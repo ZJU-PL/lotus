@@ -1,12 +1,14 @@
 add_subdirectory(Alias)
-add_subdirectory(NullPointer)
 add_subdirectory(Support)
 add_subdirectory(Transform)
 add_subdirectory(Solvers)
-add_subdirectory(CSIndex)
 add_subdirectory(IR)
 add_subdirectory(Dataflow)
 add_subdirectory(Annotation)
 add_subdirectory(Checker/ESSS)
 add_subdirectory(Checker/Taint)
+add_subdirectory(CFL/CSIndex)
+
+
 #add_subdirectory(Pestrie)
+#add_subdirectory(NullPointer)

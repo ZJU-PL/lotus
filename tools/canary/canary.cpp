@@ -16,8 +16,8 @@
  *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "NullPointer/NullCheckAnalysis.h"
-#include "NullPointer/ContextSensitiveNullCheckAnalysis.h"
+#include "Dataflow/NullPointer/NullCheckAnalysis.h"
+#include "Dataflow/NullPointer/ContextSensitiveNullCheckAnalysis.h"
 #include "Support/RecursiveTimer.h"
 #include "Support/Statistics.h"
 #include "Transform/LowerConstantExpr.h"
