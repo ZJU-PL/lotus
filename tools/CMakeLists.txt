@@ -3,7 +3,6 @@ add_subdirectory(kint)
 add_subdirectory(seadsa)
 add_subdirectory(fpa)
 add_subdirectory(dynaa)
-add_subdirectory(esss)
 add_subdirectory(taint)
 add_subdirectory(gvfa)
 # add_subdirectory(z_solver)  # being developed in another repo; to be merged
@@ -12,6 +11,7 @@ add_subdirectory(gvfa)
 option(BUILD_OWL "Build Owl SMT solver" OFF)
 option(BUILD_HORN_ICE "Build ICE learning for CHC and Boogie" OFF)
 option(BUILD_CSR "Build indexing context-sensitive reachability solver" OFF)
+option(BUILD_ESSS "Build the ESSS bug finder" OFF)
 
 # Tool for solving SMT-LIB2 files
 if(BUILD_OWL)
@@ -27,3 +27,7 @@ endif()
 if(BUILD_CSR)
     add_subdirectory(csr)
 endif() 
+
+if (BUILD_ESSS)
+    add_subdirectory(esss)
+endif()

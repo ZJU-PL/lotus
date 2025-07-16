@@ -86,6 +86,14 @@ public:
     bool backwardReachableSink(const Value *V);
     bool backwardReachableAllSinks(const Value *V);
     
+    /// CFL reachability query interfaces (context-sensitive)
+    bool cflReachable(const Value *From, const Value *To) const;
+    bool cflBackwardReachable(const Value *From, const Value *To) const;
+    
+    /// Enhanced context-sensitive reachability queries
+    bool contextSensitiveReachable(const Value *From, const Value *To) const;
+    bool contextSensitiveBackwardReachable(const Value *From, const Value *To) const;
+    
     /// Performance monitoring
     void printOnlineQueryTime(llvm::raw_ostream &O, const char *Title = "[Online]") const;
     
@@ -145,6 +153,12 @@ private:
     /// VFG navigation helpers
     std::vector<const Value *> getSuccessors(const Value *V) const;
     std::vector<const Value *> getPredecessors(const Value *V) const;
+    
+    /// CFL reachability helpers
+    void initializeCFLAnalyzer();
+    bool performCFLReachabilityQuery(const Value *From, const Value *To, bool Forward) const;
+    bool cflReachabilityQuery(const Value *From, const Value *To, bool Forward) const;
+    int getValueNodeID(const Value *V) const;
 };
 
 /**

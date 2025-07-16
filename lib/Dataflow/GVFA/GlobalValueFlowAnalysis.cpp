@@ -23,6 +23,8 @@ static cl::opt<bool> EnableOptVFA("enable-opt-vfa",
                                  cl::desc("enable optimized value flow analysis"),
                                  cl::init(true), cl::ReallyHidden);
 
+
+
 static std::mutex ClearMutex;
 
 //===----------------------------------------------------------------------===//
@@ -816,4 +818,137 @@ bool TaintVulnerabilityChecker::isValidTransfer(const Value *From, const Value *
         }
     }
     return true;
+}
+
+//===----------------------------------------------------------------------===//
+// CFL Reachability Implementation (Lightweight)
+//===----------------------------------------------------------------------===//
+
+void DyckGlobalValueFlowAnalysis::initializeCFLAnalyzer() {
+    // Lightweight CFL analyzer doesn't need separate initialization
+    // It works directly with the VFG's existing label structure
+}
+
+bool DyckGlobalValueFlowAnalysis::cflReachable(const Value *From, const Value *To) const {
+    // Use lightweight CFL reachability with matched call/return pairs
+    return cflReachabilityQuery(From, To, true);
+}
+
+bool DyckGlobalValueFlowAnalysis::cflBackwardReachable(const Value *From, const Value *To) const {
+    // Use lightweight CFL reachability with matched call/return pairs
+    return cflReachabilityQuery(To, From, false);
+}
+
+bool DyckGlobalValueFlowAnalysis::performCFLReachabilityQuery(const Value *From, const Value *To, bool Forward) const {
+    return cflReachabilityQuery(From, To, Forward);
+}
+
+bool DyckGlobalValueFlowAnalysis::cflReachabilityQuery(const Value *From, const Value *To, bool Forward) const {
+    // Lightweight CFL reachability using a stack to match call/return pairs
+    // This respects the context-free nature of function calls
+    
+    std::set<const Value *> visited;
+    std::stack<std::pair<const Value *, std::vector<int>>> workStack;
+    
+    // Start with empty call stack
+    workStack.push(std::make_pair(From, std::vector<int>()));
+    
+    while (!workStack.empty()) {
+        auto currentPair = workStack.top();
+        workStack.pop();
+        
+        const Value *current = currentPair.first;
+        std::vector<int> callStack = currentPair.second;
+        
+        if (current == To) {
+            return true;
+        }
+        
+        if (visited.count(current)) {
+            continue;
+        }
+        visited.insert(current);
+        
+        // Get VFG node for current value
+        auto *currentNode = VFG->getVFGNode(const_cast<Value *>(current));
+        if (!currentNode) {
+            continue;
+        }
+        
+        // Explore edges based on direction
+        if (Forward) {
+            // Forward traversal: follow outgoing edges
+            for (auto edgeIt = currentNode->begin(); edgeIt != currentNode->end(); ++edgeIt) {
+                auto *nextNode = edgeIt->first;
+                auto *nextValue = nextNode->getValue();
+                int label = edgeIt->second;
+                
+                std::vector<int> newCallStack = callStack;
+                
+                if (label > 0) {
+                    // Call edge: push call site ID onto stack
+                    newCallStack.push_back(label);
+                } else if (label < 0) {
+                    // Return edge: check if it matches top of stack
+                    if (newCallStack.empty() || newCallStack.back() != -label) {
+                        // Unmatched return - skip this path
+                        continue;
+                    }
+                    // Matched return: pop from stack
+                    newCallStack.pop_back();
+                }
+                // label == 0: epsilon edge, no change to call stack
+                
+                if (!visited.count(nextValue)) {
+                    workStack.push(std::make_pair(nextValue, newCallStack));
+                }
+            }
+        } else {
+            // Backward traversal: follow incoming edges
+            for (auto edgeIt = currentNode->in_begin(); edgeIt != currentNode->in_end(); ++edgeIt) {
+                auto *prevNode = edgeIt->first;
+                auto *prevValue = prevNode->getValue();
+                int label = edgeIt->second;
+                
+                std::vector<int> newCallStack = callStack;
+                
+                if (label < 0) {
+                    // Return edge in backward direction: push call site ID onto stack
+                    newCallStack.push_back(-label);
+                } else if (label > 0) {
+                    // Call edge in backward direction: check if it matches top of stack
+                    if (newCallStack.empty() || newCallStack.back() != label) {
+                        // Unmatched call - skip this path
+                        continue;
+                    }
+                    // Matched call: pop from stack
+                    newCallStack.pop_back();
+                }
+                // label == 0: epsilon edge, no change to call stack
+                
+                if (!visited.count(prevValue)) {
+                    workStack.push(std::make_pair(prevValue, newCallStack));
+                }
+            }
+        }
+    }
+    
+    return false;
+}
+
+int DyckGlobalValueFlowAnalysis::getValueNodeID(const Value *V) const {
+    // For lightweight implementation, we don't need separate node IDs
+    // Just use the value pointer as identifier
+    return reinterpret_cast<intptr_t>(V);
+}
+//===----------------------------------------------------------------------===//
+// Enhanced reachability queries with CFL support
+//===----------------------------------------------------------------------===//
+
+bool DyckGlobalValueFlowAnalysis::contextSensitiveReachable(const Value *From, const Value *To) const {
+    return cflReachable(From, To);
+}
+
+bool DyckGlobalValueFlowAnalysis::contextSensitiveBackwardReachable(const Value *From, const Value *To) const {
+    return cflBackwardReachable(From, To);
 }
