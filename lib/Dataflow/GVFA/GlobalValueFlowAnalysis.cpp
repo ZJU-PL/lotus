@@ -6,6 +6,8 @@
 #include <stack>
 #include <queue>
 #include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "Dataflow/GVFA/GlobalValueFlowAnalysis.h"
 #include "Checker/Taint/TaintUtils.h"
@@ -112,7 +114,7 @@ bool DyckGlobalValueFlowAnalysis::allCount(const Value *V, const Value *Src) {
             return false;
         }
     } else {
-        AllReachabilityMap.insert(std::make_pair(V, std::set<const Value *>()));
+        AllReachabilityMap.insert(std::make_pair(V, std::unordered_set<const Value *>()));
         AllReachabilityMap[V].insert(Src);
         return false;
     }
@@ -137,7 +139,7 @@ bool DyckGlobalValueFlowAnalysis::allBackwardCount(const Value *V, const Value *
             return false;
         }
     } else {
-        AllBackwardReachabilityMap.insert(std::make_pair(V, std::set<const Value *>()));
+        AllBackwardReachabilityMap.insert(std::make_pair(V, std::unordered_set<const Value *>()));
         AllBackwardReachabilityMap[V].insert(Sink);
         return false;
     }
@@ -261,13 +263,14 @@ bool DyckGlobalValueFlowAnalysis::backwardReachableAllSinks(const Value *V) {
 }
 
 //===----------------------------------------------------------------------===//
-// VFG navigation helpers
+// VFG navigation helpers - optimized with caching
 //===----------------------------------------------------------------------===//
 
 std::vector<const Value *> DyckGlobalValueFlowAnalysis::getSuccessors(const Value *V) const {
     std::vector<const Value *> Successors;
     
     if (auto *Node = VFG->getVFGNode(const_cast<Value *>(V))) {
+        Successors.reserve(std::distance(Node->begin(), Node->end()));
         for (auto It = Node->begin(); It != Node->end(); ++It) {
             Successors.push_back(It->first->getValue());
         }
@@ -280,6 +283,7 @@ std::vector<const Value *> DyckGlobalValueFlowAnalysis::getPredecessors(const Va
     std::vector<const Value *> Predecessors;
     
     if (auto *Node = VFG->getVFGNode(const_cast<Value *>(V))) {
+        Predecessors.reserve(std::distance(Node->in_begin(), Node->in_end()));
         for (auto It = Node->in_begin(); It != Node->in_end(); ++It) {
             Predecessors.push_back(It->first->getValue());
         }
@@ -289,8 +293,14 @@ std::vector<const Value *> DyckGlobalValueFlowAnalysis::getPredecessors(const Va
 }
 
 bool DyckGlobalValueFlowAnalysis::isValueFlowEdge(const Value *From, const Value *To) const {
-    auto Successors = getSuccessors(From);
-    return std::find(Successors.begin(), Successors.end(), To) != Successors.end();
+    if (auto *Node = VFG->getVFGNode(const_cast<Value *>(From))) {
+        for (auto It = Node->begin(); It != Node->end(); ++It) {
+            if (It->first->getValue() == To) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -321,13 +331,22 @@ int DyckGlobalValueFlowAnalysis::getCallSiteID(const CallInst *CI, const Functio
 }
 
 //===----------------------------------------------------------------------===//
-// Source extension using alias analysis
+// Source extension using alias analysis - optimized with iterative approach
 //===----------------------------------------------------------------------===//
 
 void DyckGlobalValueFlowAnalysis::extendSources(std::vector<std::pair<const Value *, int>> &Sources) {
-    std::map<const Value *, int> NewSrcMap;
+    std::unordered_map<const Value *, int> NewSrcMap;
+    std::queue<std::pair<const Value *, int>> WorkQueue;
     
-    auto count_lambda = [&NewSrcMap, this](const Value *V, int Mask) {
+    // Initialize work queue with current sources
+    for (const auto &Source : Sources) {
+        WorkQueue.push(Source);
+        NewSrcMap[Source.first] = Source.second;
+    }
+    
+    Sources.clear();
+    
+    auto count_lambda = [&NewSrcMap, this](const Value *V, int Mask) -> int {
         int Uncovered = 0;
         
         auto It = NewSrcMap.find(V);
@@ -340,66 +359,57 @@ void DyckGlobalValueFlowAnalysis::extendSources(std::vector<std::pair<const Valu
         return this->count(V, Uncovered);
     };
     
-    while (!Sources.empty()) {
-        std::vector<std::pair<const Value *, int>> WorkingList = std::move(Sources);
-        Sources.clear();
+    // Process work queue iteratively
+    while (!WorkQueue.empty()) {
+        auto [CurrentValue, CurrentMask] = WorkQueue.front();
+        WorkQueue.pop();
         
-        for (auto &It : WorkingList) {
-            // DFS from Value
-            std::stack<std::pair<const Value *, int>> DFSStack;
-            DFSStack.push(It);
+        if (count_lambda(CurrentValue, CurrentMask) == 0) {
+            continue;
+        }
+        
+        NewSrcMap[CurrentValue] |= CurrentMask;
+        
+        // Process function arguments and returns
+        if (auto *Arg = dyn_cast<Argument>(CurrentValue)) {
+            const Function *F = Arg->getParent();
             
-            while (!DFSStack.empty()) {
-                auto TopPair = DFSStack.top();
-                DFSStack.pop();
-                auto *Top = TopPair.first;
-                int TopMask = TopPair.second;
-                
-                if (count_lambda(Top, TopMask) == 0) {
-                    continue;
+            // Find call sites that call this function
+            for (auto *User : F->users()) {
+                if (auto *CI = dyn_cast<CallInst>(User)) {
+                    if (CI->getCalledFunction() == F) {
+                        unsigned ArgIdx = Arg->getArgNo();
+                        if (ArgIdx < CI->arg_size()) {
+                            auto *ActualArg = CI->getArgOperand(ArgIdx);
+                            if (int UncoveredMask = count_lambda(ActualArg, CurrentMask)) {
+                                WorkQueue.emplace(ActualArg, UncoveredMask);
+                            }
+                        }
+                    }
                 }
-                NewSrcMap[Top] |= TopMask;
-                
-                // Process function arguments and returns
-                if (auto *Arg = dyn_cast<Argument>(Top)) {
-                    const Function *F = Arg->getParent();
-                    
-                    // Find call sites that call this function
-                    for (auto *User : F->users()) {
-                        if (auto *CI = dyn_cast<CallInst>(User)) {
-                            if (CI->getCalledFunction() == F) {
-                                unsigned ArgIdx = Arg->getArgNo();
-                                if (ArgIdx < CI->arg_size()) {
-                                    auto *ActualArg = CI->getArgOperand(ArgIdx);
-                                    if (int UncoveredMask = count_lambda(ActualArg, TopMask)) {
-                                        Sources.emplace_back(ActualArg, UncoveredMask);
-                                    }
+            }
+        } else if (auto *CI = dyn_cast<CallInst>(CurrentValue)) {
+            // Handle return values
+            if (auto *F = CI->getCalledFunction()) {
+                for (auto &BB : *F) {
+                    for (auto &I : BB) {
+                        if (auto *RI = dyn_cast<ReturnInst>(&I)) {
+                            if (RI->getReturnValue()) {
+                                if (int UncoveredMask = count_lambda(RI->getReturnValue(), CurrentMask)) {
+                                    WorkQueue.emplace(RI->getReturnValue(), UncoveredMask);
                                 }
                             }
                         }
                     }
-                } else if (auto *CI = dyn_cast<CallInst>(Top)) {
-                    // Handle return values
-                    if (auto *F = CI->getCalledFunction()) {
-                        for (auto &BB : *F) {
-                            for (auto &I : BB) {
-                                if (auto *RI = dyn_cast<ReturnInst>(&I)) {
-                                    if (RI->getReturnValue()) {
-                                        if (int UncoveredMask = count_lambda(RI->getReturnValue(), TopMask)) {
-                                            Sources.emplace_back(RI->getReturnValue(), UncoveredMask);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Follow VFG predecessors
-                    auto Predecessors = getPredecessors(Top);
-                    for (auto *Pred : Predecessors) {
-                        if (int UncoveredMask = count_lambda(Pred, TopMask)) {
-                            DFSStack.emplace(Pred, UncoveredMask);
-                        }
+                }
+            }
+        } else {
+            // Follow VFG predecessors
+            if (auto *Node = VFG->getVFGNode(const_cast<Value *>(CurrentValue))) {
+                for (auto It = Node->in_begin(); It != Node->in_end(); ++It) {
+                    auto *Pred = It->first->getValue();
+                    if (int UncoveredMask = count_lambda(Pred, CurrentMask)) {
+                        WorkQueue.emplace(Pred, UncoveredMask);
                     }
                 }
             }
@@ -407,10 +417,10 @@ void DyckGlobalValueFlowAnalysis::extendSources(std::vector<std::pair<const Valu
     }
     
     // Re-init sources using NewSrcMap
-    assert(Sources.empty());
     for (auto &It : NewSrcMap) {
-        if (It.second)
-            Sources.emplace_back(It);
+        if (It.second) {
+            Sources.emplace_back(It.first, It.second);
+        }
     }
 }
 
@@ -530,85 +540,167 @@ void DyckGlobalValueFlowAnalysis::comprehensiveBackwardRun() {
 }
 
 //===----------------------------------------------------------------------===//
-// Slicing algorithms
+// Slicing algorithms - converted to iterative worklist algorithms
 //===----------------------------------------------------------------------===//
 
 void DyckGlobalValueFlowAnalysis::forwardSlicing(const Value *V, int Mask) {
-    ReachabilityMap[V] |= Mask;
+    std::queue<std::pair<const Value *, int>> WorkQueue;
+    std::unordered_set<const Value *> Visited;
     
-    // Follow VFG edges
-    auto Successors = getSuccessors(V);
-    for (auto *Succ : Successors) {
-        if (int UncoveredMask = count(Succ, Mask)) {
-            forwardSlicing(Succ, UncoveredMask);
+    WorkQueue.emplace(V, Mask);
+    
+    while (!WorkQueue.empty()) {
+        auto [CurrentValue, CurrentMask] = WorkQueue.front();
+        WorkQueue.pop();
+        
+        // Skip if already processed with this mask
+        if (Visited.count(CurrentValue)) {
+            continue;
         }
-    }
-    
-    // Handle call sites and returns
-    if (auto *CI = dyn_cast<CallInst>(V)) {
-        processCallSite(CI, V, Mask);
-    } else if (auto *RI = dyn_cast<ReturnInst>(V)) {
-        processReturnSite(RI, V, Mask);
+        Visited.insert(CurrentValue);
+        
+        // Update reachability map
+        ReachabilityMap[CurrentValue] |= CurrentMask;
+        
+        // Process call sites and returns
+        if (auto *CI = dyn_cast<CallInst>(CurrentValue)) {
+            processCallSite(CI, CurrentValue, CurrentMask, WorkQueue);
+        } else if (auto *RI = dyn_cast<ReturnInst>(CurrentValue)) {
+            processReturnSite(RI, CurrentValue, CurrentMask, WorkQueue);
+        }
+        
+        // Follow VFG edges
+        if (auto *Node = VFG->getVFGNode(const_cast<Value *>(CurrentValue))) {
+            for (auto It = Node->begin(); It != Node->end(); ++It) {
+                auto *Succ = It->first->getValue();
+                if (int UncoveredMask = count(Succ, CurrentMask)) {
+                    if (!Visited.count(Succ)) {
+                        WorkQueue.emplace(Succ, UncoveredMask);
+                    }
+                }
+            }
+        }
     }
 }
 
 void DyckGlobalValueFlowAnalysis::backwardSlicing(const Value *V) {
-    if (BackwardReachabilityMap.count(V)) {
-        BackwardReachabilityMap[V] += 1;
-    } else {
-        BackwardReachabilityMap[V] = 1;
-    }
+    std::queue<const Value *> WorkQueue;
+    std::unordered_set<const Value *> Visited;
     
-    // Follow VFG edges backwards
-    auto Predecessors = getPredecessors(V);
-    for (auto *Pred : Predecessors) {
-        if (!backwardCount(Pred)) {
-            backwardSlicing(Pred);
+    WorkQueue.push(V);
+    
+    while (!WorkQueue.empty()) {
+        const Value *CurrentValue = WorkQueue.front();
+        WorkQueue.pop();
+        
+        if (Visited.count(CurrentValue)) {
+            continue;
+        }
+        Visited.insert(CurrentValue);
+        
+        // Update backward reachability map
+        if (BackwardReachabilityMap.count(CurrentValue)) {
+            BackwardReachabilityMap[CurrentValue] += 1;
+        } else {
+            BackwardReachabilityMap[CurrentValue] = 1;
+        }
+        
+        // Follow VFG edges backwards
+        if (auto *Node = VFG->getVFGNode(const_cast<Value *>(CurrentValue))) {
+            for (auto It = Node->in_begin(); It != Node->in_end(); ++It) {
+                auto *Pred = It->first->getValue();
+                if (!backwardCount(Pred)) {
+                    if (!Visited.count(Pred)) {
+                        WorkQueue.push(Pred);
+                    }
+                }
+            }
         }
     }
 }
 
 void DyckGlobalValueFlowAnalysis::comprehensiveForwardSlicing(const Value *V, const Value *Src) {
-    auto It = AllReachabilityMap.find(V);
-    if (It != AllReachabilityMap.end()) {
-        It->second.insert(Src);
-    } else {
-        AllReachabilityMap.insert(std::make_pair(V, std::set<const Value *>()));
-        AllReachabilityMap[V].insert(Src);
-    }
+    std::queue<const Value *> WorkQueue;
+    std::unordered_set<const Value *> Visited;
     
-    // Follow VFG edges
-    auto Successors = getSuccessors(V);
-    for (auto *Succ : Successors) {
-        if (!allCount(Succ, Src)) {
-            comprehensiveForwardSlicing(Succ, Src);
+    WorkQueue.push(V);
+    
+    while (!WorkQueue.empty()) {
+        const Value *CurrentValue = WorkQueue.front();
+        WorkQueue.pop();
+        
+        if (Visited.count(CurrentValue)) {
+            continue;
+        }
+        Visited.insert(CurrentValue);
+        
+        // Update comprehensive reachability map
+        auto It = AllReachabilityMap.find(CurrentValue);
+        if (It != AllReachabilityMap.end()) {
+            It->second.insert(Src);
+        } else {
+            AllReachabilityMap.insert(std::make_pair(CurrentValue, std::unordered_set<const Value *>()));
+            AllReachabilityMap[CurrentValue].insert(Src);
+        }
+        
+        // Follow VFG edges
+        if (auto *Node = VFG->getVFGNode(const_cast<Value *>(CurrentValue))) {
+            for (auto It = Node->begin(); It != Node->end(); ++It) {
+                auto *Succ = It->first->getValue();
+                if (!allCount(Succ, Src)) {
+                    if (!Visited.count(Succ)) {
+                        WorkQueue.push(Succ);
+                    }
+                }
+            }
         }
     }
 }
 
 void DyckGlobalValueFlowAnalysis::comprehensiveBackwardSlicing(const Value *V, const Value *Sink) {
-    auto It = AllBackwardReachabilityMap.find(V);
-    if (It != AllBackwardReachabilityMap.end()) {
-        It->second.insert(Sink);
-    } else {
-        AllBackwardReachabilityMap.insert(std::make_pair(V, std::set<const Value *>()));
-        AllBackwardReachabilityMap[V].insert(Sink);
-    }
+    std::queue<const Value *> WorkQueue;
+    std::unordered_set<const Value *> Visited;
     
-    // Follow VFG edges backwards
-    auto Predecessors = getPredecessors(V);
-    for (auto *Pred : Predecessors) {
-        if (!allBackwardCount(Pred, Sink)) {
-            comprehensiveBackwardSlicing(Pred, Sink);
+    WorkQueue.push(V);
+    
+    while (!WorkQueue.empty()) {
+        const Value *CurrentValue = WorkQueue.front();
+        WorkQueue.pop();
+        
+        if (Visited.count(CurrentValue)) {
+            continue;
+        }
+        Visited.insert(CurrentValue);
+        
+        // Update comprehensive backward reachability map
+        auto It = AllBackwardReachabilityMap.find(CurrentValue);
+        if (It != AllBackwardReachabilityMap.end()) {
+            It->second.insert(Sink);
+        } else {
+            AllBackwardReachabilityMap.insert(std::make_pair(CurrentValue, std::unordered_set<const Value *>()));
+            AllBackwardReachabilityMap[CurrentValue].insert(Sink);
+        }
+        
+        // Follow VFG edges backwards
+        if (auto *Node = VFG->getVFGNode(const_cast<Value *>(CurrentValue))) {
+            for (auto It = Node->in_begin(); It != Node->in_end(); ++It) {
+                auto *Pred = It->first->getValue();
+                if (!allBackwardCount(Pred, Sink)) {
+                    if (!Visited.count(Pred)) {
+                        WorkQueue.push(Pred);
+                    }
+                }
+            }
         }
     }
 }
 
 //===----------------------------------------------------------------------===//
-// Call site and return site processing
+// Call site and return site processing - updated for iterative approach
 //===----------------------------------------------------------------------===//
 
-void DyckGlobalValueFlowAnalysis::processCallSite(const CallInst *CI, const Value *V, int Mask) {
+void DyckGlobalValueFlowAnalysis::processCallSite(const CallInst *CI, const Value *V, int Mask, 
+                                                  std::queue<std::pair<const Value *, int>> &WorkQueue) {
     // Handle interprocedural flow through call sites
     if (auto *F = CI->getCalledFunction()) {
         // Map arguments to parameters
@@ -617,14 +709,15 @@ void DyckGlobalValueFlowAnalysis::processCallSite(const CallInst *CI, const Valu
             auto *Param = F->getArg(i);
             if (Arg == V) {
                 if (int UncoveredMask = count(Param, Mask)) {
-                    forwardSlicing(Param, UncoveredMask);
+                    WorkQueue.emplace(Param, UncoveredMask);
                 }
             }
         }
     }
 }
 
-void DyckGlobalValueFlowAnalysis::processReturnSite(const ReturnInst *RI, const Value *V, int Mask) {
+void DyckGlobalValueFlowAnalysis::processReturnSite(const ReturnInst *RI, const Value *V, int Mask,
+                                                    std::queue<std::pair<const Value *, int>> &WorkQueue) {
     // Handle interprocedural flow through return sites
     const Function *F = RI->getFunction();
     
@@ -633,7 +726,7 @@ void DyckGlobalValueFlowAnalysis::processReturnSite(const ReturnInst *RI, const 
         if (auto *CI = dyn_cast<CallInst>(User)) {
             if (CI->getCalledFunction() == F && RI->getReturnValue() == V) {
                 if (int UncoveredMask = count(CI, Mask)) {
-                    forwardSlicing(CI, UncoveredMask);
+                    WorkQueue.emplace(CI, UncoveredMask);
                 }
             }
         }
@@ -641,13 +734,13 @@ void DyckGlobalValueFlowAnalysis::processReturnSite(const ReturnInst *RI, const 
 }
 
 //===----------------------------------------------------------------------===//
-// Online slicing for queries
+// Online slicing for queries - optimized with iterative approach
 //===----------------------------------------------------------------------===//
 
 bool DyckGlobalValueFlowAnalysis::onlineSlicing(const Value *Target) {
     for (const auto &Sink : Sinks) {
-        std::map<const Value *, int> localCountMap;
-        if (onlineBackwardSlicing(Sink.first, Target, localCountMap)) {
+        std::unordered_set<const Value *> visited;
+        if (onlineBackwardSlicing(Sink.first, Target, visited)) {
             return true;
         }
     }
@@ -655,21 +748,30 @@ bool DyckGlobalValueFlowAnalysis::onlineSlicing(const Value *Target) {
 }
 
 bool DyckGlobalValueFlowAnalysis::onlineForwardSlicing(const Value *V, 
-                                                      std::map<const Value *, int> &localCountMap) {
-    if (Sinks.count(V)) {
-        return true;
-    }
+                                                      std::unordered_set<const Value *> &visited) {
+    std::queue<const Value *> WorkQueue;
+    WorkQueue.push(V);
     
-    if (!localCountMap.count(V)) {
-        localCountMap[V] = 1;
-    }
-    
-    // Follow VFG edges
-    auto Successors = getSuccessors(V);
-    for (auto *Succ : Successors) {
-        if (!localCountMap.count(Succ)) {
-            if (onlineForwardSlicing(Succ, localCountMap)) {
-                return true;
+    while (!WorkQueue.empty()) {
+        const Value *CurrentValue = WorkQueue.front();
+        WorkQueue.pop();
+        
+        if (visited.count(CurrentValue)) {
+            continue;
+        }
+        visited.insert(CurrentValue);
+        
+        if (Sinks.count(CurrentValue)) {
+            return true;
+        }
+        
+        // Follow VFG edges
+        if (auto *Node = VFG->getVFGNode(const_cast<Value *>(CurrentValue))) {
+            for (auto It = Node->begin(); It != Node->end(); ++It) {
+                auto *Succ = It->first->getValue();
+                if (!visited.count(Succ)) {
+                    WorkQueue.push(Succ);
+                }
             }
         }
     }
@@ -678,21 +780,30 @@ bool DyckGlobalValueFlowAnalysis::onlineForwardSlicing(const Value *V,
 }
 
 bool DyckGlobalValueFlowAnalysis::onlineBackwardSlicing(const Value *V, const Value *Target,
-                                                       std::map<const Value *, int> &localCountMap) {
-    if (V == Target) {
-        return true;
-    }
+                                                       std::unordered_set<const Value *> &visited) {
+    std::queue<const Value *> WorkQueue;
+    WorkQueue.push(V);
     
-    if (!localCountMap.count(V)) {
-        localCountMap[V] = 1;
-    }
-    
-    // Follow VFG edges backwards
-    auto Predecessors = getPredecessors(V);
-    for (auto *Pred : Predecessors) {
-        if (!localCountMap.count(Pred)) {
-            if (onlineBackwardSlicing(Pred, Target, localCountMap)) {
-                return true;
+    while (!WorkQueue.empty()) {
+        const Value *CurrentValue = WorkQueue.front();
+        WorkQueue.pop();
+        
+        if (visited.count(CurrentValue)) {
+            continue;
+        }
+        visited.insert(CurrentValue);
+        
+        if (CurrentValue == Target) {
+            return true;
+        }
+        
+        // Follow VFG edges backwards
+        if (auto *Node = VFG->getVFGNode(const_cast<Value *>(CurrentValue))) {
+            for (auto It = Node->in_begin(); It != Node->in_end(); ++It) {
+                auto *Pred = It->first->getValue();
+                if (!visited.count(Pred)) {
+                    WorkQueue.push(Pred);
+                }
             }
         }
     }
@@ -821,7 +932,7 @@ bool TaintVulnerabilityChecker::isValidTransfer(const Value *From, const Value *
 }
 
 //===----------------------------------------------------------------------===//
-// CFL Reachability Implementation (Lightweight)
+// CFL Reachability Implementation (Lightweight) - optimized with iterative approach
 //===----------------------------------------------------------------------===//
 
 void DyckGlobalValueFlowAnalysis::initializeCFLAnalyzer() {
@@ -847,18 +958,15 @@ bool DyckGlobalValueFlowAnalysis::cflReachabilityQuery(const Value *From, const 
     // Lightweight CFL reachability using a stack to match call/return pairs
     // This respects the context-free nature of function calls
     
-    std::set<const Value *> visited;
-    std::stack<std::pair<const Value *, std::vector<int>>> workStack;
+    std::unordered_set<const Value *> visited;
+    std::queue<std::pair<const Value *, std::vector<int>>> workQueue;
     
     // Start with empty call stack
-    workStack.push(std::make_pair(From, std::vector<int>()));
+    workQueue.push(std::make_pair(From, std::vector<int>()));
     
-    while (!workStack.empty()) {
-        auto currentPair = workStack.top();
-        workStack.pop();
-        
-        const Value *current = currentPair.first;
-        std::vector<int> callStack = currentPair.second;
+    while (!workQueue.empty()) {
+        auto [current, callStack] = workQueue.front();
+        workQueue.pop();
         
         if (current == To) {
             return true;
@@ -900,7 +1008,7 @@ bool DyckGlobalValueFlowAnalysis::cflReachabilityQuery(const Value *From, const 
                 // label == 0: epsilon edge, no change to call stack
                 
                 if (!visited.count(nextValue)) {
-                    workStack.push(std::make_pair(nextValue, newCallStack));
+                    workQueue.push(std::make_pair(nextValue, std::move(newCallStack)));
                 }
             }
         } else {
@@ -927,7 +1035,7 @@ bool DyckGlobalValueFlowAnalysis::cflReachabilityQuery(const Value *From, const 
                 // label == 0: epsilon edge, no change to call stack
                 
                 if (!visited.count(prevValue)) {
-                    workStack.push(std::make_pair(prevValue, newCallStack));
+                    workQueue.push(std::make_pair(prevValue, std::move(newCallStack)));
                 }
             }
         }
@@ -941,6 +1049,7 @@ int DyckGlobalValueFlowAnalysis::getValueNodeID(const Value *V) const {
     // Just use the value pointer as identifier
     return reinterpret_cast<intptr_t>(V);
 }
+
 //===----------------------------------------------------------------------===//
 // Enhanced reachability queries with CFL support
 //===----------------------------------------------------------------------===//

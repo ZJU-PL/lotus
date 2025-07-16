@@ -7,6 +7,7 @@ add_subdirectory(Dataflow)
 add_subdirectory(Annotation)
 add_subdirectory(Checker/ESSS)
 add_subdirectory(Checker/Taint)
+add_subdirectory(Checker/Report)
 add_subdirectory(CFL/CSIndex)
 
 

@@ -43,8 +43,6 @@ Maybe we can design a VFG independent from DyckAA (e.g., it can use the results 
 
 Use VFG or PDG to answer slicing queries.
 
-* Forward slicing
-* Backward slicing
 * Program chopping
 * Thin slicing
 
@@ -52,7 +50,6 @@ Use VFG or PDG to answer slicing queries.
 
 ### Bug
 
-- Null pointer analysis (lib/NullPointer)
 - Buffer overflow detection?
 - Memory leak detection?
 - Race condition analysis?

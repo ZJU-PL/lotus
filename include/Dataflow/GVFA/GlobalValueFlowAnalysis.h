@@ -3,10 +3,13 @@
 
 #include <map>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <memory>
 #include <chrono>
 #include <mutex>
+#include <queue>
 
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
@@ -21,6 +24,17 @@ using namespace llvm;
 
 // Forward declarations
 class VulnerabilityChecker;
+
+// Hash function for pair<const CallInst *, const Function *>
+namespace std {
+    template<>
+    struct hash<std::pair<const CallInst *, const Function *>> {
+        size_t operator()(const std::pair<const CallInst *, const Function *> &p) const {
+            return std::hash<const CallInst *>()(p.first) ^ 
+                   (std::hash<const Function *>()(p.second) << 1);
+        }
+    };
+}
 
 // Vulnerability source/sink types
 using ValueSitePairType = std::pair<const Value *, int>;
@@ -41,17 +55,17 @@ public:
     long SnapshotedOnlineTime = 0;
 
 private:
-    /// Reachability maps for optimization
-    std::map<const Value *, int> ReachabilityMap;
-    std::map<const Value *, int> BackwardReachabilityMap;
+    /// Reachability maps for optimization - using unordered_map for better performance
+    std::unordered_map<const Value *, int> ReachabilityMap;
+    std::unordered_map<const Value *, int> BackwardReachabilityMap;
     
-    /// All-pairs reachability maps for comprehensive analysis
-    std::map<const Value *, std::set<const Value *>> AllReachabilityMap;
-    std::map<const Value *, std::set<const Value *>> AllBackwardReachabilityMap;
+    /// All-pairs reachability maps for comprehensive analysis - using unordered containers
+    std::unordered_map<const Value *, std::unordered_set<const Value *>> AllReachabilityMap;
+    std::unordered_map<const Value *, std::unordered_set<const Value *>> AllBackwardReachabilityMap;
     
-    /// Call site indexing for context sensitivity
-    std::map<const CallInst *, int> CallSiteIndexMap;
-    std::map<std::pair<const CallInst *, const Function *>, int> CallSiteCalleePairIndexMap;
+    /// Call site indexing for context sensitivity - using unordered_map for better performance
+    std::unordered_map<const CallInst *, int> CallSiteIndexMap;
+    std::unordered_map<std::pair<const CallInst *, const Function *>, int> CallSiteCalleePairIndexMap;
     
     /// Core analysis components
     DyckVFG *VFG = nullptr;
@@ -116,18 +130,18 @@ private:
     /// Source extension (alias analysis integration)
     void extendSources(std::vector<std::pair<const Value *, int>> &Sources);
     
-    /// Slicing algorithms
+    /// Slicing algorithms - now iterative instead of recursive
     void forwardSlicing(const Value *Node, int Mask);
     void backwardSlicing(const Value *Node);
     void comprehensiveForwardSlicing(const Value *Node, const Value *Src);
     void comprehensiveBackwardSlicing(const Value *Node, const Value *Sink);
     
-    /// Online slicing for queries
+    /// Online slicing for queries - updated for iterative approach
     bool onlineSlicing(const Value *Target);
     bool onlineForwardSlicing(const Value *Node, 
-                             std::map<const Value *, int> &localCountMap);
+                             std::unordered_set<const Value *> &visited);
     bool onlineBackwardSlicing(const Value *Node, const Value *Target,
-                              std::map<const Value *, int> &localCountMap);
+                              std::unordered_set<const Value *> &visited);
     
     /// Counting helpers for reachability tracking
     int count(const Value *V, int Mask);
@@ -145,9 +159,11 @@ private:
     int getCallSiteID(const CallInst *CI);
     int getCallSiteID(const CallInst *CI, const Function *Callee);
     
-    /// Helper methods
-    void processCallSite(const CallInst *CI, const Value *Node, int Mask);
-    void processReturnSite(const ReturnInst *RI, const Value *Node, int Mask);
+    /// Helper methods - updated for iterative approach
+    void processCallSite(const CallInst *CI, const Value *Node, int Mask,
+                        std::queue<std::pair<const Value *, int>> &WorkQueue);
+    void processReturnSite(const ReturnInst *RI, const Value *Node, int Mask,
+                          std::queue<std::pair<const Value *, int>> &WorkQueue);
     bool isValueFlowEdge(const Value *From, const Value *To) const;
     
     /// VFG navigation helpers

@@ -170,8 +170,3 @@ endif(SVF_DIR)
 add_subdirectory(lib)
 add_subdirectory(tools)
 add_subdirectory(benchmarks)
-
-option(ENABLE_EXAMPLES "Enable examples" OFF)
-if(ENABLE_EXAMPLES)
-	add_subdirectory(examples)
-endif()
