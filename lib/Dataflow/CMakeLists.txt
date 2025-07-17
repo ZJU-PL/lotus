@@ -6,6 +6,8 @@ set(WPDS_SOURCES
   WPDS/GenKillTransformer.cpp
   WPDS/InterProceduralDataFlowEngine.cpp
 )
+add_library(DataFlow STATIC ${WPDS_SOURCES}) 
+
 
 set(CanaryNullPointer_SOURCES
     NullPointer/LocalNullCheckAnalysis.cpp
@@ -17,16 +19,23 @@ set(CanaryNullPointer_SOURCES
     NullPointer/ContextSensitiveNullFlowAnalysis.cpp
     NullPointer/AliasAnalysisAdapter.cpp
 )
+add_library(CanaryNullPointer STATIC ${CanaryNullPointer_SOURCES}) 
+
 
 set(GVFA_SOURCES
     GVFA/GlobalValueFlowAnalysis.cpp
 )
-
-add_library(DataFlow STATIC ${WPDS_SOURCES}) 
-
-
-add_library(CanaryNullPointer STATIC ${CanaryNullPointer_SOURCES}) 
-add_library(GVFA STATIC ${GVFA_SOURCES})
-
 # Link GVFA with required dependencies
+add_library(GVFA STATIC ${GVFA_SOURCES})
 target_link_libraries(GVFA CanaryDyckAA CanarySupport CanaryTaint) 
+
+
+set(RANGE_ANALYSIS_SOURCES
+    Range/vSSA.cpp
+    Range/RangeAnalysis.cpp
+)
+
+
+
+
+
