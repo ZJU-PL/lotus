@@ -65,4 +65,18 @@ Use VFG or PDG to answer slicing queries.
 
 
 
+## Invesgiate More Related Work
 
+- https://github.com/harp-lab/yapall
+- https://github.com/GaloisInc/cclyzerpp
+- [DG](https://github.com/mchalupa/dg) - Dependence Graph for analysis of LLVM bitcode ([paper1](https://www.fi.muni.cz/~xchalup4/dg_atva20_preprint.pdf), [paper2](https://www.sciencedirect.com/science/article/pii/S2665963820300294?via%3Dihub))
+- [AserPTA](https://github.com/PeimingLiu/AserPTA) - Andersen's points-to analysis
+- [TPA](https://github.com/grievejia/tpa) - A flow-sensitive, context-sensitive pointer analysis
+- [Andersen](https://github.com/grievejia/andersen) - Andersen's points-to analysis
+- [SUTURE](https://github.com/seclab-ucr/SUTURE) - Static analysis for security
+- [Phasar](https://github.com/secure-software-engineering/phasar):  a LLVM-based static analysis framework
+- [EOS](https://github.com/gpoesia/eos)
+- https://github.com/hotpeperoncino/sfs
+- https://github.com/jumormt/PSTA-16 
+- https://github.com/SVF-tools/SVF: Static Value-Flow Analysis Framework for Source Code
+- [LLVM Opt Benchmark](https://github.com/dtcxzyw/llvm-opt-benchmark) - LLVM optimization benchmarks
