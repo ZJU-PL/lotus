@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10.0)
+cmake_minimum_required(VERSION 3.5)
 project(canary C CXX)
 
 # Set C++14 standard and compiler flags
@@ -36,10 +36,9 @@ else()
 endif()
 
 # Configure LLVM
-include_directories(${LLVM_INCLUDE_DIRS})
+include_directories(${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_definitions(${LLVM_DEFINITIONS})
 link_directories(${LLVM_LIBRARY_DIRS})
-include_directories(AFTER ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Find and configure Z3
 find_library(Z3_LIBRARIES NAMES z3 HINTS ${Z3_DIR} ENV Z3_DIR PATH_SUFFIXES bin lib)
@@ -67,7 +66,7 @@ if(NOT Boost_FOUND AND DOWNLOAD_BOOST)
     include(ExternalProject)
     set(BOOST_INSTALL_DIR ${CMAKE_BINARY_DIR}/deps/boost)
     message(STATUS "Boost not found, will download and build it in ${BOOST_INSTALL_DIR}")
-    
+
     ExternalProject_Add(boost
         GIT_REPOSITORY https://github.com/boostorg/boost.git
         GIT_TAG boost-1.65.0
@@ -78,10 +77,9 @@ if(NOT Boost_FOUND AND DOWNLOAD_BOOST)
         INSTALL_COMMAND ""
         INSTALL_DIR ${BOOST_INSTALL_DIR}
     )
-    
+
     set(BOOST_ROOT ${BOOST_INSTALL_DIR})
     set(BOOST_INCLUDEDIR ${BOOST_INSTALL_DIR}/include)
-    set(BOOST_LIBRARYDIR ${BOOST_INSTALL_DIR}/lib)
     include_directories(${BOOST_INCLUDEDIR})
 elseif(Boost_FOUND)
     message(STATUS "Found Boost: ${Boost_INCLUDE_DIRS}")
@@ -95,9 +93,9 @@ endif()
 
 # Sea-dsa sanity checks option
 option(ENABLE_SANITY_CHECKS "Enable sea-dsa sanity checks." OFF)
+set(SANITY_CHECKS ${ENABLE_SANITY_CHECKS})
 if(ENABLE_SANITY_CHECKS)
     message(STATUS "Compiling sea-dsa with sanity checks")
-    set(SANITY_CHECKS TRUE)
 else()
     message(STATUS "Compiling sea-dsa without sanity checks")
 endif()
