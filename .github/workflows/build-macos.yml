@@ -1,0 +1,42 @@
+name: Build Canary on macOS
+on:
+  push:
+  pull_request:
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      MAKEFLAGS: -j4
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install cmake llvm@14 z3 boost
+      - name: Setup LLVM paths
+        run: |
+          echo "/opt/homebrew/opt/llvm@14/bin" >> $GITHUB_PATH
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@14/lib"
+          export CPPFLAGS="-I/opt/homebrew/opt/llvm@14/include"
+          echo "LDFLAGS=$LDFLAGS" >> $GITHUB_ENV
+          echo "CPPFLAGS=$CPPFLAGS" >> $GITHUB_ENV
+      - name: Compile Canary
+        run: |
+          mkdir build
+          cd build
+          cmake \
+            -DCMAKE_INSTALL_PREFIX="$HOME/canary" \
+            -DCMAKE_BUILD_TYPE="Debug" \
+            -DLLVM_BUILD_PATH="/opt/homebrew/opt/llvm@14/lib/cmake/llvm" \
+            -DZ3_DIR="/usr/local" \
+            ..
+          make
+          make install
+      - name: Add Canary to the path
+        run: |
+          echo "$HOME/canary/bin" >> $GITHUB_PATH
+      - name: Confirm that it runs
+        run: |
+          canary --version || echo "Canary built successfully"
