@@ -1,0 +1,341 @@
+/*
+ * Interprocedural Reaching Definitions Analysis using IFDS
+ * 
+ * This implements reaching definitions analysis to demonstrate 
+ * another use case of the IFDS framework.
+ */
+
+#pragma once
+
+#include <Analysis/sparta/LLVM_IFDS/IFDSFramework.h>
+
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/Support/raw_ostream.h>
+
+namespace sparta {
+namespace ifds {
+
+// ============================================================================
+// Definition Fact
+// ============================================================================
+
+class DefinitionFact {
+public:
+    enum Type { ZERO, DEFINITION };
+    
+private:
+    Type m_type;
+    const llvm::Value* m_variable;
+    const llvm::Instruction* m_definition_site;
+    
+public:
+    DefinitionFact() : m_type(ZERO), m_variable(nullptr), m_definition_site(nullptr) {}
+    
+    static DefinitionFact zero() { return DefinitionFact(); }
+    
+    static DefinitionFact definition(const llvm::Value* var, const llvm::Instruction* def_site) {
+        DefinitionFact fact;
+        fact.m_type = DEFINITION;
+        fact.m_variable = var;
+        fact.m_definition_site = def_site;
+        return fact;
+    }
+    
+    bool operator==(const DefinitionFact& other) const {
+        if (m_type != other.m_type) return false;
+        if (m_type == ZERO) return true;
+        return m_variable == other.m_variable && m_definition_site == other.m_definition_site;
+    }
+    
+    bool operator<(const DefinitionFact& other) const {
+        if (m_type != other.m_type) return m_type < other.m_type;
+        if (m_type == ZERO) return false;
+        if (m_variable != other.m_variable) return m_variable < other.m_variable;
+        return m_definition_site < other.m_definition_site;
+    }
+    
+    Type get_type() const { return m_type; }
+    const llvm::Value* get_variable() const { return m_variable; }
+    const llvm::Instruction* get_definition_site() const { return m_definition_site; }
+    
+    bool is_zero() const { return m_type == ZERO; }
+    bool is_definition() const { return m_type == DEFINITION; }
+    
+    friend std::ostream& operator<<(std::ostream& os, const DefinitionFact& fact) {
+        if (fact.is_zero()) {
+            os << "⊥";
+        } else {
+            os << "Def(" << fact.m_variable->getName().str() << " @ ";
+            if (fact.m_definition_site->getParent()) {
+                os << fact.m_definition_site->getParent()->getName().str() << ")";
+            } else {
+                os << "?)";
+            }
+        }
+        return os;
+    }
+};
+
+} // namespace ifds
+} // namespace sparta
+
+// Hash function for DefinitionFact
+namespace std {
+template<>
+struct hash<sparta::ifds::DefinitionFact> {
+    size_t operator()(const sparta::ifds::DefinitionFact& fact) const {
+        if (fact.is_zero()) return 0;
+        
+        size_t h1 = std::hash<const llvm::Value*>{}(fact.get_variable());
+        size_t h2 = std::hash<const llvm::Instruction*>{}(fact.get_definition_site());
+        return h1 ^ (h2 << 1);
+    }
+};
+}
+
+namespace sparta {
+namespace ifds {
+
+// ============================================================================
+// Interprocedural Reaching Definitions Analysis
+// ============================================================================
+
+class ReachingDefinitionsAnalysis : public IFDSProblem<DefinitionFact> {
+public:
+    // IFDS interface implementation
+    DefinitionFact zero_fact() const override {
+        return DefinitionFact::zero();
+    }
+    
+    FactSet normal_flow(const llvm::Instruction* stmt, const DefinitionFact& fact) override {
+        FactSet result;
+        
+        // Always propagate zero fact
+        if (fact.is_zero()) {
+            result.insert(fact);
+        }
+        
+        // Check if this instruction defines a variable
+        if (defines_variable(stmt)) {
+            const llvm::Value* defined_var = get_defined_variable(stmt);
+            
+            // Kill existing definitions of the same variable
+            if (fact.is_definition() && fact.get_variable() == defined_var) {
+                // This fact is killed by the new definition
+                // Don't propagate it
+            } else {
+                // Propagate existing facts that are not killed
+                if (!fact.is_zero()) {
+                    result.insert(fact);
+                }
+            }
+            
+            // Generate new definition fact
+            if (fact.is_zero()) {
+                result.insert(DefinitionFact::definition(defined_var, stmt));
+            }
+            
+        } else {
+            // No definition - just propagate existing facts
+            if (!fact.is_zero()) {
+                result.insert(fact);
+            }
+        }
+        
+        return result;
+    }
+    
+    FactSet call_flow(const llvm::CallInst* call, const llvm::Function* callee,
+                     const DefinitionFact& fact) override {
+        FactSet result;
+        
+        // Always propagate zero fact
+        if (fact.is_zero()) {
+            result.insert(fact);
+        }
+        
+        if (!callee || callee->isDeclaration()) {
+            return result;
+        }
+        
+        // For reaching definitions, we need to map definitions of arguments
+        if (fact.is_definition()) {
+            // Check if the defined variable is passed as an argument
+            for (unsigned i = 0; i < call->getNumOperands() - 1; ++i) {
+                if (call->getOperand(i) == fact.get_variable()) {
+                    // Map to corresponding parameter in callee
+                    auto arg_it = callee->arg_begin();
+                    std::advance(arg_it, i);
+                    
+                    // Create a new definition fact for the parameter
+                    // The definition site is the function entry
+                    const llvm::Instruction* entry_inst = &callee->getEntryBlock().front();
+                    result.insert(DefinitionFact::definition(&*arg_it, entry_inst));
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    FactSet return_flow(const llvm::CallInst* call, const llvm::Function* callee,
+                       const DefinitionFact& exit_fact, const DefinitionFact& call_fact) override {
+        FactSet result;
+        
+        // Always propagate zero fact
+        if (exit_fact.is_zero()) {
+            result.insert(exit_fact);
+        }
+        
+        // For reaching definitions, we need to handle return values
+        if (exit_fact.is_definition()) {
+            // Check if the definition is of a return value
+            for (const llvm::BasicBlock& bb : *callee) {
+                for (const llvm::Instruction& inst : bb) {
+                    if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&inst)) {
+                        if (ret->getReturnValue() == exit_fact.get_variable()) {
+                            // Map return value definition to call result
+                            result.insert(DefinitionFact::definition(call, exit_fact.get_definition_site()));
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Propagate call site facts that represent local variables
+        if (call_fact.is_definition() && is_local_to_caller(call_fact, callee)) {
+            result.insert(call_fact);
+        }
+        
+        return result;
+    }
+    
+    FactSet call_to_return_flow(const llvm::CallInst* call, const DefinitionFact& fact) override {
+        FactSet result;
+        
+        // Always propagate zero fact
+        if (fact.is_zero()) {
+            result.insert(fact);
+        }
+        
+        const llvm::Function* callee = call->getCalledFunction();
+        
+        // For external functions, model their effects
+        if (!callee || callee->isDeclaration()) {
+            // External function call
+            std::string func_name = callee ? callee->getName().str() : "";
+            
+            // Handle functions that might modify global state or return values
+            if (func_name == "malloc" || func_name == "calloc") {
+                // Memory allocation - creates a new definition
+                if (fact.is_zero()) {
+                    result.insert(DefinitionFact::definition(call, call));
+                }
+            }
+            
+            // Propagate facts that are not killed by external calls
+            if (fact.is_definition() && !is_killed_by_external_call(fact, call)) {
+                result.insert(fact);
+            }
+        } else {
+            // Internal function - propagate local facts
+            if (fact.is_definition() && is_local_to_caller(fact, callee)) {
+                result.insert(fact);
+            }
+        }
+        
+        return result;
+    }
+    
+    FactSet initial_facts(const llvm::Function* main) override {
+        FactSet result;
+        result.insert(zero_fact());
+        
+        // Add initial definitions for function parameters
+        for (const llvm::Argument& arg : main->args()) {
+            const llvm::Instruction* entry_inst = &main->getEntryBlock().front();
+            result.insert(DefinitionFact::definition(&arg, entry_inst));
+        }
+        
+        return result;
+    }
+    
+    // Query interface
+    std::vector<const llvm::Instruction*> get_reaching_definitions(
+        const llvm::Instruction* use_site, const llvm::Value* variable) const {
+        
+        std::vector<const llvm::Instruction*> definitions;
+        
+        // This would query the analysis results
+        // Implementation depends on how results are stored
+        
+        return definitions;
+    }
+    
+private:
+    bool defines_variable(const llvm::Instruction* inst) const {
+        // Check if instruction defines a variable
+        return !inst->getType()->isVoidTy() || 
+               llvm::isa<llvm::StoreInst>(inst) ||
+               llvm::isa<llvm::AllocaInst>(inst);
+    }
+    
+    const llvm::Value* get_defined_variable(const llvm::Instruction* inst) const {
+        if (auto* store = llvm::dyn_cast<llvm::StoreInst>(inst)) {
+            return store->getPointerOperand();
+        } else if (auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(inst)) {
+            return alloca;
+        } else if (!inst->getType()->isVoidTy()) {
+            return inst;
+        }
+        return nullptr;
+    }
+    
+    bool is_local_to_caller(const DefinitionFact& fact, const llvm::Function* callee) const {
+        if (!fact.is_definition()) return false;
+        
+        const llvm::Value* var = fact.get_variable();
+        
+        // Check if the variable is local to the caller (not a parameter or global)
+        if (llvm::isa<llvm::GlobalValue>(var)) {
+            return false; // Global variable
+        }
+        
+        if (llvm::isa<llvm::Argument>(var)) {
+            // Check if it's a parameter of the callee
+            for (const llvm::Argument& arg : callee->args()) {
+                if (&arg == var) {
+                    return false; // Parameter of callee
+                }
+            }
+        }
+        
+        return true; // Local to caller
+    }
+    
+    bool is_killed_by_external_call(const DefinitionFact& fact, const llvm::CallInst* call) const {
+        if (!fact.is_definition()) return false;
+        
+        const llvm::Value* var = fact.get_variable();
+        
+        // Conservative: external calls might modify global variables and 
+        // memory locations passed as pointer arguments
+        if (llvm::isa<llvm::GlobalValue>(var)) {
+            return true; // Assume external calls can modify globals
+        }
+        
+        // Check if the variable is passed as a pointer argument
+        for (unsigned i = 0; i < call->getNumOperands() - 1; ++i) {
+            const llvm::Value* arg = call->getOperand(i);
+            if (arg->getType()->isPointerTy() && may_alias(arg, var)) {
+                return true; // Might be modified through pointer
+            }
+        }
+        
+        return false;
+    }
+};
+
+} // namespace ifds
+} // namespace sparta

@@ -1,15 +1,20 @@
 /**
  * @file llvm-ai.cpp
- * @brief LLVM Abstract Interpreter Tool
+ * @brief LLVM IFDS/IDE Analysis Tool
  * 
- * A command-line tool for running abstract interpretation on LLVM bitcode files.
- * This tool demonstrates the use of the Sparta framework for LLVM IR analysis.
+ * A command-line tool for running IFDS/IDE interprocedural dataflow analysis 
+ * on LLVM bitcode files using the Sparta framework.
  */
 
-#include <Analysis/sparta/LLVMAbstractInterpreter.h>
+#include <Analysis/sparta/LLVM_IFDS/IFDSFramework.h>
+#include <Analysis/sparta/LLVM_IFDS/TaintAnalysis.h>
+#include <Analysis/sparta/LLVM_IFDS/ReachingDefinitions.h>
+
+#include <Alias/DyckAA/DyckAliasAnalysis.h>
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/ErrorOr.h>
@@ -22,27 +27,52 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <sstream>
 
 using namespace llvm;
-using namespace sparta::llvm_ai;
+using namespace sparta::ifds;
 
 static cl::opt<std::string> InputFilename(cl::Positional, cl::desc("<input bitcode file>"),
                                           cl::Required);
 
 static cl::opt<bool> Verbose("verbose", cl::desc("Enable verbose output"), cl::init(false));
 
-static cl::opt<std::string> FunctionName("function", cl::desc("Analyze specific function only"),
-                                         cl::init(""));
+static cl::opt<int> AnalysisType("analysis", cl::desc("Type of analysis to run: 0=taint, 1=reaching-defs"),
+                                 cl::init(0));
 
-static cl::opt<bool> ShowCFG("show-cfg", cl::desc("Show control flow graph"), cl::init(false));
+// Using Dyck alias analysis by default
 
-static cl::opt<bool> ShowAbstractStates("show-states", cl::desc("Show abstract states at each program point"),
-                                        cl::init(false));
+static cl::opt<bool> ShowResults("show-results", cl::desc("Show detailed analysis results"), 
+                                 cl::init(true));
+
+static cl::opt<int> MaxDetailedResults("max-results", cl::desc("Maximum number of detailed results to show"), 
+                                      cl::init(10));
+
+static cl::opt<std::string> SourceFunctions("sources", cl::desc("Comma-separated list of source functions"),
+                                            cl::init(""));
+
+static cl::opt<std::string> SinkFunctions("sinks", cl::desc("Comma-separated list of sink functions"),
+                                          cl::init(""));
+
+// Helper function to parse comma-separated function names
+std::vector<std::string> parseFunctionList(const std::string& input) {
+    std::vector<std::string> functions;
+    if (input.empty()) return functions;
+    
+    std::stringstream ss(input);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (!item.empty()) {
+            functions.push_back(item);
+        }
+    }
+    return functions;
+}
 
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
     
-    cl::ParseCommandLineOptions(argc, argv, "LLVM Abstract Interpreter Tool\n");
+    cl::ParseCommandLineOptions(argc, argv, "LLVM IFDS/IDE Analysis Tool\n");
     
     // Set up LLVM context and source manager
     LLVMContext Context;
@@ -60,78 +90,154 @@ int main(int argc, char **argv) {
         outs() << "Functions in module: " << M->size() << "\n";
     }
     
-    // Create the abstract interpreter
-    LLVMAbstractInterpreter Interpreter;
-    
-    // Analyze functions
-    int analyzedFunctions = 0;
-    for (Function &F : *M) {
-        if (F.isDeclaration()) {
-            if (Verbose) {
-                outs() << "Skipping declaration: " << F.getName() << "\n";
-            }
-            continue;
-        }
-        
-        // If a specific function is requested, skip others
-        if (!FunctionName.empty() && F.getName() != FunctionName) {
-            continue;
-        }
-        
-        if (Verbose) {
-            outs() << "Analyzing function: " << F.getName() << "\n";
-        }
-        
-        try {
-            // Run abstract interpretation
-            Interpreter.analyze_function(&F);
-            
-            if (ShowAbstractStates) {
-                outs() << "Abstract states for function " << F.getName() << ":\n";
-                Interpreter.print_analysis_results(&F, std::cout);
-            }
-            
-            if (ShowCFG) {
-                outs() << "Control flow graph for function " << F.getName() << ":\n";
-                // Print basic block information
-                for (const BasicBlock &BB : F) {
-                    outs() << "  Basic Block: " << BB.getName() << "\n";
-                    outs() << "    Predecessors: ";
-                    for (const BasicBlock *Pred : predecessors(&BB)) {
-                        outs() << Pred->getName() << " ";
-                    }
-                    outs() << "\n    Successors: ";
-                    for (const BasicBlock *Succ : successors(&BB)) {
-                        outs() << Succ->getName() << " ";
-                    }
-                    outs() << "\n";
-                }
-            }
-            
-            // Print analysis results
-            outs() << "Function: " << F.getName() << "\n";
-            outs() << "  Basic blocks: " << F.size() << "\n";
-            outs() << "  Instructions: " << F.getInstructionCount() << "\n";
-            outs() << "  Analysis completed successfully\n";
-            
-            analyzedFunctions++;
-            
-        } catch (const std::exception &e) {
-            errs() << "Error analyzing function " << F.getName() << ": " << e.what() << "\n";
-            return 1;
-        }
+    // Set up Dyck alias analysis
+    if (Verbose) {
+        outs() << "Using Dyck alias analysis\n";
     }
     
-    if (analyzedFunctions == 0) {
-        if (!FunctionName.empty()) {
-            errs() << "Function '" << FunctionName << "' not found in module\n";
-        } else {
-            errs() << "No functions to analyze in module\n";
+    legacy::PassManager PM;
+    auto dyckPass = std::make_unique<DyckAliasAnalysis>();
+    DyckAliasAnalysis* dyckAA = dyckPass.get();
+    PM.add(dyckPass.release());
+    PM.run(*M);
+    
+    // Run the selected analysis
+    try {
+        switch (AnalysisType.getValue()) {
+            case 0: { // Taint analysis
+                outs() << "Running interprocedural taint analysis...\n";
+                
+                TaintAnalysis taintAnalysis;
+                
+                // Set up custom sources and sinks if provided
+                auto sources = parseFunctionList(SourceFunctions);
+                auto sinks = parseFunctionList(SinkFunctions);
+                
+                for (const auto& source : sources) {
+                    taintAnalysis.add_source_function(source);
+                }
+                for (const auto& sink : sinks) {
+                    taintAnalysis.add_sink_function(sink);
+                }
+                
+                // Set up alias analysis
+                taintAnalysis.set_alias_analysis(dyckAA);
+                
+                IFDSSolver<TaintAnalysis> solver(taintAnalysis);
+                solver.solve(*M);
+                
+                if (ShowResults) {
+                    outs() << "\nTaint Flow Vulnerability Analysis:\n";
+                    outs() << "==================================\n";
+                    
+                    const auto& results = solver.get_all_results();
+                    size_t vulnerability_count = 0;
+                    const size_t max_vulnerabilities = MaxDetailedResults.getValue();
+                    
+                    // Look for taint flow vulnerabilities (tainted data reaching sinks)
+                    for (const auto& result : results) {
+                        const auto& node = result.first;
+                        const auto& facts = result.second;
+                        
+                        if (facts.empty() || !node.instruction) continue;
+                        
+                        // Check if this is a sink instruction with tainted data
+                        if (auto* call = llvm::dyn_cast<llvm::CallInst>(node.instruction)) {
+                            if (const llvm::Function* callee = call->getCalledFunction()) {
+                                std::string func_name = callee->getName().str();
+                                
+                                // Check if this is a known sink function
+                                bool is_sink = (func_name == "system" || func_name == "exec" || 
+                                              func_name == "execl" || func_name == "execv" || 
+                                              func_name == "popen" || func_name == "printf" || 
+                                              func_name == "fprintf" || func_name == "sprintf" || 
+                                              func_name == "strcpy" || func_name == "strcat");
+                                
+                                if (is_sink) {
+                                    // Check if any arguments are tainted
+                                    bool has_tainted_args = false;
+                                    std::string tainted_args;
+                                    
+                                    for (unsigned i = 0; i < call->getNumOperands() - 1; ++i) {
+                                        const llvm::Value* arg = call->getOperand(i);
+                                        
+                                        // Check if this argument is tainted
+                                        for (const auto& fact : facts) {
+                                            if (fact.is_tainted_var() && fact.get_value() == arg) {
+                                                has_tainted_args = true;
+                                                if (!tainted_args.empty()) tainted_args += ", ";
+                                                tainted_args += "arg" + std::to_string(i);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (has_tainted_args) {
+                                        vulnerability_count++;
+                                        if (vulnerability_count <= max_vulnerabilities) {
+                                            outs() << "\n🚨 VULNERABILITY #" << vulnerability_count << ":\n";
+                                            outs() << "  Sink: " << func_name << " at " << *call << "\n";
+                                            outs() << "  Tainted arguments: " << tainted_args << "\n";
+                                            outs() << "  Location: " << call->getDebugLoc() << "\n";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (vulnerability_count == 0) {
+                        outs() << "✅ No taint flow vulnerabilities detected.\n";
+                        outs() << "   (This means no tainted data reached dangerous sink functions)\n";
+                    } else {
+                        outs() << "\n📊 Summary:\n";
+                        outs() << "  Total vulnerabilities found: " << vulnerability_count << "\n";
+                        if (vulnerability_count > max_vulnerabilities) {
+                            outs() << "  (Showing first " << max_vulnerabilities << " vulnerabilities)\n";
+                        }
+                    }
+                }
+                break;
+            }
+            case 1: { // Reaching definitions
+                outs() << "Running interprocedural reaching definitions analysis...\n";
+                
+                ReachingDefinitionsAnalysis reachingDefs;
+                
+                // Set up alias analysis
+                reachingDefs.set_alias_analysis(dyckAA);
+                
+                IFDSSolver<ReachingDefinitionsAnalysis> solver(reachingDefs);
+                solver.solve(*M);
+                
+                if (ShowResults) {
+                    outs() << "\nReaching Definitions Results:\n";
+                    outs() << "=============================\n";
+                    
+                    const auto& results = solver.get_all_results();
+                    for (const auto& result : results) {
+                        const auto& node = result.first;
+                        const auto& facts = result.second;
+                        
+                        if (!facts.empty()) {
+                            outs() << "At instruction: " << *node.instruction << "\n";
+                            outs() << "  Definition facts: [" << facts.size() << " facts]\n\n";
+                        }
+                    }
+                }
+                break;
+            }
+            default:
+                errs() << "Unknown analysis type\n";
+                return 1;
         }
+        
+        outs() << "Analysis completed successfully.\n";
+        
+    } catch (const std::exception &e) {
+        errs() << "Error running analysis: " << e.what() << "\n";
         return 1;
     }
-    
-    outs() << "Analysis completed. Analyzed " << analyzedFunctions << " function(s).\n";
     
     return 0;
 }

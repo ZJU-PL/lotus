@@ -1,24 +1,18 @@
 set(SPARTA_SOURCES
-  LLVMValueDomain.cpp
-  LLVMAbstractState.cpp
-  LLVMTransferFunction.cpp
-  LLVMFixpointIterator.cpp
-  LLVMAbstractInterpreter.cpp
-  BoostExceptionStub.cpp
+  LLVM_IFDS/IFDSFramework.cpp
+  LLVM_IFDS/TaintAnalysis.cpp
+  LLVM_IFDS/ReachingDefinitions.cpp
 )
 
 add_library(SpartaLLVM STATIC ${SPARTA_SOURCES})
 
-# Link against LLVM libraries
+# Link against LLVM libraries and Dyck alias analysis
 target_link_libraries(SpartaLLVM
   LLVMSupport
   LLVMIRReader
   LLVMAnalysis
-)
-
-# Include directories
-target_include_directories(SpartaLLVM PUBLIC
-  ${CMAKE_SOURCE_DIR}/include
+  CanaryDyckAA
+  CanarySupport
 )
 
 # Set C++ standard
