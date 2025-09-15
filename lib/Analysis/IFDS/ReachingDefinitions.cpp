@@ -2,7 +2,7 @@
  * Reaching Definitions Analysis Implementation
  */
 
-#include <Analysis/sparta/LLVM_IFDS/ReachingDefinitions.h>
+#include <Analysis/IFDS/ReachingDefinitions.h>
 
 #include <llvm/Support/raw_ostream.h>
 

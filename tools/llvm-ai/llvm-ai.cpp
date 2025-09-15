@@ -6,9 +6,9 @@
  * on LLVM bitcode files using the Sparta framework.
  */
 
-#include <Analysis/sparta/LLVM_IFDS/IFDSFramework.h>
-#include <Analysis/sparta/LLVM_IFDS/TaintAnalysis.h>
-#include <Analysis/sparta/LLVM_IFDS/ReachingDefinitions.h>
+#include <Analysis/IFDS/IFDSFramework.h>
+#include <Analysis/IFDS/TaintAnalysis.h>
+#include <Analysis/IFDS/ReachingDefinitions.h>
 
 #include <Alias/DyckAA/DyckAliasAnalysis.h>
 

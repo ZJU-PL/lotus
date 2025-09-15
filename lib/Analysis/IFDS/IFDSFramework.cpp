@@ -7,7 +7,7 @@
  * - Proper termination and soundness guarantees
  */
 
-#include <Analysis/sparta/LLVM_IFDS/IFDSFramework.h>
+#include <Analysis/IFDS/IFDSFramework.h>
 
 #include <llvm/IR/CFG.h>
 #include <llvm/Support/raw_ostream.h>

@@ -30,6 +30,7 @@ add_library(GVFA STATIC ${GVFA_SOURCES})
 target_link_libraries(GVFA CanaryDyckAA CanarySupport)
 
 add_subdirectory(sparta)
+add_subdirectory(IFDS)
 
 
 

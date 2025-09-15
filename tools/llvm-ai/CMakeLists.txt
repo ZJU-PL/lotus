@@ -1,11 +1,10 @@
 add_executable(llvm-ai llvm-ai.cpp)
 
 target_link_libraries(llvm-ai
-  SpartaLLVM
-)
-
-target_include_directories(llvm-ai PUBLIC
-  ${CMAKE_SOURCE_DIR}/include
+  IFDS
+  CanaryDyckAA
+  CanarySupport
+  LLVMIRReader
 )
 
 set_property(TARGET llvm-ai PROPERTY CXX_STANDARD 17)

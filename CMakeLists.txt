@@ -105,3 +105,10 @@ add_subdirectory(lib)
 add_subdirectory(tools)
 add_subdirectory(benchmarks)
 # add_subdirectory(examples)
+
+# Add tests if enabled
+option(BUILD_TESTS "Build tests" OFF)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

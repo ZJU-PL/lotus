@@ -1,19 +1,8 @@
-set(SPARTA_SOURCES
-  LLVM_IFDS/IFDSFramework.cpp
-  LLVM_IFDS/TaintAnalysis.cpp
-  LLVM_IFDS/ReachingDefinitions.cpp
-)
+# Sparta core library - no LLVM-specific code
+# IFDS has been moved to independent directory
 
-add_library(SpartaLLVM STATIC ${SPARTA_SOURCES})
-
-# Link against LLVM libraries and Dyck alias analysis
-target_link_libraries(SpartaLLVM
-  LLVMSupport
-  LLVMIRReader
-  LLVMAnalysis
-  CanaryDyckAA
-  CanarySupport
-)
+# Create interface library for compatibility
+add_library(SpartaLLVM INTERFACE)
 
 # Set C++ standard
 set_property(TARGET SpartaLLVM PROPERTY CXX_STANDARD 17)

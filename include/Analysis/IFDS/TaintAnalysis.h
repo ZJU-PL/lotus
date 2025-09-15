@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <Analysis/sparta/LLVM_IFDS/IFDSFramework.h>
+#include <Analysis/IFDS/IFDSFramework.h>
 
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Constants.h>

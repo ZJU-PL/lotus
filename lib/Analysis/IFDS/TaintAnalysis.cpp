@@ -2,7 +2,7 @@
  * Taint Analysis Implementation
  */
 
-#include <Analysis/sparta/LLVM_IFDS/TaintAnalysis.h>
+#include <Analysis/IFDS/TaintAnalysis.h>
 
 #include <llvm/Support/raw_ostream.h>
 

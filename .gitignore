@@ -1,6 +1,4 @@
 rebuild.sh
-paper
-tests
 .cache
 .clangd
 .vscode
