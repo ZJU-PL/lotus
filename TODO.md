@@ -18,7 +18,15 @@ For Summer Research, Final Year Project Topics, etc.
 
 Universal Interface for the analyses in lib/Alias: 
 
-- Basics: points-to, alias pair, alias set, pointed-by, - Callgraph, memory dependence, etc.
+- Basics: points-to, alias pair, alias set, pointed-by, callgraph, memory dependence, etc.
+- Pointer queries: points-to, alias pair, alias set, pointed-by set
+- Callgraph: callgraph edges, reachable methods
+- Optimizations: devirtualization, dead code elimination, ...
+- Security: control-flow integrity, code pointer integrity, ...
+- IR: Memory SSA, DDG, PDG, SDG, SVFG, etc.
+- Slicing: forward, backward, thin slicing, tropping, ...
+
+**Note**: Currently, we may not focus on some "high-level clients" such as taint analysis and memory safety verification, which can require more reasoning capabilities dataflow tracking, numerical analysis, path sensitivity, etc.
 
 
 ### Third-Party
@@ -67,9 +75,13 @@ Use VFG or PDG to answer slicing queries.
 
 ## Investigate More Related Work
 
+- [SFS]https://github.com/hotpeperoncino/sfs, Ben Hardekopf's CGO 11.
+- [ccylzer] https://github.com/GaloisInc/cclyzerpp, Yannis's SAS 16.
+- [DG](https://github.com/mchalupa/dg) - Dependence Graph for analysis of LLVM bitcode ([paper1](https://www.fi.muni.cz/~xchalup4/dg_atva20_preprint.pdf), [paper2](https://www.sciencedirect.com/science/article/pii/S2665963820300294?via%3Dihub))
+- https://github.com/jumormt/PSTA-16 
+- [SVF] https://github.com/SVF-tools/SVF
 - https://github.com/harp-lab/yapall
 - https://github.com/GaloisInc/cclyzerpp
-- [DG](https://github.com/mchalupa/dg) - Dependence Graph for analysis of LLVM bitcode ([paper1](https://www.fi.muni.cz/~xchalup4/dg_atva20_preprint.pdf), [paper2](https://www.sciencedirect.com/science/article/pii/S2665963820300294?via%3Dihub))
 - [AserPTA](https://github.com/PeimingLiu/AserPTA) - Andersen's points-to analysis
 - [TPA](https://github.com/grievejia/tpa) - A flow-sensitive, context-sensitive pointer analysis
 - [Andersen](https://github.com/grievejia/andersen) - Andersen's points-to analysis

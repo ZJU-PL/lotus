@@ -9,7 +9,7 @@
 #include <map>
 //#include <list>
 //#include <deque>
-//#include <algorithm>
+#include <algorithm>
 //#include <utility>
 //#include <cmath>
 //#include <unordered_map>
