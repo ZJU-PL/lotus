@@ -1,5 +1,7 @@
 #include "CFL/CSIndex/Graph.h"
 #include "CFL/CSIndex/CSProgressBar.h"
+#include <algorithm>
+#include <cstring>
 
 Graph::Graph() {
     graph = GRA();

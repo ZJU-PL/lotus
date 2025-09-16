@@ -1,4 +1,6 @@
 #include "CFL/CSIndex/Query.h"
+#include <cstdlib>
+#include <ctime>
 
 
 Query::Query(const char* filestem, Graph& ig, int _r, double _ps, bool mat) : g(ig) {

@@ -1,4 +1,5 @@
 #include "CFL/CSIndex/PathTree.h"
+#include <algorithm>
 
 PathTree::PathTree(Graph& graph): g(graph) {
 	int maxid = g.num_vertices();

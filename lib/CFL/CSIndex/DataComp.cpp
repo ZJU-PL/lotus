@@ -3,6 +3,8 @@
 */
 
 #include "CFL/CSIndex/DataComp.h"
+#include <cstdlib>
+#include <ctime>
 
 DataComp::DataComp(vector<vector<int> > _data):data(_data) {
 	srand48(time(NULL));

@@ -1,4 +1,5 @@
 #include "CFL/CSIndex/DWGraph.h"
+#include <algorithm>
 
 DWGraph::DWGraph() {
 	graph = DWGRA();

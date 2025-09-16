@@ -1,5 +1,8 @@
 #include "CFL/CSIndex/GraphUtil.h"
+#include <algorithm>
 #include <random>
+#include <cstdlib>
+#include <ctime>
 
 // depth first search given a start node
 void GraphUtil::dfs(Graph& g, int vid, vector<int>& preorder, vector<int>& postorder, vector<bool>& visited) {

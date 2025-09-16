@@ -1,4 +1,8 @@
 #include "CFL/CSIndex/DWGraphUtil.h"
+#include <algorithm>
+#include <cstdlib>
+#include <ctime>
+#include <fstream>
 
 // implement tarjan's algorithm to find Strongly Connected Component from a given start node
 void DWGraphUtil::tarjan(DWGraph& g, int vid, int& index, map< int, pair<int,int> >& order, 

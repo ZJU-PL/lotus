@@ -4,7 +4,10 @@ on:
   pull_request:
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.ubuntu-version }}
+    strategy:
+      matrix:
+        ubuntu-version: [ubuntu-22.04, ubuntu-24.04, ubuntu-latest]
 
     env:
       MAKEFLAGS: -j4
