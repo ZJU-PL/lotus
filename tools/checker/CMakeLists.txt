@@ -19,6 +19,7 @@ target_link_libraries(canary-npa PRIVATE
 add_executable(canary-gvfa canary_gvfa.cpp)
 target_link_libraries(canary-gvfa PRIVATE
   GVFA
+  Checker
   ${LLVM_LINK_COMPONENTS}
 )
 
@@ -38,6 +39,7 @@ target_link_libraries(kint PRIVATE
 add_executable(ifds-taint ifds_taint.cpp)
 target_link_libraries(ifds-taint
   IFDS
+  Checker
   CanaryDyckAA
   CanarySupport
   LLVMIRReader

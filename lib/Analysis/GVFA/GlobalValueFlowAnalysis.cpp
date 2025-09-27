@@ -8,7 +8,7 @@
 
 
 #include "Analysis/GVFA/GlobalValueFlowAnalysis.h"
-#include "Analysis/GVFA/TaintUtils.h"
+#include "Checker/TaintConfigManager.h"
 #include "Support/RecursiveTimer.h"
 
 using namespace llvm;
@@ -888,7 +888,7 @@ void TaintVulnerabilityChecker::getSources(Module *M, VulnerabilitySourcesType &
                 if (auto *Call = dyn_cast<CallInst>(&I)) {
                     if (auto *CalledF = Call->getCalledFunction()) {
                         std::string FuncName = CalledF->getName().str();
-                        if (gvfa::TaintUtils::isKnownSourceFunction(FuncName)) {
+                        if (checker::taint_config::is_source(FuncName)) {
                             Sources[{Call, 1}] = 1;
                         }
                     }
@@ -906,7 +906,7 @@ void TaintVulnerabilityChecker::getSinks(Module *M, VulnerabilitySinksType &Sink
                 if (auto *Call = dyn_cast<CallInst>(&I)) {
                     if (auto *CalledF = Call->getCalledFunction()) {
                         std::string FuncName = CalledF->getName().str();
-                        if (gvfa::TaintUtils::isKnownSinkFunction(FuncName)) {
+                        if (checker::taint_config::is_sink(FuncName)) {
                             for (unsigned i = 0; i < Call->arg_size(); ++i) {
                                 auto *Arg = Call->getArgOperand(i);
                                 Sinks[Arg] = new std::set<const Value *>();
@@ -925,7 +925,12 @@ bool TaintVulnerabilityChecker::isValidTransfer(const Value *From, const Value *
     if (auto *CI = dyn_cast<CallInst>(To)) {
         if (auto *F = CI->getCalledFunction()) {
             std::string FuncName = F->getName().str();
-            if (gvfa::TaintUtils::isKnownSanitizerFunction(FuncName)) {
+            // Note: Sanitizer functions are not yet supported in the unified config
+            // For now, we'll keep a minimal hardcoded list
+            static const std::unordered_set<std::string> sanitizers = {
+                "strlen", "strnlen", "strncpy", "strncat", "snprintf"
+            };
+            if (sanitizers.count(FuncName)) {
                 return false;
             }
         }

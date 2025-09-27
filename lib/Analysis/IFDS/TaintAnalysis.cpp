@@ -3,6 +3,7 @@
  */
 
 #include <Analysis/IFDS/TaintAnalysis.h>
+#include <Checker/TaintConfigManager.h>
 
 #include <llvm/Support/raw_ostream.h>
 
@@ -95,27 +96,25 @@ std::ostream& operator<<(std::ostream& os, const TaintFact& fact) {
 // ============================================================================
 
 TaintAnalysis::TaintAnalysis() {
-    // Common taint sources
-    m_source_functions.insert("gets");
-    m_source_functions.insert("fgets");
-    m_source_functions.insert("getchar");
-    m_source_functions.insert("scanf");
-    m_source_functions.insert("fscanf");
-    m_source_functions.insert("read");
-    m_source_functions.insert("recv");
-    m_source_functions.insert("recvfrom");
+    // Load the unified taint configuration
+    if (!checker::taint_config::load_default_config()) {
+        llvm::errs() << "Error: Could not load taint configuration\n";
+        return;
+    }
     
-    // Common taint sinks
-    m_sink_functions.insert("system");
-    m_sink_functions.insert("exec");
-    m_sink_functions.insert("execl");
-    m_sink_functions.insert("execv");
-    m_sink_functions.insert("popen");
-    m_sink_functions.insert("printf");
-    m_sink_functions.insert("fprintf");
-    m_sink_functions.insert("sprintf");
-    m_sink_functions.insert("strcpy");
-    m_sink_functions.insert("strcat");
+    // Load sources and sinks from configuration
+    auto sources = checker::TaintConfigManager::getInstance().get_all_source_functions();
+    auto sinks = checker::TaintConfigManager::getInstance().get_all_sink_functions();
+    
+    for (const auto& source : sources) {
+        m_source_functions.insert(source);
+    }
+    
+    for (const auto& sink : sinks) {
+        m_sink_functions.insert(sink);
+    }
+    
+    llvm::outs() << "Loaded " << sources.size() << " sources and " << sinks.size() << " sinks from configuration\n";
 }
 
 TaintFact TaintAnalysis::zero_fact() const {
@@ -407,6 +406,7 @@ bool TaintAnalysis::kills_fact(const llvm::CallInst* call, const TaintFact& fact
     std::string func_name = callee->getName().str();
     
     // Some functions might "sanitize" taint
+    // Note: Sanitizer functions are not yet supported in the unified config
     static const std::unordered_set<std::string> sanitizers = {
         "strlen", "strcmp", "strncmp", "isdigit", "isalpha"
     };

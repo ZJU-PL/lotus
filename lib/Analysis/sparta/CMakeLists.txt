@@ -1,5 +1,4 @@
 # Sparta core library - no LLVM-specific code
-# IFDS has been moved to independent directory
 
 # Create interface library for compatibility
 add_library(SpartaLLVM INTERFACE)

@@ -45,6 +45,13 @@ Maybe we can design a VFG independent from DyckAA (e.g., it can use the results 
 
 * Use the pointer analysis interfaces (currently, it relies on the memory dependence analysis inside LLVM)
 
+
+Implement other algorithms
+
+- TSE 22: The Duality in Computing SSA Programs and Control Dependency
+- SAS 22: Fast and Incremental Computation of Weak Control Closure
+- TOPLAS 21: On Time-sensitive Control Dependencies
+
 ## 4. Applications 
 
 ### Slicing

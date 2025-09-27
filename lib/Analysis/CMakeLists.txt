@@ -24,10 +24,9 @@ add_library(CanaryNullPointer STATIC ${CanaryNullPointer_SOURCES})
 
 set(GVFA_SOURCES
   GVFA/GlobalValueFlowAnalysis.cpp
-  GVFA/TaintUtils.cpp
 )
 add_library(GVFA STATIC ${GVFA_SOURCES})
-target_link_libraries(GVFA CanaryDyckAA CanarySupport)
+target_link_libraries(GVFA CanaryDyckAA CanarySupport Checker)
 
 add_subdirectory(sparta)
 add_subdirectory(IFDS)

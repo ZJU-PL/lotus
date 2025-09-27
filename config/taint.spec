@@ -181,3 +181,30 @@ PIPE strtoul Ret V Arg0 D
 PIPE strtoul Arg1 D Arg0 V
 SOURCE _setjmp Ret V U
 IGNORE longjmp
+
+# Additional sources from hardcoded lists
+SOURCE gets Arg0 D T
+SOURCE recvfrom Arg1 D T
+SOURCE fread Arg0 D T
+
+# Additional sinks from hardcoded lists  
+SINK exec Arg0 D
+SINK execl Arg0 D
+SINK execle Arg0 D
+SINK execlp Arg0 D
+SINK execv Arg0 D
+SINK execve Arg0 D
+SINK execvp Arg0 D
+SINK popen Arg0 D
+SINK strcpy Arg0 D
+SINK strcat Arg0 D
+SINK write Arg1 D
+SINK send Arg1 D
+SINK sendto Arg1 D
+
+# Sanitizer functions (for future extension)
+# SANITIZE strlen Arg0 D
+# SANITIZE strnlen Arg0 D
+# SANITIZE strncpy Arg0 D
+# SANITIZE strncat Arg0 D
+# SANITIZE snprintf Arg0 D

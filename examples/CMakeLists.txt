@@ -1,14 +1,12 @@
 # Examples CMakeLists.txt
 
 set(EXAMPLES
-  ModelCheckingExample.cpp
   RapidJSONExample.cpp
   AndersenExample.cpp
   PDGExample.cpp
 )
 
 set(EXAMPLES_NAMES
-  ModelCheckingExample
   RapidJSONExample
   AndersenExample
   PDGExample
@@ -26,9 +24,6 @@ foreach(idx RANGE 0 3)
   add_executable(${example_name} ${example_file})
   target_include_directories(${example_name} PUBLIC ${EXAMPLES_INCLUDE_DIR})
 endforeach()
-
-# ModelCheckingExample needs BDD and LLVM libs
- target_link_libraries(ModelCheckingExample PRIVATE BDD ${llvm_libs})
 
 # AndersenExample needs Andersen and LLVM libs
  target_link_libraries(AndersenExample PRIVATE Andersen ${llvm_libs})
