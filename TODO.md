@@ -16,7 +16,7 @@ For Summer Research, Final Year Project Topics, etc.
 
 ### Interfaces
 
-Universal Interface for the analyses in lib/Alias: 
+Universal interface for the analyses in lib/Alias: 
 
 - Basics: points-to, alias pair, alias set, pointed-by, callgraph, memory dependence, etc.
 - Pointer queries: points-to, alias pair, alias set, pointed-by set
