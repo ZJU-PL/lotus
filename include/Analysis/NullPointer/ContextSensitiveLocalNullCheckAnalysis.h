@@ -15,13 +15,13 @@
 #include <unordered_map>
 #include <map>
 
-#include "Alias/DyckAA/DyckValueFlowAnalysis.h"
+// #include "Alias/DyckAA/DyckValueFlowAnalysis.h"
 #include "Analysis/NullPointer/NullEquivalenceAnalysis.h"
 #include "Analysis/NullPointer/ContextSensitiveNullFlowAnalysis.h"
 
 using namespace llvm;
 
-typedef std::pair<Instruction *, unsigned> Edge;
+using Edge = std::pair<Instruction *, unsigned>;
 
 class ContextSensitiveLocalNullCheckAnalysis {
 private:

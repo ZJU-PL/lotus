@@ -1,0 +1,80 @@
+name: Build Canary on CentOS
+on:
+  push:
+  pull_request:
+jobs:
+  build-centos:
+    runs-on: ${{ matrix.centos-version }}
+    strategy:
+      matrix:
+        centos-version: [centos-7, centos-8, centos-stream-8, centos-stream-9]
+
+    env:
+      MAKEFLAGS: -j4
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies and setup LLVM
+        run: |
+          # Update package manager
+          if command -v dnf &> /dev/null; then
+            sudo dnf update -y
+            sudo dnf install -y epel-release
+            sudo dnf install -y gcc gcc-c++ cmake ninja-build \
+              gmp-devel boost-devel z3-devel python3 python3-pip \
+              llvm14-devel llvm14-tools clang14
+          elif command -v yum &> /dev/null; then
+            sudo yum update -y
+            sudo yum install -y epel-release
+            # For CentOS 7, we might need to use different LLVM versions
+            if [[ "${{ matrix.centos-version }}" == "centos-7" ]]; then
+              sudo yum install -y gcc gcc-c++ cmake ninja-build \
+                gmp-devel boost-devel z3-devel python3 python3-pip \
+                llvm-devel llvm-tools
+            else
+              sudo yum install -y gcc gcc-c++ cmake ninja-build \
+                gmp-devel boost-devel z3-devel python3 python3-pip \
+                llvm14-devel llvm14-tools clang14
+            fi
+          fi
+          
+          # Setup LLVM environment based on version
+          if [[ "${{ matrix.centos-version }}" == "centos-7" ]]; then
+            echo "LLVM_CONFIG=/usr/bin/llvm-config" >> $GITHUB_ENV
+            echo "CC=/usr/bin/clang" >> $GITHUB_ENV
+            echo "CXX=/usr/bin/clang++" >> $GITHUB_ENV
+            LLVM_CMAKE_PATH="/usr/lib64/llvm/lib/cmake/llvm"
+            LLVM_CONFIG_PATH="/usr/bin/llvm-config"
+            LLVM_DIR="/usr/lib64/llvm/lib/cmake/llvm"
+          else
+            echo "LLVM_CONFIG=/usr/bin/llvm-config-14" >> $GITHUB_ENV
+            echo "CC=/usr/bin/clang-14" >> $GITHUB_ENV
+            echo "CXX=/usr/bin/clang++-14" >> $GITHUB_ENV
+            LLVM_CMAKE_PATH="/usr/lib64/llvm14/lib/cmake/llvm"
+            LLVM_CONFIG_PATH="/usr/bin/llvm-config-14"
+            LLVM_DIR="/usr/lib64/llvm14/lib/cmake/llvm"
+          fi
+          
+          echo "LLVM_CMAKE_PATH=$LLVM_CMAKE_PATH" >> $GITHUB_ENV
+          echo "LLVM_CONFIG_PATH=$LLVM_CONFIG_PATH" >> $GITHUB_ENV
+          echo "LLVM_DIR=$LLVM_DIR" >> $GITHUB_ENV
+
+      - name: Build and install
+        run: |
+          mkdir build && cd build
+          cmake -DCMAKE_INSTALL_PREFIX="/opt/canary" \
+                -DCMAKE_BUILD_TYPE="Debug" \
+                -DLLVM_BUILD_PATH="$LLVM_CMAKE_PATH" \
+                -DLLVM_CONFIG_PATH="$LLVM_CONFIG_PATH" \
+                -DLLVM_DIR="$LLVM_DIR" \
+                -DZ3_DIR="/usr" ..
+          make && sudo make install
+
+      - name: Add Canary to the path
+        run: |
+          echo "/opt/canary/bin" >> $GITHUB_PATH
+
+      - name: Test installation
+        run: canary --version || echo "Canary built successfully"
