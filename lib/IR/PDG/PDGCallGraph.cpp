@@ -39,29 +39,38 @@ void pdg::PDGCallGraph::build(Module &M)
     if (F.isDeclaration() || F.empty())
       continue;
     auto caller_node = getNode(F);
+    if (caller_node == nullptr)
+      continue;
+      
     for (auto inst_i = inst_begin(F); inst_i != inst_end(F); inst_i++)
     {
-      if (CallInst *ci = dyn_cast<CallInst>(&*inst_i))
-      {
-        auto called_func = pdgutils::getCalledFunc(*ci);
-        // direct calls
-        if (called_func != nullptr)
+      try {
+        if (CallInst *ci = dyn_cast<CallInst>(&*inst_i))
         {
-          auto callee_node = getNode(*called_func);
-          if (callee_node != nullptr)
-            caller_node->addNeighbor(*callee_node, EdgeType::CONTROLDEP_CALLINV);
-        }
-        else
-        {
-          // indirect calls
-          auto ind_call_candidates = getIndirectCallCandidates(*ci, M);
-          for (auto ind_call_can : ind_call_candidates)
+          auto called_func = pdgutils::getCalledFunc(*ci);
+          // direct calls
+          if (called_func != nullptr)
           {
-            Node* callee_node = getNode(*ind_call_can);
+            auto callee_node = getNode(*called_func);
             if (callee_node != nullptr)
-              caller_node->addNeighbor(*callee_node, EdgeType::IND_CALL);
+              caller_node->addNeighbor(*callee_node, EdgeType::CONTROLDEP_CALLINV);
+          }
+          else
+          {
+            // indirect calls
+            auto ind_call_candidates = getIndirectCallCandidates(*ci, M);
+            for (auto ind_call_can : ind_call_candidates)
+            {
+              Node* callee_node = getNode(*ind_call_can);
+              if (callee_node != nullptr)
+                caller_node->addNeighbor(*callee_node, EdgeType::IND_CALL);
+            }
           }
         }
+      } catch (...) {
+        // Skip invalid call instructions
+        errs() << "Warning: Skipping invalid call instruction in function " << F.getName() << "\n";
+        continue;
       }
     }
   }

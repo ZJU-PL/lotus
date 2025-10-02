@@ -23,5 +23,6 @@ add_library(CanaryPDG STATIC
   ProgramDependencyGraph.cpp
   QueryLanguage.cpp
   QueryParser.cpp
+  Slicing.cpp
   Tree.cpp
 ) 

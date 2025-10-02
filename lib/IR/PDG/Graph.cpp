@@ -158,21 +158,27 @@ void pdg::ProgramGraph::build(Module &M)
     FunctionWrapper *func_w = new FunctionWrapper(&F);
     for (auto inst_iter = inst_begin(F); inst_iter != inst_end(F); inst_iter++)
     {
-      GraphNodeType node_type = GraphNodeType::INST_OTHER;
-      if (isAnnotationCallInst(*inst_iter))
-        node_type = GraphNodeType::ANNO_VAR;
-      if (isa<ReturnInst>(&*inst_iter))
-        node_type = GraphNodeType::INST_RET;
-      if (isa<CallInst>(&*inst_iter))
-        node_type = GraphNodeType::INST_FUNCALL;
-      if (isa<BranchInst>(&*inst_iter))
-        node_type = GraphNodeType::INST_BR;
-      // if (auto invokeInst = dyn_cast<InvokeInst>(&*inst_iter)) 
-      //   errs() << invokeInst->getCalledFunction()->getName() << "\n";
-      Node *n = new Node(*inst_iter, node_type);
-      _val_node_map.insert(std::pair<Value *, Node *>(&*inst_iter, n));
-      func_w->addInst(*inst_iter);
-      addNode(*n);
+      try {
+        GraphNodeType node_type = GraphNodeType::INST_OTHER;
+        if (isAnnotationCallInst(*inst_iter))
+          node_type = GraphNodeType::ANNO_VAR;
+        if (isa<ReturnInst>(&*inst_iter))
+          node_type = GraphNodeType::INST_RET;
+        if (isa<CallInst>(&*inst_iter))
+          node_type = GraphNodeType::INST_FUNCALL;
+        if (isa<BranchInst>(&*inst_iter))
+          node_type = GraphNodeType::INST_BR;
+        // if (auto invokeInst = dyn_cast<InvokeInst>(&*inst_iter)) 
+        //   errs() << invokeInst->getCalledFunction()->getName() << "\n";
+        Node *n = new Node(*inst_iter, node_type);
+        _val_node_map.insert(std::pair<Value *, Node *>(&*inst_iter, n));
+        func_w->addInst(*inst_iter);
+        addNode(*n);
+      } catch (...) {
+        // Skip invalid instructions
+        errs() << "Warning: Skipping invalid instruction in function " << F.getName() << "\n";
+        continue;
+      }
     }
     func_w->buildFormalTreeForArgs();
     func_w->buildFormalTreesForRetVal();

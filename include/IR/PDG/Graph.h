@@ -1,5 +1,4 @@
 #pragma once
-#include "IR/PDG/LLVMEssentials.h"
 #include "IR/PDG/PDGNode.h"
 #include "IR/PDG/PDGEdge.h"
 #include "IR/PDG/Tree.h"
@@ -10,7 +9,7 @@
 
 
 #include <unordered_map>
-#include <map>
+//#include <map>
 #include <set>
 
 namespace pdg
@@ -40,6 +39,12 @@ namespace pdg
     int numNode() { return _val_node_map.size(); }
     void setIsBuild() { _is_build = true; }
     bool isBuild() { return _is_build; }
+    void reset() { 
+      _is_build = false; 
+      _val_node_map.clear();
+      _edge_set.clear();
+      _node_set.clear();
+    }
     bool canReach(pdg::Node &src, pdg::Node &dst);
     bool canReach(pdg::Node &src, pdg::Node &dst, std::set<EdgeType> exclude_edge_types);
     ValueNodeMap &getValueNodeMap() { return _val_node_map; }
@@ -87,6 +92,14 @@ namespace pdg
     void buildGlobalAnnotationNodes(llvm::Module &M);
     ClassNodeMap &getClassNodeMap() { return _class_node_map; }
     Node* getClassNodeByName(std::string cls_name);
+    void reset() {
+      GenericGraph::reset();
+      _func_wrapper_map.clear();
+      _call_wrapper_map.clear();
+      _node_di_type_map.clear();
+      _class_node_map.clear();
+      _class_name_set.clear();
+    }
 
   private:
     FuncWrapperMap _func_wrapper_map;
