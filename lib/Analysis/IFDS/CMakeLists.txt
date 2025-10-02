@@ -5,7 +5,6 @@ set(IFDS_SOURCES
   IFDSDebugUtils.cpp
   TaintAnalysis.cpp
   ReachingDefinitions.cpp
-  BoostExceptionStub.cpp
 )
 
 add_library(IFDS STATIC ${IFDS_SOURCES})

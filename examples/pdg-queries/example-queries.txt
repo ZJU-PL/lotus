@@ -1,0 +1,52 @@
+# PDG Query Language Examples
+# This file contains example queries and policies for the PDG query language
+
+# Basic queries
+pgm
+forwardSlice(pgm)
+backwardSlice(pgm)
+
+# Node and edge selection
+selectNodes(INST_FUNCALL)
+selectNodes(INST_RET)
+selectNodes(PARAM_FORMALIN)
+selectEdges(DATA_DEF_USE)
+selectEdges(CONTROLDEP_BR)
+
+# Function-specific queries
+returnsOf("main")
+formalsOf("main")
+entriesOf("main")
+
+# Path finding
+between(returnsOf("input"), formalsOf("output"))
+shortestPath(returnsOf("secret"), formalsOf("leak"))
+
+# Set operations
+let sources = returnsOf("input") in
+let sinks = formalsOf("output") in
+sources U sinks
+
+let dataNodes = selectNodes(INST_FUNCALL) in
+let controlNodes = selectNodes(INST_BR) in
+dataNodes ∩ controlNodes
+
+# Complex queries
+let input = returnsOf("getInput") in
+let output = formalsOf("print") in
+forwardSlice(input) ∩ backwardSlice(output)
+
+# Policy examples
+noExplicitFlows(returnsOf("secret"), formalsOf("output")) is empty
+between(returnsOf("input"), formalsOf("sink")) is empty
+
+# Access control policies
+let checks = findPCNodes(returnsOf("isAuthorized"), TRUE) in
+let sensitiveOps = selectNodes(INST_FUNCALL) in
+accessControlled(checks, sensitiveOps) is empty
+
+# Information flow policies
+let sources = returnsOf("userInput") in
+let sinks = formalsOf("networkSend") in
+let sanitizers = returnsOf("sanitize") in
+declassifies(sanitizers, sources, sinks) is empty

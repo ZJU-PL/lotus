@@ -5,7 +5,7 @@
 # 
 # The PDG system provides:
 # - Field-sensitive program dependence analysis
-# - Context-insensitive interprocedural analysis
+# - Context-insensitive interprocedural analysis (?)
 # - Support for both control and data dependencies
 # - Structural analysis for C programs
 
@@ -21,5 +21,7 @@ add_library(CanaryPDG STATIC
   PDGNode.cpp
   PDGUtils.cpp
   ProgramDependencyGraph.cpp
+  QueryLanguage.cpp
+  QueryParser.cpp
   Tree.cpp
 ) 

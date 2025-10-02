@@ -653,13 +653,13 @@ struct MKintPass : public PassInfoMixin<MKintPass> {
         }
     }
 
-    static std::string get_bb_label(const BasicBlock* bb)
-    {
+    static std::string get_bb_label(const llvm::BasicBlock* bb) {
+        // Check if func and module are available, avoiding 'Segmentfault'
+        if (!bb || !bb->getParent() || bb->getParent()->getName().empty() || !bb->getParent()->getParent()) return "<badref>";
         std::string str;
-        raw_string_ostream os(str);
+        llvm::raw_string_ostream os(str);
         bb->printAsOperand(os, false);
-
-        return str; // Return directly to allow copy elision
+        return str;
     }
 
     static SmallVector<Function*, 2> get_sink_fns(Instruction* inst) noexcept

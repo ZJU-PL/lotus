@@ -45,5 +45,3 @@ target_link_libraries(ifds-taint
   LLVMIRReader
 )
 
-set_property(TARGET ifds-taint PROPERTY CXX_STANDARD 17)
-set_property(TARGET ifds-taint PROPERTY CXX_STANDARD_REQUIRED ON)

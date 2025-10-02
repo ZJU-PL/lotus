@@ -1,6 +1,7 @@
 
 add_subdirectory(alias)
 add_subdirectory(checker)
+add_subdirectory(pdg-query)
 
 option(BUILD_CSR "Build indexing context-sensitive reachability solver" OFF)
 option(BUILD_DYNAA "Build dynamic alias analyses" OFF)

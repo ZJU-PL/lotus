@@ -20,11 +20,11 @@
 
 #include <set>
 
-#include <boost/optional.hpp>
 
 #include <Alias/DyckAA/DyckAliasAnalysis.h>
 
 #include <functional>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -202,7 +202,7 @@ public:
     const std::vector<Edge>& get_edges() const;
     
 private:
-    boost::optional<NodeId> m_entry;
+    std::unique_ptr<NodeId> m_entry;
     std::vector<Edge> m_edges;
     std::unordered_map<NodeId, std::vector<EdgeId>, NodeHash> m_successors;
     std::unordered_map<NodeId, std::vector<EdgeId>, NodeHash> m_predecessors;

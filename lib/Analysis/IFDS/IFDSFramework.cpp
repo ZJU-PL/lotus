@@ -203,7 +203,7 @@ void ExplodedSupergraph<Fact>::add_edge(const Edge& edge) {
 
 template<typename Fact>
 void ExplodedSupergraph<Fact>::set_entry(const NodeId& entry) {
-    m_entry = entry;
+    m_entry = std::make_unique<NodeId>(entry);
 }
 
 template<typename Fact>

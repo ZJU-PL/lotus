@@ -2,7 +2,7 @@
 // seadsda-tool -- Advanced memory graph and call graph analysis tool for sea-dsa
 ///
 
-#include "llvm/Analysis/CallPrinter.h"
+//#include "llvm/Analysis/CallPrinter.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -11,7 +11,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
-#include "llvm/Support/ManagedStatic.h"
+//#include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Signals.h"
@@ -28,7 +28,7 @@
 #include "Alias/seadsa/InitializePasses.hh"
 #include "Alias/seadsa/SeaDsaAliasAnalysis.hh"
 #include "Alias/seadsa/support/RemovePtrToInt.hh"
-#include "Alias/seadsa/support/Debug.h"
+//#include "Alias/seadsa/support/Debug.h"
 
 static llvm::cl::opt<std::string>
     InputFilename(llvm::cl::Positional,
