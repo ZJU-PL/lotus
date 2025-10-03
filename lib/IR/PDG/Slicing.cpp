@@ -24,6 +24,97 @@ using namespace llvm;
 namespace pdg
 {
 
+// ==================== Common Helper Functions ====================
+
+namespace {
+  /**
+   * @brief Common BFS traversal template for forward and backward slicing
+   * 
+   * This template function provides a unified BFS traversal implementation that can be
+   * used for both forward and backward slicing by parameterizing the edge access and
+   * neighbor selection functions.
+   * 
+   * @tparam GetEdgesFunc Function type that takes a Node* and returns edge collection
+   * @tparam GetNeighborFunc Function type that takes an Edge* and returns neighbor Node*
+   * @param start_nodes Set of starting nodes for the traversal
+   * @param edge_types Set of allowed edge types (empty means all types allowed)
+   * @param get_edges Function to get edges from a node (e.g., getOutEdgeSet or getInEdgeSet)
+   * @param get_neighbor Function to get neighbor from an edge (e.g., getDstNode or getSrcNode)
+   * @param max_depth Maximum traversal depth (SIZE_MAX means unlimited)
+   * @return Set of nodes reachable from start_nodes following the specified constraints
+   */
+  template<typename GetEdgesFunc, typename GetNeighborFunc>
+  ForwardSlicing::NodeSet traverseBFS(const ForwardSlicing::NodeSet &start_nodes,
+                                     const std::set<EdgeType> &edge_types,
+                                     GetEdgesFunc get_edges,
+                                     GetNeighborFunc get_neighbor,
+                                     size_t max_depth = SIZE_MAX) {
+    ForwardSlicing::NodeSet slice;
+    ForwardSlicing::VisitedSet visited;
+    std::queue<std::pair<Node *, size_t>> worklist; // <node, current_depth>
+    
+    // Initialize worklist with starting nodes at depth 0
+    for (auto *node : start_nodes)
+      if (node != nullptr) {
+        worklist.push({node, 0});
+        slice.insert(node);
+      }
+    
+    // BFS traversal with safety limit to prevent infinite loops
+    for (size_t iteration_count = 0; !worklist.empty() && iteration_count < 10000; ++iteration_count) {
+      auto current_pair = worklist.front();
+      Node *current = current_pair.first;
+      size_t depth = current_pair.second;
+      worklist.pop();
+      
+      // Skip if already visited or exceeded depth limit
+      if (visited.find(current) != visited.end() || depth >= max_depth)
+        continue;
+      
+      visited.insert(current);
+      
+      try {
+        // Explore all edges from current node
+        for (auto *edge : get_edges(current)) {
+          // Skip null edges or edges not in allowed types
+          if (edge == nullptr || 
+              (!edge_types.empty() && edge_types.find(edge->getEdgeType()) == edge_types.end()))
+            continue;
+            
+          Node *neighbor = get_neighbor(edge);
+          // Skip null neighbors or already visited neighbors
+          if (neighbor == nullptr || visited.find(neighbor) != visited.end())
+            continue;
+          
+          // Add neighbor to slice and queue for further exploration
+          slice.insert(neighbor);
+          worklist.push({neighbor, depth + 1});
+        }
+      } catch (...) {
+        // Skip this node if there's an error accessing its edges
+        continue;
+      }
+    }
+    
+    return slice;
+  }
+  
+  /**
+   * @brief Edge type filtering helper function
+   * 
+   * Determines whether an edge type should be included in the traversal based on
+   * the set of allowed edge types. If the allowed_types set is empty, all edge
+   * types are considered allowed.
+   * 
+   * @param edge_type The edge type to check
+   * @param allowed_types Set of allowed edge types (empty means all types allowed)
+   * @return True if the edge type should be included in the traversal
+   */
+  bool isEdgeTypeAllowed(EdgeType edge_type, const std::set<EdgeType> &allowed_types) {
+    return allowed_types.empty() || allowed_types.find(edge_type) != allowed_types.end();
+  }
+}
+
 // ==================== ForwardSlicing Implementation ====================
 
 ForwardSlicing::NodeSet ForwardSlicing::computeSlice(Node &start_node, const std::set<EdgeType> &edge_types)
@@ -33,93 +124,22 @@ ForwardSlicing::NodeSet ForwardSlicing::computeSlice(Node &start_node, const std
 
 ForwardSlicing::NodeSet ForwardSlicing::computeSlice(const NodeSet &start_nodes, const std::set<EdgeType> &edge_types)
 {
-  NodeSet slice;
-  VisitedSet visited;
-  std::queue<Node *> worklist;
-  
-  // Initialize worklist with start nodes
-  for (auto *node : start_nodes)
-    if (node != nullptr) {
-      worklist.push(node);
-      slice.insert(node);
-    }
-  
-  // BFS traversal to find all reachable nodes
-  // Add safety limit to prevent infinite loops
-  for (size_t iteration_count = 0; !worklist.empty() && iteration_count < 10000; ++iteration_count) {
-    Node *current = worklist.front();
-    worklist.pop();
-    
-    if (visited.find(current) != visited.end())
-      continue;
-    
-    visited.insert(current);
-    
-    // Explore all outgoing edges
-    try {
-      for (auto *edge : current->getOutEdgeSet()) {
-        if (edge == nullptr || !isEdgeTypeAllowed(edge->getEdgeType(), edge_types))
-          continue;
-          
-        Node *neighbor = edge->getDstNode();
-        if (neighbor == nullptr || visited.find(neighbor) != visited.end())
-          continue;
-        
-        slice.insert(neighbor);
-        worklist.push(neighbor);
-      }
-    } catch (...) {
-      // Skip this node if there's an error accessing its edges
-      continue;
-    }
-  }
-  
-  return slice;
+  return traverseBFS(start_nodes, edge_types,
+                     [](Node *n) { return n->getOutEdgeSet(); },
+                     [](Edge *e) { return e->getDstNode(); });
 }
 
 ForwardSlicing::NodeSet ForwardSlicing::computeSliceWithDepth(Node &start_node, size_t max_depth, const std::set<EdgeType> &edge_types)
 {
-  if (max_depth == 0)
-    return computeSlice(start_node, edge_types);
-  
-  NodeSet slice;
-  VisitedSet visited;
-  std::queue<std::pair<Node *, size_t>> worklist; // <node, depth>
-  
-  worklist.push({&start_node, 0});
-  slice.insert(&start_node);
-  
-  while (!worklist.empty()) {
-    auto current_pair = worklist.front();
-    Node *current = current_pair.first;
-    size_t depth = current_pair.second;
-    worklist.pop();
-    
-    if (visited.find(current) != visited.end() || depth >= max_depth)
-      continue;
-    
-    visited.insert(current);
-    
-    // Explore all outgoing edges
-    for (auto *edge : current->getOutEdgeSet()) {
-      if (!isEdgeTypeAllowed(edge->getEdgeType(), edge_types))
-        continue;
-        
-      Node *neighbor = edge->getDstNode();
-      if (neighbor == nullptr || visited.find(neighbor) != visited.end())
-        continue;
-      
-      slice.insert(neighbor);
-      worklist.push({neighbor, depth + 1});
-    }
-  }
-  
-  return slice;
+  return traverseBFS({&start_node}, edge_types,
+                     [](Node *n) { return n->getOutEdgeSet(); },
+                     [](Edge *e) { return e->getDstNode(); },
+                     max_depth);
 }
 
 bool ForwardSlicing::isEdgeTypeAllowed(EdgeType edge_type, const std::set<EdgeType> &allowed_types) const
 {
-  return allowed_types.empty() || allowed_types.find(edge_type) != allowed_types.end();
+  return ::pdg::isEdgeTypeAllowed(edge_type, allowed_types);
 }
 
 // ==================== BackwardSlicing Implementation ====================
@@ -131,93 +151,22 @@ BackwardSlicing::NodeSet BackwardSlicing::computeSlice(Node &end_node, const std
 
 BackwardSlicing::NodeSet BackwardSlicing::computeSlice(const NodeSet &end_nodes, const std::set<EdgeType> &edge_types)
 {
-  NodeSet slice;
-  VisitedSet visited;
-  std::queue<Node *> worklist;
-  
-  // Initialize worklist with end nodes
-  for (auto *node : end_nodes)
-    if (node != nullptr) {
-      worklist.push(node);
-      slice.insert(node);
-    }
-  
-  // BFS traversal to find all nodes that can reach the end nodes
-  // Add safety limit to prevent infinite loops
-  for (size_t iteration_count = 0; !worklist.empty() && iteration_count < 10000; ++iteration_count) {
-    Node *current = worklist.front();
-    worklist.pop();
-    
-    if (visited.find(current) != visited.end())
-      continue;
-    
-    visited.insert(current);
-    
-    // Explore all incoming edges (backward traversal)
-    try {
-      for (auto *edge : current->getInEdgeSet()) {
-        if (edge == nullptr || !isEdgeTypeAllowed(edge->getEdgeType(), edge_types))
-          continue;
-          
-        Node *neighbor = edge->getSrcNode();
-        if (neighbor == nullptr || visited.find(neighbor) != visited.end())
-          continue;
-        
-        slice.insert(neighbor);
-        worklist.push(neighbor);
-      }
-    } catch (...) {
-      // Skip this node if there's an error accessing its edges
-      continue;
-    }
-  }
-  
-  return slice;
+  return traverseBFS(end_nodes, edge_types,
+                     [](Node *n) { return n->getInEdgeSet(); },
+                     [](Edge *e) { return e->getSrcNode(); });
 }
 
 BackwardSlicing::NodeSet BackwardSlicing::computeSliceWithDepth(Node &end_node, size_t max_depth, const std::set<EdgeType> &edge_types)
 {
-  if (max_depth == 0)
-    return computeSlice(end_node, edge_types);
-  
-  NodeSet slice;
-  VisitedSet visited;
-  std::queue<std::pair<Node *, size_t>> worklist; // <node, depth>
-  
-  worklist.push({&end_node, 0});
-  slice.insert(&end_node);
-  
-  while (!worklist.empty()) {
-    auto current_pair = worklist.front();
-    Node *current = current_pair.first;
-    size_t depth = current_pair.second;
-    worklist.pop();
-    
-    if (visited.find(current) != visited.end() || depth >= max_depth)
-      continue;
-    
-    visited.insert(current);
-    
-    // Explore all incoming edges (backward traversal)
-    for (auto *edge : current->getInEdgeSet()) {
-      if (!isEdgeTypeAllowed(edge->getEdgeType(), edge_types))
-        continue;
-        
-      Node *neighbor = edge->getSrcNode();
-      if (neighbor == nullptr || visited.find(neighbor) != visited.end())
-        continue;
-      
-      slice.insert(neighbor);
-      worklist.push({neighbor, depth + 1});
-    }
-  }
-  
-  return slice;
+  return traverseBFS({&end_node}, edge_types,
+                     [](Node *n) { return n->getInEdgeSet(); },
+                     [](Edge *e) { return e->getSrcNode(); },
+                     max_depth);
 }
 
 bool BackwardSlicing::isEdgeTypeAllowed(EdgeType edge_type, const std::set<EdgeType> &allowed_types) const
 {
-  return allowed_types.empty() || allowed_types.find(edge_type) != allowed_types.end();
+  return ::pdg::isEdgeTypeAllowed(edge_type, allowed_types);
 }
 
 // ==================== ProgramChopping Implementation ====================
@@ -229,10 +178,11 @@ ProgramChopping::NodeSet ProgramChopping::computeChop(const NodeSet &source_node
   // For each source-sink pair, find all nodes on paths between them
   for (auto *source : source_nodes)
     for (auto *sink : sink_nodes) {
+      // Skip null nodes
       if (source == nullptr || sink == nullptr)
         continue;
         
-      // Find all paths from source to sink
+      // Find all paths from source to sink (0 means unlimited paths)
       auto paths = findAllPaths(*source, *sink, 0, edge_types);
       
       // Add all nodes on these paths to the chop
@@ -295,7 +245,6 @@ std::vector<std::vector<Node *>> ProgramChopping::findAllPaths(Node &source_node
   std::vector<std::vector<Node *>> all_paths;
   std::vector<Node *> current_path;
   VisitedSet visited;
-  
   findPathsDFS(source_node, sink_node, visited, current_path, all_paths, max_paths, edge_types);
   return all_paths;
 }
@@ -304,53 +253,34 @@ void ProgramChopping::findPathsDFS(Node &current, Node &sink, VisitedSet &visite
                                  std::vector<Node *> &current_path, std::vector<std::vector<Node *>> &all_paths,
                                  size_t max_paths, const std::set<EdgeType> &edge_types)
 {
-  // Add current node to path and mark as visited
+  // Add current node to path and mark as visited to prevent cycles
   current_path.push_back(&current);
   visited.insert(&current);
   
   // If we reached the sink, add this path to results
   if (&current == &sink) {
     all_paths.push_back(current_path);
-    current_path.pop_back();
-    visited.erase(&current);
-    return;
+  } else if ((max_paths == 0 || all_paths.size() < max_paths) && current_path.size() <= 100) {
+    // Continue searching if we haven't found enough paths and path isn't too long
+    for (auto *edge : current.getOutEdgeSet()) {
+      // Only follow edges of allowed types
+      if (::pdg::isEdgeTypeAllowed(edge->getEdgeType(), edge_types)) {
+        Node *neighbor = edge->getDstNode();
+        // Skip null neighbors or already visited neighbors (cycle prevention)
+        if (neighbor != nullptr && visited.find(neighbor) == visited.end())
+          findPathsDFS(*neighbor, sink, visited, current_path, all_paths, max_paths, edge_types);
+      }
+    }
   }
   
-  // If we've found enough paths, stop searching
-  if (max_paths > 0 && all_paths.size() >= max_paths) {
-    current_path.pop_back();
-    visited.erase(&current);
-    return;
-  }
-  
-  // Prevent infinite loops by limiting path length
-  const size_t MAX_PATH_LENGTH = 100;
-  if (current_path.size() > MAX_PATH_LENGTH) {
-    current_path.pop_back();
-    visited.erase(&current);
-    return;
-  }
-  
-  // Explore all outgoing edges
-  for (auto *edge : current.getOutEdgeSet()) {
-    if (!isEdgeTypeAllowed(edge->getEdgeType(), edge_types))
-      continue;
-      
-    Node *neighbor = edge->getDstNode();
-    if (neighbor == nullptr || visited.find(neighbor) != visited.end())
-      continue;
-    
-    findPathsDFS(*neighbor, sink, visited, current_path, all_paths, max_paths, edge_types);
-  }
-  
-  // Backtrack
+  // Backtrack: remove current node from path and unmark as visited
   current_path.pop_back();
   visited.erase(&current);
 }
 
 bool ProgramChopping::isEdgeTypeAllowed(EdgeType edge_type, const std::set<EdgeType> &allowed_types) const
 {
-  return allowed_types.empty() || allowed_types.find(edge_type) != allowed_types.end();
+  return ::pdg::isEdgeTypeAllowed(edge_type, allowed_types);
 }
 
 // ==================== SlicingUtils Implementation ====================
@@ -396,38 +326,26 @@ void SlicingUtils::printSlice(const NodeSet &slice, const std::string &slice_nam
   errs() << "Slice size: " << slice.size() << " nodes\n";
   
   for (auto *node : slice) {
-    if (node == nullptr)
-      continue;
+    if (node == nullptr) continue;
       
     std::string str;
     raw_string_ostream OS(str);
     Value* val = node->getValue();
+    
     if (val != nullptr) {
       if (Function* f = dyn_cast<Function>(val)) {
         OS << f->getName().str();
       } else if (Instruction* inst = dyn_cast<Instruction>(val)) {
-        // Safely print instruction with error handling
-        try {
-          OS << *inst;
-        } catch (...) {
-          OS << "<invalid instruction>";
-        }
+        try { OS << *inst; } catch (...) { OS << "<invalid instruction>"; }
       } else if (GlobalVariable* gv = dyn_cast<GlobalVariable>(val)) {
         OS << gv->getName().str();
       } else {
-        // For other types of values, try to print safely
-        try {
-          OS << *val;
-        } catch (...) {
-          OS << "<invalid value>";
-        }
+        try { OS << *val; } catch (...) { OS << "<invalid value>"; }
       }
-    }
-    
-    if (node->getValue() != nullptr)
       errs() << "node: " << node << " - " << pdgutils::rtrim(OS.str()) << " - " << pdgutils::getNodeTypeStr(node->getNodeType()) << "\n";
-    else
+    } else {
       errs() << "node: " << node << " - " << pdgutils::getNodeTypeStr(node->getNodeType()) << "\n";
+    }
   }
   errs() << "==========================================\n";
 }
@@ -435,34 +353,30 @@ void SlicingUtils::printSlice(const NodeSet &slice, const std::string &slice_nam
 std::unordered_map<std::string, size_t> SlicingUtils::getSliceStatistics(const NodeSet &slice)
 {
   std::unordered_map<std::string, size_t> stats;
-  stats["total_nodes"] = slice.size();
-  
   std::unordered_map<GraphNodeType, size_t> node_type_counts;
   std::unordered_map<EdgeType, size_t> edge_type_counts;
   
+  stats["total_nodes"] = slice.size();
+  
   for (auto *node : slice) {
-    if (node == nullptr)
-      continue;
+    if (node == nullptr) continue;
     
-    // Count node types
     node_type_counts[node->getNodeType()]++;
     
-    // Count edge types (both incoming and outgoing)
     for (auto *edge : node->getInEdgeSet())
       edge_type_counts[edge->getEdgeType()]++;
     for (auto *edge : node->getOutEdgeSet())
       edge_type_counts[edge->getEdgeType()]++;
   }
   
-  // Add node type statistics
   for (const auto &pair : node_type_counts)
     stats["node_type_" + pdgutils::getNodeTypeStr(pair.first)] = pair.second;
   
-  // Add edge type statistics
   for (const auto &pair : edge_type_counts)
     stats["edge_type_" + pdgutils::getEdgeTypeStr(pair.first)] = pair.second;
   
   return stats;
 }
+
 
 } // namespace pdg

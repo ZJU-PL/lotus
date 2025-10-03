@@ -433,7 +433,7 @@ void pdg::ProgramGraph::buildGlobalAnnotationNodes(Module &M)
     _val_node_map.insert(std::pair<Value *, Node *>(global_annos, global_anno_node));
     addNode(*global_anno_node);
     auto casted_array = cast<ConstantArray>(global_annos->getOperand(0));
-    for (int i = 0; i < casted_array->getNumOperands(); i++)
+    for (unsigned i = 0; i < casted_array->getNumOperands(); i++)
     {
       auto casted_struct = cast<ConstantStruct>(casted_array->getOperand(i));
       if (auto annotated_gv = dyn_cast<GlobalValue>(casted_struct->getOperand(0)->getOperand(0)))

@@ -24,6 +24,8 @@ add_library(CanaryNullPointer STATIC ${CanaryNullPointer_SOURCES})
 
 set(GVFA_SOURCES
   GVFA/GlobalValueFlowAnalysis.cpp
+  GVFA/SlicingAlgorithms.cpp
+  GVFA/VulnerabilityCheckers.cpp
 )
 add_library(GVFA STATIC ${GVFA_SOURCES})
 target_link_libraries(GVFA CanaryDyckAA CanarySupport Annotation)

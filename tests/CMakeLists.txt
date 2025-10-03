@@ -14,14 +14,14 @@ target_link_libraries(lotus_test_utils INTERFACE ${COMMON_LIBS})
 function(add_lotus_test test_name source_file)
     add_executable(${test_name} ${source_file})
     target_include_directories(${test_name} PRIVATE ${COMMON_INCLUDES})
-    target_link_libraries(${test_name} lotus_test_utils ${COMMON_LIBS})
+    target_link_libraries(${test_name} lotus_test_utils)
 endfunction()
 
 function(add_lotus_pdg_test test_name source_file)
     add_executable(${test_name} ${source_file})
     target_include_directories(${test_name} PRIVATE ${COMMON_INCLUDES})
     # PDG tests need additional LLVM analysis libraries
-    target_link_libraries(${test_name} lotus_test_utils ${COMMON_LIBS} LLVMTransformUtils)
+    target_link_libraries(${test_name} lotus_test_utils LLVMTransformUtils)
 endfunction()
 
 add_lotus_test(taint_analysis_test unit/TaintAnalysisTest.cpp)

@@ -22,6 +22,16 @@
 
 using namespace llvm;
 
+/**
+ * @brief Extract the struct type from a GetElementPtr instruction
+ * 
+ * This function analyzes a GEP instruction to determine what struct type
+ * it is accessing. It looks at the base pointer operand and extracts the
+ * struct type if the base pointer points to a struct.
+ * 
+ * @param gep The GetElementPtr instruction to analyze
+ * @return Pointer to the struct type, or nullptr if not a struct access
+ */
 StructType *pdg::pdgutils::getStructTypeFromGEP(GetElementPtrInst &gep)
 {
   Value *baseAddr = gep.getPointerOperand();
@@ -33,20 +43,36 @@ StructType *pdg::pdgutils::getStructTypeFromGEP(GetElementPtrInst &gep)
   return nullptr;
 }
 
+/**
+ * @brief Calculate the bit offset of a struct field accessed by a GEP instruction
+ * 
+ * This function computes the bit offset of a struct field that is being accessed
+ * by a GetElementPtr instruction. It uses the module's data layout to determine
+ * the actual memory layout of the struct and calculates the offset in bits.
+ * 
+ * @param M The LLVM module containing the GEP instruction
+ * @param struct_type The struct type being accessed
+ * @param gep The GetElementPtr instruction accessing the struct field
+ * @return The bit offset of the accessed field, or INT_MIN on error
+ */
 uint64_t pdg::pdgutils::getGEPOffsetInBits(Module& M, StructType &struct_type, GetElementPtrInst &gep)
 {
-  // get the accessed struct member offset from the gep instruction
+  // Get the accessed struct member offset from the gep instruction
   int gep_offset = getGEPAccessFieldOffset(gep);
   if (gep_offset == INT_MIN)
     return INT_MIN;
-  // use the struct layout to figure out the offset in bits
+  
+  // Use the struct layout to figure out the offset in bits
   auto const &data_layout = M.getDataLayout();
   auto const struct_layout = data_layout.getStructLayout(&struct_type);
+  
+  // Check for out-of-bounds access
   if (gep_offset >= struct_type.getNumElements())
   {
     errs() << "dubious gep access outof bound: " << gep << " in func " << gep.getFunction()->getName() << "\n";
     return INT_MIN;
   }
+  
   uint64_t field_bit_offset = struct_layout->getElementOffsetInBits(gep_offset);
   // check if the gep may be used for accessing bit fields
   // if (isGEPforBitField(gep))
@@ -64,6 +90,16 @@ uint64_t pdg::pdgutils::getGEPOffsetInBits(Module& M, StructType &struct_type, G
   return field_bit_offset;
 }
 
+/**
+ * @brief Extract the field offset from a GetElementPtr instruction
+ * 
+ * This function analyzes the operands of a GEP instruction to determine
+ * which field of a struct is being accessed. It looks at the constant
+ * indices in the GEP operands to compute the field offset.
+ * 
+ * @param gep The GetElementPtr instruction to analyze
+ * @return The field offset (0-based index), or INT_MIN on error
+ */
 int pdg::pdgutils::getGEPAccessFieldOffset(GetElementPtrInst &gep)
 {
   int operand_num = gep.getNumOperands();
@@ -285,7 +321,7 @@ std::string pdg::pdgutils::stripVersionTag(std::string str)
   size_t nth = 2;
   while (nth > 0)
   {
-    pos = str.find(".", pos + 1);
+    pos = str.find('.', pos + 1);
     if (pos == std::string::npos)
       return str;
     nth--;

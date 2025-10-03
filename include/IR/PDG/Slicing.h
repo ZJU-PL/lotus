@@ -1,3 +1,17 @@
+/**
+ * @file Slicing.h
+ * @brief Header file for PDG slicing primitives
+ *
+ * This file defines the slicing primitives for the Program Dependency Graph (PDG):
+ * - ForwardSlicing: Computes forward slices from slicing criteria
+ * - BackwardSlicing: Computes backward slices to slicing criteria  
+ * - ProgramChopping: Computes chops between source and sink nodes
+ * - SlicingUtils: Utility functions for slice analysis and statistics
+ *
+ * These primitives enable various program analysis tasks such as impact analysis,
+ * debugging, and program understanding by identifying relevant program dependencies.
+ */
+
 #pragma once
 #include "IR/PDG/PDGNode.h"
 #include "IR/PDG/PDGEdge.h"
@@ -219,6 +233,7 @@ namespace pdg
                      std::vector<Node *> &current_path, std::vector<std::vector<Node *>> &all_paths,
                      size_t max_paths, const std::set<EdgeType> &edge_types);
   };
+
 
   /**
    * @brief Utility class for common slicing operations
