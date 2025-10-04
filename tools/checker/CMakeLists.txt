@@ -30,6 +30,7 @@ set(LLVM_LINK_COMPONENTS_KINT
 
 add_executable(kint kint.cpp)
 target_link_libraries(kint PRIVATE
+        CanaryKint
         CanarySupport
         ${LLVM_LINK_COMPONENTS_KINT}
         ${Z3_LIBRARIES} 
@@ -41,7 +42,6 @@ target_link_libraries(ifds-taint
   IFDS
   Annotation
   CanaryDyckAA
-  CanarySupport
   LLVMIRReader
 )
 

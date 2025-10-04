@@ -1,0 +1,344 @@
+#include "Checker/kint/BugDetection.h"
+#include "Checker/kint/RangeAnalysis.h"
+#include "Checker/kint/Options.h"
+#include "Support/Log.h"
+
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/Metadata.h>
+#include <llvm/IR/Operator.h>
+#include <z3++.h>
+#include "Support/range.h"
+
+using namespace llvm;
+
+namespace kint {
+
+template <interr err, typename StrRet = const char*> constexpr StrRet mkstr()
+{
+    if (err == interr::INT_OVERFLOW) {
+        return "integer overflow";
+    } else if (err == interr::DIV_BY_ZERO) {
+        return "divide by zero";
+    } else if (err == interr::BAD_SHIFT) {
+        return "bad shift";
+    } else if (err == interr::ARRAY_OOB) {
+        return "array index out of bound";
+    } else if (err == interr::DEAD_TRUE_BR) {
+        return "impossible true branch";
+    } else if (err == interr::DEAD_FALSE_BR) {
+        return "impossible false branch";
+    } else {
+        static_assert(err == interr::INT_OVERFLOW || err == interr::DIV_BY_ZERO || err == interr::BAD_SHIFT
+                || err == interr::ARRAY_OOB || err == interr::DEAD_TRUE_BR || err == interr::DEAD_FALSE_BR,
+            "unknown error type");
+        return ""; // statically impossible
+    }
+}
+
+inline const char* mkstr(interr err)
+{
+    switch (err) {
+    case interr::INT_OVERFLOW: return mkstr<interr::INT_OVERFLOW>();
+    case interr::DIV_BY_ZERO: return mkstr<interr::DIV_BY_ZERO>();
+    case interr::BAD_SHIFT: return mkstr<interr::BAD_SHIFT>();
+    case interr::ARRAY_OOB: return mkstr<interr::ARRAY_OOB>();
+    case interr::DEAD_TRUE_BR: return mkstr<interr::DEAD_TRUE_BR>();
+    case interr::DEAD_FALSE_BR: return mkstr<interr::DEAD_FALSE_BR>();
+    default: break;
+    }
+    MKINT_CHECK_ABORT(false) << "unknown error type" << static_cast<int>(err);
+    return ""; // statically impossible
+}
+
+constexpr const char* MKINT_IR_ERR = "mkint.err";
+
+
+
+template <interr err_t, typename I> 
+typename std::enable_if<std::is_pointer<I>::value>::type BugDetection::mark_err(I inst) {
+    auto& ctx = inst->getContext();
+    std::string prefix = "";
+    if (MDNode* omd = inst->getMetadata(MKINT_IR_ERR)) {
+        prefix = cast<MDString>(omd->getOperand(0))->getString().str() + " + ";
+    }
+    auto md = MDNode::get(ctx, MDString::get(ctx, prefix + mkstr<err_t>()));
+    inst->setMetadata(MKINT_IR_ERR, md);
+}
+
+template <interr err_t, typename I> 
+typename std::enable_if<!std::is_pointer<I>::value>::type BugDetection::mark_err(I& inst) {
+    mark_err<err_t>(&inst);
+}
+
+bool BugDetection::add_range_cons(const crange& rng, const z3::expr& bv, z3::solver& solver) {
+    if (rng.isFullSet() || bv.is_const())
+        return true;
+
+    if (rng.isEmptySet()) {
+        MKINT_CHECK_RELAX(false) << "lhs is empty set";
+        return false;
+    }
+
+    solver.add(
+        z3::ule(bv, solver.ctx().bv_val(rng.getUnsignedMax().getZExtValue(), rng.getBitWidth())));
+    solver.add(
+        z3::uge(bv, solver.ctx().bv_val(rng.getUnsignedMin().getZExtValue(), rng.getBitWidth())));
+    return true;
+}
+
+void BugDetection::binary_check(BinaryOperator* op, 
+                               z3::solver& solver,
+                               const DenseMap<const Value*, llvm::Optional<z3::expr>>& v2sym,
+                               std::set<Instruction*>& overflow_insts,
+                               std::set<Instruction*>& bad_shift_insts,
+                               std::set<Instruction*>& div_zero_insts) {
+    // Skip checks if all checkers are disabled
+    if (!CheckIntOverflow && !CheckDivByZero && !CheckBadShift)
+        return;
+    const auto& lhs_bv = this->v2sym(op->getOperand(0), v2sym, solver);
+    const auto& rhs_bv = this->v2sym(op->getOperand(1), v2sym, solver);
+    const auto rhs_bits = rhs_bv.get_sort().bv_size();
+
+    auto is_nsw_is_nuw = [op] {
+        if (const auto ofop = dyn_cast<OverflowingBinaryOperator>(op)) {
+            return std::make_pair(ofop->hasNoSignedWrap(), ofop->hasNoUnsignedWrap());
+        }
+        return std::make_pair(false, false);
+    }();
+    const auto is_nsw = is_nsw_is_nuw.first;
+
+    const auto check = [&](interr et, bool is_signed) {
+        if (solver.check() == z3::sat) { // counter example
+            z3::model m = solver.get_model();
+            MKINT_WARN() << rang::fg::yellow << rang::style::bold << mkstr(et) << rang::style::reset << " at "
+                         << rang::bg::black << rang::fg::red << op->getParent()->getParent()->getName()
+                         << "::" << *op << rang::style::reset;
+            auto lhs_bin = m.eval(lhs_bv, true);
+            auto rhs_bin = m.eval(rhs_bv, true);
+            if (is_signed) {
+                MKINT_WARN() << "Counter example: " << rang::bg::black << rang::fg::red << op->getOpcodeName()
+                             << '(' << lhs_bin << ", " << rhs_bin << ") -> " << op->getOpcodeName() << '('
+                             << lhs_bin.as_int64() << ", " << rhs_bin.as_int64() << ')' << rang::style::reset;
+            } else {
+                MKINT_WARN() << "Counter example: " << rang::bg::black << rang::fg::red << op->getOpcodeName()
+                             << '(' << lhs_bin << ", " << rhs_bin << ") -> " << op->getOpcodeName() << '('
+                             << lhs_bin.as_uint64() << ", " << rhs_bin.as_uint64() << ')' << rang::style::reset;
+            }
+
+            switch (et) {
+            case interr::INT_OVERFLOW:
+                overflow_insts.insert(op);
+                break;
+            case interr::BAD_SHIFT:
+                bad_shift_insts.insert(op);
+                break;
+            case interr::DIV_BY_ZERO:
+                div_zero_insts.insert(op);
+                break;
+            default:
+                break;
+            }
+        }
+    };
+
+    solver.push();
+    switch (op->getOpcode()) {
+    case Instruction::Add:
+        if (!CheckIntOverflow)
+            break;
+            
+        if (!is_nsw) { // unsigned
+            solver.add(!z3::bvadd_no_overflow(lhs_bv, rhs_bv, false));
+            check(interr::INT_OVERFLOW, false);
+        } else {
+            solver.add(!z3::bvadd_no_overflow(lhs_bv, rhs_bv, true));
+            solver.add(!z3::bvadd_no_underflow(lhs_bv, rhs_bv));
+            check(interr::INT_OVERFLOW, true);
+        }
+        break;
+        
+    case Instruction::Sub:
+        if (!CheckIntOverflow)
+            break;
+            
+        if (!is_nsw) {
+            solver.add(!z3::bvsub_no_underflow(lhs_bv, rhs_bv, false));
+            check(interr::INT_OVERFLOW, false);
+        } else {
+            solver.add(!z3::bvsub_no_underflow(lhs_bv, rhs_bv, true));
+            solver.add(!z3::bvsub_no_overflow(lhs_bv, rhs_bv));
+            check(interr::INT_OVERFLOW, true);
+        }
+        break;
+        
+    case Instruction::Mul:
+        if (!CheckIntOverflow)
+            break;
+            
+        if (!is_nsw) {
+            solver.add(!z3::bvmul_no_overflow(lhs_bv, rhs_bv, false));
+            check(interr::INT_OVERFLOW, false);
+        } else {
+            solver.add(!z3::bvmul_no_overflow(lhs_bv, rhs_bv, true));
+            solver.add(!z3::bvmul_no_underflow(lhs_bv, rhs_bv)); // INTMAX * -1
+            check(interr::INT_OVERFLOW, true);
+        }
+        break;
+        
+    case Instruction::URem:
+    case Instruction::UDiv:
+        if (!CheckDivByZero)
+            break;
+            
+        solver.add(rhs_bv == solver.ctx().bv_val(0, rhs_bits));
+        check(interr::DIV_BY_ZERO, false);
+        break;
+        
+    case Instruction::SRem:
+    case Instruction::SDiv: // can be overflow or divisor == 0
+        if (CheckDivByZero) {
+            solver.push();
+            solver.add(rhs_bv == solver.ctx().bv_val(0, rhs_bits)); // may 0?
+            check(interr::DIV_BY_ZERO, true);
+            solver.pop();
+        }
+        
+        if (CheckIntOverflow) {
+            solver.add(z3::bvsdiv_no_overflow(lhs_bv, rhs_bv));
+            check(interr::INT_OVERFLOW, true);
+        }
+        break;
+        
+    case Instruction::Shl:
+    case Instruction::LShr:
+    case Instruction::AShr:
+        if (!CheckBadShift)
+            break;
+            
+        solver.add(rhs_bv >= solver.ctx().bv_val(rhs_bits, rhs_bits)); // sat means bug
+        check(interr::BAD_SHIFT, false);
+        break;
+        
+    case Instruction::And:
+    case Instruction::Or:
+    case Instruction::Xor:
+        break;
+        
+    default:
+        break;
+    }
+    solver.pop();
+}
+
+z3::expr BugDetection::binary_op_propagate(BinaryOperator* op, const DenseMap<const Value*, llvm::Optional<z3::expr>>& v2sym, z3::solver& solver) {
+    auto lhs = this->v2sym(op->getOperand(0), v2sym, solver);
+    auto rhs = this->v2sym(op->getOperand(1), v2sym, solver);
+    switch (op->getOpcode()) {
+    case Instruction::Add:
+        return lhs + rhs;
+    case Instruction::Sub:
+        return lhs - rhs;
+    case Instruction::Mul:
+        return lhs * rhs;
+    case Instruction::URem:
+        return z3::urem(lhs, rhs);
+    case Instruction::UDiv:
+        return z3::udiv(lhs, rhs);
+    case Instruction::SRem:
+        return z3::srem(lhs, rhs);
+    case Instruction::SDiv: // can be overflow or divisor == 0
+        return lhs / rhs;
+    case Instruction::Shl:
+        return z3::shl(lhs, rhs);
+    case Instruction::LShr:
+        return z3::lshr(lhs, rhs);
+    case Instruction::AShr:
+        return z3::ashr(lhs, rhs);
+    case Instruction::And:
+        return lhs & rhs;
+    case Instruction::Or:
+        return lhs | rhs;
+    case Instruction::Xor:
+        return lhs ^ rhs;
+    default:
+        break;
+    }
+
+    MKINT_CHECK_ABORT(false) << "unsupported binary op: " << *op;
+    return lhs; // dummy
+}
+
+z3::expr BugDetection::v2sym(const Value* v, 
+                             const DenseMap<const Value*, llvm::Optional<z3::expr>>& v2sym_map,
+                             z3::solver& solver) {
+    auto it = v2sym_map.find(v);
+    if (it != v2sym_map.end())
+        return it->second.getValue();
+
+    auto lconst = dyn_cast<ConstantInt>(v);
+    MKINT_CHECK_ABORT(nullptr != lconst) << "unsupported value -> symbol mapping: " << *v;
+    return solver.ctx().bv_val(lconst->getZExtValue(), lconst->getType()->getIntegerBitWidth());
+}
+
+z3::expr BugDetection::cast_op_propagate(CastInst* op, const DenseMap<const Value*, llvm::Optional<z3::expr>>& v2sym, z3::solver& solver) {
+    const auto src = this->v2sym(op->getOperand(0), v2sym, solver);
+    const uint32_t bits = op->getType()->getIntegerBitWidth();
+    switch (op->getOpcode()) {
+    case CastInst::Trunc:
+        return src.extract(bits - 1, 0);
+    case CastInst::ZExt:
+        return z3::zext(src, bits - op->getOperand(0)->getType()->getIntegerBitWidth());
+    case CastInst::SExt:
+        return z3::sext(src, bits - op->getOperand(0)->getType()->getIntegerBitWidth());
+    default:
+        MKINT_WARN() << "Unhandled Cast Instruction " << op->getOpcodeName() << ". Using original range.";
+    }
+
+    const std::string new_sym_str = "\%cast" + std::to_string(op->getValueID());
+    return v2sym.begin()->second.getValue().ctx().bv_const(new_sym_str.c_str(), bits); // new expr
+}
+
+
+void BugDetection::mark_errors(const std::map<ICmpInst*, bool>& impossible_branches,
+                              const std::set<GetElementPtrInst*>& gep_oob,
+                              const std::set<Instruction*>& overflow_insts,
+                              const std::set<Instruction*>& bad_shift_insts,
+                              const std::set<Instruction*>& div_zero_insts) {
+    if (CheckDeadBranch) {
+        for (auto& cmp_istbr_pair : impossible_branches) {
+            auto cmp = cmp_istbr_pair.first;
+            auto is_tbr = cmp_istbr_pair.second;
+            if (is_tbr)
+                mark_err<interr::DEAD_TRUE_BR>(cmp);
+            else
+                mark_err<interr::DEAD_FALSE_BR>(cmp);
+        }
+    }
+
+    if (CheckArrayOOB) {
+        for (auto gep : gep_oob) {
+            mark_err<interr::ARRAY_OOB>(gep);
+        }
+    }
+
+    if (CheckIntOverflow) {
+        for (auto inst : overflow_insts) {
+            mark_err<interr::INT_OVERFLOW>(inst);
+        }
+    }
+
+    if (CheckBadShift) {
+        for (auto inst : bad_shift_insts) {
+            mark_err<interr::BAD_SHIFT>(inst);
+        }
+    }
+
+    if (CheckDivByZero) {
+        for (auto inst : div_zero_insts) {
+            mark_err<interr::DIV_BY_ZERO>(inst);
+        }
+    }
+}
+
+} // namespace kint

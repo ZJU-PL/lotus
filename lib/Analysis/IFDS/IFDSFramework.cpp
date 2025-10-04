@@ -13,8 +13,8 @@
 #include <llvm/Support/raw_ostream.h>
 
 // Include the analysis headers to get the complete types
-#include <Analysis/IFDS/TaintAnalysis.h>
-#include <Analysis/IFDS/ReachingDefinitions.h>
+#include <Analysis/IFDS/IFDSTaintAnalysis.h>
+#include <Analysis/IFDS/IFDSReachingDefinitions.h>
 
 namespace ifds {
 
@@ -570,8 +570,8 @@ IDESolver<Problem>::get_all_values() const {
 // ============================================================================
 
 // Include the analysis headers to get the complete types
-#include <Analysis/IFDS/TaintAnalysis.h>
-#include <Analysis/IFDS/ReachingDefinitions.h>
+#include <Analysis/IFDS/IFDSTaintAnalysis.h>
+#include <Analysis/IFDS/IFDSReachingDefinitions.h>
 
 // Explicit template instantiations for types used in the codebase
 template class ifds::IFDSSolver<ifds::TaintAnalysis>;

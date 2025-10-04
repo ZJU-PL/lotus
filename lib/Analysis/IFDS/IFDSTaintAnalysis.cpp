@@ -2,7 +2,7 @@
  * Taint Analysis Implementation
  */
 
-#include <Analysis/IFDS/TaintAnalysis.h>
+#include <Analysis/IFDS/IFDSTaintAnalysis.h>
 #include <Annotation/Taint/TaintConfigManager.h>
 
 #include <iostream>

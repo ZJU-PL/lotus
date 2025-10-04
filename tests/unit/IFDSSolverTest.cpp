@@ -10,7 +10,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <Analysis/IFDS/IFDSFramework.h>
-#include <Analysis/IFDS/TaintAnalysis.h>
+#include <Analysis/IFDS/IFDSTaintAnalysis.h>
 
 using namespace ifds;
 using namespace llvm;

@@ -6,8 +6,8 @@
  */
 
 #include <Analysis/IFDS/IFDSFramework.h>
-#include <Analysis/IFDS/TaintAnalysis.h>
-#include <Analysis/IFDS/ReachingDefinitions.h>
+#include <Analysis/IFDS/IFDSTaintAnalysis.h>
+#include <Analysis/IFDS/IFDSReachingDefinitions.h>
 
 #include <llvm/Support/raw_ostream.h>
 
