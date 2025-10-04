@@ -2,6 +2,7 @@
 #include "Checker/kint/KINTTaintAnalysis.h"
 #include "Checker/kint/Options.h"
 #include "Support/Log.h"
+#include "Support/range.h"
 
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Constants.h>
@@ -10,7 +11,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Module.h>
-#include "Support/range.h"
+#include <deque>
 
 using namespace llvm;
 
