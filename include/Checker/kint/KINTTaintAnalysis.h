@@ -37,7 +37,7 @@ public:
                                          SetVector<Function*>& taint_funcs);
 
 private:
-    static void mark_taint(Instruction& inst, std::string taint_name = "");
+    static void mark_taint(Instruction& inst, const std::string& taint_name = "");
     static std::string demangle(const char* name);
 };
 

@@ -2,50 +2,26 @@
 
 namespace kint {
 
-// Define a category for performance options
-llvm::cl::OptionCategory PerformanceCategory("Performance Options",
-                                             "Options for controlling analysis performance");
-
-// Add a timeout option
+// Performance options
+llvm::cl::OptionCategory PerformanceCategory("Performance Options", "Options for controlling analysis performance");
 llvm::cl::opt<unsigned> FunctionTimeout("function-timeout",
                                         llvm::cl::desc("Maximum time in seconds to spend analyzing a single function (0 = no limit)"),
-                                        llvm::cl::init(10),
-                                        llvm::cl::cat(PerformanceCategory));
+                                        llvm::cl::init(10), llvm::cl::cat(PerformanceCategory));
 
-// Define a category for checker options
-llvm::cl::OptionCategory CheckerCategory("Bug Checker Options",
-                                         "Options for enabling/disabling specific bug checkers");
-
-// Add command line options for enabling/disabling specific checkers
-llvm::cl::opt<bool> CheckAll("check-all",
-                             llvm::cl::desc("Enable all checkers (overrides individual settings)"),
-                             llvm::cl::init(false),
-                             llvm::cl::cat(CheckerCategory));
-
-llvm::cl::opt<bool> CheckIntOverflow("check-int-overflow",
-                                     llvm::cl::desc("Enable integer overflow checker"),
-                                     llvm::cl::init(false),
-                                     llvm::cl::cat(CheckerCategory));
-
-llvm::cl::opt<bool> CheckDivByZero("check-div-by-zero",
-                                   llvm::cl::desc("Enable division by zero checker"),
-                                   llvm::cl::init(false),
-                                   llvm::cl::cat(CheckerCategory));
-
-llvm::cl::opt<bool> CheckBadShift("check-bad-shift",
-                                  llvm::cl::desc("Enable bad shift checker"),
-                                  llvm::cl::init(false),
-                                  llvm::cl::cat(CheckerCategory));
-
-llvm::cl::opt<bool> CheckArrayOOB("check-array-oob",
-                                  llvm::cl::desc("Enable array index out of bounds checker"),
-                                  llvm::cl::init(false),
-                                  llvm::cl::cat(CheckerCategory));
-
-llvm::cl::opt<bool> CheckDeadBranch("check-dead-branch",
-                                    llvm::cl::desc("Enable dead branch checker"),
-                                    llvm::cl::init(false),
-                                    llvm::cl::cat(CheckerCategory));
+// Checker options
+llvm::cl::OptionCategory CheckerCategory("Bug Checker Options", "Options for enabling/disabling specific bug checkers");
+llvm::cl::opt<bool> CheckAll("check-all", llvm::cl::desc("Enable all checkers (overrides individual settings)"),
+                             llvm::cl::init(false), llvm::cl::cat(CheckerCategory));
+llvm::cl::opt<bool> CheckIntOverflow("check-int-overflow", llvm::cl::desc("Enable integer overflow checker"),
+                                     llvm::cl::init(false), llvm::cl::cat(CheckerCategory));
+llvm::cl::opt<bool> CheckDivByZero("check-div-by-zero", llvm::cl::desc("Enable division by zero checker"),
+                                   llvm::cl::init(false), llvm::cl::cat(CheckerCategory));
+llvm::cl::opt<bool> CheckBadShift("check-bad-shift", llvm::cl::desc("Enable bad shift checker"),
+                                  llvm::cl::init(false), llvm::cl::cat(CheckerCategory));
+llvm::cl::opt<bool> CheckArrayOOB("check-array-oob", llvm::cl::desc("Enable array index out of bounds checker"),
+                                  llvm::cl::init(false), llvm::cl::cat(CheckerCategory));
+llvm::cl::opt<bool> CheckDeadBranch("check-dead-branch", llvm::cl::desc("Enable dead branch checker"),
+                                    llvm::cl::init(false), llvm::cl::cat(CheckerCategory));
 
 // Define a category for logging options
 llvm::cl::OptionCategory LoggingCategory("Logging Options",

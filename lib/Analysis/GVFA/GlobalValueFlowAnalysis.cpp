@@ -1,11 +1,9 @@
 /**
  * @file GlobalValueFlowAnalysis.cpp
- * @brief Implementation of Global Value Flow Analysis using Dyck VFG
+ * @brief Global Value Flow Analysis using Dyck VFG
  *
- * This file implements the core global value flow analysis that tracks data flow
- * from vulnerability sources to sinks using the Dyck Value Flow Graph. It provides
- * both optimized and comprehensive analysis modes, with support for context-sensitive
- * reachability queries through CFL reachability.
+ * Tracks data flow from vulnerability sources to sinks with optimized
+ * and detailed analysis modes, plus context-sensitive CFL reachability.
  */
 
 #include <llvm/IR/Argument.h>
@@ -13,11 +11,11 @@
 #include <llvm/IR/InstIterator.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Debug.h>
-//#include <algorithm>
 #include <unordered_map>
 
 
 #include "Analysis/GVFA/GlobalValueFlowAnalysis.h"
+#include "Analysis/GVFA/ReachabilityAlgorithms.h"
 #include "Support/RecursiveTimer.h"
 
 using namespace llvm;
@@ -36,18 +34,25 @@ static cl::opt<bool> EnableOptVFA("enable-opt-vfa",
 // Mutex for thread-safe online query timing
 static std::mutex ClearMutex;
 
+// Helper macro for online query timing
+#define TIME_ONLINE_QUERY(expr) \
+    if (EnableOnlineQuery.getValue()) { \
+        auto start_time = std::chrono::high_resolution_clock::now(); \
+        auto res = (expr); \
+        auto end_time = std::chrono::high_resolution_clock::now(); \
+        auto elapsed_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count(); \
+        std::lock_guard<std::mutex> L(ClearMutex); \
+        SnapshotedOnlineTime += elapsed_time; \
+        if (res) SuccsQueryCounter++; \
+        return res; \
+    }
+
 //===----------------------------------------------------------------------===//
-// DyckGlobalValueFlowAnalysis Implementation
+// Implementation
 //===----------------------------------------------------------------------===//
 
-/**
- * Constructs a new DyckGlobalValueFlowAnalysis instance.
- *
- * @param M The LLVM module to analyze
- * @param VFG The Dyck Value Flow Graph for value flow tracking
- * @param DyckAA The Dyck alias analysis for alias information
- * @param DyckMRA The Dyck mod-ref analysis for side-effect tracking
- */
+// Constructor
+
 DyckGlobalValueFlowAnalysis::DyckGlobalValueFlowAnalysis(Module *M, DyckVFG *VFG, 
                                                          DyckAliasAnalysis *DyckAA, 
                                                          DyckModRefAnalysis *DyckMRA)
@@ -55,21 +60,14 @@ DyckGlobalValueFlowAnalysis::DyckGlobalValueFlowAnalysis(Module *M, DyckVFG *VFG
 
 DyckGlobalValueFlowAnalysis::~DyckGlobalValueFlowAnalysis() = default;
 
-/**
- * Sets the vulnerability checker for this analysis instance.
- *
- * @param checker A unique pointer to the vulnerability checker to use
- */
+// Set vulnerability checker
+
 void DyckGlobalValueFlowAnalysis::setVulnerabilityChecker(std::unique_ptr<VulnerabilityChecker> checker) {
     VulnChecker = std::move(checker);
 }
 
-/**
- * Prints the accumulated online query time to the output stream.
- *
- * @param O The output stream to write to
- * @param Title The title prefix for the timing output
- */
+// Print online query timing
+
 void DyckGlobalValueFlowAnalysis::printOnlineQueryTime(llvm::raw_ostream &O, const char *Title) const {
     if (EnableOnlineQuery.getValue()) {
         long Ms = SnapshotedOnlineTime / 1000;
@@ -79,20 +77,11 @@ void DyckGlobalValueFlowAnalysis::printOnlineQueryTime(llvm::raw_ostream &O, con
 }
 
 //===----------------------------------------------------------------------===//
-// Counting helpers for reachability tracking
+// Reachability tracking
 //===----------------------------------------------------------------------===//
 
-/**
- * Counts and tracks reachability for a value with a given mask.
- *
- * This function implements an optimized reachability tracking mechanism where
- * each value can have multiple sources identified by bit masks. It returns
- * the uncovered portion of the mask that hasn't been processed yet.
- *
- * @param V The value to count reachability for
- * @param Mask The bit mask representing source identifiers
- * @return The uncovered portion of the mask that needs processing
- */
+// Count reachability with bit mask
+
 int DyckGlobalValueFlowAnalysis::count(const Value *V, int Mask) {
     auto It = ReachabilityMap.find(V);
     if (It != ReachabilityMap.end()) {
@@ -103,12 +92,8 @@ int DyckGlobalValueFlowAnalysis::count(const Value *V, int Mask) {
     }
 }
 
-/**
- * Checks if a value has been counted before and marks it as counted.
- *
- * @param V The value to check and mark
- * @return true if the value was already counted, false otherwise
- */
+// Check if value counted
+
 bool DyckGlobalValueFlowAnalysis::count(const Value *V) {
     auto It = ReachabilityMap.find(V);
     if (It != ReachabilityMap.end()) {
@@ -119,24 +104,9 @@ bool DyckGlobalValueFlowAnalysis::count(const Value *V) {
     }
 }
 
-/**
- * Const version of count() that doesn't modify the reachability map.
- *
- * @param V The value to check reachability for
- * @param Mask The bit mask representing source identifiers
- * @return The uncovered portion of the mask that needs processing
- */
-int DyckGlobalValueFlowAnalysis::countConst(const Value *V, int Mask) const {
-    auto It = ReachabilityMap.find(V);
-    return (It != ReachabilityMap.end()) ? (Mask & ~(Mask & It->second)) : Mask;
-}
 
-/**
- * Counts backward reachability for a value.
- *
- * @param V The value to count backward reachability for
- * @return The number of times this value has been reached backward
- */
+// Count backward reachability
+
 int DyckGlobalValueFlowAnalysis::backwardCount(const Value *V) {
     auto It = BackwardReachabilityMap.find(V);
     if (It != BackwardReachabilityMap.end()) {
@@ -147,24 +117,9 @@ int DyckGlobalValueFlowAnalysis::backwardCount(const Value *V) {
     }
 }
 
-/**
- * Const version of backwardCount() that doesn't modify the map.
- *
- * @param V The value to check backward reachability for
- * @return The number of times this value has been reached backward
- */
-int DyckGlobalValueFlowAnalysis::backwardCountConst(const Value *V) const {
-    auto It = BackwardReachabilityMap.find(V);
-    return (It != BackwardReachabilityMap.end()) ? It->second : 0;
-}
 
-/**
- * Tracks all-pairs reachability from a source to a value.
- *
- * @param V The target value
- * @param Src The source value
- * @return true if this source was already tracked for this value
- */
+// Track all-pairs reachability
+
 bool DyckGlobalValueFlowAnalysis::allCount(const Value *V, const Value *Src) {
     auto &Set = AllReachabilityMap[V];
     if (Set.count(Src)) {
@@ -175,25 +130,9 @@ bool DyckGlobalValueFlowAnalysis::allCount(const Value *V, const Value *Src) {
     }
 }
 
-/**
- * Const version of allCount() for checking all-pairs reachability.
- *
- * @param V The target value
- * @param Src The source value
- * @return true if the source can reach the value
- */
-bool DyckGlobalValueFlowAnalysis::allCountConst(const Value *V, const Value *Src) const {
-    auto It = AllReachabilityMap.find(V);
-    return (It != AllReachabilityMap.end()) && It->second.count(Src);
-}
 
-/**
- * Tracks all-pairs backward reachability from a value to a sink.
- *
- * @param V The source value
- * @param Sink The sink value
- * @return true if this sink was already tracked for this value
- */
+// Track all-pairs backward reachability
+
 bool DyckGlobalValueFlowAnalysis::allBackwardCount(const Value *V, const Value *Sink) {
     auto &Set = AllBackwardReachabilityMap[V];
     if (Set.count(Sink)) {
@@ -204,148 +143,61 @@ bool DyckGlobalValueFlowAnalysis::allBackwardCount(const Value *V, const Value *
     }
 }
 
-/**
- * Const version of allBackwardCount() for checking all-pairs backward reachability.
- *
- * @param V The source value
- * @param Sink The sink value
- * @return true if the value can reach the sink
- */
-bool DyckGlobalValueFlowAnalysis::allBackwardCountConst(const Value *V, const Value *Sink) const {
-    auto It = AllBackwardReachabilityMap.find(V);
-    return (It != AllBackwardReachabilityMap.end()) && It->second.count(Sink);
-}
 
 //===----------------------------------------------------------------------===//
 // Query interfaces
 //===----------------------------------------------------------------------===//
 
-/**
- * Checks if a value is reachable from sources with the given mask.
- *
- * This function supports both online and offline query modes. In offline mode,
- * it uses pre-computed reachability information. In online mode, it performs
- * real-time slicing to determine reachability.
- *
- * @param V The value to check reachability for
- * @param Mask The bit mask representing source identifiers
- * @return The portion of the mask that corresponds to reachable sources
- */
+// Check reachability with mask
+
 int DyckGlobalValueFlowAnalysis::reachable(const Value *V, int Mask) {
     AllQueryCounter++;
-    if (EnableOnlineQuery.getValue()) {
-        auto start_time = std::chrono::high_resolution_clock::now();
-        auto res = onlineSlicing(V);
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto elapsed_time = std::chrono::duration_cast<std::chrono::microseconds>(
-                                end_time - start_time).count();
-        std::lock_guard<std::mutex> L(ClearMutex);
-        SnapshotedOnlineTime += elapsed_time;
-        if (res) {
-            SuccsQueryCounter++;
-            return 1;
-        } else {
-            return 0;
-        }
-    } else {
-        int UncoveredMask = countConst(V, Mask);
-        if (!UncoveredMask) {
-            SuccsQueryCounter++;
-        }
-        return Mask & ~UncoveredMask;
-    }
+    TIME_ONLINE_QUERY(onlineReachability(V) ? 1 : 0);
+    
+    auto It = ReachabilityMap.find(V);
+    int UncoveredMask = (It != ReachabilityMap.end()) ? (Mask & ~(Mask & It->second)) : Mask;
+    if (!UncoveredMask) SuccsQueryCounter++;
+    return Mask & ~UncoveredMask;
 }
 
-/**
- * Checks if a specific source can reach a target value.
- *
- * @param V The target value
- * @param Src The source value
- * @return true if the source can reach the target
- */
+// Check source reachability
+
 bool DyckGlobalValueFlowAnalysis::srcReachable(const Value *V, const Value *Src) const {
-    return allCountConst(V, Src);
+    auto It = AllReachabilityMap.find(V);
+    return (It != AllReachabilityMap.end()) && It->second.count(Src);
 }
 
-/**
- * Checks if a value can reach any sink through backward analysis.
- *
- * @param V The value to check backward reachability for
- * @return true if the value can reach any sink
- */
+// Check backward reachability
+
 bool DyckGlobalValueFlowAnalysis::backwardReachable(const Value *V) {
-    if (Sinks.empty()) {
-        return true;
-    }
+    if (Sinks.empty()) return true;
     AllQueryCounter++;
-    if (EnableOnlineQuery.getValue()) {
-        auto start_time = std::chrono::high_resolution_clock::now();
-        auto res = onlineSlicing(V);
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto elapsed_time = std::chrono::duration_cast<std::chrono::microseconds>(
-                                end_time - start_time).count();
-        std::lock_guard<std::mutex> L(ClearMutex);
-        SnapshotedOnlineTime += elapsed_time;
-        if (res) {
-            SuccsQueryCounter++;
-            return true;
-        } else {
-            return false;
-        }
-    } else {
-        if (!backwardCountConst(V)) {
-            SuccsQueryCounter++;
-            return false;
-        } else {
-            return true;
-        }
+    TIME_ONLINE_QUERY(onlineReachability(V));
+    
+    auto It = BackwardReachabilityMap.find(V);
+    if (It == BackwardReachabilityMap.end() || It->second == 0) {
+        SuccsQueryCounter++;
+        return false;
     }
+    return true;
 }
 
-/**
- * Checks if a value can reach any specific sink.
- *
- * @param V The value to check reachability for
- * @return true if the value can reach any sink
- */
+// Check sink reachability
+
 bool DyckGlobalValueFlowAnalysis::backwardReachableSink(const Value *V) {
     AllQueryCounter++;
-    if (EnableOnlineQuery.getValue()) {
-        auto start_time = std::chrono::high_resolution_clock::now();
-        auto res = onlineSlicing(V);
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto elapsed_time = std::chrono::duration_cast<std::chrono::microseconds>(
-                                end_time - start_time).count();
-        std::lock_guard<std::mutex> L(ClearMutex);
-        SnapshotedOnlineTime += elapsed_time;
-        if (res) {
-            SuccsQueryCounter++;
-            return true;
-        } else {
-            return false;
-        }
-    } else {
-        auto It = AllBackwardReachabilityMap.find(V);
-        if (It != AllBackwardReachabilityMap.end()) {
-            if (It->second.empty()) {
-                SuccsQueryCounter++;
-                return false;
-            } else {
-                return true;
-            }
-        } else {
-            SuccsQueryCounter++;
-            return false;
-        }
+    TIME_ONLINE_QUERY(onlineReachability(V));
+    
+    auto It = AllBackwardReachabilityMap.find(V);
+    if (It != AllBackwardReachabilityMap.end() && !It->second.empty()) {
+        return true;
     }
+    SuccsQueryCounter++;
+    return false;
 }
 
-/**
- * Checks if a value can reach all known sinks.
- *
- * @param V The value to check reachability for
- * @return true if the value can reach all sinks
- */
+// Check all sinks reachability
+
 bool DyckGlobalValueFlowAnalysis::backwardReachableAllSinks(const Value *V) {
     auto It = AllBackwardReachabilityMap.find(V);
     if (It == AllBackwardReachabilityMap.end()) {
@@ -567,7 +419,7 @@ void DyckGlobalValueFlowAnalysis::extendSources(std::vector<std::pair<const Valu
  *
  * This is the main entry point that orchestrates the entire analysis process.
  * It retrieves sources and sinks from the vulnerability checker, then runs
- * either the optimized or comprehensive analysis based on configuration.
+ * either the optimized or detailed analysis based on configuration.
  */
 void DyckGlobalValueFlowAnalysis::run() {
     if (!VulnChecker) {
@@ -596,7 +448,7 @@ void DyckGlobalValueFlowAnalysis::run() {
     if (EnableOptVFA.getValue()) {
         optimizedRun();
     } else {
-        comprehensiveRun();
+        detailedRun();
     }
 }
 
@@ -635,27 +487,27 @@ void DyckGlobalValueFlowAnalysis::optimizedRun() {
 }
 
 /**
- * Runs the comprehensive version of the analysis.
+ * Runs the detailed version of the analysis.
  *
  * This version maintains detailed all-pairs reachability information,
  * providing complete source-to-sink mappings at the cost of higher
  * memory usage and computation time.
  */
-void DyckGlobalValueFlowAnalysis::comprehensiveRun() {
-    RecursiveTimer Timer("DyckGVFA-Comprehensive");
+void DyckGlobalValueFlowAnalysis::detailedRun() {
+    RecursiveTimer Timer("DyckGVFA-Detailed");
     
     AllReachabilityMap.clear();
     while (!SourcesVec.empty()) {
         LLVM_DEBUG(dbgs() << "[DEBUG] SrcVecSzBeforeExtend: " << SourcesVec.size() << "\n");
         extendSources(SourcesVec);
         LLVM_DEBUG(dbgs() << "[DEBUG] SrcVecSzAfterExtend: " << SourcesVec.size() << "\n");
-        comprehensiveForwardRun(SourcesVec);
+        detailedForwardRun(SourcesVec);
     }
     
     outs() << "[Indexing FW] Map Size: " << AllReachabilityMap.size() << "\n";
     
     AllBackwardReachabilityMap.clear();
-    comprehensiveBackwardRun();
+        detailedBackwardRun();
     
     outs() << "[Indexing BW] Map Size: " << AllBackwardReachabilityMap.size() << "\n";
 }
@@ -672,19 +524,19 @@ void DyckGlobalValueFlowAnalysis::comprehensiveRun() {
 void DyckGlobalValueFlowAnalysis::optimizedForwardRun(std::vector<std::pair<const Value *, int>> &Sources) {
     auto SourceList = std::move(Sources);
     for (const auto &Src : SourceList) {
-        forwardSlicing(Src.first, Src.second);
+        forwardReachability(Src.first, Src.second);
     }
 }
 
 /**
- * Runs the comprehensive forward analysis.
+ * Runs the detailed forward analysis.
  *
  * @param Sources The vector of source-value pairs to analyze
  */
-void DyckGlobalValueFlowAnalysis::comprehensiveForwardRun(std::vector<std::pair<const Value *, int>> &Sources) {
+void DyckGlobalValueFlowAnalysis::detailedForwardRun(std::vector<std::pair<const Value *, int>> &Sources) {
     auto SourceList = std::move(Sources);
     for (const auto &Src : SourceList) {
-        comprehensiveForwardSlicing(Src.first, Src.first);
+        detailedForwardReachability(Src.first, Src.first);
     }
 }
 
@@ -700,18 +552,18 @@ void DyckGlobalValueFlowAnalysis::comprehensiveForwardRun(std::vector<std::pair<
  */
 void DyckGlobalValueFlowAnalysis::optimizedBackwardRun() {
     for (const auto &Sink : Sinks) {
-        backwardSlicing(Sink.first);
+        backwardReachability(Sink.first);
     }
 }
 
 /**
- * Runs the comprehensive backward analysis.
+ * Runs the detailed backward analysis.
  *
  * This function performs detailed backward reachability analysis maintaining
  * complete sink-to-source mappings.
  */
-void DyckGlobalValueFlowAnalysis::comprehensiveBackwardRun() {
+void DyckGlobalValueFlowAnalysis::detailedBackwardRun() {
     for (const auto &Sink : Sinks) {
-        comprehensiveBackwardSlicing(Sink.first, Sink.first);
+        detailedBackwardReachability(Sink.first, Sink.first);
     }
 }

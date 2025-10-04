@@ -49,7 +49,7 @@ std::string TaintAnalysis::demangle(const char* name) {
     return (status == 0) ? res.get() : std::string(name);
 }
 
-void TaintAnalysis::mark_taint(Instruction& inst, std::string taint_name) {
+void TaintAnalysis::mark_taint(Instruction& inst, const std::string& taint_name) {
     auto& ctx = inst.getContext();
     auto md = MDNode::get(ctx, MDString::get(ctx, taint_name));
     inst.setMetadata(MKINT_IR_TAINT, md);
@@ -228,7 +228,7 @@ bool TaintAnalysis::taint_bcast_sink(Iter taint_source, SetVector<Function*>& ta
 }
 
 void TaintAnalysis::mark_func_sinks(Function& F, SetVector<StringRef>& callback_tsrc_fn) {
-    static auto mark_sink = [](Instruction& inst, std::string sink_name) {
+    static auto mark_sink = [](Instruction& inst, const std::string& sink_name) {
         auto& ctx = inst.getContext();
         auto md = MDNode::get(ctx, MDString::get(ctx, sink_name));
         inst.setMetadata(MKINT_IR_SINK, md);
@@ -285,7 +285,7 @@ void TaintAnalysis::mark_func_sinks(Function& F, SetVector<StringRef>& callback_
     }
 }
 
-void TaintAnalysis::propagate_taint_across_functions(Module& M,
+void TaintAnalysis::propagate_taint_across_functions(Module& /*M*/,
                                                     MapVector<Function*, std::vector<CallInst*>>& func2tsrc,
                                                     SetVector<Function*>& taint_funcs) {
     for (auto& func_tsrc_pair : func2tsrc) {

@@ -1,11 +1,9 @@
 /**
- * @file SlicingAlgorithms.cpp
- * @brief Implementation of slicing algorithms for Global Value Flow Analysis
+ * @file ReachabilityAlgorithms.cpp
+ * @brief Reachability algorithms for Global Value Flow Analysis
  *
- * This file contains the core slicing algorithms used in the global value flow
- * analysis. All algorithms have been converted from recursive to iterative
- * implementations using work queues for better performance and stack safety.
- * Includes forward/backward slicing, comprehensive analysis, and online queries.
+ * Iterative work queue implementations for forward/backward reachability,
+ * detailed analysis, and online queries.
  */
 
 #include <llvm/IR/Argument.h>
@@ -16,26 +14,19 @@
 #include <unordered_map>
 
 #include "Analysis/GVFA/GlobalValueFlowAnalysis.h"
+#include "Analysis/GVFA/ReachabilityAlgorithms.h"
 
 using namespace llvm;
 
 #define DEBUG_TYPE "dyck-gvfa"
 
 //===----------------------------------------------------------------------===//
-// Slicing algorithms - converted to iterative worklist algorithms
+// Reachability algorithms
 //===----------------------------------------------------------------------===//
 
-/**
- * Performs forward slicing from a source value with a given mask.
- *
- * This function uses an iterative work queue approach to traverse the Value
- * Flow Graph forward from the source, tracking reachability with bit masks.
- * It handles call sites and return sites specially for context sensitivity.
- *
- * @param V The source value to start slicing from
- * @param Mask The bit mask representing source identifiers
- */
-void DyckGlobalValueFlowAnalysis::forwardSlicing(const Value *V, int Mask) {
+// Forward reachability with bit mask tracking
+
+void DyckGlobalValueFlowAnalysis::forwardReachability(const Value *V, int Mask) {
     std::queue<std::pair<const Value *, int>> WorkQueue;
     std::unordered_set<const Value *> Visited;
     
@@ -70,16 +61,9 @@ void DyckGlobalValueFlowAnalysis::forwardSlicing(const Value *V, int Mask) {
     }
 }
 
-/**
- * Performs backward slicing from a sink value.
- *
- * This function traverses the Value Flow Graph backward from a sink to
- * identify all values that can reach the sink. It uses an iterative
- * work queue approach for better performance.
- *
- * @param V The sink value to start backward slicing from
- */
-void DyckGlobalValueFlowAnalysis::backwardSlicing(const Value *V) {
+// Backward reachability from sink
+
+void DyckGlobalValueFlowAnalysis::backwardReachability(const Value *V) {
     std::queue<const Value *> WorkQueue;
     std::unordered_set<const Value *> Visited;
     
@@ -104,17 +88,9 @@ void DyckGlobalValueFlowAnalysis::backwardSlicing(const Value *V) {
     }
 }
 
-/**
- * Performs comprehensive forward slicing maintaining detailed source mappings.
- *
- * This function is similar to forwardSlicing but maintains detailed
- * all-pairs reachability information, tracking which specific source
- * reaches each value.
- *
- * @param V The source value to start slicing from
- * @param Src The source identifier for detailed tracking
- */
-void DyckGlobalValueFlowAnalysis::comprehensiveForwardSlicing(const Value *V, const Value *Src) {
+// Detailed forward reachability with all-pairs tracking
+
+void DyckGlobalValueFlowAnalysis::detailedForwardReachability(const Value *V, const Value *Src) {
     std::queue<const Value *> WorkQueue;
     std::unordered_set<const Value *> Visited;
     
@@ -139,17 +115,9 @@ void DyckGlobalValueFlowAnalysis::comprehensiveForwardSlicing(const Value *V, co
     }
 }
 
-/**
- * Performs comprehensive backward slicing maintaining detailed sink mappings.
- *
- * This function is similar to backwardSlicing but maintains detailed
- * all-pairs reachability information, tracking which specific sink
- * can be reached from each value.
- *
- * @param V The sink value to start backward slicing from
- * @param Sink The sink identifier for detailed tracking
- */
-void DyckGlobalValueFlowAnalysis::comprehensiveBackwardSlicing(const Value *V, const Value *Sink) {
+// Detailed backward reachability with all-pairs tracking
+
+void DyckGlobalValueFlowAnalysis::detailedBackwardReachability(const Value *V, const Value *Sink) {
     std::queue<const Value *> WorkQueue;
     std::unordered_set<const Value *> Visited;
     
@@ -175,20 +143,11 @@ void DyckGlobalValueFlowAnalysis::comprehensiveBackwardSlicing(const Value *V, c
 }
 
 //===----------------------------------------------------------------------===//
-// Call site and return site processing - updated for iterative approach
+// Call/return processing
 //===----------------------------------------------------------------------===//
 
-/**
- * Processes call sites to propagate values across function boundaries.
- *
- * This function handles the propagation of values from call instructions
- * to the corresponding formal parameters in the called function.
- *
- * @param CI The call instruction being processed
- * @param V The value being propagated
- * @param Mask The bit mask for the value
- * @param WorkQueue The work queue to add new work items to
- */
+// Process call sites for value propagation
+
 void DyckGlobalValueFlowAnalysis::processCallSite(const CallInst *CI, const Value *V, int Mask, 
                                                   std::queue<std::pair<const Value *, int>> &WorkQueue) {
     if (auto *F = CI->getCalledFunction()) {
@@ -202,17 +161,8 @@ void DyckGlobalValueFlowAnalysis::processCallSite(const CallInst *CI, const Valu
     }
 }
 
-/**
- * Processes return sites to propagate values back to callers.
- *
- * This function handles the propagation of return values from return
- * instructions back to the corresponding call instructions.
- *
- * @param RI The return instruction being processed
- * @param V The return value being propagated
- * @param Mask The bit mask for the value
- * @param WorkQueue The work queue to add new work items to
- */
+// Process return sites for value propagation
+
 void DyckGlobalValueFlowAnalysis::processReturnSite(const ReturnInst *RI, const Value *V, int Mask,
                                                     std::queue<std::pair<const Value *, int>> &WorkQueue) {
     const Function *F = RI->getFunction();
@@ -229,37 +179,22 @@ void DyckGlobalValueFlowAnalysis::processReturnSite(const ReturnInst *RI, const 
 }
 
 //===----------------------------------------------------------------------===//
-// Online slicing for queries - optimized with iterative approach
+// Online queries
 //===----------------------------------------------------------------------===//
 
-/**
- * Performs online slicing to check if a target can reach any sink.
- *
- * This function is used for real-time queries when online query mode is enabled.
- * It performs backward slicing from all sinks to check if the target is reachable.
- *
- * @param Target The value to check reachability for
- * @return true if the target can reach any sink
- */
-bool DyckGlobalValueFlowAnalysis::onlineSlicing(const Value *Target) {
+// Online reachability check
+
+bool DyckGlobalValueFlowAnalysis::onlineReachability(const Value *Target) {
     for (const auto &Sink : Sinks) {
         std::unordered_set<const Value *> visited;
-        if (onlineBackwardSlicing(Sink.first, Target, visited)) return true;
+        if (onlineBackwardReachability(Sink.first, Target, visited)) return true;
     }
     return false;
 }
 
-/**
- * Performs online forward slicing to check reachability to sinks.
- *
- * This function performs forward traversal from a value to check if
- * any sink can be reached. It maintains a visited set to avoid cycles.
- *
- * @param V The value to start forward slicing from
- * @param visited The set of already visited values
- * @return true if any sink is reachable from the value
- */
-bool DyckGlobalValueFlowAnalysis::onlineForwardSlicing(const Value *V, 
+// Online forward reachability
+
+bool DyckGlobalValueFlowAnalysis::onlineForwardReachability(const Value *V, 
                                                       std::unordered_set<const Value *> &visited) {
     std::queue<const Value *> WorkQueue;
     WorkQueue.push(V);
@@ -285,18 +220,9 @@ bool DyckGlobalValueFlowAnalysis::onlineForwardSlicing(const Value *V,
     return false;
 }
 
-/**
- * Performs online backward slicing to check reachability from a target.
- *
- * This function performs backward traversal from a value to check if
- * a specific target can be reached. It maintains a visited set to avoid cycles.
- *
- * @param V The value to start backward slicing from
- * @param Target The target value to search for
- * @param visited The set of already visited values
- * @return true if the target is reachable from the value
- */
-bool DyckGlobalValueFlowAnalysis::onlineBackwardSlicing(const Value *V, const Value *Target,
+// Online backward reachability
+
+bool DyckGlobalValueFlowAnalysis::onlineBackwardReachability(const Value *V, const Value *Target,
                                                        std::unordered_set<const Value *> &visited) {
     std::queue<const Value *> WorkQueue;
     WorkQueue.push(V);
@@ -323,69 +249,35 @@ bool DyckGlobalValueFlowAnalysis::onlineBackwardSlicing(const Value *V, const Va
 }
 
 //===----------------------------------------------------------------------===//
-// CFL Reachability Implementation (Lightweight) - optimized with iterative approach
+// CFL Reachability
 //===----------------------------------------------------------------------===//
 
-/**
- * Initializes the CFL (Context-Free Language) analyzer.
- *
- * This is a lightweight implementation that works directly with the VFG's
- * existing label structure rather than building a separate CFL graph.
- */
+// Initialize CFL analyzer
+
 void DyckGlobalValueFlowAnalysis::initializeCFLAnalyzer() {
     // Lightweight CFL analyzer works directly with VFG's existing label structure
 }
 
-/**
- * Checks CFL reachability between two values in the forward direction.
- *
- * CFL reachability provides context-sensitive analysis by tracking
- * call and return edges with proper stack discipline.
- *
- * @param From The source value
- * @param To The target value
- * @return true if To is CFL reachable from From
- */
+// CFL forward reachability
+
 bool DyckGlobalValueFlowAnalysis::cflReachable(const Value *From, const Value *To) const {
     return cflReachabilityQuery(From, To, true);
 }
 
-/**
- * Checks CFL reachability between two values in the backward direction.
- *
- * @param From The source value
- * @param To The target value
- * @return true if From is CFL reachable from To (backward)
- */
+// CFL backward reachability
+
 bool DyckGlobalValueFlowAnalysis::cflBackwardReachable(const Value *From, const Value *To) const {
     return cflReachabilityQuery(To, From, false);
 }
 
-/**
- * Performs a CFL reachability query in the specified direction.
- *
- * @param From The source value
- * @param To The target value
- * @param Forward true for forward direction, false for backward
- * @return true if reachable in the specified direction
- */
+// CFL reachability query
+
 bool DyckGlobalValueFlowAnalysis::performCFLReachabilityQuery(const Value *From, const Value *To, bool Forward) const {
     return cflReachabilityQuery(From, To, Forward);
 }
 
-/**
- * Core CFL reachability query implementation.
- *
- * This function implements context-sensitive reachability by maintaining
- * a call stack during traversal. Positive labels represent call edges,
- * negative labels represent return edges. The stack ensures proper
- * matching of calls and returns.
- *
- * @param From The source value
- * @param To The target value
- * @param Forward true for forward direction, false for backward
- * @return true if reachable with proper context sensitivity
- */
+// Core CFL reachability with call stack tracking
+
 bool DyckGlobalValueFlowAnalysis::cflReachabilityQuery(const Value *From, const Value *To, bool Forward) const {
     std::unordered_set<const Value *> visited;
     std::queue<std::pair<const Value *, std::vector<int>>> workQueue;
@@ -446,38 +338,24 @@ bool DyckGlobalValueFlowAnalysis::cflReachabilityQuery(const Value *From, const 
     return false;
 }
 
-/**
- * Gets a unique ID for a value node.
- *
- * @param V The value to get an ID for
- * @return A unique integer ID for the value
- */
+// Get unique value node ID
+
 int DyckGlobalValueFlowAnalysis::getValueNodeID(const Value *V) const {
     return reinterpret_cast<intptr_t>(V);
 }
 
 //===----------------------------------------------------------------------===//
-// Enhanced reachability queries with CFL support
+// Context-sensitive queries
 //===----------------------------------------------------------------------===//
 
-/**
- * Checks context-sensitive reachability using CFL analysis.
- *
- * @param From The source value
- * @param To The target value
- * @return true if To is context-sensitively reachable from From
- */
+// Context-sensitive reachability
+
 bool DyckGlobalValueFlowAnalysis::contextSensitiveReachable(const Value *From, const Value *To) const {
     return cflReachable(From, To);
 }
 
-/**
- * Checks context-sensitive backward reachability using CFL analysis.
- *
- * @param From The source value
- * @param To The target value
- * @return true if From is context-sensitively reachable from To (backward)
- */
+// Context-sensitive backward reachability
+
 bool DyckGlobalValueFlowAnalysis::contextSensitiveBackwardReachable(const Value *From, const Value *To) const {
     return cflBackwardReachable(From, To);
 }

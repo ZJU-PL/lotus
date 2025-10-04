@@ -14,8 +14,7 @@ using namespace llvm;
 
 namespace kint {
 
-template <interr err, typename StrRet = const char*> constexpr StrRet mkstr()
-{
+template <interr err, typename StrRet = const char*> constexpr StrRet mkstr() {
     if (err == interr::INT_OVERFLOW) {
         return "integer overflow";
     } else if (err == interr::DIV_BY_ZERO) {
@@ -32,12 +31,11 @@ template <interr err, typename StrRet = const char*> constexpr StrRet mkstr()
         static_assert(err == interr::INT_OVERFLOW || err == interr::DIV_BY_ZERO || err == interr::BAD_SHIFT
                 || err == interr::ARRAY_OOB || err == interr::DEAD_TRUE_BR || err == interr::DEAD_FALSE_BR,
             "unknown error type");
-        return ""; // statically impossible
+        return "";
     }
 }
 
-inline const char* mkstr(interr err)
-{
+inline const char* mkstr(interr err) {
     switch (err) {
     case interr::INT_OVERFLOW: return mkstr<interr::INT_OVERFLOW>();
     case interr::DIV_BY_ZERO: return mkstr<interr::DIV_BY_ZERO>();
@@ -45,10 +43,9 @@ inline const char* mkstr(interr err)
     case interr::ARRAY_OOB: return mkstr<interr::ARRAY_OOB>();
     case interr::DEAD_TRUE_BR: return mkstr<interr::DEAD_TRUE_BR>();
     case interr::DEAD_FALSE_BR: return mkstr<interr::DEAD_FALSE_BR>();
-    default: break;
+    default: MKINT_CHECK_ABORT(false) << "unknown error type" << static_cast<int>(err);
     }
-    MKINT_CHECK_ABORT(false) << "unknown error type" << static_cast<int>(err);
-    return ""; // statically impossible
+    return "";
 }
 
 constexpr const char* MKINT_IR_ERR = "mkint.err";
@@ -116,15 +113,10 @@ void BugDetection::binary_check(BinaryOperator* op,
                          << "::" << *op << rang::style::reset;
             auto lhs_bin = m.eval(lhs_bv, true);
             auto rhs_bin = m.eval(rhs_bv, true);
-            if (is_signed) {
-                MKINT_WARN() << "Counter example: " << rang::bg::black << rang::fg::red << op->getOpcodeName()
-                             << '(' << lhs_bin << ", " << rhs_bin << ") -> " << op->getOpcodeName() << '('
-                             << lhs_bin.as_int64() << ", " << rhs_bin.as_int64() << ')' << rang::style::reset;
-            } else {
-                MKINT_WARN() << "Counter example: " << rang::bg::black << rang::fg::red << op->getOpcodeName()
-                             << '(' << lhs_bin << ", " << rhs_bin << ") -> " << op->getOpcodeName() << '('
-                             << lhs_bin.as_uint64() << ", " << rhs_bin.as_uint64() << ')' << rang::style::reset;
-            }
+            MKINT_WARN() << "Counter example: " << rang::bg::black << rang::fg::red << op->getOpcodeName()
+                         << '(' << lhs_bin << ", " << rhs_bin << ") -> " << op->getOpcodeName() << '('
+                         << (is_signed ? lhs_bin.as_int64() : lhs_bin.as_uint64()) << ", "
+                         << (is_signed ? rhs_bin.as_int64() : rhs_bin.as_uint64()) << ')' << rang::style::reset;
 
             switch (et) {
             case interr::INT_OVERFLOW:
