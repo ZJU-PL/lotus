@@ -135,7 +135,7 @@ public:
     opt.add(formula);
   }
 
-  void sample(z3::model m) {
+  void sample(z3::model& m) {
     std::unordered_set<std::string> initial_mutations;
     std::string m_string = model_string(m);
     std::cout << m_string << " STARTING\n";
@@ -169,7 +169,7 @@ public:
           new_mutations[new_string] = 1;
           output(new_string, 1);
           flips += 1;
-          for (auto it : mutations) {
+          for (auto &it : mutations) {
             if (it.second >= 6)
               continue;
             std::string candidate;
@@ -188,7 +188,7 @@ public:
               output(candidate, it.second + 1);
             }
           }
-          for (auto it : new_mutations) {
+          for (auto& it : new_mutations) {
             mutations[it.first] = it.second;
           }
         } else {
@@ -205,7 +205,7 @@ public:
     opt.pop();
   }
 
-  void output(std::string sample, int nmut) {
+  void output(std::string& sample, int nmut) {
     samples += 1;
     results_file << nmut << ": " << sample << '\n';
   }
@@ -239,7 +239,7 @@ public:
     return result == z3::sat;
   }
 
-  std::string model_string(z3::model model) {
+  std::string model_string(z3::model& model) {
     std::string s;
 
     for (int v : ind) {
@@ -291,7 +291,7 @@ struct region_sampler {
 
   std::vector<std::vector<int>> unique_models;
 
-  region_sampler(std::string input, int max_samples, double max_time)
+  region_sampler(std::string& input, int max_samples, double max_time)
       : path(input), max_samples(max_samples), max_time(max_time),
         smt_formula(c), m_vars(c) {
     struct stat info;
@@ -425,7 +425,7 @@ struct region_sampler {
     //        clock_gettime(CLOCK_REALTIME, &start_time);
     //        srand(start_time.tv_sec);
     // parse_cnf();
-    for (auto file : input_files) {
+    for (auto& file : input_files) {
       input_file = file;
       parse_smt();
       std::cout << "parse finished... \n";

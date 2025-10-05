@@ -2054,9 +2054,9 @@ Constant* State::constantFoldAlignmentCheckAnd(Constant* C) {
 
   Constant* Val = nullptr;
   ConstantInt* Mask = nullptr;
-  if (Mask = dyn_cast<ConstantInt>(And->getOperand(0))) {
+  if ((Mask = dyn_cast<ConstantInt>(And->getOperand(0)))) {
     Val = cast<Constant>(And->getOperand(1));
-  } else if (Mask = dyn_cast<ConstantInt>(And->getOperand(1))) {
+  } else if ((Mask = dyn_cast<ConstantInt>(And->getOperand(1)))) {
     Val = cast<Constant>(And->getOperand(0));
   } else {
     return C;
@@ -2346,7 +2346,7 @@ Optional<LinearPtr> State::evalPtrGEP(User* U) {
   if (BasePtrTy == nullptr) {
     return None;
   }
-  Type* BaseTy = BasePtrTy->getElementType();
+  Type* BaseTy = BasePtrTy->getPointerElementType();
 
   // Get the base pointer as a `LinearPtr`.
   LinearPtr* BaseLP = evalPtr(U->getOperand(0));

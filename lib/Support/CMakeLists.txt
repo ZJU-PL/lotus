@@ -15,4 +15,5 @@ add_library(CanarySupport STATIC
         IO/FileUtils.cpp
         IO/ReadIR.cpp
         IO/WriteIR.cpp
+        UnionFind.cpp
 )

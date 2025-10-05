@@ -10,6 +10,7 @@
 #include <llvm/Support/Debug.h>
 #include <llvm/Support/raw_ostream.h>
 #include "Alias/DyckAA/DyckValueFlowAnalysis.h"
+#include "Alias/DyckAA/DyckAliasAnalysis.h"
 #include "Analysis/NullPointer/ContextSensitiveNullFlowAnalysis.h"
 #include "Analysis/NullPointer/AliasAnalysisAdapter.h"
 #include "Support/API.h"
@@ -26,12 +27,7 @@ static cl::opt<unsigned> CSMaxContextDepth("csnfa-max-depth", cl::init(3), cl::H
 static cl::opt<unsigned> CSRound("csnfa-round", cl::init(10), cl::Hidden,
                                cl::desc("Maximum rounds for context-sensitive analysis."));
 
-// Define options for alias analysis selection
-static cl::opt<unsigned> DyckAAOpt("nfa-dyck-aa", cl::init(1), cl::Hidden,
-                        cl::desc("Use DyckAA for analysis. (0: None, 1: DyckAA)"));
-
-static cl::opt<unsigned> CFLAAOpt("nfa-cfl-aa", cl::init(0), cl::Hidden,
-                        cl::desc("Use CFLAA for analysis. (0: None, 1: Steensgaard, 2: Andersen)"));
+// DyckAA is now the only alias analysis option
 
 char ContextSensitiveNullFlowAnalysis::ID = 0;
 static RegisterPass<ContextSensitiveNullFlowAnalysis> X("csnfa", "context-sensitive null value flow");
@@ -50,6 +46,7 @@ ContextSensitiveNullFlowAnalysis::~ContextSensitiveNullFlowAnalysis() {
 void ContextSensitiveNullFlowAnalysis::getAnalysisUsage(AnalysisUsage &AU) const {
     AU.setPreservesAll();
     AU.addRequired<DyckValueFlowAnalysis>();
+    AU.addRequired<DyckAliasAnalysis>();
 }
 
 bool ContextSensitiveNullFlowAnalysis::runOnModule(Module &M) {
@@ -59,8 +56,9 @@ bool ContextSensitiveNullFlowAnalysis::runOnModule(Module &M) {
     auto *VFA = &getAnalysis<DyckValueFlowAnalysis>();
     VFG = VFA->getDyckVFGraph();
     
-    // Create the appropriate alias analysis adapter using the factory method
-    AAA = AliasAnalysisAdapter::createAdapter(&M, nullptr);
+    // Get DyckAliasAnalysis and create the adapter
+    auto *DyckAA = &getAnalysis<DyckAliasAnalysis>();
+    AAA = AliasAnalysisAdapter::createAdapter(&M, DyckAA);
     OwnsAliasAnalysisAdapter = true;
 
     // Initialize the basic context (empty context)

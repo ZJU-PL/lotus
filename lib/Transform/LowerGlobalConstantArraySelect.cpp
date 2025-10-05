@@ -3,7 +3,7 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Debug.h>
-#include <set>
+//#include <set>
 #include "Transform/LowerGlobalConstantArraySelect.h"
 
 #define DEBUG_TYPE "LowerGlobalConstantArraySelect"
@@ -103,7 +103,7 @@ void LowerGlobalConstantArraySelect::initialize(Function *F, ConstantDataArray *
     auto *Default = BasicBlock::Create(Ctx, "default", F, nullptr);
     new UnreachableInst(Ctx, Default);
     std::vector<std::pair<BasicBlock *, APInt>> Cases;
-    for (auto K = 0; K < CDA->getNumElements(); ++K) {
+    for (unsigned K = 0; K < CDA->getNumElements(); ++K) {
         Cases.emplace_back(BasicBlock::Create(Ctx, "", F, nullptr),
                            CDA->getElementAsAPInt(K));
     }

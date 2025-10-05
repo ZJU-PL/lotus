@@ -18,7 +18,7 @@
 
 #include "Solvers/SMT/SMTExpr.h"
 #include "Solvers/SMT/SMTFactory.h"
-#include <algorithm>
+//#include <algorithm>
 #include <functional>
 #include <set>
 #include <utility>
@@ -426,7 +426,7 @@ bool SMTExpr::getExprVars(SMTExprVec &Vars) {
       Vars.push_back(SMTExpr(&getSMTFactory(), i));
     }
   } catch (z3::exception &ex) {
-    std::cout << ex.msg() << std::endl;
+    std::cout << ex.msg() << "\n";
     return false;
   }
 
@@ -1261,12 +1261,12 @@ SMTExprVec SMTExprVec::setDifference(const SMTExprVec &Vars) {
   return Ret;
 }
 
-std::ostream &operator<<(std::ostream &Out, SMTExprVec Vec) {
-  if (Vec.ExprVec.get() == nullptr) {
+std::ostream &operator<<(std::ostream &Out, SMTExprVec& Vec) {
+  if (Vec.empty()) {
     Out << "(empty vector)";
     return Out;
   }
-  Out << *Vec.ExprVec;
+  Vec.SMTExprVecToStream(Out);
   return Out;
 }
 

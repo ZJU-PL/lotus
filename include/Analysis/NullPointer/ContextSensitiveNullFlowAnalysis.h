@@ -60,7 +60,7 @@ typedef std::unordered_map<FunctionContextPair, std::set<std::pair<CallInst *, u
 
 class ContextSensitiveNullFlowAnalysis : public ModulePass {
 private:
-    // Alias analysis adapter - can be either DyckAA or CFLAA
+    // Alias analysis adapter - uses DyckAA
     AliasAnalysisAdapter *AAA;
     
     // VFG from DyckValueFlowAnalysis
@@ -74,9 +74,6 @@ private:
     
     // Internally created alias analysis adapter - needs to be deleted
     bool OwnsAliasAnalysisAdapter;
-    
-    // Command line option for using CFLAA
-    static cl::opt<bool> UseCFLAA;
 
 public:
     static char ID;

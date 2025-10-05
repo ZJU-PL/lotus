@@ -18,11 +18,11 @@
  * support minimization and maximization, which are essential for many analysis tasks.
  */
 
-#include <cstdint>
+//#include <cstdint>
 #include <iostream>
-#include <map>
+//#include <map>
 #include <string>
-#include <unordered_map>
+//#include <unordered_map>
 #include <vector>
 
 #include "Solvers/SMT/SMTOptimization.h"
@@ -457,7 +457,7 @@ bool opt_solver::solve_with_z3opt(expr &pre_cond, expr &query, expr_vector &res,
     std::cout << "SymAbs: solving with z3 opt\n";
   }
 
-  unsigned timeout = m_timeout;
+  //unsigned timeout = m_timeout;
   context &Ctx = pre_cond.ctx();
   if (m_var_lge_zero) {
     pre_cond = pre_cond && uge(query, 0);
@@ -516,7 +516,7 @@ bool opt_solver::solve_with_z3opt(expr &pre_cond, expr_vector &query,
     std::cout << "SymAbs: solving with z3 opt\n";
   }
 
-  unsigned timeout = m_timeout;
+  //unsigned timeout = m_timeout;
   context &Ctx = pre_cond.ctx();
   if (m_var_lge_zero) {
     for (unsigned i = 0; i < query.size(); i++) {

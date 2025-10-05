@@ -1,7 +1,7 @@
 /*
  *  Author: rainoftime
  *  Date: 2025-04
- *  Description: Adapter interface for alias analyses used by NullPointer analyses
+ *  Description: Adapter interface for DyckAA used by NullPointer analyses
  */
 
 #ifndef NULLPOINTER_ALIASANALYSISADAPTER_H
@@ -9,17 +9,17 @@
 
 #include <llvm/IR/Value.h>
 #include <llvm/IR/Instruction.h>
-#include <set>
-#include <map>
+#include <llvm/IR/Module.h>
 
 using namespace llvm;
 
-// Forward declarations for LLVM classes
+// Forward declarations
 namespace llvm {
-class CFLSteensAAResult;
-class CFLAndersAAResult;
 class Module;
 }
+
+// Forward declaration for DyckAliasAnalysis
+class DyckAliasAnalysis;
 
 // Abstract interface for alias analysis adapters
 class AliasAnalysisAdapter {
@@ -36,37 +36,18 @@ public:
                        
     // Factory method to create the appropriate adapter
     // The caller takes ownership of the returned object
-    static AliasAnalysisAdapter* createAdapter(Module *M, Function *F);
+    static AliasAnalysisAdapter* createAdapter(Module *M, const DyckAliasAnalysis *DAA);
 };
 
 // Adapter for DyckAA
 class DyckAAAdapter : public AliasAnalysisAdapter {
 private:
-    Function *Fn; // Function this adapter analyzes
-
-public:
-    explicit DyckAAAdapter(Function *F);
-    ~DyckAAAdapter();
-    
-    bool mayAlias(Value *V1, Value *V2, Instruction *InstPoint, 
-                 bool IncludeI = true) override;
-                 
-    bool mayNull(Value *V, Instruction *InstPoint, 
-                bool BeforeInstruction = false) override;
-};
-
-// Adapter for CFLAA
-class CFLAAAdapter : public AliasAnalysisAdapter {
-private:
     Module *ModuleRef;
-    llvm::CFLSteensAAResult *SteensAAResult;
-    llvm::CFLAndersAAResult *AndersAAResult;
-    bool UseSteensgaard;
+    const DyckAliasAnalysis *DyckAA;
 
 public:
-    explicit CFLAAAdapter(Module *M, llvm::CFLSteensAAResult *SteensAA, 
-                         llvm::CFLAndersAAResult *AndersAA, bool UseSteens);
-    ~CFLAAAdapter();
+    explicit DyckAAAdapter(Module *M, const DyckAliasAnalysis *DAA);
+    ~DyckAAAdapter();
     
     bool mayAlias(Value *V1, Value *V2, Instruction *InstPoint, 
                  bool IncludeI = true) override;
