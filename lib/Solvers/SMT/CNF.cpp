@@ -22,9 +22,9 @@
  */
 
 #include "Solvers/SMT/CNF.h"
-#include <algorithm>
+//include <algorithm>
 #include <ctype.h>
-#include <set>
+//#include <set>
 #include <stdio.h>
 #include <stdlib.h>
 

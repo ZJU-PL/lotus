@@ -3,10 +3,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/Support/raw_ostream.h"
-#include "Support/rapidjson/document.h"
-#include "Support/rapidjson/writer.h"
-#include "Support/rapidjson/stringbuffer.h"
-#include "Support/rapidjson/error/en.h"
+#include "Support/cJSON.h"
 #include <fstream>
 #include "llvm/Support/Path.h"
 #include <llvm/ADT/SmallString.h>
@@ -15,8 +12,6 @@
 #include <set>
 #include "Alias/OriginAA/Util.h"
 
-using rapidjson::Document;
-using rapidjson::SizeType;
 using namespace llvm;
 
 void PointerAnalysis::analyze()
@@ -1920,37 +1915,47 @@ bool PointerAnalysis::parseTaintConfig(Module &M)
                            std::istreambuf_iterator<char>());
         configFile.close();
         
-        Document config;
-        config.Parse(jsonStr.c_str());
+        cJSON* config = cJSON_Parse(jsonStr.c_str());
         
-        if (config.HasParseError())
+        if (!config)
         {
-            errs() << "Error parsing JSON: " << rapidjson::GetParseError_En(config.GetParseError()) << "\n";
+            const char* error_ptr = cJSON_GetErrorPtr();
+            if (error_ptr) {
+                errs() << "Error parsing JSON: " << error_ptr << "\n";
+            } else {
+                errs() << "Error parsing JSON\n";
+            }
             return false;
         }
 
         // Parse the "taint" array
-        if (config.HasMember("taint") && config["taint"].IsArray())
+        cJSON* taintArray = cJSON_GetObjectItem(config, "taint");
+        if (taintArray && cJSON_IsArray(taintArray))
         {
-            const rapidjson::Value& taintArray = config["taint"];
-            for (SizeType i = 0; i < taintArray.Size(); i++)
+            int arraySize = cJSON_GetArraySize(taintArray);
+            for (int i = 0; i < arraySize; i++)
             {
-                const rapidjson::Value& obj = taintArray[i];
-                if (obj.IsObject() && 
-                    obj.HasMember("fn_name") && obj["fn_name"].IsString() &&
-                    obj.HasMember("return_type") && obj["return_type"].IsString() &&
-                    obj.HasMember("parameter_type") && obj["parameter_type"].IsArray())
+                cJSON* obj = cJSON_GetArrayItem(taintArray, i);
+                cJSON* fnNameItem = cJSON_GetObjectItem(obj, "fn_name");
+                cJSON* returnTypeItem = cJSON_GetObjectItem(obj, "return_type");
+                cJSON* paramTypeItem = cJSON_GetObjectItem(obj, "parameter_type");
+                
+                if (cJSON_IsObject(obj) && 
+                    fnNameItem && cJSON_IsString(fnNameItem) &&
+                    returnTypeItem && cJSON_IsString(returnTypeItem) &&
+                    paramTypeItem && cJSON_IsArray(paramTypeItem))
                 {
-                    std::string fn_name = obj["fn_name"].GetString();
-                    std::string return_type = obj["return_type"].GetString();
+                    std::string fn_name = fnNameItem->valuestring;
+                    std::string return_type = returnTypeItem->valuestring;
                     
                     std::vector<std::string> parameter_type;
-                    const rapidjson::Value& paramArray = obj["parameter_type"];
-                    for (SizeType j = 0; j < paramArray.Size(); j++)
+                    int paramArraySize = cJSON_GetArraySize(paramTypeItem);
+                    for (int j = 0; j < paramArraySize; j++)
                     {
-                        if (paramArray[j].IsString())
+                        cJSON* paramItem = cJSON_GetArrayItem(paramTypeItem, j);
+                        if (cJSON_IsString(paramItem))
                         {
-                            parameter_type.push_back(paramArray[j].GetString());
+                            parameter_type.push_back(paramItem->valuestring);
                         }
                     }
 
@@ -1960,6 +1965,7 @@ bool PointerAnalysis::parseTaintConfig(Module &M)
                 }
             }
         }
+        cJSON_Delete(config);
     }
     else
     {

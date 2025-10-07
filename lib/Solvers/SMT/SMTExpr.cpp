@@ -112,6 +112,7 @@ std::pair<bool, SMTExpr> SMTExpr::forgetVar(SMTExpr &Var, unsigned Timeout) {
   z3::context &Ctx = Expr.ctx();
   z3::tactic QE = z3::try_for(z3::tactic(Ctx, "qe2"), Timeout);
   z3::goal G(Ctx);
+  G.add(z3::forall(Var.Expr, Expr));
   try {
     z3::apply_result Rt = QE.apply(G);
     Ret.first = true;
@@ -129,7 +130,7 @@ std::pair<bool, SMTExpr> SMTExpr::forgetVars(SMTExprVec &Vars,
   z3::context &Ctx = Expr.ctx();
   z3::tactic QE = z3::try_for(z3::tactic(Ctx, "qe2"), Timeout);
   z3::goal G(Ctx);
-  G.add(z3::exists(*Vars.ExprVec, Expr));
+  //G.add(z3::exists(*Vars.ExprVec, Expr));
   try {
     z3::apply_result Rt = QE.apply(G);
     Ret.first = true;
@@ -1255,7 +1256,7 @@ SMTExprVec SMTExprVec::setDifference(const SMTExprVec &Vars) {
       }
     }
   } catch (z3::exception &Ex) {
-    std::cout << Ex.msg() << std::endl;
+    std::cout << Ex.msg() << "\n";
     return Ret;
   }
   return Ret;

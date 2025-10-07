@@ -32,7 +32,7 @@ int AllSMTSolver::getModels(z3::expr& expr, int k) {
 	int found = 0;
 	while (solver.check() == z3::sat && k >= 1) {
 		found++;
-		std::cout << solver << std::endl;
+		std::cout << solver << "\n";
 		// get model
 		z3::model m = solver.get_model();
 		//std::cout << m << std::endl;

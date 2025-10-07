@@ -37,7 +37,7 @@ The current version has been tested on x86 Linux and ARM Mac using LLVM-12 and L
 ### Utilities
 
 - **Sparta**: A header-only library for building abstract interpreters (See `include/Analysis/sparta`) (NOTE: this modules requies C++17 and boost)
-- **RapidJSON**: A fast JSON parser/generator for C++ with both SAX/DOM style API (See `include/rapidjson`)
+- **cJSON**: A lightweight JSON parser/generator for C with a simple API (See `include/Support/cJSON.h`)
 - **Transform**: Tranformations for LLVM bitcode
 
 ## Binary Tools

@@ -4,18 +4,10 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/raw_ostream.h>
 #include <fstream>
-// #include <sstream>
 
 using namespace sarif;
 
 namespace {
-// Helper function to create JSON string value
-JsonValue createJsonString(const std::string& str, JsonAllocator& allocator) {
-    JsonValue val;
-    val.SetString(str.c_str(), str.length(), allocator);
-    return val;
-}
-
 // Helper function to convert Level to string
 std::string levelToString(Level level) {
     switch (level) {
@@ -28,90 +20,90 @@ std::string levelToString(Level level) {
 }
 
 // Location implementation
-JsonValue Location::toJson(JsonAllocator& allocator) const {
-    JsonValue location(rapidjson::kObjectType);
+cJSON* Location::toJson() const {
+    cJSON* location = cJSON_CreateObject();
     
     if (!file.empty()) {
-        JsonValue artifactLocation(rapidjson::kObjectType);
-        artifactLocation.AddMember("uri", createJsonString(file, allocator), allocator);
-        location.AddMember("artifactLocation", artifactLocation, allocator);
+        cJSON* artifactLocation = cJSON_CreateObject();
+        cJSON_AddStringToObject(artifactLocation, "uri", file.c_str());
+        cJSON_AddItemToObject(location, "artifactLocation", artifactLocation);
     }
     
     if (line > 0) {
-        JsonValue region(rapidjson::kObjectType);
-        region.AddMember("startLine", line, allocator);
+        cJSON* region = cJSON_CreateObject();
+        cJSON_AddNumberToObject(region, "startLine", line);
         if (column > 0) {
-            region.AddMember("startColumn", column, allocator);
+            cJSON_AddNumberToObject(region, "startColumn", column);
         }
         if (!snippet.empty()) {
-            JsonValue snippetObj(rapidjson::kObjectType);
-            snippetObj.AddMember("text", createJsonString(snippet, allocator), allocator);
-            region.AddMember("snippet", snippetObj, allocator);
+            cJSON* snippetObj = cJSON_CreateObject();
+            cJSON_AddStringToObject(snippetObj, "text", snippet.c_str());
+            cJSON_AddItemToObject(region, "snippet", snippetObj);
         }
-        location.AddMember("region", region, allocator);
+        cJSON_AddItemToObject(location, "region", region);
     }
     
     if (!function.empty()) {
-        JsonValue logicalLocation(rapidjson::kObjectType);
-        logicalLocation.AddMember("name", createJsonString(function, allocator), allocator);
-        logicalLocation.AddMember("kind", createJsonString("function", allocator), allocator);
-        location.AddMember("logicalLocation", logicalLocation, allocator);
+        cJSON* logicalLocation = cJSON_CreateObject();
+        cJSON_AddStringToObject(logicalLocation, "name", function.c_str());
+        cJSON_AddStringToObject(logicalLocation, "kind", "function");
+        cJSON_AddItemToObject(location, "logicalLocation", logicalLocation);
     }
     
     return location;
 }
 
 // Result implementation
-JsonValue Result::toJson(JsonAllocator& allocator) const {
-    JsonValue result(rapidjson::kObjectType);
+cJSON* Result::toJson() const {
+    cJSON* result = cJSON_CreateObject();
     
     if (!ruleId.empty()) {
-        result.AddMember("ruleId", createJsonString(ruleId, allocator), allocator);
+        cJSON_AddStringToObject(result, "ruleId", ruleId.c_str());
     }
     
-    JsonValue messageObj(rapidjson::kObjectType);
-    messageObj.AddMember("text", createJsonString(message, allocator), allocator);
-    result.AddMember("message", messageObj, allocator);
+    cJSON* messageObj = cJSON_CreateObject();
+    cJSON_AddStringToObject(messageObj, "text", message.c_str());
+    cJSON_AddItemToObject(result, "message", messageObj);
     
     if (level != Level::Warning) {
-        result.AddMember("level", createJsonString(levelToString(level), allocator), allocator);
+        cJSON_AddStringToObject(result, "level", levelToString(level).c_str());
     }
     
     if (!locations.empty()) {
-        JsonValue locationsArray(rapidjson::kArrayType);
+        cJSON* locationsArray = cJSON_CreateArray();
         for (const auto& location : locations) {
-            locationsArray.PushBack(location.toJson(allocator), allocator);
+            cJSON_AddItemToArray(locationsArray, location.toJson());
         }
-        result.AddMember("locations", locationsArray, allocator);
+        cJSON_AddItemToObject(result, "locations", locationsArray);
     }
     
     if (!relatedLocations.empty()) {
-        JsonValue relatedLocationsArray(rapidjson::kArrayType);
+        cJSON* relatedLocationsArray = cJSON_CreateArray();
         for (const auto& location : relatedLocations) {
-            relatedLocationsArray.PushBack(location.toJson(allocator), allocator);
+            cJSON_AddItemToArray(relatedLocationsArray, location.toJson());
         }
-        result.AddMember("relatedLocations", relatedLocationsArray, allocator);
+        cJSON_AddItemToObject(result, "relatedLocations", relatedLocationsArray);
     }
     
     return result;
 }
 
 // Rule implementation
-JsonValue Rule::toJson(JsonAllocator& allocator) const {
-    JsonValue rule(rapidjson::kObjectType);
+cJSON* Rule::toJson() const {
+    cJSON* rule = cJSON_CreateObject();
     
     if (!id.empty()) {
-        rule.AddMember("id", createJsonString(id, allocator), allocator);
+        cJSON_AddStringToObject(rule, "id", id.c_str());
     }
     
     if (!name.empty()) {
-        rule.AddMember("name", createJsonString(name, allocator), allocator);
+        cJSON_AddStringToObject(rule, "name", name.c_str());
     }
     
     if (!description.empty()) {
-        JsonValue shortDesc(rapidjson::kObjectType);
-        shortDesc.AddMember("text", createJsonString(description, allocator), allocator);
-        rule.AddMember("shortDescription", shortDesc, allocator);
+        cJSON* shortDesc = cJSON_CreateObject();
+        cJSON_AddStringToObject(shortDesc, "text", description.c_str());
+        cJSON_AddItemToObject(rule, "shortDescription", shortDesc);
     }
     
     return rule;
@@ -130,18 +122,23 @@ void SarifLog::addResult(const Result& result) {
 }
 
 std::string SarifLog::toJsonString(bool pretty) const {
-    JsonDocument doc = toJsonDocument();
+    cJSON* doc = toJsonDocument();
     
-    rapidjson::StringBuffer buffer;
+    char* jsonStr = nullptr;
     if (pretty) {
-        rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
-        doc.Accept(writer);
+        jsonStr = cJSON_Print(doc);
     } else {
-        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-        doc.Accept(writer);
+        jsonStr = cJSON_PrintUnformatted(doc);
     }
     
-    return buffer.GetString();
+    std::string result;
+    if (jsonStr) {
+        result = jsonStr;
+        cJSON_free(jsonStr);
+    }
+    cJSON_Delete(doc);
+    
+    return result;
 }
 
 void SarifLog::writeToFile(const std::string& filename, bool pretty) const {
@@ -156,45 +153,43 @@ void SarifLog::writeToStream(llvm::raw_ostream& os, bool pretty) const {
     os << toJsonString(pretty);
 }
 
-JsonDocument SarifLog::toJsonDocument() const {
-    JsonDocument doc;
-    doc.SetObject();
-    auto& allocator = doc.GetAllocator();
+cJSON* SarifLog::toJsonDocument() const {
+    cJSON* doc = cJSON_CreateObject();
     
-    doc.AddMember("version", createJsonString("2.1.0", allocator), allocator);
-    doc.AddMember("$schema", createJsonString("https://json.schemastore.org/sarif-2.1.0.json", allocator), allocator);
+    cJSON_AddStringToObject(doc, "version", "2.1.0");
+    cJSON_AddStringToObject(doc, "$schema", "https://json.schemastore.org/sarif-2.1.0.json");
     
-    JsonValue runsArray(rapidjson::kArrayType);
-    JsonValue run(rapidjson::kObjectType);
+    cJSON* runsArray = cJSON_CreateArray();
+    cJSON* run = cJSON_CreateObject();
     
     // Tool information
-    JsonValue tool(rapidjson::kObjectType);
-    JsonValue driver(rapidjson::kObjectType);
-    driver.AddMember("name", createJsonString(toolName, allocator), allocator);
-    driver.AddMember("version", createJsonString(toolVersion, allocator), allocator);
+    cJSON* tool = cJSON_CreateObject();
+    cJSON* driver = cJSON_CreateObject();
+    cJSON_AddStringToObject(driver, "name", toolName.c_str());
+    cJSON_AddStringToObject(driver, "version", toolVersion.c_str());
     
     if (!rules.empty()) {
-        JsonValue rulesArray(rapidjson::kArrayType);
+        cJSON* rulesArray = cJSON_CreateArray();
         for (const auto& rule : rules) {
-            rulesArray.PushBack(rule.toJson(allocator), allocator);
+            cJSON_AddItemToArray(rulesArray, rule.toJson());
         }
-        driver.AddMember("rules", rulesArray, allocator);
+        cJSON_AddItemToObject(driver, "rules", rulesArray);
     }
     
-    tool.AddMember("driver", driver, allocator);
-    run.AddMember("tool", tool, allocator);
+    cJSON_AddItemToObject(tool, "driver", driver);
+    cJSON_AddItemToObject(run, "tool", tool);
     
     // Results
     if (!results.empty()) {
-        JsonValue resultsArray(rapidjson::kArrayType);
+        cJSON* resultsArray = cJSON_CreateArray();
         for (const auto& result : results) {
-            resultsArray.PushBack(result.toJson(allocator), allocator);
+            cJSON_AddItemToArray(resultsArray, result.toJson());
         }
-        run.AddMember("results", resultsArray, allocator);
+        cJSON_AddItemToObject(run, "results", resultsArray);
     }
     
-    runsArray.PushBack(run, allocator);
-    doc.AddMember("runs", runsArray, allocator);
+    cJSON_AddItemToArray(runsArray, run);
+    cJSON_AddItemToObject(doc, "runs", runsArray);
     
     return doc;
 }

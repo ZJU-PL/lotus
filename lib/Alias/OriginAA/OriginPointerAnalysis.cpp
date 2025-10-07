@@ -5,13 +5,9 @@
 #include "llvm/Support/FileSystem.h"
 #include "Alias/OriginAA/Flags.h"
 #include <fstream>
-#include "Support/rapidjson/document.h"
-#include "Support/rapidjson/writer.h"
-#include "Support/rapidjson/stringbuffer.h"
+#include "Support/cJSON.h"
 #include "Alias/OriginAA/Util.h"
 
-using rapidjson::Document;
-using rapidjson::SizeType;
 using namespace llvm;
 
 static bool isThreadRelatedCallInstruction(const llvm::Value *callsite)

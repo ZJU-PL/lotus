@@ -6,6 +6,7 @@
 
 using namespace lotus;
 
+
 namespace {
 // Trims whitespace from both ends of a string.
 static inline std::string trim(const std::string &s) {
@@ -15,6 +16,7 @@ static inline std::string trim(const std::string &s) {
   while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
   return s.substr(b, e - b);
 }
+
 
 // Returns true if the line is a comment (starts with #) or blank.
 static inline bool isCommentOrBlank(const std::string &line) {

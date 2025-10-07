@@ -19,10 +19,10 @@
  */
 
 #include "Solvers/SMT/SATSolver.h"
-#include "Support/PdQsort.h"
+//#include "Support/PdQsort.h"
 #include <algorithm>
-#include <functional>
-#include <math.h>
+//#include <functional>
+//#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 

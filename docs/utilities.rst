@@ -24,22 +24,23 @@ Header-only library for building abstract interpreters.
    MonotonicFixpointIterator<MyDomain> iterator(cfg, domain);
    iterator.run();
 
-RapidJSON
----------
+cJSON
+-----
 
-Fast JSON parser/generator for C++.
+Lightweight JSON parser/generator for C.
 
-**Location**: ``include/Support/rapidjson``
+**Location**: ``include/Support/cJSON.h``
 
-**Features**: High performance, SAX/DOM APIs, UTF-8 support
+**Features**: Simple API, small footprint, easy to use
 
 **Usage**:
 .. code-block:: cpp
 
-   #include <Support/rapidjson/document.h>
-   rapidjson::Document doc;
-   doc.Parse(jsonString);
-   auto value = doc["key"].GetString();
+   #include <Support/cJSON.h>
+   cJSON* json = cJSON_Parse(jsonString);
+   cJSON* item = cJSON_GetObjectItem(json, "key");
+   const char* value = cJSON_GetStringValue(item);
+   cJSON_Delete(json);
 
 Transform Utilities
 -------------------

@@ -6,17 +6,9 @@
 #include <llvm/IR/DebugLoc.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/Support/raw_ostream.h>
-#include "Support/rapidjson/document.h"
-#include "Support/rapidjson/writer.h"
-#include "Support/rapidjson/stringbuffer.h"
-#include "Support/rapidjson/prettywriter.h"
+#include "Support/cJSON.h"
 
 namespace sarif {
-
-// Use rapidjson namespace directly
-typedef rapidjson::Value JsonValue;
-typedef rapidjson::Document JsonDocument;
-typedef rapidjson::Document::AllocatorType JsonAllocator;
 
 enum class Level { Note, Warning, Error };
 
@@ -32,7 +24,7 @@ struct Location {
     Location(const std::string& file, int line, int column = 0) 
         : file(file), line(line), column(column) {}
     
-    JsonValue toJson(JsonAllocator& allocator) const;
+    cJSON* toJson() const;
 };
 
 // Simple result representation
@@ -46,7 +38,7 @@ struct Result {
     Result(const std::string& ruleId, const std::string& message) 
         : ruleId(ruleId), message(message) {}
     
-    JsonValue toJson(JsonAllocator& allocator) const;
+    cJSON* toJson() const;
 };
 
 // Simple rule representation
@@ -58,7 +50,7 @@ struct Rule {
     Rule(const std::string& id, const std::string& name, const std::string& description = "")
         : id(id), name(name), description(description) {}
     
-    JsonValue toJson(JsonAllocator& allocator) const;
+    cJSON* toJson() const;
 };
 
 // Main SARIF log
@@ -79,7 +71,7 @@ private:
     std::vector<Rule> rules;
     std::vector<Result> results;
     
-    JsonDocument toJsonDocument() const;
+    cJSON* toJsonDocument() const;
 };
 
 // Utility functions
