@@ -131,6 +131,11 @@ PreservedAnalyses MKintPass::run(Module& M, ModuleAnalysisManager& MAM) {
     m_bug_detection->mark_errors(m_impossible_branches, m_gep_oob, 
                                 m_overflow_insts, m_bad_shift_insts, m_div_zero_insts);
 
+    // Generate SARIF output if requested
+    if (!SarifOutputFile.empty()) {
+        this->generateSarifReport(SarifOutputFile);
+    }
+
     return PreservedAnalyses::all();
 }
 
@@ -345,6 +350,13 @@ std::string MKintPass::get_bb_label(const BasicBlock* bb) {
     llvm::raw_string_ostream os(str);
     bb->printAsOperand(os, false);
     return str;
+}
+
+void MKintPass::generateSarifReport(const std::string& filename) {
+    if (m_bug_detection) {
+        m_bug_detection->generateSarifReport(filename, m_impossible_branches, m_gep_oob,
+                                            m_overflow_insts, m_bad_shift_insts, m_div_zero_insts);
+    }
 }
 
 } // namespace kint

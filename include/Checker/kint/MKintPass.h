@@ -35,6 +35,9 @@ struct MKintPass : public PassInfoMixin<MKintPass> {
 
     PreservedAnalyses run(Module& M, ModuleAnalysisManager& MAM);
 
+    // SARIF reporting
+    void generateSarifReport(const std::string& filename);
+
 private:
     void backedge_analysis(const Function& F);
     void init_ranges(Module& M);

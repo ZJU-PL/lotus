@@ -60,6 +60,14 @@ public:
                     const std::set<Instruction*>& bad_shift_insts,
                     const std::set<Instruction*>& div_zero_insts);
 
+    // SARIF reporting
+    void generateSarifReport(const std::string& filename,
+                            const std::map<ICmpInst*, bool>& impossible_branches,
+                            const std::set<GetElementPtrInst*>& gep_oob,
+                            const std::set<Instruction*>& overflow_insts,
+                            const std::set<Instruction*>& bad_shift_insts,
+                            const std::set<Instruction*>& div_zero_insts);
+
 };
 
 } // namespace kint

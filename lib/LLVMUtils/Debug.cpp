@@ -3,7 +3,7 @@
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/ManagedStatic.h>
 #include <vector>
-#include "Support/Debug.h"
+#include "LLVMUtils/Debug.h"
 
 using namespace llvm;
 

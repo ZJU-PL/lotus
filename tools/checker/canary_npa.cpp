@@ -8,8 +8,8 @@
 
 #include "Analysis/NullPointer/NullCheckAnalysis.h"
 #include "Analysis/NullPointer/ContextSensitiveNullCheckAnalysis.h"
-#include "Support/RecursiveTimer.h"
-#include "Support/Statistics.h"
+#include "LLVMUtils/RecursiveTimer.h"
+#include "LLVMUtils/Statistics.h"
 #include "Transform/LowerConstantExpr.h"
 
 #include <llvm/Bitcode/BitcodeWriterPass.h>

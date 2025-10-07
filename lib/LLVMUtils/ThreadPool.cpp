@@ -2,7 +2,7 @@
 #include <llvm/Support/CommandLine.h>
 #include <unistd.h>
 
-#include "Support/ThreadPool.h"
+#include "LLVMUtils/ThreadPool.h"
 
 using namespace llvm;
 

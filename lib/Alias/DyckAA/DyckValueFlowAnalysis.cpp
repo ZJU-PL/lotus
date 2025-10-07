@@ -19,7 +19,7 @@
 #include "Alias/DyckAA/DyckAliasAnalysis.h"
 #include "Alias/DyckAA/DyckModRefAnalysis.h"
 #include "Alias/DyckAA/DyckValueFlowAnalysis.h"
-#include "Support/RecursiveTimer.h"
+#include "LLVMUtils/RecursiveTimer.h"
 
 char DyckValueFlowAnalysis::ID = 0;
 static RegisterPass<DyckValueFlowAnalysis> X("dyckvfa", "vfa based on the unification based alias analysis");

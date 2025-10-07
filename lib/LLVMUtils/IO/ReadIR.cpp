@@ -1,4 +1,4 @@
-#include "Support/IO/ReadIR.h"
+#include "LLVMUtils/IO/ReadIR.h"
 
 #include <llvm/AsmParser/Parser.h>
 #include <llvm/IR/LLVMContext.h>

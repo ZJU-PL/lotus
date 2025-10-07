@@ -2,6 +2,7 @@
 #include "Checker/kint/RangeAnalysis.h"
 #include "Checker/kint/Options.h"
 #include "Checker/kint/Log.h"
+#include "Checker/Report/SARIF.h"
 #include "Support/range.h"
 
 #include <llvm/IR/Instructions.h>
@@ -333,6 +334,105 @@ void BugDetection::mark_errors(const std::map<ICmpInst*, bool>& impossible_branc
             mark_err<interr::DIV_BY_ZERO>(inst);
         }
     }
+}
+
+void BugDetection::generateSarifReport(const std::string& filename,
+                                      const std::map<ICmpInst*, bool>& impossible_branches,
+                                      const std::set<GetElementPtrInst*>& gep_oob,
+                                      const std::set<Instruction*>& overflow_insts,
+                                      const std::set<Instruction*>& bad_shift_insts,
+                                      const std::set<Instruction*>& div_zero_insts) {
+    sarif::SarifLog sarifLog("Kint", "1.0.0");
+
+    // Define rules for each bug type
+    sarifLog.addRule(sarif::Rule("INT_OVERFLOW", "Integer Overflow",
+                                 "Integer arithmetic operation may overflow"));
+    sarifLog.addRule(sarif::Rule("DIV_BY_ZERO", "Division by Zero",
+                                 "Division or modulo operation may have zero divisor"));
+    sarifLog.addRule(sarif::Rule("BAD_SHIFT", "Bad Shift",
+                                 "Shift operation may have shift amount >= bit width"));
+    sarifLog.addRule(sarif::Rule("ARRAY_OOB", "Array Out of Bounds",
+                                 "Array index may be out of bounds"));
+    sarifLog.addRule(sarif::Rule("DEAD_TRUE_BR", "Impossible True Branch",
+                                 "Branch condition can never be true"));
+    sarifLog.addRule(sarif::Rule("DEAD_FALSE_BR", "Impossible False Branch",
+                                 "Branch condition can never be false"));
+
+    // Helper lambda to add a result for an instruction
+    auto addBugResult = [&sarifLog](const Instruction* inst, interr bugType) {
+        if (!inst) return;
+        
+        sarif::Result result(
+            [bugType]() {
+                switch (bugType) {
+                    case interr::INT_OVERFLOW: return "INT_OVERFLOW";
+                    case interr::DIV_BY_ZERO: return "DIV_BY_ZERO";
+                    case interr::BAD_SHIFT: return "BAD_SHIFT";
+                    case interr::ARRAY_OOB: return "ARRAY_OOB";
+                    case interr::DEAD_TRUE_BR: return "DEAD_TRUE_BR";
+                    case interr::DEAD_FALSE_BR: return "DEAD_FALSE_BR";
+                    default: return "UNKNOWN";
+                }
+            }(),
+            mkstr(bugType)
+        );
+        
+        result.level = sarif::Level::Error;
+        
+        // Get location from debug info
+        sarif::Location loc = sarif::utils::createLocationFromInstruction(inst);
+        if (!loc.file.empty() && loc.line > 0) {
+            // Add instruction text as snippet
+            std::string instStr;
+            llvm::raw_string_ostream instOS(instStr);
+            instOS << *inst;
+            loc.snippet = instOS.str();
+            
+            result.locations.push_back(loc);
+        }
+        
+        sarifLog.addResult(result);
+    };
+
+    // Add results for integer overflow bugs
+    if (CheckIntOverflow) {
+        for (auto inst : overflow_insts) {
+            addBugResult(inst, interr::INT_OVERFLOW);
+        }
+    }
+
+    // Add results for division by zero bugs
+    if (CheckDivByZero) {
+        for (auto inst : div_zero_insts) {
+            addBugResult(inst, interr::DIV_BY_ZERO);
+        }
+    }
+
+    // Add results for bad shift bugs
+    if (CheckBadShift) {
+        for (auto inst : bad_shift_insts) {
+            addBugResult(inst, interr::BAD_SHIFT);
+        }
+    }
+
+    // Add results for array out of bounds bugs
+    if (CheckArrayOOB) {
+        for (auto inst : gep_oob) {
+            addBugResult(inst, interr::ARRAY_OOB);
+        }
+    }
+
+    // Add results for dead branch bugs
+    if (CheckDeadBranch) {
+        for (const auto& pair : impossible_branches) {
+            addBugResult(pair.first, pair.second ? interr::DEAD_TRUE_BR : interr::DEAD_FALSE_BR);
+        }
+    }
+
+    // Write SARIF output to file
+    sarifLog.writeToFile(filename, true);
+    
+    MKINT_LOG() << "SARIF report written to: " << filename;
 }
 
 } // namespace kint

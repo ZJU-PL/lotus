@@ -1,11 +1,12 @@
 #include "Checker/Report/SARIF.h"
+#include "LLVMUtils/Demangle.h"
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/raw_ostream.h>
 #include <fstream>
 
-using namespace sarif;
+namespace sarif {
 
 namespace {
 // Helper function to convert Level to string
@@ -221,7 +222,17 @@ Location createLocationFromInstruction(const llvm::Instruction* instruction) {
         location = createLocationFromDebugLoc(instruction->getDebugLoc());
         
         if (auto* func = instruction->getFunction()) {
-            location.function = func->getName().str();
+            std::string funcName;
+            
+            // Try to get name from debug info first
+            if (auto* subprogram = func->getSubprogram()) {
+                funcName = subprogram->getName().str();
+            } else {
+                funcName = func->getName().str();
+            }
+            
+            // Demangle C++ and Rust function names for better readability
+            location.function = DemangleUtils::demangleWithCleanup(funcName);
         }
     }
     
@@ -229,7 +240,12 @@ Location createLocationFromInstruction(const llvm::Instruction* instruction) {
 }
 
 std::string levelToString(Level level) {
-    return ::levelToString(level);
+    switch (level) {
+        case Level::Note: return "note";
+        case Level::Warning: return "warning";
+        case Level::Error: return "error";
+        default: return "warning";
+    }
 }
 
 Level stringToLevel(const std::string& level) {
@@ -263,3 +279,5 @@ SarifBuilder& SarifBuilder::addResult(const std::string& ruleId, const std::stri
 SarifLog SarifBuilder::build() {
     return log;
 }
+
+} // namespace sarif

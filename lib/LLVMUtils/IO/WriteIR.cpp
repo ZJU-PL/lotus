@@ -1,4 +1,4 @@
-#include "Support/IO/WriteIR.h"
+#include "LLVMUtils/IO/WriteIR.h"
 
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Module.h>

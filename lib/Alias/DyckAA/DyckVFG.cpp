@@ -23,9 +23,9 @@
 #include "Alias/DyckAA/DyckGraphNode.h"
 #include "Alias/DyckAA/DyckModRefAnalysis.h"
 #include "Alias/DyckAA/DyckVFG.h"
-#include "Support/CFG.h"
-#include "Support/RecursiveTimer.h"
-#include "Support/ThreadPool.h"
+#include "LLVMUtils/CFG.h"
+#include "LLVMUtils/RecursiveTimer.h"
+#include "LLVMUtils/ThreadPool.h"
 
 DyckVFG::DyckVFG(DyckAliasAnalysis *DAA, DyckModRefAnalysis *DMRA, Module *M) {
     // create a VFG for each function

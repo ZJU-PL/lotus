@@ -1,5 +1,6 @@
 add_subdirectory(Alias)
 add_subdirectory(Support)
+add_subdirectory(LLVMUtils)
 add_subdirectory(Transform)
 add_subdirectory(Solvers)
 add_subdirectory(IR)

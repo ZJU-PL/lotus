@@ -2,7 +2,7 @@
 #include <llvm/Support/Path.h>
 #include <llvm/Support/raw_ostream.h>
 
-#include "Support/FileUtils.h"
+#include "LLVMUtils/FileUtils.h"
 #include <fstream>
 #include <llvm/Support/Debug.h>
 

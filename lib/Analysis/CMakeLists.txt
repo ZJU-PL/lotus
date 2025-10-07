@@ -21,6 +21,7 @@ set(CanaryNullPointer_SOURCES
   NullPointer/AliasAnalysisAdapter.cpp
 )
 add_library(CanaryNullPointer STATIC ${CanaryNullPointer_SOURCES})
+target_link_libraries(CanaryNullPointer CanaryLLVMUtils)
 
 set(GVFA_SOURCES
   GVFA/GlobalValueFlowAnalysis.cpp
@@ -28,7 +29,7 @@ set(GVFA_SOURCES
   GVFA/VulnerabilityCheckers.cpp
 )
 add_library(GVFA STATIC ${GVFA_SOURCES})
-target_link_libraries(GVFA CanaryDyckAA CanarySupport Annotation)
+target_link_libraries(GVFA CanaryDyckAA Annotation)
 
 add_subdirectory(sparta)
 add_subdirectory(IFDS)

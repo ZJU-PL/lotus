@@ -19,7 +19,7 @@
 #include "Alias/DyckAA/DyckAliasAnalysis.h"
 #include "Alias/DyckAA/DyckModRefAnalysis.h"
 #include "Alias/DyckAA/MRAnalyzer.h"
-#include "Support/RecursiveTimer.h"
+#include "LLVMUtils/RecursiveTimer.h"
 
 char DyckModRefAnalysis::ID = 0;
 static RegisterPass<DyckModRefAnalysis> X("dyckmr", "m/r based on the unification based alias analysis");

@@ -4,7 +4,6 @@ add_executable(pdg-query
 
 target_link_libraries(pdg-query
   PRIVATE
-  CanarySupport
   CanaryPDG
   LLVMIRReader
 )

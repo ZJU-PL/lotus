@@ -17,10 +17,10 @@ public:
     // Get source location information (file:line:col)
     std::string getSourceLocation(const llvm::Instruction *I);
 
-    // Get function name from debug info or LLVM IR
+    // Get function name from debug info or LLVM IR (with C++ demangling)
     std::string getFunctionName(const llvm::Instruction *I);
 
-    // Get variable name from debug info or LLVM IR
+    // Get variable name from debug info or LLVM IR (with C++ demangling)
     std::string getVariableName(const llvm::Value *V);
 
     // Get type name as string

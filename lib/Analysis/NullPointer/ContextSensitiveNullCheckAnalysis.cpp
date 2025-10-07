@@ -10,7 +10,7 @@
 #include "Analysis/NullPointer/ContextSensitiveLocalNullCheckAnalysis.h"
 #include "Analysis/NullPointer/ContextSensitiveNullCheckAnalysis.h"
 #include "Analysis/NullPointer/ContextSensitiveNullFlowAnalysis.h"
-#include "Support/RecursiveTimer.h"
+#include "LLVMUtils/RecursiveTimer.h"
 
 using namespace llvm;
 

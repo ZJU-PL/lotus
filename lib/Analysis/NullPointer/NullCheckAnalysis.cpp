@@ -21,8 +21,8 @@
 #include "Analysis/NullPointer/LocalNullCheckAnalysis.h"
 #include "Analysis/NullPointer/NullCheckAnalysis.h"
 #include "Analysis/NullPointer/NullFlowAnalysis.h"
-#include "Support/RecursiveTimer.h"
-#include "Support/ThreadPool.h"
+#include "LLVMUtils/RecursiveTimer.h"
+#include "LLVMUtils/ThreadPool.h"
 
 using namespace llvm;
 

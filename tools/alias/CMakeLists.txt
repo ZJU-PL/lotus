@@ -11,6 +11,7 @@ add_executable(origin_aa origin_aa.cpp)
 target_link_libraries(origin_aa PRIVATE
   OriginAA
   CanarySupport
+  CanaryLLVMUtils
   ${LLVM_LINK_COMPONENTS}
 )
 

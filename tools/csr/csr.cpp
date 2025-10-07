@@ -51,7 +51,7 @@ static void usage() {
             "	-r\tEvaluate rep's tabulation algorithm.\n"
             "	-m\tEvaluate what indexing approach, pathtree, grail, or pathtree+grail.\n"
             "	-d\tSet the dim of Grail, 2 by default.\n"
-         << endl;
+         << "\n";
 }
 
 static void parse_arg(int argc, char *argv[]) {
@@ -119,7 +119,7 @@ static double test_query(AbstractQuery *aq, vector<std::pair<int, int>> &queries
         aq->reset();
         bool pt_r = aq->reach(s, t);
         if (pt_r != r) {
-            cerr << "### Wrong: [" << rs.first << "] to [" << rs.second << "] reach = " << pt_r << endl;
+            cerr << "### Wrong: [" << rs.first << "] to [" << rs.second << "] reach = " << pt_r << "\n";
         } else {
             succ_num++;
         }
@@ -135,7 +135,7 @@ static double test_query(AbstractQuery *aq, vector<std::pair<int, int>> &queries
         cout << " reachable queries: ";
     else
         cout << " unreachable queries: ";
-    cout << (int) query_time << " ms. Success rate: " << (succ_num / queries.size()) * 100 << " %." << endl;
+    cout << (int) query_time << " ms. Success rate: " << (succ_num / queries.size()) * 100 << " %." << "\n";
     return query_time;
 }
 
@@ -144,7 +144,7 @@ static void read_or_generate_queries(
         vector<std::pair<int, int>> &reachable_pairs,
         vector<std::pair<int, int>> &unreachable_pairs) {
     if (read_query) {
-        cout << "Reading queries from " << query_file << " ... " << endl;
+        cout << "Reading queries from " << query_file << " ... " << "\n";
         vector<std::pair<int, int>> *query_vec = &reachable_pairs;
         int s, t;
         ifstream iq(query_file);
@@ -160,7 +160,7 @@ static void read_or_generate_queries(
         }
         iq.close();
     } else {
-        cout << "Generating " << query_num * 2 << " queries..." << endl;
+        cout << "Generating " << query_num * 2 << " queries..." << "\n";
         int reachable_count = 0;
         int unreachable_count = 0;
         srand48(time(nullptr));
@@ -183,22 +183,22 @@ static void read_or_generate_queries(
                 }
             }
         }
-        cout << "\rDone!" << endl;
+        cout << "\rDone!" << "\n";
         if (gen_query) {
-            cout << "Saving queries into " << query_file << " ... " << endl;
+            cout << "Saving queries into " << query_file << " ... " << "\n";
             ofstream oq(query_file);
             for (const auto &re : reachable_pairs) {
-                oq << re.first << " " << (re.second) << endl;
+                oq << re.first << " " << (re.second) << "\n";
             }
-            oq << "-1 -1" << endl; // use -1 -1 as a separation line
+            oq << "-1 -1" << "\n"; // use -1 -1 as a separation line
             for (const auto &ue : unreachable_pairs) {
-                oq << ue.first << " " << (ue.second) << endl;
+                oq << ue.first << " " << (ue.second) << "\n";
             }
             oq.close();
         }
     }
 
-    cout << endl << endl;
+    cout << "\n\n";
 }
 
 static double grail_index_size(Graph &ig) {
@@ -268,13 +268,13 @@ int main(int argc, char *argv[]) {
     // merge strongly connected component
     int *sccmap = new int[vfg.num_vertices()]; // store pair of orignal vertex and corresponding vertex in merged graph
     vector<int> reverse_topo_sort;
-    cout << "Merging strongly connected component of IG ..." << endl;
+    cout << "Merging strongly connected component of IG ..." << "\n";
     start = std::chrono::high_resolution_clock::now();
     GraphUtil::mergeSCC(vfg, sccmap, reverse_topo_sort);
     end = std::chrono::high_resolution_clock::now();
     diff = end - start;
-    cout << "Merging SCC of Indexing-Graph(IG) Duration: " << diff.count() << " ms" << endl;
-    cout << "#DAG of IG: " << vfg.num_vertices() << " #DAG of IG Edges:" << vfg.num_edges() << endl;
+    cout << "Merging SCC of Indexing-Graph(IG) Duration: " << diff.count() << " ms" << "\n";
+    cout << "#DAG of IG: " << vfg.num_vertices() << " #DAG of IG Edges:" << vfg.num_edges() << "\n";
 
     // GRAIL
     Grail *grail = nullptr;
@@ -288,7 +288,7 @@ int main(int argc, char *argv[]) {
         diff = end - start;
         grail_on_ig_duration = diff.count();
         grail_on_ig_size = grail_index_size(vfg);
-        cout << "GRAIL Indexing Construction on IG Duration: " << grail_on_ig_duration << " ms" << endl;
+        cout << "GRAIL Indexing Construction on IG Duration: " << grail_on_ig_duration << " ms" << "\n";
     }
 
     // PATHTREE+SCARAB
@@ -307,12 +307,12 @@ int main(int argc, char *argv[]) {
         diff = end - start;
         double bb_discover_duration = diff.count();
         pt_total_duration = bb_discover_duration;
-        cout << "Backbone Discover on IG Duration: " << bb_discover_duration << " ms" << endl;
+        cout << "Backbone Discover on IG Duration: " << bb_discover_duration << " ms" << "\n";
         string filesystem = graph_file + ".backbone";
         rbb.outputBackbone(filesystem.c_str());
         int bbsize = rbb.getBBsize();
         int bbedgesize = rbb.getBBEdgesize();
-        cout << "#Backbone of IG Vertices: " << bbsize << " #Backbone of IG Edges: " << bbedgesize << endl;
+        cout << "#Backbone of IG Vertices: " << bbsize << " #Backbone of IG Edges: " << bbedgesize << "\n";
 
         // pathtree
         int pt_alg_type = 1;
@@ -322,24 +322,24 @@ int main(int argc, char *argv[]) {
         ifstream cfile;
         bool compress = false;
         if (!infile) {
-            cout << "Error: Cannot open " << ggfile << endl;
+            cout << "Error: Cannot open " << ggfile << "\n";
             return -1;
         }
         Graph bbgg(infile); // backbone gated graph
         int bbggsize = bbgg.num_vertices();
         int *bbgg_sccmap = new int[bbggsize];    // store pair of orignal vertex and corresponding vertex in merged graph
         vector<int> bbgg_reverse_topo_sort;
-        cout << "Merging SCC of Backbone ..." << endl;
+        cout << "Merging SCC of Backbone ..." << "\n";
 
         start = std::chrono::high_resolution_clock::now();
         GraphUtil::mergeSCC(bbgg, bbgg_sccmap, bbgg_reverse_topo_sort);
         end = std::chrono::high_resolution_clock::now();
         diff = end - start;
         pt_total_duration += diff.count();
-        cout << "Merging SCC of Backbone Duration: " << diff.count() << " ms" << endl;
-        cout << "#DAG of BB Vertices: " << bbgg.num_vertices() << " #DAG of BB Edges: " << bbgg.num_edges() << endl;
+        cout << "Merging SCC of Backbone Duration: " << diff.count() << " ms" << "\n";
+        cout << "#DAG of BB Vertices: " << bbgg.num_vertices() << " #DAG of BB Edges: " << bbgg.num_edges() << "\n";
 
-        cout << "Constructing Pathtree (PT) Indexing ..." << endl;
+        cout << "Constructing Pathtree (PT) Indexing ..." << "\n";
         start = std::chrono::high_resolution_clock::now();
         PathTree pt(bbgg, bbgg_reverse_topo_sort);
         pt.createLabels(pt_alg_type, cfile, compress);
@@ -347,7 +347,7 @@ int main(int argc, char *argv[]) {
         diff = end - start;
         auto pt_on_bb_duration = diff.count();
         pt_total_duration += diff.count();
-        cout << "#PT Indexing Construction Duration: " << pt_on_bb_duration << " ms" << endl;
+        cout << "#PT Indexing Construction Duration: " << pt_on_bb_duration << " ms" << "\n";
         ofstream lfile(labelsfile);
         pt.save_labels(lfile);
 
@@ -372,7 +372,7 @@ int main(int argc, char *argv[]) {
     double grail_r_time = 0;
     double grail_nr_time = 0;
     if (grail) {
-        cout << "\n--------- GRAIL Queries Test ------------" << endl;
+        cout << "\n--------- GRAIL Queries Test ------------" << "\n";
         auto src_map = [sccmap](int v) { return sccmap[v]; };
         auto trg_map = [sccmap, orig_vfg_size](int v) { return sccmap[v + orig_vfg_size]; };
         grail_r_time = test_query(grail, reachable_pairs, true, src_map, trg_map);
@@ -382,7 +382,7 @@ int main(int argc, char *argv[]) {
     double pt_r_time = 0;
     double pt_nr_time = 0;
     if (pathtree) {
-        cout << "--------- Pathtree Queries Test ------------" << endl;
+        cout << "--------- Pathtree Queries Test ------------" << "\n ";
         auto src_map = [sccmap](int v) { return sccmap[v]; };
         auto trg_map = [sccmap, orig_vfg_size](int v) { return sccmap[v + orig_vfg_size]; };
         pt_r_time = test_query(pathtree, reachable_pairs, true, src_map, trg_map);
@@ -401,7 +401,7 @@ int main(int argc, char *argv[]) {
         orig_vfg.add_summary_edges();
 
         if (reps_tab_alg) {
-            cout << "--------- Tabulation Queries Test ------------" << endl;
+            cout << "--------- Tabulation Queries Test ------------" << "\n";
             auto *tab = new Tabulation(orig_vfg);
             auto vertex_map = [](int v) { return v; };
             tab_r_query_time = test_query(tab, reachable_pairs, true, vertex_map, vertex_map);
@@ -410,36 +410,36 @@ int main(int argc, char *argv[]) {
         }
 
         if (transitive_closure) {
-            cout << "--------- Transitive Closure ---------" << endl;
+            cout << "--------- Transitive Closure ---------" << "\n";
             start = std::chrono::high_resolution_clock::now();
             tc_size = Tabulation(orig_vfg).tc();
             end = std::chrono::high_resolution_clock::now();
             diff = end - start;
             tc_time = diff.count();
-            cout << "\rTransitive closure time: " << std::setprecision(2) << fixed << tc_time << " ms. " << endl;
-            cout << "Transitive closure size: " << std::setprecision(2) << fixed << tc_size << " mb. " << endl;
+            cout << "\rTransitive closure time: " << std::setprecision(2) << fixed << tc_time << " ms. " << "\n";
+            cout << "Transitive closure size: " << std::setprecision(2) << fixed << tc_size << " mb. " << "\n";
         }
     }
 
-    cout << "--------- Indexing Construction Summary ---------" << endl;
-    cout << "# Vertices: " << orig_vfg_size << endl;
-    cout << "# Edges: " << orig_vfg_edges << endl;
-    cout << "# Summary Edges: " << vfg.summary_edge_size() << endl;
-    cout << "Summary Edge     time: " << std::setprecision(2) << fixed << summary_edge_time << " ms. " << endl;
-    cout << "Summary Edge     size: " << std::setprecision(2) << fixed << summary_edge_size << " mb." << endl;
+    cout << "--------- Indexing Construction Summary ---------" << "\n";
+    cout << "# Vertices: " << orig_vfg_size << "\n";
+    cout << "# Edges: " << orig_vfg_edges << "\n";
+    cout << "# Summary Edges: " << vfg.summary_edge_size() << "\n";
+    cout << "Summary Edge     time: " << std::setprecision(2) << fixed << summary_edge_time << " ms. " << "\n";
+    cout << "Summary Edge     size: " << std::setprecision(2) << fixed << summary_edge_size << " mb." << "\n";
     if (grail) {
-        cout << "GRAIL    indices time: " << std::setprecision(2) << fixed << grail_on_ig_duration << " ms. " << endl;
-        cout << "GRAIL    indices size: " << std::setprecision(2) << fixed << grail_on_ig_size << " mb. " << endl;
+        cout << "GRAIL    indices time: " << std::setprecision(2) << fixed << grail_on_ig_duration << " ms. " << "\n";
+        cout << "GRAIL    indices size: " << std::setprecision(2) << fixed << grail_on_ig_size << " mb. " << "\n";
         delete grail;
     }
     if (pathtree) {
-        cout << "Pathtree indices time: " << std::setprecision(2) << fixed << pt_total_duration << " ms. " << endl;
-        cout << "Pathtree indices size: " << std::setprecision(2) << fixed << pt_total_size << " mb. " << endl;
+        cout << "Pathtree indices time: " << std::setprecision(2) << fixed << pt_total_duration << " ms. " << "\n";
+        cout << "Pathtree indices size: " << std::setprecision(2) << fixed << pt_total_size << " mb. " << "\n";
         delete pathtree;
     }
 
     // final output
-    cout << endl;
+    cout << "\n";
     cerr << std::setprecision(2) << fixed << orig_vfg_edges / 1000.0 << ", ";
     cerr << std::setprecision(2) << fixed << orig_vfg_size / 1000.0 << ", ";
     cerr << std::setprecision(2) << fixed << summary_edge_time / 1000.0 << ", ";
@@ -461,7 +461,7 @@ int main(int argc, char *argv[]) {
     cerr << std::setprecision(2) << fixed << tab_r_query_time << ", ";
     cerr << std::setprecision(2) << fixed << tab_notr_query_time << ", ";
     cerr << ", ";
-    cerr << endl;
+    cerr << "\n";
 
     return 0;
 }

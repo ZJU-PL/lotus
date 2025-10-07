@@ -24,7 +24,7 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Type.h>
 #include "Analysis/NullPointer/LocalNullCheckAnalysis.h"
-#include "Support/API.h"
+#include "LLVMUtils/API.h"
 
 LocalNullCheckAnalysis::LocalNullCheckAnalysis(NullFlowAnalysis *NFA, Function *F) : F(F), NEA(F), NFA(NFA), DT(*F) {
     // init nca

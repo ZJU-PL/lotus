@@ -1,4 +1,5 @@
-#include "Support/InstructionUtils.h"
+#include "LLVMUtils/InstructionUtils.h"
+#include "LLVMUtils/Demangle.h"
 #include <llvm/IR/CFG.h>
 #include <set>
 
@@ -35,7 +36,9 @@ unsigned InstructionUtils::getLineNumber(Instruction &I) {
 // Returns the name of the instruction or "No Name" if unnamed.
 std::string InstructionUtils::getInstructionName(Instruction *I) {
   if (I->hasName()) {
-    return I->getName().str();
+    std::string name = I->getName().str();
+    // Demangle if the name is mangled
+    return DemangleUtils::demangleWithCleanup(name);
   } else {
     return "No Name";
   }
@@ -44,7 +47,9 @@ std::string InstructionUtils::getInstructionName(Instruction *I) {
 // Returns the name of the value or "No Name" if unnamed.
 std::string InstructionUtils::getValueName(Value *v) {
   if (v->hasName()) {
-    return v->getName().str();
+    std::string name = v->getName().str();
+    // Demangle if the name is mangled
+    return DemangleUtils::demangleWithCleanup(name);
   } else {
     return "No Name";
   }

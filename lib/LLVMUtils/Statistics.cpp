@@ -3,7 +3,7 @@
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
-#include "Support/Statistics.h"
+#include "LLVMUtils/Statistics.h"
 
 // Analyzes and prints statistics about the module's instructions.
 void Statistics::run(Module &M) {

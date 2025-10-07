@@ -11,7 +11,7 @@ target_link_libraries(canary-npa PRIVATE
   CanaryNullPointer 
   CanaryDyckAA 
   CanaryTransform 
-  CanarySupport
+  CanaryLLVMUtils
   ${LLVM_LINK_COMPONENTS}
 )
 
@@ -31,6 +31,7 @@ set(LLVM_LINK_COMPONENTS_KINT
 add_executable(kint kint.cpp)
 target_link_libraries(kint PRIVATE
         CanaryKint
+        CanaryReport
         CanarySupport
         ${LLVM_LINK_COMPONENTS_KINT}
         ${Z3_LIBRARIES} 
@@ -42,6 +43,7 @@ target_link_libraries(ifds-taint
   IFDS
   Annotation
   CanaryDyckAA
+  CanaryLLVMUtils
   LLVMIRReader
 )
 

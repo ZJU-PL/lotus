@@ -1,4 +1,4 @@
-#include "Support/CFG.h"
+#include "LLVMUtils/CFG.h"
 #include <llvm/IR/CFG.h>
 
 // Constructs a CFG analyzer for the given function.

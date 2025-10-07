@@ -1,6 +1,7 @@
 // Use debug info of LLVM to better report bugs, e.g., line number, position, function name, variable name, etc.
 
 #include "Checker/Report/DebugInfoAnalysis.h"
+#include "LLVMUtils/Demangle.h"
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Instructions.h>
@@ -40,17 +41,24 @@ std::string DebugInfoAnalysis::getFunctionName(const Instruction *I) {
     const Function *F = I->getFunction();
     if (!F) return "unknown_function";
 
+    std::string funcName;
+    
     // Try to get name from debug info first
     if (DISubprogram *Subprogram = F->getSubprogram()) {
-        return Subprogram->getName().str();
+        funcName = Subprogram->getName().str();
+    } else {
+        funcName = F->getName().str();
     }
-
-    return F->getName().str();
+    
+    // Demangle C++ and Rust function names for better readability
+    return DemangleUtils::demangleWithCleanup(funcName);
 }
 
 std::string DebugInfoAnalysis::getVariableName(const Value *V) {
     if (!V) return "unknown_var";
 
+    std::string varName;
+    
     // Try to get debug info for local variables
     if (auto *I = dyn_cast<Instruction>(V)) {
         // Look for local variable debug info
@@ -58,7 +66,9 @@ std::string DebugInfoAnalysis::getVariableName(const Value *V) {
             for (const auto &Inst : BB) {
                 if (auto *DbgVar = dyn_cast<DbgVariableIntrinsic>(&Inst)) {
                     if (DbgVar->getVariableLocationOp(0) == V) {
-                        return DbgVar->getVariable()->getName().str();
+                        varName = DbgVar->getVariable()->getName().str();
+                        // Demangle variable names (useful for C++ static members, etc.)
+                        return DemangleUtils::demangleWithCleanup(varName);
                     }
                 }
             }
@@ -67,7 +77,9 @@ std::string DebugInfoAnalysis::getVariableName(const Value *V) {
 
     // Fallback to LLVM IR name
     if (V->hasName()) {
-        return V->getName().str();
+        varName = V->getName().str();
+        // Demangle if needed
+        return DemangleUtils::demangleWithCleanup(varName);
     }
 
     return "temp_var";

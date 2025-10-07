@@ -201,7 +201,7 @@ void AllocAA::collectCGUnderFunctionMain(Module &M, CallGraph &callGraph) {
 
 void AllocAA::collectAllocations(Module &M, CallGraph &callGraph) {
   std::set<Function *> allocatorFns;
-  for (auto allocName : allocatorFunctionNames) {
+  for (auto& allocName : allocatorFunctionNames) {
     auto F = M.getFunction(allocName);
     if (!F)
       continue;

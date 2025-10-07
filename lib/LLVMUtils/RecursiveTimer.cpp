@@ -1,5 +1,5 @@
 
-#include "Support/RecursiveTimer.h"
+#include "LLVMUtils/RecursiveTimer.h"
 
 // Current depth of nested timers for indentation.
 static unsigned DepthOfTimeRecorder = 0;
