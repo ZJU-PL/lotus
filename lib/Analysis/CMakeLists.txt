@@ -31,6 +31,14 @@ set(GVFA_SOURCES
 add_library(GVFA STATIC ${GVFA_SOURCES})
 target_link_libraries(GVFA CanaryDyckAA Annotation)
 
+set(Concurrency_SOURCES
+  Concurrency/ThreadAPI.cpp
+  Concurrency/LockSetAnalysis.cpp
+  Concurrency/MHPAnalysis.cpp
+)
+add_library(Concurrency STATIC ${Concurrency_SOURCES})
+target_link_libraries(Concurrency CanaryLLVMUtils)
+
 add_subdirectory(sparta)
 add_subdirectory(IFDS)
 
