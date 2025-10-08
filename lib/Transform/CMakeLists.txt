@@ -4,11 +4,11 @@ add_library(CanaryTransform STATIC
         LowerGlobalConstantArraySelect.cpp
         LowerSelect.cpp
         MergeReturn.cpp
+        ModuleOptimizer.cpp
         NameBlock.cpp
         RemoveDeadBlock.cpp
         RemoveNoRetFunction.cpp
         SimplifyLatch.cpp
-        # LLVM_Optimizer.cpp
         # FlattenInit.cpp
         # SoftFloat.cpp
         UnrollVectors.cpp

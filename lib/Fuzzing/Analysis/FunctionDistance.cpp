@@ -1,6 +1,6 @@
-#include "Fuzzing/Analysis/ExtendedCallGraph.hpp"
-#include "Fuzzing/Analysis/FunctionDistance.hpp"
-#include "Fuzzing/Analysis/TargetDetection.hpp"
+#include "Fuzzing/Analysis/ExtendedCallGraph.h"
+#include "Fuzzing/Analysis/FunctionDistance.h"
+#include "Fuzzing/Analysis/TargetDetection.h"
 
 #include <llvm/ADT/BreadthFirstIterator.h>
 #include <llvm/ADT/GraphTraits.h>

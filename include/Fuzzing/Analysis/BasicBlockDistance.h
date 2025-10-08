@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Fuzzing/Analysis/FunctionDistance.hpp"
+#include "Fuzzing/Analysis/FunctionDistance.h"
 
 #include <llvm/Analysis/CallGraph.h>
 #include <llvm/IR/PassManager.h>
@@ -27,8 +27,8 @@ public:
   public:
     explicit Result(FunctionToOriginBBsMapTy &FunctionToOriginBBs,
                     const FunctionToDistanceTy &FunctionToDistance)
-        : FunctionToOriginBBs(FunctionToOriginBBs),
-          FunctionToDistance(FunctionToDistance) {}
+        : FunctionToDistance(FunctionToDistance),
+          FunctionToOriginBBs(FunctionToOriginBBs) {}
 
     BBToDistanceTy computeBBDistances(Function &F);
   };
