@@ -69,6 +69,17 @@ Use VFG or PDG to answer slicing queries.
 - Memory leak detection?
 - Race condition analysis?
 
+Some related publications
+- S&P 19:  RAZZER: Finding Kernel Race Bugs through Fuzzing,
+- CCS 18:  Hawkeye: Towards a Desired Directed Grey-box Fuzzer
+
+### Software Protection
+
+- CCS 22: C2C: Fine-grained Configuration-driven System Call Filtering
+- USENIX Security 20: Temporal System Call Specialization for Attack Surface Reduction
+- USENIX Security 19:  Origin-sensitive Control Flow Integrity
+- ISSTA 17:  Boosting the Precision of Virtual Call Integrity Protection with Partial Pointer Analysis for C++ 
+
 
 ## 5. Numerical Analysis
 

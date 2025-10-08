@@ -88,9 +88,15 @@ PreservedAnalyses MKintPass::run(Module& M, ModuleAnalysisManager& MAM) {
     // Propagate taint across functions
     m_taint_analysis->propagate_taint_across_functions(M, m_func2tsrc, m_taint_funcs);
 
+    // Also add main function to analysis if it exists and is not already in taint_funcs
     for (auto& F : M) {
         if (!F.isDeclaration()) {
             backedge_analysis(F);
+            // Add main function to analysis if it's not already there
+            if (F.getName() == "main" && !m_taint_funcs.contains(&F)) {
+                m_taint_funcs.insert(&F);
+                MKINT_LOG() << "Added main function to analysis";
+            }
         }
     }
 
@@ -207,6 +213,20 @@ void MKintPass::path_solving(BasicBlock* cur, BasicBlock* pred) {
     if (m_backedges[cur].contains(pred))
         return;
 
+    // Track this basic block in the current execution path
+    std::string bbDesc = "Basic block ";
+    if (cur->hasName()) {
+        bbDesc += cur->getName().str();
+    } else {
+        bbDesc += "<unnamed>";
+    }
+    if (cur->getParent()) {
+        bbDesc += " in function " + cur->getParent()->getName().str();
+    }
+    
+    PathPoint pathPoint(cur, nullptr, bbDesc);
+    m_bug_detection->addPathPoint(pathPoint);
+
     auto cur_brng = m_func2range_info[cur->getParent()][cur];
 
     if (nullptr != pred) {
@@ -274,11 +294,25 @@ void MKintPass::path_solving(BasicBlock* cur, BasicBlock* pred) {
                             if (!check())
                                 return;
                             m_v2sym[cmp] = m_solver.getValue().ctx().bv_val(true, 1);
+                            
+                            // Add branch decision to path
+                            std::string branchDesc = "Taking true branch from condition: ";
+                            llvm::raw_string_ostream brOS(branchDesc);
+                            brOS << *cmp;
+                            PathPoint branchPoint(pred, cmp, brOS.str());
+                            m_bug_detection->addPathPoint(branchPoint);
                         } else { // F branch
                             m_solver.getValue().add(!get_tbr_assert());
                             if (!check())
                                 return;
                             m_v2sym[cmp] = m_solver.getValue().ctx().bv_val(false, 1);
+                            
+                            // Add branch decision to path
+                            std::string branchDesc = "Taking false branch from condition: ";
+                            llvm::raw_string_ostream brOS(branchDesc);
+                            brOS << *cmp;
+                            PathPoint branchPoint(pred, cmp, brOS.str());
+                            m_bug_detection->addPathPoint(branchPoint);
                         }
                     }
                 }
@@ -339,6 +373,13 @@ void MKintPass::path_solving(BasicBlock* cur, BasicBlock* pred) {
         m_solver.getValue().push();
         path_solving(succ, cur);
         m_solver.getValue().pop();
+    }
+    
+    // Pop the current basic block from the path when backtracking
+    auto currentPath = m_bug_detection->getCurrentPath();
+    if (!currentPath.empty()) {
+        currentPath.pop_back();
+        m_bug_detection->setCurrentPath(currentPath);
     }
 }
 

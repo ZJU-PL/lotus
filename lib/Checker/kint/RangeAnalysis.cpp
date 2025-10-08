@@ -119,15 +119,26 @@ void RangeAnalysis::analyze_one_bb_range(BasicBlock* bb, DenseMap<const Value*, 
                         auto& argblock = func2range_info[f][&(f->getEntryBlock())];
                         const size_t arg_idx = arg.getArgNo();
                         if (arg.getType()->isIntegerTy()) {
-                            argblock[&arg] = get_rng(call->getArgOperand(arg_idx)).unionWith(argblock[&arg]);
+                            auto arg_rng = get_rng(call->getArgOperand(arg_idx));
+                            if (argblock.count(&arg) && argblock[&arg].getBitWidth() == arg_rng.getBitWidth()) {
+                                argblock[&arg] = arg_rng.unionWith(argblock[&arg]);
+                            } else {
+                                argblock[&arg] = arg_rng;
+                            }
                             func2ret_range[argcalls[arg_idx]->getCalledFunction()] = argblock[&arg];
                         }
                     }
                 } else {
                     for (const auto& arg : f->args()) {
                         auto& argblock = func2range_info[f][&(f->getEntryBlock())];
-                        if (arg.getType()->isIntegerTy())
-                            argblock[&arg] = get_rng(call->getArgOperand(arg.getArgNo())).unionWith(argblock[&arg]);
+                        if (arg.getType()->isIntegerTy()) {
+                            auto arg_rng = get_rng(call->getArgOperand(arg.getArgNo()));
+                            if (argblock.count(&arg) && argblock[&arg].getBitWidth() == arg_rng.getBitWidth()) {
+                                argblock[&arg] = arg_rng.unionWith(argblock[&arg]);
+                            } else {
+                                argblock[&arg] = arg_rng;
+                            }
+                        }
                     }
                 }
 
@@ -146,7 +157,11 @@ void RangeAnalysis::analyze_one_bb_range(BasicBlock* bb, DenseMap<const Value*, 
 
             auto valrng = get_rng(val);
             if (const auto gv = dyn_cast<GlobalVariable>(ptr)) {
-                global2range[gv] = global2range[gv].unionWith(valrng);
+                if (global2range.count(gv) && global2range[gv].getBitWidth() == valrng.getBitWidth()) {
+                    global2range[gv] = global2range[gv].unionWith(valrng);
+                } else {
+                    global2range[gv] = valrng;
+                }
             } else if (const auto gep = dyn_cast<GetElementPtrInst>(ptr)) {
                 auto gep_addr = gep->getPointerOperand();
                 if (auto garr = dyn_cast<GlobalVariable>(gep_addr)) {
@@ -160,7 +175,11 @@ void RangeAnalysis::analyze_one_bb_range(BasicBlock* bb, DenseMap<const Value*, 
 
                         for (size_t i = idx_rng.getUnsignedMin().getLimitedValue(); i < std::min(arr_size, idx_max);
                              ++i) {
-                            garr2ranges[garr][i] = garr2ranges[garr][i].unionWith(valrng);
+                            if (garr2ranges[garr][i].getBitWidth() == valrng.getBitWidth()) {
+                                garr2ranges[garr][i] = garr2ranges[garr][i].unionWith(valrng);
+                            } else {
+                                garr2ranges[garr][i] = valrng;
+                            }
                         }
                     }
                 }
@@ -171,8 +190,14 @@ void RangeAnalysis::analyze_one_bb_range(BasicBlock* bb, DenseMap<const Value*, 
             continue;
         } else if (const auto ret = dyn_cast<ReturnInst>(&inst)) {
             // low precision: just apply!
-            if (F.getReturnType()->isIntegerTy())
-                func2ret_range[&F] = get_rng(ret->getReturnValue()).unionWith(func2ret_range[&F]);
+            if (F.getReturnType()->isIntegerTy()) {
+                auto ret_rng = get_rng(ret->getReturnValue());
+                if (func2ret_range.count(&F) && func2ret_range[&F].getBitWidth() == ret_rng.getBitWidth()) {
+                    func2ret_range[&F] = ret_rng.unionWith(func2ret_range[&F]);
+                } else {
+                    func2ret_range[&F] = ret_rng;
+                }
+            }
 
             continue;
         }
@@ -194,7 +219,14 @@ void RangeAnalysis::analyze_one_bb_range(BasicBlock* bb, DenseMap<const Value*, 
         } else if (const SelectInst* op = dyn_cast<SelectInst>(&inst)) {
             const auto tval = op->getTrueValue();
             const auto fval = op->getFalseValue();
-            new_range = get_rng(tval).unionWith(get_rng(fval));
+            auto tval_rng = get_rng(tval);
+            auto fval_rng = get_rng(fval);
+            if (tval_rng.getBitWidth() == fval_rng.getBitWidth()) {
+                new_range = tval_rng.unionWith(fval_rng);
+            } else {
+                // If bit widths don't match, use the range with the correct bit width
+                new_range = (tval_rng.getBitWidth() == inst.getType()->getIntegerBitWidth()) ? tval_rng : fval_rng;
+            }
         } else if (const CastInst* op = dyn_cast<CastInst>(&inst)) {
             new_range = [op, &get_rng]() -> crange {
                 auto inp = op->getOperand(0);
@@ -222,7 +254,12 @@ void RangeAnalysis::analyze_one_bb_range(BasicBlock* bb, DenseMap<const Value*, 
                 if (bb_it != backedges.end() && bb_it->second.contains(pred)) {
                     continue; // skip backedge
                 }
-                new_range = new_range.unionWith(get_range_by_bb(op->getIncomingValue(i), pred, func2range_info));
+                auto incoming_rng = get_range_by_bb(op->getIncomingValue(i), pred, func2range_info);
+                if (new_range.getBitWidth() == incoming_rng.getBitWidth()) {
+                    new_range = new_range.unionWith(incoming_rng);
+                } else if (new_range.isEmptySet()) {
+                    new_range = incoming_rng;
+                }
             }
         } else if (auto op = dyn_cast<LoadInst>(&inst)) {
             auto addr = op->getPointerOperand();
@@ -244,7 +281,11 @@ void RangeAnalysis::analyze_one_bb_range(BasicBlock* bb, DenseMap<const Value*, 
 
                         for (size_t i = idx_rng.getUnsignedMin().getLimitedValue(); i < std::min(arr_size, idx_max);
                              ++i) {
-                            new_range = new_range.unionWith(garr2ranges[garr][i]);
+                            if (new_range.getBitWidth() == garr2ranges[garr][i].getBitWidth()) {
+                                new_range = new_range.unionWith(garr2ranges[garr][i]);
+                            } else if (new_range.isEmptySet()) {
+                                new_range = garr2ranges[garr][i];
+                            }
                         }
 
                         succ = true;
@@ -266,14 +307,27 @@ void RangeAnalysis::analyze_one_bb_range(BasicBlock* bb, DenseMap<const Value*, 
             MKINT_CHECK_RELAX(false) << " [Range Analysis] Unhandled instruction: " << inst;
         }
 
-        cur_rng[&inst] = new_range.unionWith(cur_rng[&inst]);
+        // Check if cur_rng[&inst] exists and has the right bit width before unionWith
+        if (cur_rng.count(&inst) && cur_rng[&inst].getBitWidth() == new_range.getBitWidth()) {
+            cur_rng[&inst] = new_range.unionWith(cur_rng[&inst]);
+        } else {
+            cur_rng[&inst] = new_range;
+        }
     }
 
     if (&cur_rng != &sum_rng) {
         for (auto& bb_rng_pair : cur_rng) {
             auto bb = bb_rng_pair.first;
             auto rng = bb_rng_pair.second;
-            sum_rng[bb] = sum_rng.count(bb) ? sum_rng[bb].unionWith(rng) : rng;
+            if (sum_rng.count(bb)) {
+                if (sum_rng[bb].getBitWidth() == rng.getBitWidth()) {
+                    sum_rng[bb] = sum_rng[bb].unionWith(rng);
+                } else {
+                    sum_rng[bb] = rng;
+                }
+            } else {
+                sum_rng[bb] = rng;
+            }
         }
     }
 }
@@ -355,19 +409,31 @@ void RangeAnalysis::range_analysis(Function& F,
                         // not (all)
                         for (auto c : swt->cases()) {
                             auto case_val = c.getCaseValue();
-                            emp_rng = emp_rng.unionWith(case_val->getValue());
+                            if (emp_rng.getBitWidth() == case_val->getValue().getBitWidth()) {
+                                emp_rng = emp_rng.unionWith(case_val->getValue());
+                            } else if (emp_rng.isEmptySet()) {
+                                emp_rng = crange(case_val->getValue());
+                            }
                         }
                         emp_rng = emp_rng.inverse();
                     } else {
                         for (auto c : swt->cases()) {
                             if (c.getCaseSuccessor() == bb) {
                                 auto case_val = c.getCaseValue();
-                                emp_rng = emp_rng.unionWith(case_val->getValue());
+                                if (emp_rng.getBitWidth() == case_val->getValue().getBitWidth()) {
+                                    emp_rng = emp_rng.unionWith(case_val->getValue());
+                                } else if (emp_rng.isEmptySet()) {
+                                    emp_rng = crange(case_val->getValue());
+                                }
                             }
                         }
                     }
 
-                    branch_rng[cond] = cond_rng.unionWith(emp_rng);
+                    if (cond_rng.getBitWidth() == emp_rng.getBitWidth()) {
+                        branch_rng[cond] = cond_rng.unionWith(emp_rng);
+                    } else {
+                        branch_rng[cond] = cond_rng;
+                    }
                 }
             } else {
                 // try catch... (thank god, C does not have try-catch)

@@ -54,6 +54,77 @@ cJSON* Location::toJson() const {
     return location;
 }
 
+cJSON* Location::toThreadFlowLocationJson() const {
+    cJSON* physicalLocation = cJSON_CreateObject();
+    
+    if (!file.empty()) {
+        cJSON* artifactLocation = cJSON_CreateObject();
+        cJSON_AddStringToObject(artifactLocation, "uri", file.c_str());
+        cJSON_AddItemToObject(physicalLocation, "artifactLocation", artifactLocation);
+    }
+    
+    if (line > 0) {
+        cJSON* region = cJSON_CreateObject();
+        cJSON_AddNumberToObject(region, "startLine", line);
+        if (column > 0) {
+            cJSON_AddNumberToObject(region, "startColumn", column);
+        }
+        cJSON_AddItemToObject(physicalLocation, "region", region);
+    }
+    
+    return physicalLocation;
+}
+
+// ThreadFlowLocation implementation
+cJSON* ThreadFlowLocation::toJson() const {
+    cJSON* tfl = cJSON_CreateObject();
+    
+    cJSON_AddItemToObject(tfl, "location", location.toThreadFlowLocationJson());
+    
+    if (!message.empty()) {
+        cJSON* msgObj = cJSON_CreateObject();
+        cJSON_AddStringToObject(msgObj, "text", message.c_str());
+        cJSON_AddItemToObject(tfl, "message", msgObj);
+    }
+    
+    if (nestingLevel > 0) {
+        cJSON_AddNumberToObject(tfl, "nestingLevel", nestingLevel);
+    }
+    
+    if (executionOrder > 0) {
+        cJSON_AddNumberToObject(tfl, "executionOrder", executionOrder);
+    }
+    
+    return tfl;
+}
+
+// CodeFlow implementation
+cJSON* CodeFlow::toJson() const {
+    cJSON* codeFlow = cJSON_CreateObject();
+    
+    if (!message.empty()) {
+        cJSON* msgObj = cJSON_CreateObject();
+        cJSON_AddStringToObject(msgObj, "text", message.c_str());
+        cJSON_AddItemToObject(codeFlow, "message", msgObj);
+    }
+    
+    if (!threadFlowLocations.empty()) {
+        cJSON* threadFlows = cJSON_CreateArray();
+        cJSON* threadFlow = cJSON_CreateObject();
+        cJSON* locations = cJSON_CreateArray();
+        
+        for (const auto& tfl : threadFlowLocations) {
+            cJSON_AddItemToArray(locations, tfl.toJson());
+        }
+        
+        cJSON_AddItemToObject(threadFlow, "locations", locations);
+        cJSON_AddItemToArray(threadFlows, threadFlow);
+        cJSON_AddItemToObject(codeFlow, "threadFlows", threadFlows);
+    }
+    
+    return codeFlow;
+}
+
 // Result implementation
 cJSON* Result::toJson() const {
     cJSON* result = cJSON_CreateObject();
@@ -84,6 +155,14 @@ cJSON* Result::toJson() const {
             cJSON_AddItemToArray(relatedLocationsArray, location.toJson());
         }
         cJSON_AddItemToObject(result, "relatedLocations", relatedLocationsArray);
+    }
+    
+    if (!codeFlows.empty()) {
+        cJSON* codeFlowsArray = cJSON_CreateArray();
+        for (const auto& codeFlow : codeFlows) {
+            cJSON_AddItemToArray(codeFlowsArray, codeFlow.toJson());
+        }
+        cJSON_AddItemToObject(result, "codeFlows", codeFlowsArray);
     }
     
     return result;

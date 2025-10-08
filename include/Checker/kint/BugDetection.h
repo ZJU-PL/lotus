@@ -6,6 +6,7 @@
 
 #include <map>
 #include <set>
+#include <vector>
 
 using namespace llvm;
 
@@ -16,13 +17,35 @@ namespace kint {
 
 namespace kint {
 
-enum class interr { 
+enum class interr {
+    NONE,  // Uninitialized/invalid state
     INT_OVERFLOW, 
     DIV_BY_ZERO, 
     BAD_SHIFT, 
     ARRAY_OOB, 
     DEAD_TRUE_BR, 
     DEAD_FALSE_BR 
+};
+
+// Structure to hold information about a program point along an execution path
+struct PathPoint {
+    const BasicBlock* bb;
+    const Instruction* inst;
+    std::string description;
+    
+    PathPoint(const BasicBlock* bb, const Instruction* inst = nullptr, const std::string& desc = "")
+        : bb(bb), inst(inst), description(desc) {}
+};
+
+// Structure to hold the execution path that leads to a bug
+struct BugPath {
+    std::vector<PathPoint> path;
+    const Instruction* bugInstruction;
+    interr bugType;
+    
+    BugPath() : bugInstruction(nullptr), bugType(interr::NONE) {}
+    BugPath(const Instruction* bugInst, interr type) 
+        : bugInstruction(bugInst), bugType(type) {}
 };
 
 class BugDetection {
@@ -53,6 +76,15 @@ public:
     // Range constraint generation
     bool add_range_cons(const crange& rng, const z3::expr& bv, z3::solver& solver);
 
+    // Path tracking
+    void setCurrentPath(const std::vector<PathPoint>& path) { m_current_path = path; }
+    void addPathPoint(const PathPoint& point) { m_current_path.push_back(point); }
+    void clearCurrentPath() { m_current_path.clear(); }
+    const std::vector<PathPoint>& getCurrentPath() const { return m_current_path; }
+    
+    // Get bug paths
+    const std::map<const Instruction*, BugPath>& getBugPaths() const { return m_bug_paths; }
+
     // Error reporting
     void mark_errors(const std::map<ICmpInst*, bool>& impossible_branches,
                     const std::set<GetElementPtrInst*>& gep_oob,
@@ -68,6 +100,15 @@ public:
                             const std::set<Instruction*>& bad_shift_insts,
                             const std::set<Instruction*>& div_zero_insts);
 
+private:
+    // Store the current execution path being analyzed
+    std::vector<PathPoint> m_current_path;
+    
+    // Map from bug instruction to its execution path
+    std::map<const Instruction*, BugPath> m_bug_paths;
+    
+    // Helper to record a bug with its path
+    void recordBugWithPath(const Instruction* inst, interr type);
 };
 
 } // namespace kint

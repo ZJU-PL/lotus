@@ -65,7 +65,7 @@ std::vector<CallInst*> TaintAnalysis::get_taint_source(Function& F) {
     std::vector<CallInst*> ret;
     // judge if this function is the taint source.
     const auto name = F.getName();
-    if (is_taint_src(name)) {
+    if (is_taint_src(name) && !F.isDeclaration()) {
         // mark all this function as a taint source.
         // Unfortunately arguments cannot be marked with metadata...
         // We need to rewrite the arguments -> unary callers and mark the callers.

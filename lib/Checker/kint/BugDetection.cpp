@@ -18,7 +18,9 @@ using namespace llvm;
 namespace kint {
 
 template <interr err, typename StrRet = const char*> constexpr StrRet mkstr() {
-    if (err == interr::INT_OVERFLOW) {
+    if (err == interr::NONE) {
+        return "none";
+    } else if (err == interr::INT_OVERFLOW) {
         return "integer overflow";
     } else if (err == interr::DIV_BY_ZERO) {
         return "divide by zero";
@@ -31,7 +33,7 @@ template <interr err, typename StrRet = const char*> constexpr StrRet mkstr() {
     } else if (err == interr::DEAD_FALSE_BR) {
         return "impossible false branch";
     } else {
-        static_assert(err == interr::INT_OVERFLOW || err == interr::DIV_BY_ZERO || err == interr::BAD_SHIFT
+        static_assert(err == interr::NONE || err == interr::INT_OVERFLOW || err == interr::DIV_BY_ZERO || err == interr::BAD_SHIFT
                 || err == interr::ARRAY_OOB || err == interr::DEAD_TRUE_BR || err == interr::DEAD_FALSE_BR,
             "unknown error type");
         return "";
@@ -40,6 +42,7 @@ template <interr err, typename StrRet = const char*> constexpr StrRet mkstr() {
 
 inline const char* mkstr(interr err) {
     switch (err) {
+    case interr::NONE: return mkstr<interr::NONE>();
     case interr::INT_OVERFLOW: return mkstr<interr::INT_OVERFLOW>();
     case interr::DIV_BY_ZERO: return mkstr<interr::DIV_BY_ZERO>();
     case interr::BAD_SHIFT: return mkstr<interr::BAD_SHIFT>();
@@ -120,6 +123,9 @@ void BugDetection::binary_check(BinaryOperator* op,
                          << '(' << lhs_bin << ", " << rhs_bin << ") -> " << op->getOpcodeName() << '('
                          << (is_signed ? lhs_bin.as_int64() : lhs_bin.as_uint64()) << ", "
                          << (is_signed ? rhs_bin.as_int64() : rhs_bin.as_uint64()) << ')' << rang::style::reset;
+
+            // Record bug with its path
+            this->recordBugWithPath(op, et);
 
             switch (et) {
             case interr::INT_OVERFLOW:
@@ -276,6 +282,17 @@ z3::expr BugDetection::v2sym(const Value* v,
     return solver.ctx().bv_val(lconst->getZExtValue(), lconst->getType()->getIntegerBitWidth());
 }
 
+void BugDetection::recordBugWithPath(const Instruction* inst, interr type) {
+    if (!inst) return;
+    
+    // Create a new BugPath for this bug
+    BugPath bugPath(inst, type);
+    bugPath.path = m_current_path;
+    
+    // Store it in the map
+    m_bug_paths[inst] = bugPath;
+}
+
 z3::expr BugDetection::cast_op_propagate(CastInst* op, const DenseMap<const Value*, llvm::Optional<z3::expr>>& v2sym, z3::solver& solver) {
     const auto src = this->v2sym(op->getOperand(0), v2sym, solver);
     const uint32_t bits = op->getType()->getIntegerBitWidth();
@@ -359,12 +376,13 @@ void BugDetection::generateSarifReport(const std::string& filename,
                                  "Branch condition can never be false"));
 
     // Helper lambda to add a result for an instruction
-    auto addBugResult = [&sarifLog](const Instruction* inst, interr bugType) {
+    auto addBugResult = [&sarifLog, this](const Instruction* inst, interr bugType) {
         if (!inst) return;
         
         sarif::Result result(
             [bugType]() {
                 switch (bugType) {
+                    case interr::NONE: return "NONE";
                     case interr::INT_OVERFLOW: return "INT_OVERFLOW";
                     case interr::DIV_BY_ZERO: return "DIV_BY_ZERO";
                     case interr::BAD_SHIFT: return "BAD_SHIFT";
@@ -389,6 +407,51 @@ void BugDetection::generateSarifReport(const std::string& filename,
             loc.snippet = instOS.str();
             
             result.locations.push_back(loc);
+        }
+        
+        // Add execution path as code flow if available
+        auto pathIt = m_bug_paths.find(inst);
+        if (pathIt != m_bug_paths.end() && !pathIt->second.path.empty()) {
+            sarif::CodeFlow codeFlow;
+            codeFlow.message = "Execution path leading to " + std::string(mkstr(bugType));
+            
+            int order = 1;
+            for (const auto& pathPoint : pathIt->second.path) {
+                // Create location for this path point
+                sarif::Location pathLoc;
+                
+                // Try to get location from the instruction if available
+                const Instruction* pathInst = pathPoint.inst ? pathPoint.inst : 
+                                              (pathPoint.bb ? &pathPoint.bb->front() : nullptr);
+                
+                if (pathInst && pathInst->getDebugLoc()) {
+                    pathLoc = sarif::utils::createLocationFromInstruction(pathInst);
+                    
+                    // Add instruction as snippet if we have a specific instruction
+                    if (pathPoint.inst) {
+                        std::string pathInstStr;
+                        llvm::raw_string_ostream pathInstOS(pathInstStr);
+                        pathInstOS << *pathPoint.inst;
+                        pathLoc.snippet = pathInstOS.str();
+                    }
+                }
+                
+                // Create thread flow location
+                std::string message = pathPoint.description;
+                if (message.empty() && pathPoint.bb) {
+                    message = "Execution reaches basic block in " + 
+                             (pathPoint.bb->getParent() ? pathPoint.bb->getParent()->getName().str() : "unknown");
+                }
+                
+                sarif::ThreadFlowLocation tfl(pathLoc, message, order++);
+                codeFlow.threadFlowLocations.push_back(tfl);
+            }
+            
+            // Add the bug location as the final step in the path
+            sarif::ThreadFlowLocation bugTfl(loc, "Bug detected: " + std::string(mkstr(bugType)), order);
+            codeFlow.threadFlowLocations.push_back(bugTfl);
+            
+            result.codeFlows.push_back(codeFlow);
         }
         
         sarifLog.addResult(result);

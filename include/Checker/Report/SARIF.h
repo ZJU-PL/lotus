@@ -19,10 +19,36 @@ struct Location {
     int column = 0;
     std::string function;
     std::string snippet;
+    std::string message;  // Optional message for this location
     
     Location() = default;
     Location(const std::string& file, int line, int column = 0) 
         : file(file), line(line), column(column) {}
+    
+    cJSON* toJson() const;
+    cJSON* toThreadFlowLocationJson() const;  // For codeFlow representation
+};
+
+// Thread flow location for code flows (execution paths)
+struct ThreadFlowLocation {
+    Location location;
+    std::string message;
+    int nestingLevel = 0;  // For showing call depth
+    int executionOrder = 0;
+    
+    ThreadFlowLocation() = default;
+    ThreadFlowLocation(const Location& loc, const std::string& msg = "", int order = 0)
+        : location(loc), message(msg), executionOrder(order) {}
+    
+    cJSON* toJson() const;
+};
+
+// Code flow represents an execution path
+struct CodeFlow {
+    std::vector<ThreadFlowLocation> threadFlowLocations;
+    std::string message;
+    
+    CodeFlow() = default;
     
     cJSON* toJson() const;
 };
@@ -34,6 +60,7 @@ struct Result {
     Level level = Level::Warning;
     std::vector<Location> locations;
     std::vector<Location> relatedLocations;
+    std::vector<CodeFlow> codeFlows;  // Execution paths that lead to the result
     
     Result(const std::string& ruleId, const std::string& message) 
         : ruleId(ruleId), message(message) {}
