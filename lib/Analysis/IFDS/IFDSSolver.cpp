@@ -1,5 +1,5 @@
 /*
- * Complete IFDS/IDE Framework Implementation
+ * IFDS Solver Implementation
  * 
  * This implements the full IFDS tabulation algorithm with:
  * - Path edges and summary edges
@@ -15,8 +15,8 @@
 #include <Support/ProgressBar.h>
 
 // Include the analysis headers to get the complete types
-#include <Analysis/IFDS/IFDSTaintAnalysis.h>
-#include <Analysis/IFDS/IFDSReachingDefinitions.h>
+#include "Analysis/IFDS/Clients/IFDSTaintAnalysis.h"
+#include "Analysis/IFDS/Clients/IFDSReachingDefinitions.h"
 
 namespace ifds {
 
@@ -122,22 +122,6 @@ std::vector<const llvm::Value*> IFDSProblem<Fact>::get_alias_set(const llvm::Val
         alias_set.push_back(v);
     }
     return alias_set;
-}
-
-// ============================================================================
-// IDEProblem Implementation
-// ============================================================================
-
-template<typename Fact, typename Value>
-typename IDEProblem<Fact, Value>::EdgeFunction 
-IDEProblem<Fact, Value>::compose(const EdgeFunction& f1, const EdgeFunction& f2) const {
-    return [f1, f2](const Value& v) { return f1(f2(v)); };
-}
-
-template<typename Fact, typename Value>
-typename IDEProblem<Fact, Value>::EdgeFunction 
-IDEProblem<Fact, Value>::identity() const {
-    return [](const Value& v) { return v; };
 }
 
 // ============================================================================
@@ -580,46 +564,8 @@ const llvm::Function* IFDSSolver<Problem>::get_main_function(const llvm::Module&
 }
 
 // ============================================================================
-// IDESolver Implementation
-// ============================================================================
-
-template<typename Problem>
-IDESolver<Problem>::IDESolver(Problem& problem) : m_problem(problem) {}
-
-template<typename Problem>
-void IDESolver<Problem>::solve(const llvm::Module& /*module*/) {
-    // TODO: Implement full IDE tabulation algorithm
-    // This is a simplified version - full implementation would include
-    // edge functions, value propagation, and meet-over-valid-paths computation
-}
-
-template<typename Problem>
-typename IDESolver<Problem>::Value 
-IDESolver<Problem>::get_value_at(const llvm::Instruction* inst, const typename Problem::FactType& fact) const {
-    auto inst_it = m_values.find(inst);
-    if (inst_it != m_values.end()) {
-        auto fact_it = inst_it->second.find(fact);
-        if (fact_it != inst_it->second.end()) {
-            return fact_it->second;
-        }
-    }
-    return m_problem.bottom_value();
-}
-
-template<typename Problem>
-const std::unordered_map<const llvm::Instruction*, 
-                        std::unordered_map<typename Problem::FactType, typename Problem::ValueType>>& 
-IDESolver<Problem>::get_all_values() const {
-    return m_values;
-}
-
-// ============================================================================
 // Explicit template instantiations for common fact types
 // ============================================================================
-
-// Include the analysis headers to get the complete types
-#include <Analysis/IFDS/IFDSTaintAnalysis.h>
-#include <Analysis/IFDS/IFDSReachingDefinitions.h>
 
 // Explicit template instantiations for types used in the codebase
 template class ifds::IFDSSolver<ifds::TaintAnalysis>;

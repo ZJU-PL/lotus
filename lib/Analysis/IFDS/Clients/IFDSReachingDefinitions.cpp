@@ -2,7 +2,7 @@
  * Reaching Definitions Analysis Implementation
  */
 
-#include <Analysis/IFDS/IFDSReachingDefinitions.h>
+#include <Analysis/IFDS/Clients/IFDSReachingDefinitions.h>
 
 #include <iostream>
 #include <llvm/Support/raw_ostream.h>

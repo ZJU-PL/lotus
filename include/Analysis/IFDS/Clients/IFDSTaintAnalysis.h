@@ -29,13 +29,14 @@ private:
     Type m_type;
     const llvm::Value* m_value;  // For variables
     const llvm::Value* m_memory_location;  // For memory locations
+    const llvm::Instruction* m_source_inst;  // Where this taint originated
     
 public:
     TaintFact();
     
     static TaintFact zero();
-    static TaintFact tainted_var(const llvm::Value* v);
-    static TaintFact tainted_memory(const llvm::Value* loc);
+    static TaintFact tainted_var(const llvm::Value* v, const llvm::Instruction* source = nullptr);
+    static TaintFact tainted_memory(const llvm::Value* loc, const llvm::Instruction* source = nullptr);
     
     bool operator==(const TaintFact& other) const;
     bool operator<(const TaintFact& other) const;
@@ -44,10 +45,14 @@ public:
     Type get_type() const;
     const llvm::Value* get_value() const;
     const llvm::Value* get_memory_location() const;
+    const llvm::Instruction* get_source() const;
     
     bool is_zero() const;
     bool is_tainted_var() const;
     bool is_tainted_memory() const;
+    
+    // Create a new fact with the same taint but different source
+    TaintFact with_source(const llvm::Instruction* source) const;
     
     friend std::ostream& operator<<(std::ostream& os, const TaintFact& fact);
 };
@@ -101,6 +106,17 @@ public:
     
 private:
     bool kills_fact(const llvm::CallInst* call, const TaintFact& fact) const;
+    
+    // Helper to find sources by backward traversal
+    struct TaintPath {
+        std::vector<const llvm::Instruction*> sources;
+        std::vector<const llvm::Function*> intermediate_functions;
+    };
+    
+    TaintPath find_sources_for_sink(
+        const IFDSSolver<TaintAnalysis>& solver,
+        const llvm::CallInst* sink_call,
+        const TaintFact& tainted_fact) const;
 };
 
 } // namespace ifds

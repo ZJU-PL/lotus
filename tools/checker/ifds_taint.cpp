@@ -7,7 +7,7 @@
  */
 
 #include <Analysis/IFDS/IFDSFramework.h>
-#include <Analysis/IFDS/IFDSTaintAnalysis.h>
+#include <Analysis/IFDS/Clients/IFDSTaintAnalysis.h>
 
 #include <Alias/DyckAA/DyckAliasAnalysis.h>
 

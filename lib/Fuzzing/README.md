@@ -12,6 +12,6 @@ The analyses:
  
 - BasicBlockDistance.hpp                      <-     AFLGo basic block distance analysis
 - DAFL.hpp                                    <-     DAFL data-flow distance
-- xtendedCallGraph.hpp                       <-     enhance CFG with PTA
+- xtendedCallGraph.hpp                        <-     enhance CFG with PTA
 - FunctionDistance.hpp                        <-     Hawkeye function distance analysis
 - TargetDetection.hpp                         <-     supporting target instrumentation

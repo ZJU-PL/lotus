@@ -1,4 +1,5 @@
 // DAFL analysis using DyckVFG for slicing-based distance computation
+// USENIX Security 23: DAFL: Directed Grey-box Fuzzing guided by Data Dependency
 #include "Fuzzing/Analysis/DAFL.h"
 #include "Fuzzing/Analysis/TargetDetection.h"
 

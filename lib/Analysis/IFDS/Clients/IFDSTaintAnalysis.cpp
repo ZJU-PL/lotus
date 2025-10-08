@@ -2,7 +2,7 @@
  * Taint Analysis Implementation
  */
 
-#include <Analysis/IFDS/IFDSTaintAnalysis.h>
+#include <Analysis/IFDS/Clients/IFDSTaintAnalysis.h>
 #include <Annotation/Taint/TaintConfigManager.h>
 
 #include <iostream>
@@ -14,23 +14,25 @@ namespace ifds {
 // TaintFact Implementation
 // ============================================================================
 
-TaintFact::TaintFact() : m_type(ZERO), m_value(nullptr), m_memory_location(nullptr) {}
+TaintFact::TaintFact() : m_type(ZERO), m_value(nullptr), m_memory_location(nullptr), m_source_inst(nullptr) {}
 
 TaintFact TaintFact::zero() { 
     return TaintFact(); 
 }
 
-TaintFact TaintFact::tainted_var(const llvm::Value* v) {
+TaintFact TaintFact::tainted_var(const llvm::Value* v, const llvm::Instruction* source) {
     TaintFact fact;
     fact.m_type = TAINTED_VAR;
     fact.m_value = v;
+    fact.m_source_inst = source;
     return fact;
 }
 
-TaintFact TaintFact::tainted_memory(const llvm::Value* loc) {
+TaintFact TaintFact::tainted_memory(const llvm::Value* loc, const llvm::Instruction* source) {
     TaintFact fact;
     fact.m_type = TAINTED_MEMORY;
     fact.m_memory_location = loc;
+    fact.m_source_inst = source;
     return fact;
 }
 
@@ -68,6 +70,18 @@ const llvm::Value* TaintFact::get_value() const {
 
 const llvm::Value* TaintFact::get_memory_location() const { 
     return m_memory_location; 
+}
+
+const llvm::Instruction* TaintFact::get_source() const {
+    return m_source_inst;
+}
+
+TaintFact TaintFact::with_source(const llvm::Instruction* source) const {
+    TaintFact fact = *this;
+    if (!fact.m_source_inst) { // Only set source if not already set
+        fact.m_source_inst = source;
+    }
+    return fact;
 }
 
 bool TaintFact::is_zero() const { 
@@ -506,6 +520,77 @@ bool TaintAnalysis::kills_fact(const llvm::CallInst* call, const TaintFact& fact
     return false;
 }
 
+// Helper to find source instructions by backward traversal
+// TODO: is this an elegant (or correct) way? A more natural (but potentially more compelx) way is to "log" the analysis process (e.g. track "value flows")
+TaintAnalysis::TaintPath TaintAnalysis::find_sources_for_sink(
+    const IFDSSolver<TaintAnalysis>& solver,
+    const llvm::CallInst* sink_call,
+    const TaintFact& tainted_fact) const {
+    
+    TaintPath result;
+    std::unordered_set<const llvm::Instruction*> visited;
+    std::unordered_set<const llvm::Function*> visited_functions;
+    std::vector<const llvm::Instruction*> worklist;
+    worklist.push_back(sink_call);
+    
+    const auto& path_edges = solver.get_path_edges();
+    
+    // Track intermediate functions for path visualization
+    visited_functions.insert(sink_call->getFunction());
+    
+    // Backward search with depth limit to avoid performance issues
+    int depth = 0;
+    const int max_depth = 1000;
+    
+    while (!worklist.empty() && result.sources.size() < 5 && depth < max_depth) {
+        const llvm::Instruction* current = worklist.back();
+        worklist.pop_back();
+        depth++;
+        
+        if (visited.count(current)) continue;
+        visited.insert(current);
+        
+        // Track functions in the path (intermediate functions between source and sink)
+        const llvm::Function* current_func = current->getFunction();
+        if (!visited_functions.count(current_func) && result.intermediate_functions.size() < 8) {
+            visited_functions.insert(current_func);
+            result.intermediate_functions.push_back(current_func);
+        }
+        
+        // Check if this instruction is a source function
+        if (is_source(current)) {
+            result.sources.push_back(current);
+            continue; // Don't traverse beyond sources
+        }
+        
+        // Check if this is a function entry with tainted arguments (initial taint)
+        if (current == &current->getFunction()->getEntryBlock().front()) {
+            // This could be entry point with tainted arguments
+            result.sources.push_back(current);
+            continue;
+        }
+        
+        // Find predecessor path edges
+        bool found_predecessor = false;
+        for (const auto& edge : path_edges) {
+            if (edge.target_node == current && !visited.count(edge.start_node)) {
+                worklist.push_back(edge.start_node);
+                found_predecessor = true;
+            }
+        }
+        
+        // If no predecessors found, this might be a source
+        if (!found_predecessor && current != sink_call) {
+            result.sources.push_back(current);
+        }
+    }
+    
+    // Reverse intermediate functions so they go from source to sink
+    std::reverse(result.intermediate_functions.begin(), result.intermediate_functions.end());
+    
+    return result;
+}
+
 void TaintAnalysis::report_vulnerabilities(const IFDSSolver<TaintAnalysis>& solver, 
                                           llvm::raw_ostream& OS, 
                                           size_t max_vulnerabilities) const {
@@ -527,30 +612,43 @@ void TaintAnalysis::report_vulnerabilities(const IFDSSolver<TaintAnalysis>& solv
         std::string func_name = taint_config::normalize_name(call->getCalledFunction()->getName().str());
         
         std::string tainted_args;
+        std::vector<const llvm::Instruction*> all_sources;
+        std::vector<const llvm::Function*> propagation_path;
         
         for (unsigned i = 0; i < call->getNumOperands() - 1; ++i) {
             const llvm::Value* arg = call->getOperand(i);
             
             for (const auto& fact : facts) {
+                bool found_tainted = false;
                 // Check if the argument itself is tainted
                 if (fact.is_tainted_var() && fact.get_value() == arg) {
                     if (!tainted_args.empty()) tainted_args += ", ";
                     tainted_args += "arg" + std::to_string(i);
-                    break;
+                    found_tainted = true;
                 }
                 // Check if the argument points to tainted memory (direct match)
-                if (fact.is_tainted_memory() && arg->getType()->isPointerTy()) {
+                else if (fact.is_tainted_memory() && arg->getType()->isPointerTy()) {
                     if (fact.get_memory_location() == arg) {
                         if (!tainted_args.empty()) tainted_args += ", ";
                         tainted_args += "arg" + std::to_string(i) + "(mem)";
-                        break;
+                        found_tainted = true;
                     }
                     // Check if the argument may alias with tainted memory
-                    if (may_alias(arg, fact.get_memory_location())) {
+                    else if (may_alias(arg, fact.get_memory_location())) {
                         if (!tainted_args.empty()) tainted_args += ", ";
                         tainted_args += "arg" + std::to_string(i) + "(alias)";
-                        break;
+                        found_tainted = true;
                     }
+                }
+                
+                // Find sources for this tainted fact
+                if (found_tainted) {
+                    auto path = find_sources_for_sink(solver, call, fact);
+                    all_sources.insert(all_sources.end(), path.sources.begin(), path.sources.end());
+                    if (propagation_path.empty()) {
+                        propagation_path = path.intermediate_functions;
+                    }
+                    break;
                 }
             }
         }
@@ -562,6 +660,55 @@ void TaintAnalysis::report_vulnerabilities(const IFDSSolver<TaintAnalysis>& solv
                 OS << "  Sink: " << func_name << " at " << *call << "\n";
                 OS << "  Tainted arguments: " << tainted_args << "\n";
                 OS << "  Location: " << call->getDebugLoc() << "\n";
+                
+                // Display sources
+                if (!all_sources.empty()) {
+                    OS << "  \n  📍 Taint Sources:\n";
+                    std::unordered_set<const llvm::Instruction*> unique_sources(all_sources.begin(), all_sources.end());
+                    int source_num = 1;
+                    for (const auto* source : unique_sources) {
+                        if (auto* source_call = llvm::dyn_cast<llvm::CallInst>(source)) {
+                            if (source_call->getCalledFunction()) {
+                                std::string source_func = taint_config::normalize_name(
+                                    source_call->getCalledFunction()->getName().str());
+                                OS << "    " << source_num++ << ". " << source_func 
+                                   << " in function " << source->getFunction()->getName()
+                                   << " at " << source_call->getDebugLoc() << "\n";
+                            }
+                        } else {
+                            // Function entry (tainted arguments)
+                            if (source == &source->getFunction()->getEntryBlock().front()) {
+                                OS << "    " << source_num++ << ". [Program Entry/Tainted Argument]"
+                                   << " in function " << source->getFunction()->getName() << "\n";
+                            } else {
+                                OS << "    " << source_num++ << ". [Instruction]"
+                                   << " in function " << source->getFunction()->getName()
+                                   << " at " << source->getDebugLoc() << "\n";
+                            }
+                        }
+                    }
+                } else {
+                    OS << "  \n  📍 Taint Sources: [Unable to determine - complex flow]\n";
+                }
+                
+                // Display propagation path (intermediate functions)
+                if (!propagation_path.empty() && propagation_path.size() > 1) {
+                    OS << "  \n  🔗 Propagation Path:\n";
+                    OS << "     ";
+                    for (size_t i = 0; i < propagation_path.size() && i < 6; ++i) {
+                        if (i > 0) OS << " → ";
+                        OS << propagation_path[i]->getName().str();
+                    }
+                    if (propagation_path.size() > 6) {
+                        OS << " → ... (" << (propagation_path.size() - 6) << " more)";
+                    }
+                    OS << " → " << call->getFunction()->getName().str();
+                    OS << "\n";
+                } else if (!all_sources.empty()) {
+                    // Show simple path when in same function
+                    OS << "  \n  🔗 Flow: Source and sink in same function (" 
+                       << call->getFunction()->getName().str() << ")\n";
+                }
             }
         }
     }
