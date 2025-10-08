@@ -12,6 +12,8 @@
 #include <llvm/IR/CFG.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <Support/ProgressBar.h>
+
 // Include the analysis headers to get the complete types
 #include <Analysis/IFDS/IFDSTaintAnalysis.h>
 #include <Analysis/IFDS/IFDSReachingDefinitions.h>
@@ -296,6 +298,9 @@ void IFDSSolver<Problem>::propagate_path_edge(const PathEdgeType& edge) {
     m_path_edges.insert(edge);
     m_worklist.push_back(edge);
     
+    // Add to index for fast lookup by target node
+    m_path_edges_at[edge.target_node].push_back(edge);
+    
     // Update entry/exit facts for queries
     m_entry_facts[edge.start_node].insert(edge.start_fact);
     m_exit_facts[edge.target_node].insert(edge.target_fact);
@@ -332,17 +337,20 @@ void IFDSSolver<Problem>::process_call_edge(const llvm::CallInst* call, const ll
         propagate_path_edge(edge);
     }
     
-    // Check if we have existing summary edges for this call
-    for (const auto& summary : m_summary_edges) {
-        if (summary.call_site == call && summary.call_fact == fact) {
-            // Apply existing summary
-            const llvm::Instruction* return_site = get_return_site(call);
-            if (return_site) {
-                FactSet return_facts = m_problem.return_flow(call, callee, 
-                                                           summary.return_fact, fact);
-                for (const auto& return_fact : return_facts) {
-                    PathEdgeType return_edge(call, fact, return_site, return_fact);
-                    propagate_path_edge(return_edge);
+    // Check if we have existing summary edges for this call (O(1) lookup)
+    auto summary_it = m_summary_index.find(call);
+    if (summary_it != m_summary_index.end()) {
+        const llvm::Instruction* return_site = get_return_site(call);
+        if (return_site) {
+            for (const auto& summary : summary_it->second) {
+                if (summary.call_fact == fact) {
+                    // Apply existing summary
+                    FactSet return_facts = m_problem.return_flow(call, callee, 
+                                                               summary.return_fact, fact);
+                    for (const auto& return_fact : return_facts) {
+                        PathEdgeType return_edge(call, fact, return_site, return_fact);
+                        propagate_path_edge(return_edge);
+                    }
                 }
             }
         }
@@ -363,12 +371,15 @@ void IFDSSolver<Problem>::process_return_edge(const llvm::ReturnInst* ret, const
         
         if (m_summary_edges.find(summary) == m_summary_edges.end()) {
             m_summary_edges.insert(summary);
+            // Add to index for O(1) lookup
+            m_summary_index[call].push_back(summary);
             
-            // Apply summary to all existing path edges ending at this call
-            for (const auto& path_edge : m_path_edges) {
-                if (path_edge.target_node == call) {
-                    const llvm::Instruction* return_site = get_return_site(call);
-                    if (return_site) {
+            // Apply summary to all existing path edges ending at this call (O(1) lookup)
+            auto path_it = m_path_edges_at.find(call);
+            if (path_it != m_path_edges_at.end()) {
+                const llvm::Instruction* return_site = get_return_site(call);
+                if (return_site) {
+                    for (const auto& path_edge : path_it->second) {
                         FactSet return_facts = m_problem.return_flow(call, func, 
                                                                    fact, path_edge.target_fact);
                         for (const auto& return_fact : return_facts) {
@@ -473,7 +484,9 @@ void IFDSSolver<Problem>::build_cfg_successors(const llvm::Module& module) {
 template<typename Problem>
 void IFDSSolver<Problem>::initialize_worklist(const llvm::Module& module) {
     m_path_edges.clear();
+    m_path_edges_at.clear();
     m_summary_edges.clear();
+    m_summary_index.clear();
     m_worklist.clear();
     m_entry_facts.clear();
     m_exit_facts.clear();
@@ -499,6 +512,16 @@ void IFDSSolver<Problem>::initialize_worklist(const llvm::Module& module) {
 
 template<typename Problem>
 void IFDSSolver<Problem>::run_tabulation() {
+    ProgressBar* progress = nullptr;
+    size_t processed_edges = 0;
+    size_t last_update = 0;
+    const size_t update_interval = 100; // Update progress every 100 edges
+    
+    if (m_show_progress) {
+        progress = new ProgressBar("IFDS Analysis", ProgressBar::PBS_CharacterStyle, 0.01);
+        llvm::outs() << "\n"; // Start on a new line for cleaner output
+    }
+    
     while (!m_worklist.empty()) {
         PathEdgeType current_edge = m_worklist.back();
         m_worklist.pop_back();
@@ -523,6 +546,31 @@ void IFDSSolver<Problem>::run_tabulation() {
                 process_normal_edge(curr, succ, fact);
             }
         }
+        
+        // Update progress based on total path edges discovered
+        // This gives a more accurate picture since path_edges is monotonically increasing
+        processed_edges++;
+        if (m_show_progress && processed_edges - last_update >= update_interval) {
+            last_update = processed_edges;
+            // Display stats: processed edges and current path edge count
+            size_t total_path_edges = m_path_edges.size();
+            size_t worklist_size = m_worklist.size();
+            
+            // Show processed/total and worklist size for transparency
+            llvm::outs() << "\r\033[KProcessed: " << processed_edges 
+                        << " | Path edges: " << total_path_edges
+                        << " | Worklist: " << worklist_size;
+            llvm::outs().flush();
+        }
+    }
+    
+    // Show 100% completion
+    if (m_show_progress) {
+        llvm::outs() << "\r\033[K"; // Clear the line
+        progress->showProgress(1.0);
+        llvm::outs() << "\nCompleted! Processed " << processed_edges 
+                    << " edges, discovered " << m_path_edges.size() << " path edges\n";
+        delete progress;
     }
 }
 

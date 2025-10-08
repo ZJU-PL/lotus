@@ -123,6 +123,12 @@ int main(int argc, char **argv) {
                 taintAnalysis.set_alias_analysis(dyckAA);
                 
                 IFDSSolver<TaintAnalysis> solver(taintAnalysis);
+                
+                // Enable progress bar when running in verbose mode
+                if (Verbose) {
+                    solver.set_show_progress(true);
+                }
+                
                 solver.solve(*M);
                 
                 if (ShowResults) {

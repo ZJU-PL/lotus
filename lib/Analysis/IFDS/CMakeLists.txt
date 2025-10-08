@@ -9,6 +9,6 @@ set(IFDS_SOURCES
 
 add_library(IFDS STATIC ${IFDS_SOURCES})
 
-# Link with Checker library for taint configuration
-target_link_libraries(IFDS Annotation)
+# Link with Checker library for taint configuration and Support library for progress bar
+target_link_libraries(IFDS Annotation CanarySupport)
 

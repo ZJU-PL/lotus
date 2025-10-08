@@ -224,6 +224,9 @@ public:
     
     void solve(const llvm::Module& module);
     
+    // Enable/disable progress bar display during analysis
+    void set_show_progress(bool show) { m_show_progress = show; }
+    
     // Query interface for analysis results
     FactSet get_facts_at_entry(const llvm::Instruction* inst) const;
     FactSet get_facts_at_exit(const llvm::Instruction* inst) const;
@@ -247,6 +250,9 @@ private:
     
     Problem& m_problem;
     
+    // Progress tracking
+    bool m_show_progress = false;
+    
     // Core tabulation tables
     std::unordered_set<PathEdgeType, PathEdgeHash<Fact>> m_path_edges;
     std::unordered_set<SummaryEdgeType, SummaryEdgeHash<Fact>> m_summary_edges;
@@ -255,6 +261,12 @@ private:
     // Tabulation tables for efficiency
     std::unordered_map<const llvm::Instruction*, FactSet> m_entry_facts;
     std::unordered_map<const llvm::Instruction*, FactSet> m_exit_facts;
+    
+    // Indexed summary edges for O(1) lookup (call_site -> list of summary edges)
+    std::unordered_map<const llvm::CallInst*, std::vector<SummaryEdgeType>> m_summary_index;
+    
+    // Indexed path edges by target node for O(1) lookup
+    std::unordered_map<const llvm::Instruction*, std::vector<PathEdgeType>> m_path_edges_at;
     
     // Call graph information
     std::unordered_map<const llvm::CallInst*, const llvm::Function*> m_call_to_callee;
