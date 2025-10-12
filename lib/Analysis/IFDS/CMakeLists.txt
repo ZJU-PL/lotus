@@ -2,9 +2,9 @@
 
 # Framework core
 set(IFDS_FRAMEWORK_SOURCES
-  IFDSSolver.cpp
   IDESolver.cpp
   IFDSDebugUtils.cpp
+  ParallelIFDSSolver.cpp
 )
 
 # Client analyses

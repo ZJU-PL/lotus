@@ -12,6 +12,9 @@
 #include <Analysis/IFDS/IFDSFramework.h>
 #include <Analysis/IFDS/Clients/IFDSTaintAnalysis.h>
 
+// Forward declaration for solver class
+template<typename Problem> class IFDSSolver;
+
 using namespace ifds;
 using namespace llvm;
 

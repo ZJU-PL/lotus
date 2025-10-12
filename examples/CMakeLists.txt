@@ -4,12 +4,14 @@ set(EXAMPLES
   RapidJSONExample.cpp
   AndersenExample.cpp
   PDGExample.cpp
+  ParallelIFDSExample.cpp
 )
 
 set(EXAMPLES_NAMES
   RapidJSONExample
   AndersenExample
   PDGExample
+  ParallelIFDSExample
 )
 
 set(EXAMPLES_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)

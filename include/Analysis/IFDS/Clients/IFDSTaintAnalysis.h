@@ -7,6 +7,7 @@
 #pragma once
 
 #include <Analysis/IFDS/IFDSFramework.h>
+#include <Analysis/IFDS/IFDSSolvers.h>
 
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Constants.h>
@@ -100,23 +101,52 @@ public:
     void add_sink_function(const std::string& func_name);
     
     // Vulnerability detection and reporting
-    void report_vulnerabilities(const IFDSSolver<TaintAnalysis>& solver, 
-                               llvm::raw_ostream& OS, 
+    void report_vulnerabilities(const IFDSSolver<TaintAnalysis>& solver,
+                               llvm::raw_ostream& OS,
                                size_t max_vulnerabilities = 10) const;
+
+    void report_vulnerabilities_parallel(const ParallelIFDSSolver<TaintAnalysis>& solver,
+                                        llvm::raw_ostream& OS,
+                                        size_t max_vulnerabilities = 10) const;
     
-private:
-    bool kills_fact(const llvm::CallInst* call, const TaintFact& fact) const;
-    
-    // Helper to find sources by backward traversal
+    // Exposed for reporting utilities
     struct TaintPath {
         std::vector<const llvm::Instruction*> sources;
         std::vector<const llvm::Function*> intermediate_functions;
     };
-    
+
     TaintPath find_sources_for_sink(
         const IFDSSolver<TaintAnalysis>& solver,
         const llvm::CallInst* sink_call,
         const TaintFact& tainted_fact) const;
+
+    TaintPath find_sources_for_sink_parallel(
+        const ParallelIFDSSolver<TaintAnalysis>& solver,
+        const llvm::CallInst* sink_call,
+        const TaintFact& tainted_fact) const;
+
+    bool is_argument_tainted(const llvm::Value* arg, const TaintFact& fact) const;
+    std::string format_tainted_arg(unsigned arg_index, const TaintFact& fact, const llvm::CallInst* call) const;
+    void analyze_tainted_arguments(const llvm::CallInst* call, const FactSet& facts,
+                                  std::string& tainted_args,
+                                  std::vector<const llvm::Instruction*>& all_sources,
+                                  std::vector<const llvm::Function*>& propagation_path) const;
+    void output_vulnerability_report(llvm::raw_ostream& OS, size_t vuln_num,
+                                   const std::string& func_name, const llvm::CallInst* call,
+                                   const std::string& tainted_args,
+                                   const std::vector<const llvm::Instruction*>& all_sources,
+                                   const std::vector<const llvm::Function*>& propagation_path,
+                                   size_t max_vulnerabilities) const;
+
+private:
+    bool kills_fact(const llvm::CallInst* call, const TaintFact& fact) const;
+
+    // Internal helpers that need access to alias analysis utilities
+    void propagate_tainted_memory_aliases(const llvm::Value* ptr, FactSet& result) const;
+    void handle_format_function_taint(const llvm::CallInst* call, const TaintFact& fact, FactSet& result) const;
+    void handle_source_function_specs(const llvm::CallInst* call, FactSet& result) const;
+    void handle_pipe_specifications(const llvm::CallInst* call, const TaintFact& fact, FactSet& result) const;
+
 };
 
 } // namespace ifds

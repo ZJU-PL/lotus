@@ -10,7 +10,7 @@ InterProceduralDataFlowEngine::InterProceduralDataFlowEngine() = default;
 
 std::unique_ptr<DataFlowResult> InterProceduralDataFlowEngine::runForwardAnalysis(
     Module& m,
-    std::function<GenKillTransformer*(Instruction*)> createTransformer,
+    const std::function<GenKillTransformer*(Instruction*)>& createTransformer,
     const std::set<Value*>& initialFacts) {
     
     // Create semiring and WPDS
@@ -36,7 +36,7 @@ std::unique_ptr<DataFlowResult> InterProceduralDataFlowEngine::runForwardAnalysi
 
 std::unique_ptr<DataFlowResult> InterProceduralDataFlowEngine::runBackwardAnalysis(
     Module& m,
-    std::function<GenKillTransformer*(Instruction*)> createTransformer,
+    const std::function<GenKillTransformer*(Instruction*)>& createTransformer,
     const std::set<Value*>& initialFacts) {
     
     // Create semiring and WPDS
@@ -79,7 +79,7 @@ const std::set<Value*>& InterProceduralDataFlowEngine::getOutSet(Instruction* in
 void InterProceduralDataFlowEngine::buildWPDS(
     Module& m, 
     WPDS<GenKillTransformer>& wpds,
-    std::function<GenKillTransformer*(Instruction*)> createTransformer) {
+    const std::function<GenKillTransformer*(Instruction*)>& createTransformer) {
     
     // Clear previous mappings
     functionToKey.clear();
@@ -102,16 +102,37 @@ void InterProceduralDataFlowEngine::buildWPDS(
         wpds_key_t funcEntry = new_str2key(("entry_" + fname).c_str());
         wpds_key_t funcExit = new_str2key(("exit_" + fname).c_str());
         functionToKey[&F] = funcEntry;
+        functionExitToKey[&F] = funcExit;
         
-        // For each basic block in the function
-        for (auto& BB : F) {
-            // Create basic block key
-            std::string bbName = BB.getName().str();
+        // Connect function entry symbol to the first basic block
+        {
+            BasicBlock &entryBB = F.getEntryBlock();
+            wpds_key_t entryBBKey = WPDS_EPSILON;
+            // bbToKey is filled inside loop; ensure a temporary key for entry if needed
+            std::string bbName = entryBB.getName().str();
             if (bbName.empty()) {
                 bbName = "bb_" + std::to_string(bbToKey.size());
             }
-            wpds_key_t bbKey = new_str2key(bbName.c_str());
-            bbToKey[&BB] = bbKey;
+            entryBBKey = new_str2key(bbName.c_str());
+            bbToKey[&entryBB] = entryBBKey;
+            wpds.add_rule(controlState, funcEntry, controlState, entryBBKey, GenKillTransformer::one());
+        }
+
+        // For each basic block in the function
+        for (auto& BB : F) {
+            // Create basic block key if not already created (e.g., entry BB)
+            wpds_key_t bbKey;
+            auto bbIt = bbToKey.find(&BB);
+            if (bbIt == bbToKey.end()) {
+                std::string bbName = BB.getName().str();
+                if (bbName.empty()) {
+                    bbName = "bb_" + std::to_string(bbToKey.size());
+                }
+                bbKey = new_str2key(bbName.c_str());
+                bbToKey[&BB] = bbKey;
+            } else {
+                bbKey = bbIt->second;
+            }
             
             // For each instruction in the basic block
             for (auto& I : BB) {
@@ -149,6 +170,7 @@ void InterProceduralDataFlowEngine::buildWPDS(
                         
                         // Add interprocedural edges for the call
                         wpds_key_t calledFuncEntry = functionToKey[calledFunc];
+                        wpds_key_t calledFuncExit  = functionExitToKey[calledFunc];
                         wpds.add_rule(
                             controlState, instKey, 
                             controlState, calledFuncEntry, callSiteKey, 
@@ -165,13 +187,14 @@ void InterProceduralDataFlowEngine::buildWPDS(
                             Instruction* nextInst = &(*nextIt);
                             wpds_key_t nextInstKey = instToKey[nextInst];
                             
-                            // Add rule for function return
+                            // Connect function exit to return site, then to next instruction
                             wpds.add_rule(
-                                controlState, funcExit, 
-                                controlState, 
+                                controlState, calledFuncExit,
+                                controlState,
+                                returnSiteKey,
                                 GenKillTransformer::one()
                             );
-                            
+
                             // Connect return site to next instruction
                             wpds.add_rule(
                                 controlState, returnSiteKey, 

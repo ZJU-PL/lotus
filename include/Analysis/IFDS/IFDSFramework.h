@@ -17,19 +17,209 @@
 #include <llvm/IR/CFG.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/CallGraph.h>
-
-#include <set>
-
-
 #include <Alias/DyckAA/DyckAliasAnalysis.h>
 
 #include <functional>
-#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <thread>
+#include <set>
+#include <mutex>
+#include <atomic>
+#include <condition_variable>
+#include <chrono>
+#include <memory>
+
+// Forward declarations for solver classes (moved to separate headers)
+template<typename Problem> class IFDSSolver;
+template<typename Problem> class ParallelIFDSSolver;
+template<typename Problem> class IDESolver;
+
+// Forward declaration (real class defined in Alias/DyckAA/DyckAliasAnalysis.h)
+class DyckAliasAnalysis;
 
 namespace ifds {
+
+// ============================================================================
+// Thread-Safe Data Structures for Parallel IFDS
+// ============================================================================
+
+// Minimal optional for C++14 (local to IFDS framework)
+template<typename T>
+class SimpleOptional {
+private:
+    T* m_value;
+    bool m_has_value;
+public:
+    SimpleOptional() : m_value(nullptr), m_has_value(false) {}
+    SimpleOptional(const T& value) : m_value(new T(value)), m_has_value(true) {}
+    SimpleOptional(const SimpleOptional& other) : m_has_value(other.m_has_value) {
+        if (m_has_value) m_value = new T(*other.m_value); else m_value = nullptr;
+    }
+    SimpleOptional& operator=(const SimpleOptional& other) {
+        if (this != &other) {
+            if (m_value) delete m_value;
+            m_has_value = other.m_has_value;
+            if (m_has_value) m_value = new T(*other.m_value); else m_value = nullptr;
+        }
+        return *this;
+    }
+    ~SimpleOptional() { if (m_value) delete m_value; }
+    bool has_value() const { return m_has_value; }
+    const T& value() const { return *m_value; }
+    T& value() { return *m_value; }
+    explicit operator bool() const { return m_has_value; }
+};
+
+template<typename T>
+class ThreadSafeSet {
+private:
+    mutable std::mutex m_mutex;
+    std::unordered_set<T> m_set;
+
+public:
+    bool insert(const T& value) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_set.insert(value).second;
+    }
+
+    bool contains(const T& value) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_set.find(value) != m_set.end();
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_set.size();
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_set.clear();
+    }
+
+    // For iteration (read-only operations)
+    template<typename Func>
+    void for_each(Func func) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const auto& item : m_set) {
+            func(item);
+        }
+    }
+};
+
+template<typename K, typename V>
+class ThreadSafeMap {
+private:
+    mutable std::mutex m_mutex;
+    std::unordered_map<K, V> m_map;
+
+public:
+    bool insert_or_assign(const K& key, const V& value) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_map.find(key);
+        if (it != m_map.end()) {
+            it->second = value;
+            return false; // Updated existing
+        } else {
+            m_map[key] = value;
+            return true;  // Inserted new
+        }
+    }
+
+    SimpleOptional<V> get(const K& key) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_map.find(key);
+        return it != m_map.end() ? SimpleOptional<V>(it->second) : SimpleOptional<V>();
+    }
+
+    bool contains(const K& key) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_map.find(key) != m_map.end();
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_map.size();
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_map.clear();
+    }
+
+    // For iteration (read-only operations)
+    template<typename Func>
+    void for_each(Func func) const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const auto& item : m_map) {
+            func(item);
+        }
+    }
+};
+
+template<typename T>
+class ThreadSafeVector {
+private:
+    mutable std::mutex m_mutex;
+    std::vector<T> m_vector;
+
+public:
+    void push_back(const T& value) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_vector.push_back(value);
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_vector.size();
+    }
+
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_vector.empty();
+    }
+
+    SimpleOptional<T> pop_back() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_vector.empty()) {
+            return SimpleOptional<T>();
+        }
+        T value = m_vector.back();
+        m_vector.pop_back();
+        return SimpleOptional<T>(value);
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_vector.clear();
+    }
+};
+
+// ============================================================================
+// Parallel IFDS Solver Configuration
+// ============================================================================
+
+struct ParallelIFDSConfig {
+    size_t num_threads = std::thread::hardware_concurrency();
+    bool enable_parallel_processing = true;
+    enum class ParallelMode {
+        WORKLIST_PARALLELISM,    // Parallel worklist processing (default)
+        FUNCTION_PARALLELISM,    // Function-level parallelism
+        HYBRID_PARALLELISM       // Combination of both
+    };
+    ParallelMode parallel_mode = ParallelMode::WORKLIST_PARALLELISM;
+
+    // Worklist batch size for load balancing
+    size_t worklist_batch_size = 100;
+
+    // Enable/disable work stealing for better load balancing
+    bool enable_work_stealing = true;
+
+    // Synchronization frequency (how often to sync shared data structures)
+    size_t sync_frequency = 1000;
+};
 
 // ============================================================================
 // Forward Declarations
@@ -38,8 +228,6 @@ namespace ifds {
 template<typename Fact> class IFDSProblem;
 template<typename Fact, typename Value> class IDEProblem;
 template<typename Fact> class ExplodedSupergraph;
-template<typename Problem> class IFDSSolver;
-template<typename Problem> class IDESolver;
 
 // ============================================================================
 // IFDS Core Data Structures
@@ -56,13 +244,27 @@ struct PathEdge {
              const llvm::Instruction* t_node, const Fact& t_fact)
         : start_node(s_node), start_fact(s_fact), target_node(t_node), target_fact(t_fact) {}
     
-    bool operator==(const PathEdge& other) const;
-    bool operator<(const PathEdge& other) const;
+    bool operator==(const PathEdge& other) const {
+        return start_node == other.start_node && target_node == other.target_node &&
+               start_fact == other.start_fact && target_fact == other.target_fact;
+    }
+    bool operator<(const PathEdge& other) const {
+        if (start_node != other.start_node) return start_node < other.start_node;
+        if (target_node != other.target_node) return target_node < other.target_node;
+        if (start_fact != other.start_fact) return start_fact < other.start_fact;
+        return target_fact < other.target_fact;
+    }
 };
 
 template<typename Fact>
 struct PathEdgeHash {
-    size_t operator()(const PathEdge<Fact>& edge) const;
+    size_t operator()(const PathEdge<Fact>& edge) const {
+        size_t h1 = std::hash<const llvm::Instruction*>{}(edge.start_node);
+        size_t h2 = std::hash<const llvm::Instruction*>{}(edge.target_node);
+        size_t h3 = std::hash<Fact>{}(edge.start_fact);
+        size_t h4 = std::hash<Fact>{}(edge.target_fact);
+        return ((h1 ^ (h2 << 1)) ^ (h3 << 2)) ^ (h4 << 3);
+    }
 };
 
 template<typename Fact>
@@ -74,13 +276,24 @@ struct SummaryEdge {
     SummaryEdge(const llvm::CallInst* call, const Fact& c_fact, const Fact& r_fact)
         : call_site(call), call_fact(c_fact), return_fact(r_fact) {}
     
-    bool operator==(const SummaryEdge& other) const;
-    bool operator<(const SummaryEdge& other) const;
+    bool operator==(const SummaryEdge& other) const {
+        return call_site == other.call_site && call_fact == other.call_fact && return_fact == other.return_fact;
+    }
+    bool operator<(const SummaryEdge& other) const {
+        if (call_site != other.call_site) return call_site < other.call_site;
+        if (call_fact != other.call_fact) return call_fact < other.call_fact;
+        return return_fact < other.return_fact;
+    }
 };
 
 template<typename Fact>
 struct SummaryEdgeHash {
-    size_t operator()(const SummaryEdge<Fact>& edge) const;
+    size_t operator()(const SummaryEdge<Fact>& edge) const {
+        size_t h1 = std::hash<const llvm::CallInst*>{}(edge.call_site);
+        size_t h2 = std::hash<Fact>{}(edge.call_fact);
+        size_t h3 = std::hash<Fact>{}(edge.return_fact);
+        return (h1 ^ (h2 << 1)) ^ (h3 << 2);
+    }
 };
 
 // ============================================================================
@@ -170,12 +383,21 @@ public:
         Node() : instruction(nullptr), fact() {}
         Node(const llvm::Instruction* inst, const Fact& f) : instruction(inst), fact(f) {}
         
-        bool operator==(const Node& other) const;
-        bool operator<(const Node& other) const;
+        bool operator==(const Node& other) const {
+            return instruction == other.instruction && fact == other.fact;
+        }
+        bool operator<(const Node& other) const {
+            if (instruction != other.instruction) return instruction < other.instruction;
+            return fact < other.fact;
+        }
     };
     
     struct NodeHash {
-        size_t operator()(const Node& node) const;
+        size_t operator()(const Node& node) const {
+            size_t h1 = std::hash<const llvm::Instruction*>{}(node.instruction);
+            size_t h2 = std::hash<Fact>{}(node.fact);
+            return h1 ^ (h2 << 1);
+        }
     };
     
     struct Edge {
@@ -208,125 +430,91 @@ private:
     std::unordered_map<NodeId, std::vector<EdgeId>, NodeHash> m_predecessors;
 };
 
-// ============================================================================
-// IFDS Solver
-// ============================================================================
 
-template<typename Problem>
-class IFDSSolver {
-public:
-    using Fact = typename Problem::FactType;
-    using FactSet = typename Problem::FactSet;
-    using Node = typename ExplodedSupergraph<Fact>::Node;
-    using NodeHash = typename ExplodedSupergraph<Fact>::NodeHash;
-    
-    IFDSSolver(Problem& problem);
-    
-    void solve(const llvm::Module& module);
-    
-    // Enable/disable progress bar display during analysis
-    void set_show_progress(bool show) { m_show_progress = show; }
-    
-    // Query interface for analysis results
-    FactSet get_facts_at_entry(const llvm::Instruction* inst) const;
-    FactSet get_facts_at_exit(const llvm::Instruction* inst) const;
-    
-    // Get all path edges (for debugging/analysis)
-    const std::unordered_set<PathEdge<Fact>, PathEdgeHash<Fact>>& get_path_edges() const;
-    
-    // Get all summary edges (for debugging/analysis)
-    const std::unordered_set<SummaryEdge<Fact>, SummaryEdgeHash<Fact>>& get_summary_edges() const;
-    
-    // Check if a fact reaches a specific instruction
-    bool fact_reaches(const Fact& fact, const llvm::Instruction* inst) const;
-    
-    // Legacy compatibility methods for existing tools
-    std::unordered_map<Node, FactSet, NodeHash> get_all_results() const;
-    FactSet get_facts_at(const Node& node) const;
 
-private:
-    using PathEdgeType = PathEdge<Fact>;
-    using SummaryEdgeType = SummaryEdge<Fact>;
-    
-    Problem& m_problem;
-    
-    // Progress tracking
-    bool m_show_progress = false;
-    
-    // Core tabulation tables
-    std::unordered_set<PathEdgeType, PathEdgeHash<Fact>> m_path_edges;
-    std::unordered_set<SummaryEdgeType, SummaryEdgeHash<Fact>> m_summary_edges;
-    std::vector<PathEdgeType> m_worklist;
-    
-    // Tabulation tables for efficiency
-    std::unordered_map<const llvm::Instruction*, FactSet> m_entry_facts;
-    std::unordered_map<const llvm::Instruction*, FactSet> m_exit_facts;
-    
-    // Indexed summary edges for O(1) lookup (call_site -> list of summary edges)
-    std::unordered_map<const llvm::CallInst*, std::vector<SummaryEdgeType>> m_summary_index;
-    
-    // Indexed path edges by target node for O(1) lookup
-    std::unordered_map<const llvm::Instruction*, std::vector<PathEdgeType>> m_path_edges_at;
-    
-    // Call graph information
-    std::unordered_map<const llvm::CallInst*, const llvm::Function*> m_call_to_callee;
-    std::unordered_map<const llvm::Function*, std::vector<const llvm::CallInst*>> m_callee_to_calls;
-    std::unordered_map<const llvm::Function*, std::vector<const llvm::ReturnInst*>> m_function_returns;
-    
-    // CFG navigation helpers
-    std::unordered_map<const llvm::Instruction*, std::vector<const llvm::Instruction*>> m_successors;
-    std::unordered_map<const llvm::Instruction*, std::vector<const llvm::Instruction*>> m_predecessors;
-    
-    // Core IFDS Tabulation Algorithm Methods
-    void propagate_path_edge(const PathEdgeType& edge);
-    void process_normal_edge(const llvm::Instruction* curr, const llvm::Instruction* next, const Fact& fact);
-    void process_call_edge(const llvm::CallInst* call, const llvm::Function* callee, const Fact& fact);
-    void process_return_edge(const llvm::ReturnInst* ret, const Fact& fact);
-    void process_call_to_return_edge(const llvm::CallInst* call, const Fact& fact);
-    
-    const llvm::Instruction* get_return_site(const llvm::CallInst* call) const;
-    std::vector<const llvm::Instruction*> get_successors(const llvm::Instruction* inst) const;
-    
-    // Initialization methods
-    void initialize_call_graph(const llvm::Module& module);
-    void build_cfg_successors(const llvm::Module& module);
-    void initialize_worklist(const llvm::Module& module);
-    void run_tabulation();
-    
-    const llvm::Function* get_main_function(const llvm::Module& module);
-};
+
+
 
 // ============================================================================
-// IDE Solver
+// Parallel IFDS Solver and IFDS Solver (Declarations moved to IFDSSolvers.h)
 // ============================================================================
 
-template<typename Problem>
-class IDESolver {
-public:
-    using Fact = typename Problem::FactType;
-    using Value = typename Problem::ValueType;
-    using EdgeFunction = typename Problem::EdgeFunction;
-    
-    IDESolver(Problem& problem);
-    
-    void solve(const llvm::Module& module);
-    
-    // Query interface
-    Value get_value_at(const llvm::Instruction* inst, const Fact& fact) const;
-    const std::unordered_map<const llvm::Instruction*, 
-                            std::unordered_map<Fact, Value>>& get_all_values() const;
-
-private:
-    Problem& m_problem;
-    std::unordered_map<const llvm::Instruction*, 
-                      std::unordered_map<Fact, Value>> m_values;
-};
+// Note: ParallelIFDSSolver and IFDSSolver class definitions have been moved
+// to include/Analysis/IFDS/IFDSSolvers.h to avoid duplication and improve
+// modularity. Include that header for solver implementations.
 
 } // namespace ifds
+
+// Provide std::hash specializations for IFDS types used in unordered containers
+namespace std {
+template<typename Fact>
+struct hash<ifds::PathEdge<Fact>> {
+    size_t operator()(const ifds::PathEdge<Fact>& edge) const noexcept {
+        return ifds::PathEdgeHash<Fact>{}(edge);
+    }
+};
+
+template<typename Fact>
+struct hash<ifds::SummaryEdge<Fact>> {
+    size_t operator()(const ifds::SummaryEdge<Fact>& edge) const noexcept {
+        return ifds::SummaryEdgeHash<Fact>{}(edge);
+    }
+};
+}
 
 // ============================================================================
 // Template Implementation (moved to .cpp for explicit instantiation)
 // ============================================================================
 
-// Template implementations are now in IFDSFramework.cpp
-// This reduces compilation time and improves code organization
+// Provide inline template implementations for commonly used helpers so that
+// templated clients (e.g., taint analysis) can link without relying on a
+// separate translation unit.
+
+namespace ifds {
+
+template<typename Fact>
+inline void IFDSProblem<Fact>::set_alias_analysis(DyckAliasAnalysis* aa) {
+    m_alias_analysis = aa;
+}
+
+template<typename Fact>
+inline bool IFDSProblem<Fact>::is_source(const llvm::Instruction*) const {
+    return false;
+}
+
+template<typename Fact>
+inline bool IFDSProblem<Fact>::is_sink(const llvm::Instruction*) const {
+    return false;
+}
+
+template<typename Fact>
+inline bool IFDSProblem<Fact>::may_alias(const llvm::Value* v1, const llvm::Value* v2) const {
+    if (!m_alias_analysis || !v1 || !v2) return false;
+    return m_alias_analysis->mayAlias(const_cast<llvm::Value*>(v1), const_cast<llvm::Value*>(v2));
+}
+
+template<typename Fact>
+inline std::vector<const llvm::Value*>
+IFDSProblem<Fact>::get_points_to_set(const llvm::Value* ptr) const {
+    std::vector<const llvm::Value*> result;
+    if (!m_alias_analysis || !ptr) return result;
+    if (const std::set<llvm::Value*>* as = m_alias_analysis->getAliasSet(const_cast<llvm::Value*>(ptr))) {
+        result.reserve(as->size());
+        for (llvm::Value* v : *as) result.push_back(v);
+    }
+    return result;
+}
+
+template<typename Fact>
+inline std::vector<const llvm::Value*>
+IFDSProblem<Fact>::get_alias_set(const llvm::Value* val) const {
+    std::vector<const llvm::Value*> result;
+    if (!m_alias_analysis || !val) return result;
+    if (const std::set<llvm::Value*>* as = m_alias_analysis->getAliasSet(const_cast<llvm::Value*>(val))) {
+        result.reserve(as->size());
+        for (llvm::Value* v : *as) result.push_back(v);
+    }
+    return result;
+}
+
+} // namespace ifds

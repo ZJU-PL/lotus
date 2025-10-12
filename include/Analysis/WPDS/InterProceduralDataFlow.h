@@ -102,13 +102,13 @@ public:
     // Main method to run forward inter-procedural dataflow analysis
     std::unique_ptr<DataFlowResult> runForwardAnalysis(
         Module& m,
-        std::function<GenKillTransformer*(Instruction*)> createTransformer,
+        const std::function<GenKillTransformer*(Instruction*)>& createTransformer,
         const std::set<Value*>& initialFacts = {});
 
     // Main method to run backward inter-procedural dataflow analysis
     std::unique_ptr<DataFlowResult> runBackwardAnalysis(
         Module& m,
-        std::function<GenKillTransformer*(Instruction*)> createTransformer,
+        const std::function<GenKillTransformer*(Instruction*)>& createTransformer,
         const std::set<Value*>& initialFacts = {});
 
     // Helper methods to query results
@@ -120,7 +120,7 @@ private:
     void buildWPDS(
         Module& m, 
         wpds::WPDS<GenKillTransformer>& wpds,
-        std::function<GenKillTransformer*(Instruction*)> createTransformer);
+        const std::function<GenKillTransformer*(Instruction*)>& createTransformer);
 
     // Create a configuration automaton for the initial states
     void buildInitialAutomaton(
@@ -144,7 +144,8 @@ private:
         bool isForward);
 
     // Map program elements to WPDS keys and vice versa
-    std::map<Function*, wpds::wpds_key_t> functionToKey;
+    std::map<Function*, wpds::wpds_key_t> functionToKey;          // function entry keys
+    std::map<Function*, wpds::wpds_key_t> functionExitToKey;      // function exit keys
     std::map<Instruction*, wpds::wpds_key_t> instToKey;
     std::map<BasicBlock*, wpds::wpds_key_t> bbToKey;
     std::map<wpds::wpds_key_t, Instruction*> keyToInst;

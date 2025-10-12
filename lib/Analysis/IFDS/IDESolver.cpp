@@ -5,6 +5,7 @@
  * an extension of IFDS that propagates values along with dataflow facts.
  */
 
+#include <Analysis/IFDS/IDESolver.h>
 #include <Analysis/IFDS/IFDSFramework.h>
 
 #include <llvm/IR/CFG.h>

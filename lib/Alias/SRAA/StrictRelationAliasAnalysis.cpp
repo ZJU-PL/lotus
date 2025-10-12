@@ -262,7 +262,7 @@ bool StrictRelations::disjointGEPs(const GetElementPtrInst* G1,
     return false;
 }
 
-bool diff(Range r1, Range r2) {
+bool diff(Range& r1, Range& r2) {
   if (r1.getLower().sgt(r2.getUpper()))
     return true;
   else if (r2.getLower().sgt(r1.getUpper()))
@@ -319,7 +319,7 @@ bool StrictRelations::aliastest1(const Value* p1, const Value* p2) {
     if (dp1->local_root == dp2->local_root) {
       int index = -1;
       DepNode* ancestor = NULL;
-      for (auto i : dp1->path_to_root) {
+      for (auto&i : dp1->path_to_root) {
         if (index > -1 and i.second.first > index) {
           continue;
         } else if (dp2->path_to_root.count(i.first)) {
@@ -1531,7 +1531,7 @@ void StrictRelations::DepNode::getPathToRoot() {
         //  so the local tree's root will be the pointer with the highest
         //  address
         DepNode* root = NULL;
-        for (auto i : path_to_root) {
+        for (auto& i : path_to_root) {
           if (root < i.first)
             root = i.first;
         }
