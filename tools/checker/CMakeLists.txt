@@ -47,3 +47,12 @@ target_link_libraries(ifds-taint
   LLVMIRReader
 )
 
+# Concurrency Checker Tool
+add_executable(concurrency-checker concurrency-checker.cpp)
+target_link_libraries(concurrency-checker
+  ConcurrencyChecker
+  LLVMIRReader
+  LLVMAnalysis
+  LLVMSupport
+)
+

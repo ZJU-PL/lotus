@@ -6,13 +6,14 @@
 #include "Analysis/Concurrency/MHPAnalysis.h"
 
 #include <llvm/IR/CFG.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/raw_ostream.h>
 
-#include <algorithm>
-#include <queue>
+// #include <algorithm>
+// #include <queue>
 
 using namespace llvm;
 using namespace mhp;
@@ -480,6 +481,13 @@ void MHPAnalysis::processFunction(const Function *func, ThreadID tid) {
   if (!func || func->isDeclaration())
     return;
 
+  // Avoid reprocessing the same function for this thread
+  auto &visited = m_visited_functions_by_thread[tid];
+  if (visited.find(func) != visited.end()) {
+    return;
+  }
+  visited.insert(func);
+
   SyncNode *prev_node = nullptr;
   SyncNode *entry_node = nullptr;
 
@@ -508,6 +516,12 @@ void MHPAnalysis::processFunction(const Function *func, ThreadID tid) {
         } else if (m_thread_api->isTDBarWait(&inst)) {
           node = m_tfg->createNode(&inst, SyncNodeType::BARRIER_WAIT, tid);
           handleBarrier(&inst, node);
+        } else {
+          // Recursively process direct callee in the same thread (non-thread API)
+          const Function *callee = cb->getCalledFunction();
+          if (callee && !callee->isDeclaration()) {
+            processFunction(callee, tid);
+          }
         }
       }
 
@@ -706,7 +720,10 @@ void MHPAnalysis::computeMHPPairs() {
 
   for (Function &func : m_module) {
     for (inst_iterator I = inst_begin(func), E = inst_end(func); I != E; ++I) {
-      all_insts.push_back(&*I);
+      const Instruction *inst = &*I;
+      if (m_inst_to_thread.find(inst) != m_inst_to_thread.end()) {
+        all_insts.push_back(inst);
+      }
     }
   }
 
@@ -823,24 +840,21 @@ bool MHPAnalysis::hasHappenBeforeRelation(const Instruction *i1,
   // Check various happens-before relations:
   // 1. Same thread, program order
   // 2. Fork-join ordering
-  // 3. Lock-based ordering
 
   if (isInSameThread(i1, i2)) {
-    // In same thread, check program order
-    const Function *func = i1->getFunction();
-    for (const_inst_iterator I = inst_begin(func), E = inst_end(func); I != E;
-         ++I) {
-      if (&*I == i1)
+    // In same thread, check program order using dominance in same function
+    const Function *f1 = i1->getFunction();
+    const Function *f2 = i2->getFunction();
+    if (f1 == f2) {
+      const DominatorTree &DT = getDomTree(f1);
+      if (DT.dominates(i1, i2) && !DT.dominates(i2, i1)) {
         return true;
-      if (&*I == i2)
-        return false;
+      }
+      return false;
     }
   }
 
   if (isOrderedByForkJoin(i1, i2))
-    return true;
-
-  if (isOrderedByLocks(i1, i2))
     return true;
 
   return false;
@@ -856,9 +870,17 @@ bool MHPAnalysis::isOrderedByLocks(const Instruction *i1,
   if (!m_lockset)
     return false;
 
-  // If they hold a common lock in different threads, they're ordered
+  // If both instructions must hold a common lock in different threads,
+  // they cannot execute in parallel due to mutual exclusion
   if (!isInSameThread(i1, i2)) {
-    return m_lockset->mayHoldCommonLock(i1, i2);
+    auto must1 = m_lockset->getMustLockSetAt(i1);
+    auto must2 = m_lockset->getMustLockSetAt(i2);
+    for (auto l : must1) {
+      if (must2.find(l) != must2.end()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   return false;
@@ -1111,3 +1133,30 @@ bool isThreadBoundaryNode(SyncNodeType type) {
 }
 
 } // namespace mhp
+
+// =========================================================================
+// Dominator helpers
+// =========================================================================
+
+const DominatorTree &MHPAnalysis::getDomTree(const Function *func) const {
+  auto it = m_dom_cache.find(func);
+  if (it != m_dom_cache.end()) {
+    return *(it->second);
+  }
+  auto DT = std::make_unique<DominatorTree>();
+  DT->recalculate(*const_cast<Function *>(func));
+  auto *dtPtr = DT.get();
+  m_dom_cache[func] = std::move(DT);
+  return *dtPtr;
+}
+
+bool MHPAnalysis::dominates(const Instruction *a, const Instruction *b) const {
+  if (!a || !b)
+    return false;
+  const Function *fa = a->getFunction();
+  const Function *fb = b->getFunction();
+  if (fa != fb)
+    return false;
+  const DominatorTree &DT = getDomTree(fa);
+  return DT.dominates(a, b);
+}

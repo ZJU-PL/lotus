@@ -32,6 +32,7 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <memory>
@@ -417,6 +418,14 @@ private:
   std::unordered_map<ThreadID, const llvm::Value *>
       m_thread_to_pthread_value;                             // thread ID -> pthread_t value
 
+  // Per-thread set of functions already processed to avoid reprocessing
+  std::unordered_map<ThreadID, std::unordered_set<const llvm::Function *>>
+      m_visited_functions_by_thread;
+
+  // Dominator tree cache for HB queries within a function
+  mutable std::unordered_map<const llvm::Function *, std::unique_ptr<DominatorTree>>
+      m_dom_cache;
+
   // ========================================================================
   // Analysis Phases
   // ========================================================================
@@ -489,6 +498,10 @@ private:
   bool isJoinSite(const llvm::Instruction *inst) const;
   ThreadID getForkedThreadID(const llvm::Instruction *fork_inst) const;
   ThreadID getJoinedThreadID(const llvm::Instruction *join_inst) const;
+
+  // Dominator helpers (intra-function)
+  const DominatorTree &getDomTree(const llvm::Function *func) const;
+  bool dominates(const llvm::Instruction *a, const llvm::Instruction *b) const;
 };
 
 // ============================================================================
