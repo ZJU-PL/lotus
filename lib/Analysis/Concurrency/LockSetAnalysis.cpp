@@ -4,6 +4,9 @@
  */
 
 #include "Analysis/Concurrency/LockSetAnalysis.h"
+#include "Alias/DyckAA/DyckAliasAnalysis.h"
+#include "Alias/DyckAA/DyckCallGraph.h"
+#include "Alias/DyckAA/DyckCallGraphNode.h"
 
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/MemoryLocation.h>
@@ -15,6 +18,7 @@
 
 #include <algorithm>
 #include <queue>
+#include <stack>
 
 using namespace llvm;
 using namespace mhp;
@@ -25,11 +29,13 @@ using namespace mhp;
 
 LockSetAnalysis::LockSetAnalysis(Module &module)
     : m_module(&module), m_single_function(nullptr),
-      m_thread_api(ThreadAPI::getThreadAPI()), m_alias_analysis(nullptr) {}
+      m_thread_api(ThreadAPI::getThreadAPI()), m_alias_analysis(nullptr),
+      m_dyck_aa(nullptr) {}
 
 LockSetAnalysis::LockSetAnalysis(Function &func)
     : m_module(nullptr), m_single_function(&func),
-      m_thread_api(ThreadAPI::getThreadAPI()), m_alias_analysis(nullptr) {}
+      m_thread_api(ThreadAPI::getThreadAPI()), m_alias_analysis(nullptr),
+      m_dyck_aa(nullptr) {}
 
 void LockSetAnalysis::analyze() {
   errs() << "Starting Lock Set Analysis...\n";
@@ -505,8 +511,24 @@ void LockSetAnalysis::computeIntraproceduralLockSets(Function *func) {
 }
 
 void LockSetAnalysis::computeInterproceduralLockSets() {
-  // TODO: Implement interprocedural propagation
-  // This would require function summaries and callgraph analysis
+  if (!m_dyck_aa) {
+    errs() << "Warning: DyckAA not set. Skipping interprocedural analysis.\n";
+    return;
+  }
+
+  errs() << "Computing interprocedural lock sets using DyckAA...\n";
+  
+  // Perform bottom-up traversal of call graph to compute function summaries
+  bottomUpTraversal();
+  
+  // Re-analyze each function with interprocedural context
+  for (Function &func : *m_module) {
+    if (!func.isDeclaration()) {
+      analyzeFunction(&func);
+    }
+  }
+  
+  errs() << "Interprocedural lock set analysis complete.\n";
 }
 
 LockSet LockSetAnalysis::transfer(const Instruction *inst,
@@ -553,6 +575,17 @@ LockSet LockSetAnalysis::transfer(const Instruction *inst,
         }
       }
       // Must-analysis: don't add lock (can't guarantee acquisition)
+    } else if (!m_thread_api->isTDAcquire(call) && 
+               !m_thread_api->isTDRelease(call)) {
+      // Handle regular function calls with interprocedural summaries
+      if (m_dyck_aa) {
+        auto callees = getCallees(call);
+        for (Function *callee : callees) {
+          if (callee && !callee->isDeclaration()) {
+            applyFunctionSummary(call, callee, out_set, out_set);
+          }
+        }
+      }
     }
   }
 
@@ -659,6 +692,13 @@ bool LockSetAnalysis::mayAlias(LockID lock1, LockID lock2) const {
   if (lock1 == lock2)
     return true;
 
+  // Try DyckAA first for better precision
+  if (m_dyck_aa && lock1 && lock2) {
+    return m_dyck_aa->mayAlias(const_cast<Value*>(lock1), 
+                               const_cast<Value*>(lock2));
+  }
+
+  // Fall back to standard alias analysis
   if (m_alias_analysis && lock1 && lock2) {
     MemoryLocation loc1 = MemoryLocation(lock1, LocationSize::beforeOrAfterPointer());
     MemoryLocation loc2 = MemoryLocation(lock2, LocationSize::beforeOrAfterPointer());
@@ -683,4 +723,287 @@ LockID LockSetAnalysis::getLockValue(const Instruction *inst) const {
     return getCanonicalLock(m_thread_api->getLockVal(inst));
   }
   return nullptr;
+}
+
+// ============================================================================
+// Interprocedural Analysis Implementation
+// ============================================================================
+
+std::set<Function *> LockSetAnalysis::getCallees(const CallInst *call) const {
+  std::set<Function *> callees;
+  
+  if (!m_dyck_aa || !call) {
+    return callees;
+  }
+  
+  DyckCallGraph *cg = m_dyck_aa->getDyckCallGraph();
+  if (!cg) {
+    return callees;
+  }
+  
+  Function *caller = const_cast<Function*>(call->getFunction());
+  if (!caller) {
+    return callees;
+  }
+  
+  DyckCallGraphNode *caller_node = cg->getFunction(caller);
+  if (!caller_node) {
+    return callees;
+  }
+  
+  // Get the Call object from DyckAA for this instruction
+  Call *dyck_call = caller_node->getCall(const_cast<Instruction*>(
+                                         static_cast<const Instruction*>(call)));
+  
+  if (!dyck_call) {
+    // If not found in DyckAA, try direct call
+    if (Function *direct_callee = call->getCalledFunction()) {
+      callees.insert(direct_callee);
+    }
+    return callees;
+  }
+  
+  // Handle common calls (direct calls)
+  if (CommonCall *common_call = dyn_cast<CommonCall>(dyck_call)) {
+    if (Function *callee = common_call->getCalledFunction()) {
+      callees.insert(callee);
+    }
+  }
+  // Handle pointer calls (indirect calls)
+  else if (PointerCall *ptr_call = dyn_cast<PointerCall>(dyck_call)) {
+    for (auto it = ptr_call->begin(); it != ptr_call->end(); ++it) {
+      if (*it) {
+        callees.insert(*it);
+      }
+    }
+  }
+  
+  return callees;
+}
+
+void LockSetAnalysis::computeFunctionSummary(Function *func) {
+  if (!func || func->isDeclaration()) {
+    return;
+  }
+  
+  auto &summary = m_function_summaries[func];
+  if (summary.is_analyzed) {
+    return; // Already computed
+  }
+  
+  errs() << "Computing summary for function: " << func->getName() << "\n";
+  
+  // Clear previous summary
+  summary.may_acquire.clear();
+  summary.may_release.clear();
+  summary.must_acquire.clear();
+  summary.must_release.clear();
+  
+  // Analyze all instructions in the function
+  for (inst_iterator I = inst_begin(func), E = inst_end(func); I != E; ++I) {
+    Instruction *inst = &*I;
+    
+    // Check for lock acquire operations
+    if (m_thread_api->isTDAcquire(inst)) {
+      LockID lock = getLockValue(inst);
+      if (lock) {
+        summary.may_acquire.insert(lock);
+        
+        // For must-analysis, we need flow-sensitive analysis
+        // For now, conservatively assume must_acquire is subset of may_acquire
+        // A lock is must-acquired if it's on all paths
+        summary.must_acquire.insert(lock);
+      }
+    }
+    
+    // Check for lock release operations
+    if (m_thread_api->isTDRelease(inst)) {
+      LockID lock = getLockValue(inst);
+      if (lock) {
+        summary.may_release.insert(lock);
+        summary.must_release.insert(lock);
+      }
+    }
+    
+    // Handle calls to other functions
+    if (CallInst *call = dyn_cast<CallInst>(inst)) {
+      if (!m_thread_api->isTDAcquire(call) && !m_thread_api->isTDRelease(call)) {
+        auto callees = getCallees(call);
+        for (Function *callee : callees) {
+          if (callee && !callee->isDeclaration()) {
+            // Recursively compute callee summary first
+            computeFunctionSummary(callee);
+            
+            auto &callee_summary = m_function_summaries[callee];
+            
+            // Merge callee's effects into caller's summary
+            summary.may_acquire.insert(callee_summary.may_acquire.begin(),
+                                       callee_summary.may_acquire.end());
+            summary.may_release.insert(callee_summary.may_release.begin(),
+                                       callee_summary.may_release.end());
+            
+            // For must-analysis, be conservative with transitive calls
+            // Only propagate if this is the only path
+            if (callees.size() == 1) {
+              summary.must_acquire.insert(callee_summary.must_acquire.begin(),
+                                          callee_summary.must_acquire.end());
+              summary.must_release.insert(callee_summary.must_release.begin(),
+                                          callee_summary.must_release.end());
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  summary.is_analyzed = true;
+  
+  errs() << "  May acquire: " << summary.may_acquire.size() << " locks\n";
+  errs() << "  May release: " << summary.may_release.size() << " locks\n";
+}
+
+void LockSetAnalysis::applyFunctionSummary(const CallInst *call,
+                                           const Function *callee,
+                                           LockSet &may_locks,
+                                           LockSet &must_locks) const {
+  if (!call || !callee) {
+    return;
+  }
+  
+  auto it = m_function_summaries.find(callee);
+  if (it == m_function_summaries.end() || !it->second.is_analyzed) {
+    return;
+  }
+  
+  const FunctionSummary &summary = it->second;
+  
+  // Apply lock acquisitions
+  may_locks.insert(summary.may_acquire.begin(), summary.may_acquire.end());
+  
+  // For must-locks, be conservative
+  // Only add to must_locks if the callee must-acquires the lock
+  for (LockID lock : summary.must_acquire) {
+    must_locks.insert(lock);
+  }
+  
+  // Apply lock releases (remove from locksets)
+  for (LockID lock : summary.may_release) {
+    may_locks.erase(lock);
+    
+    // Also remove aliases
+    if (m_dyck_aa) {
+      LockSet to_remove;
+      for (auto l : may_locks) {
+        if (mayAlias(l, lock)) {
+          to_remove.insert(l);
+        }
+      }
+      for (auto l : to_remove) {
+        may_locks.erase(l);
+      }
+    }
+  }
+  
+  for (LockID lock : summary.must_release) {
+    must_locks.erase(lock);
+    
+    // Also remove aliases
+    if (m_dyck_aa) {
+      LockSet to_remove;
+      for (auto l : must_locks) {
+        if (mayAlias(l, lock)) {
+          to_remove.insert(l);
+        }
+      }
+      for (auto l : to_remove) {
+        must_locks.erase(l);
+      }
+    }
+  }
+}
+
+void LockSetAnalysis::bottomUpTraversal() {
+  if (!m_dyck_aa) {
+    return;
+  }
+  
+  DyckCallGraph *cg = m_dyck_aa->getDyckCallGraph();
+  if (!cg) {
+    errs() << "Warning: Cannot get DyckCallGraph\n";
+    return;
+  }
+  
+  errs() << "Performing bottom-up call graph traversal...\n";
+  
+  // Compute post-order traversal for bottom-up analysis
+  std::vector<Function *> post_order;
+  std::set<Function *> visited;
+  std::stack<std::pair<Function *, bool>> stack;
+  
+  // Find all functions in the module
+  for (Function &func : *m_module) {
+    if (!func.isDeclaration()) {
+      if (visited.find(&func) == visited.end()) {
+        stack.push({&func, false});
+        
+        while (!stack.empty()) {
+          auto top_pair = stack.top();
+          stack.pop();
+          Function *current = top_pair.first;
+          bool children_visited = top_pair.second;
+          
+          if (children_visited) {
+            post_order.push_back(current);
+            continue;
+          }
+          
+          if (visited.find(current) != visited.end()) {
+            continue;
+          }
+          
+          visited.insert(current);
+          stack.push({current, true});
+          
+          // Get callees from DyckAA
+          DyckCallGraphNode *node = cg->getFunction(current);
+          if (node) {
+            // Iterate over common calls
+            for (auto call_it = node->common_call_begin(); 
+                 call_it != node->common_call_end(); ++call_it) {
+              CommonCall *common_call = *call_it;
+              if (Function *callee = common_call->getCalledFunction()) {
+                if (!callee->isDeclaration() && 
+                    visited.find(callee) == visited.end()) {
+                  stack.push({callee, false});
+                }
+              }
+            }
+            
+            // Iterate over pointer calls
+            for (auto call_it = node->pointer_call_begin(); 
+                 call_it != node->pointer_call_end(); ++call_it) {
+              PointerCall *ptr_call = *call_it;
+              for (auto func_it = ptr_call->begin(); 
+                   func_it != ptr_call->end(); ++func_it) {
+                Function *callee = *func_it;
+                if (callee && !callee->isDeclaration() && 
+                    visited.find(callee) == visited.end()) {
+                  stack.push({callee, false});
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  errs() << "Processing " << post_order.size() << " functions in bottom-up order\n";
+  
+  // Compute summaries in post-order (callees before callers)
+  for (Function *func : post_order) {
+    computeFunctionSummary(func);
+  }
+  
+  errs() << "Bottom-up traversal complete\n";
 }

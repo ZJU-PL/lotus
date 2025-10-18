@@ -51,8 +51,8 @@ target_link_libraries(ifds-taint
 add_executable(concurrency-checker concurrency-checker.cpp)
 target_link_libraries(concurrency-checker
   ConcurrencyChecker
+  CanaryDyckAA
   LLVMIRReader
   LLVMAnalysis
   LLVMSupport
 )
-

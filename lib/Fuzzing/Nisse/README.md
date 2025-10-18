@@ -1,5 +1,7 @@
 # Nisse
 
+Ball Larus edge profiling with loop optimization
+
 https://github.com/lac-dcc/Nisse
 
 An exact profiler inserts counters in a program to record how many times each edge of that program's control-flow graph has been traversed during an execution of it.

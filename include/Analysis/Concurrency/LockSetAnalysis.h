@@ -36,7 +36,6 @@
 #include <llvm/IR/Value.h>
 #include <llvm/Support/raw_ostream.h>
 
-#include <memory>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,6 +44,9 @@
 namespace llvm {
 class AAResults;
 }
+
+class DyckAliasAnalysis;
+class DyckCallGraph;
 
 namespace mhp {
 
@@ -105,6 +107,12 @@ public:
    * @param aa Alias analysis instance
    */
   void setAliasAnalysis(llvm::AAResults *aa) { m_alias_analysis = aa; }
+
+  /**
+   * @brief Set DyckAA for interprocedural precision
+   * @param dyck_aa DyckAA analysis instance
+   */
+  void setDyckAA(DyckAliasAnalysis *dyck_aa) { m_dyck_aa = dyck_aa; }
 
   // ========================================================================
   // Query Interface
@@ -259,6 +267,7 @@ private:
   llvm::Function *m_single_function; // For single-function analysis
   ThreadAPI *m_thread_api;
   llvm::AAResults *m_alias_analysis;
+  DyckAliasAnalysis *m_dyck_aa;
 
   // Lockset results
   std::unordered_map<const llvm::Instruction *, LockSet> m_may_locksets_entry;
@@ -293,6 +302,19 @@ private:
 
   std::unordered_set<LockPair, LockPair::Hash> m_observed_lock_orders;
   std::unordered_set<LockID> m_reentrant_locks;
+
+  // Interprocedural analysis data structures
+  struct FunctionSummary {
+    LockSet may_acquire;    ///< Locks that may be acquired
+    LockSet may_release;    ///< Locks that may be released
+    LockSet must_acquire;   ///< Locks that must be acquired
+    LockSet must_release;   ///< Locks that must be released
+    bool is_analyzed;       ///< Whether function has been analyzed
+    
+    FunctionSummary() : is_analyzed(false) {}
+  };
+  
+  std::unordered_map<const llvm::Function *, FunctionSummary> m_function_summaries;
 
   // ========================================================================
   // Analysis Implementation
@@ -360,6 +382,28 @@ private:
    * @brief Get lock value from lock operation
    */
   LockID getLockValue(const llvm::Instruction *inst) const;
+
+  /**
+   * @brief Compute function summary for interprocedural analysis
+   */
+  void computeFunctionSummary(llvm::Function *func);
+
+  /**
+   * @brief Apply function summary at call site
+   */
+  void applyFunctionSummary(const llvm::CallInst *call, 
+                            const llvm::Function *callee,
+                            LockSet &may_locks, LockSet &must_locks) const;
+
+  /**
+   * @brief Get callees at a call site using DyckAA
+   */
+  std::set<llvm::Function *> getCallees(const llvm::CallInst *call) const;
+
+  /**
+   * @brief Perform bottom-up call graph traversal for interprocedural analysis
+   */
+  void bottomUpTraversal();
 };
 
 } // namespace mhp
