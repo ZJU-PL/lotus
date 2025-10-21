@@ -37,7 +37,7 @@ set(Concurrency_SOURCES
   Concurrency/MHPAnalysis.cpp
 )
 add_library(Concurrency STATIC ${Concurrency_SOURCES})
-target_link_libraries(Concurrency CanaryLLVMUtils)
+target_link_libraries(Concurrency CanaryLLVMUtils CanaryDyckAA)
 
 add_subdirectory(sparta)
 add_subdirectory(IFDS)
