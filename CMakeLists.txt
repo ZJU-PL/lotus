@@ -60,7 +60,8 @@ if(CUSTOM_BOOST_ROOT)
     set(Boost_NO_SYSTEM_PATHS "ON")
 endif()
 
-find_package(Boost 1.65 COMPONENTS system thread)
+# Try to find Boost - note that system is header-only in Boost 1.69+
+find_package(Boost 1.65 COMPONENTS thread)
 
 # Initialize availability flags
 set(BOOST_SYSTEM_AVAILABLE OFF)
@@ -68,17 +69,15 @@ set(BOOST_THREAD_AVAILABLE OFF)
 
 # Check if Boost was found with required components
 if(Boost_FOUND)
-    # In Boost 1.69+, system is header-only and may not have a CMake target
-    # Check if the targets exist
-    if(NOT TARGET Boost::system)
-        set(BOOST_SYSTEM_AVAILABLE OFF)
-    else()
-        set(BOOST_SYSTEM_AVAILABLE ON)
-    endif()
-    if(NOT TARGET Boost::thread)
-        set(BOOST_THREAD_AVAILABLE OFF)
-    else()
+    # In Boost 1.69+, system is header-only, so we just check if Boost headers are available
+    # If Boost is found, system headers are available
+    set(BOOST_SYSTEM_AVAILABLE ON)
+    
+    # Thread must have a compiled library component
+    if(TARGET Boost::thread OR Boost_THREAD_FOUND)
         set(BOOST_THREAD_AVAILABLE ON)
+    else()
+        set(BOOST_THREAD_AVAILABLE OFF)
     endif()
 endif()
 
@@ -103,6 +102,7 @@ if((NOT Boost_FOUND OR NOT BOOST_SYSTEM_AVAILABLE OR NOT BOOST_THREAD_AVAILABLE)
     include_directories(${BOOST_INCLUDEDIR})
     set(BOOST_SYSTEM_AVAILABLE ON)
     set(BOOST_THREAD_AVAILABLE ON)
+    set(BOOST_EXTERNAL_PROJECT ON)
 elseif(Boost_FOUND)
     message(STATUS "Found Boost: ${Boost_INCLUDE_DIRS}")
     include_directories(${Boost_INCLUDE_DIRS})

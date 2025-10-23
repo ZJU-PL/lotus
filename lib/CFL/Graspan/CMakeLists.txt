@@ -29,7 +29,8 @@ set(GRASPAN_LIB_SOURCES
 # Create Graspan static library
 add_library(Graspan STATIC ${GRASPAN_LIB_SOURCES})
 
-# Include directories - headers are now in include/CFL/Graspan
-#target_include_directories(Graspan PUBLIC
- #   ${CMAKE_SOURCE_DIR}/include/CFL/Graspan
-#)
+# If Boost is being downloaded as an external project, add dependency
+if(BOOST_EXTERNAL_PROJECT)
+    add_dependencies(Graspan boost)
+endif()
+

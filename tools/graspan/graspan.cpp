@@ -1,9 +1,9 @@
-#include "utilities/timer.h"
-#include "edgecomp/engine.h"
-#include "preproc/run_pre.h"
-#include "datastructures/vit.h"
+#include "CFL/Graspan/utilities/timer.h"
+#include "CFL/Graspan/edgecomp/engine.h"
+#include "CFL/Graspan/preproc/run_pre.h"
+#include "CFL/Graspan/datastructures/vit.h"
+#include "CFL/Graspan/utilities/globalDefinitions.hpp"
 
-#include "utilities/globalDefinitions.hpp"
 
 int main(int argc, char *argv[])
 {
