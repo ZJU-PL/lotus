@@ -1,16 +1,4 @@
-/* Copyright (C), 2016-present, Sourcebrella, Inc Ltd - All rights reserved.
- * Unauthorized copying, using, modifying of this file, via any medium is
- * strictly prohibited, proprietary, and confidential.
- *
- * Author:
- *   Qingkai Shi <qingkai.sqk@alibaba-inc.com>
- *
- * File Description:
- *   
- *
- * Creation Date: 2021/7/10
- * Modification History:
-**/
+
 
 #include <csignal>
 #include <unistd.h>

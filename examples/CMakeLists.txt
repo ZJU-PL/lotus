@@ -1,17 +1,17 @@
 # Examples CMakeLists.txt
 
 set(EXAMPLES
-  RapidJSONExample.cpp
   AndersenExample.cpp
+  EGraphExample.cpp
   PDGExample.cpp
-  ParallelIFDSExample.cpp
+  PointerAnalysisExample.cpp
 )
 
 set(EXAMPLES_NAMES
-  RapidJSONExample
   AndersenExample
+  EGraphExample
   PDGExample
-  ParallelIFDSExample
+  PointerAnalysisExample
 )
 
 set(EXAMPLES_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
@@ -28,8 +28,8 @@ foreach(idx RANGE 0 3)
 endforeach()
 
 # AndersenExample needs Andersen and LLVM libs
- target_link_libraries(AndersenExample PRIVATE Andersen ${llvm_libs})
+target_link_libraries(AndersenExample PRIVATE Andersen ${llvm_libs})
 
 # PDGExample needs CanaryPDG and LLVM libs
- target_link_libraries(PDGExample PRIVATE CanaryPDG ${llvm_libs})
+target_link_libraries(PDGExample PRIVATE CanaryPDG ${llvm_libs})
 

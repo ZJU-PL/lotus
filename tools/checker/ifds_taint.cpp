@@ -64,8 +64,6 @@ static cl::opt<unsigned> NumThreads("threads", cl::desc("Number of threads for p
 static cl::opt<unsigned> WorklistBatchSize("batch-size", cl::desc("Worklist batch size for load balancing"),
                                           cl::init(100));
 
-static cl::opt<bool> EnableWorkStealing("work-stealing", cl::desc("Enable work stealing for better load balancing"),
-                                       cl::init(true));
 
 static cl::opt<unsigned> SyncFrequency("sync-freq", cl::desc("Synchronization frequency (edges between syncs)"),
                                       cl::init(1000));
@@ -150,7 +148,6 @@ int main(int argc, char **argv) {
                     config.enable_parallel_processing = true;
                     config.parallel_mode = ifds::ParallelIFDSConfig::ParallelMode::WORKLIST_PARALLELISM;
                     config.worklist_batch_size = WorklistBatchSize;
-                    config.enable_work_stealing = EnableWorkStealing;
                     config.sync_frequency = SyncFrequency;
 
                     ifds::ParallelIFDSSolver<ifds::TaintAnalysis> solver(taintAnalysis, config);

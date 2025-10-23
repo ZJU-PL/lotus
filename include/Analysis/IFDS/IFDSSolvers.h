@@ -181,9 +181,6 @@ private:
     void run_sequential_tabulation();
 
     const llvm::Function* get_main_function(const llvm::Module& module);
-
-    // Work stealing implementation
-    std::vector<PathEdgeType> try_steal_work();
 };
 
 } // namespace ifds

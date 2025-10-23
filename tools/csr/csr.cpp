@@ -16,6 +16,7 @@
 #include "CFL/CSIndex/Grail.h"
 #include "CFL/CSIndex/Graph.h"
 #include "CFL/CSIndex/GraphUtil.h"
+#include "CFL/CSIndex/ParallelTabulation.h"
 #include "CFL/CSIndex/PathtreeQuery.h"
 #include "CFL/CSIndex/PathTree.h"
 #include "CFL/CSIndex/Query.h"
@@ -31,6 +32,8 @@ static bool read_query = false;
 static int bb_epsilon = 10;
 static bool transitive_closure = false;
 static bool reps_tab_alg = false;
+static bool parallel_tab_alg = false;
+static int parallel_threads = 0; // 0 means auto-detect
 static string indexing;
 
 static bool timeout = false;
@@ -49,6 +52,8 @@ static void usage() {
             "	-q\tRead the randomly generated queries from file.\n"
             "	-t\tEvaluate transitive closure.\n"
             "	-r\tEvaluate rep's tabulation algorithm.\n"
+            "	-p\tEvaluate parallel tabulation algorithm.\n"
+            "	-j\tNumber of threads for parallel tabulation (0 for auto-detect).\n"
             "	-m\tEvaluate what indexing approach, pathtree, grail, or pathtree+grail.\n"
             "	-d\tSet the dim of Grail, 2 by default.\n"
          << "\n";
@@ -88,6 +93,12 @@ static void parse_arg(int argc, char *argv[]) {
         } else if (strcmp("-r", argv[i]) == 0) {
             i++;
             reps_tab_alg = true;
+        } else if (strcmp("-p", argv[i]) == 0) {
+            i++;
+            parallel_tab_alg = true;
+        } else if (strcmp("-j", argv[i]) == 0) {
+            i++;
+            parallel_threads = atoi(argv[i++]);
         } else if (strcmp("-m", argv[i]) == 0) {
             i++;
             indexing = argv[i++];
@@ -393,7 +404,9 @@ int main(int argc, char *argv[]) {
     double tab_notr_query_time = 0;
     double tc_time = 0;
     double tc_size = 0;
-    if (reps_tab_alg || transitive_closure) {
+    double parallel_tc_time = 0;
+    double parallel_tc_size = 0;
+    if (reps_tab_alg || transitive_closure || parallel_tab_alg) {
         ifstream orig_gf(graph_file);
         Graph orig_vfg(orig_gf);
         orig_gf.close();
@@ -409,6 +422,31 @@ int main(int argc, char *argv[]) {
             delete tab;
         }
 
+        if (parallel_tab_alg) {
+            cout << "--------- Parallel Tabulation Test ------------" << "\n";
+            // Create parallel tabulation with specified or auto-detected thread count
+            ParallelTabulation *parallel_tab;
+            if (parallel_threads > 0) {
+                parallel_tab = new ParallelTabulation(orig_vfg, parallel_threads);
+                cout << "Using " << parallel_threads << " threads for parallel tabulation" << "\n";
+            } else {
+                parallel_tab = new ParallelTabulation(orig_vfg);
+                cout << "Using auto-detected threads for parallel tabulation" << "\n";
+            }
+
+            cout << "Algorithm: " << parallel_tab->method() << "\n";
+
+            // Test queries
+            auto vertex_map = [](int v) { return v; };
+            double parallel_r_time = test_query(parallel_tab, reachable_pairs, true, vertex_map, vertex_map);
+            double parallel_nr_time = test_query(parallel_tab, unreachable_pairs, false, vertex_map, vertex_map);
+
+            cout << "Parallel Tabulation reachable queries: " << parallel_r_time << " ms" << "\n";
+            cout << "Parallel Tabulation unreachable queries: " << parallel_nr_time << " ms" << "\n";
+
+            delete parallel_tab;
+        }
+
         if (transitive_closure) {
             cout << "--------- Transitive Closure ---------" << "\n";
             start = std::chrono::high_resolution_clock::now();
@@ -418,6 +456,18 @@ int main(int argc, char *argv[]) {
             tc_time = diff.count();
             cout << "\rTransitive closure time: " << std::setprecision(2) << fixed << tc_time << " ms. " << "\n";
             cout << "Transitive closure size: " << std::setprecision(2) << fixed << tc_size << " mb. " << "\n";
+        }
+
+        if (parallel_tab_alg) {
+            cout << "--------- Parallel Transitive Closure ---------" << "\n";
+            start = std::chrono::high_resolution_clock::now();
+            ParallelTabulation parallel_tab(orig_vfg, parallel_threads > 0 ? parallel_threads : std::thread::hardware_concurrency());
+            parallel_tc_size = parallel_tab.tc();
+            end = std::chrono::high_resolution_clock::now();
+            diff = end - start;
+            parallel_tc_time = diff.count();
+            cout << "\rParallel transitive closure time: " << std::setprecision(2) << fixed << parallel_tc_time << " ms. " << "\n";
+            cout << "Parallel transitive closure size: " << std::setprecision(2) << fixed << parallel_tc_size << " mb. " << "\n";
         }
     }
 
@@ -461,6 +511,8 @@ int main(int argc, char *argv[]) {
     cerr << std::setprecision(2) << fixed << tab_r_query_time << ", ";
     cerr << std::setprecision(2) << fixed << tab_notr_query_time << ", ";
     cerr << ", ";
+    cerr << std::setprecision(2) << fixed << parallel_tc_time / 1000.0 << ", ";
+    cerr << std::setprecision(2) << fixed << parallel_tc_size << ", ";
     cerr << "\n";
 
     return 0;

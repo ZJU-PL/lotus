@@ -7,6 +7,7 @@ add_library(CanaryCSIndex STATIC
         Grail.cpp
         Graph.cpp
         GraphUtil.cpp
+        ParallelTabulation.cpp
         PathTree.cpp
         PathtreeQuery.cpp
         Query.cpp

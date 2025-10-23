@@ -4,7 +4,6 @@
  * This implements a parallel version of the IFDS tabulation algorithm with:
  * - Thread-safe data structures using shared mutexes
  * - Multiple worker threads processing worklist items in parallel
- * - Work stealing for better load balancing
  * - Proper termination detection and synchronization
  * - Performance monitoring and statistics
  */
@@ -143,16 +142,9 @@ void ParallelIFDSSolver<Problem>::worker_thread_function() {
             // Get a batch of work from the worklist
             auto batch = get_worklist_batch();
 
+            // If no work available, break
             if (batch.empty()) {
-                // Try work stealing if enabled
-                if (m_config.enable_work_stealing) {
-                    batch = try_steal_work();
-                }
-
-                // If still no work and should terminate, break
-                if (batch.empty()) {
-                    break;
-                }
+                break;
             }
 
             // Process the batch
@@ -351,7 +343,7 @@ void ParallelIFDSSolver<Problem>::process_call_to_return_edge(const llvm::CallIn
 }
 
 // ============================================================================
-// Worklist Management and Work Stealing
+// Worklist Management
 // ============================================================================
 
 template<typename Problem>
@@ -378,13 +370,6 @@ void ParallelIFDSSolver<Problem>::add_edges_to_worklist(const std::vector<PathEd
     }
 }
 
-template<typename Problem>
-std::vector<typename ParallelIFDSSolver<Problem>::PathEdgeType>
-ParallelIFDSSolver<Problem>::try_steal_work() {
-    // Simple work stealing implementation - could be improved
-    // For now, just return empty vector (no work to steal)
-    return {};
-}
 
 // ============================================================================
 // Termination and Synchronization

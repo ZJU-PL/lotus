@@ -214,9 +214,6 @@ struct ParallelIFDSConfig {
     // Worklist batch size for load balancing
     size_t worklist_batch_size = 100;
 
-    // Enable/disable work stealing for better load balancing
-    bool enable_work_stealing = true;
-
     // Synchronization frequency (how often to sync shared data structures)
     size_t sync_frequency = 1000;
 };
