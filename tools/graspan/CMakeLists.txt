@@ -14,7 +14,14 @@ target_include_directories(graspan PRIVATE
 # Link against the Graspan library and Boost dependencies
 target_link_libraries(graspan
     Graspan
-    Boost::system
-    Boost::thread
     pthread
 )
+
+# Conditionally link Boost libraries if available as targets
+if(TARGET Boost::system)
+    target_link_libraries(graspan Boost::system)
+endif()
+
+if(TARGET Boost::thread)
+    target_link_libraries(graspan Boost::thread)
+endif()

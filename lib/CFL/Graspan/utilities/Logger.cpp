@@ -1,4 +1,4 @@
-#include "CFL/Graspan/Library/Logger.h"
+#include "CFL/Graspan/utilities/Logger.h"
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -80,3 +80,4 @@ void Logger::severe(Error err) {
     
     log("SEVERE", errorMessage);
 }
+

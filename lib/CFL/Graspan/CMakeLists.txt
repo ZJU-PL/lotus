@@ -23,7 +23,7 @@ set(GRASPAN_LIB_SOURCES
     preproc/preproc_new.cpp
     preproc/run_pre.cpp
     utilities/timer.cpp
-    Library/Logger.cpp
+    utilities/Logger.cpp
 )
 
 # Create Graspan static library

@@ -62,7 +62,27 @@ endif()
 
 find_package(Boost 1.65 COMPONENTS system thread)
 
-if(NOT Boost_FOUND AND DOWNLOAD_BOOST)
+# Initialize availability flags
+set(BOOST_SYSTEM_AVAILABLE OFF)
+set(BOOST_THREAD_AVAILABLE OFF)
+
+# Check if Boost was found with required components
+if(Boost_FOUND)
+    # In Boost 1.69+, system is header-only and may not have a CMake target
+    # Check if the targets exist
+    if(NOT TARGET Boost::system)
+        set(BOOST_SYSTEM_AVAILABLE OFF)
+    else()
+        set(BOOST_SYSTEM_AVAILABLE ON)
+    endif()
+    if(NOT TARGET Boost::thread)
+        set(BOOST_THREAD_AVAILABLE OFF)
+    else()
+        set(BOOST_THREAD_AVAILABLE ON)
+    endif()
+endif()
+
+if((NOT Boost_FOUND OR NOT BOOST_SYSTEM_AVAILABLE OR NOT BOOST_THREAD_AVAILABLE) AND DOWNLOAD_BOOST)
     include(ExternalProject)
     set(BOOST_INSTALL_DIR ${CMAKE_BINARY_DIR}/deps/boost)
     message(STATUS "Boost not found, will download and build it in ${BOOST_INSTALL_DIR}")
@@ -81,6 +101,8 @@ if(NOT Boost_FOUND AND DOWNLOAD_BOOST)
     set(BOOST_ROOT ${BOOST_INSTALL_DIR})
     set(BOOST_INCLUDEDIR ${BOOST_INSTALL_DIR}/include)
     include_directories(${BOOST_INCLUDEDIR})
+    set(BOOST_SYSTEM_AVAILABLE ON)
+    set(BOOST_THREAD_AVAILABLE ON)
 elseif(Boost_FOUND)
     message(STATUS "Found Boost: ${Boost_INCLUDE_DIRS}")
     include_directories(${Boost_INCLUDE_DIRS})
