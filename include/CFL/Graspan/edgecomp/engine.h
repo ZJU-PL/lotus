@@ -3,7 +3,20 @@
 
 #include <ctime>
 
+// Boost 1.66+ renamed io_service to io_context
+#include <boost/version.hpp>
+#if BOOST_VERSION >= 106600
+#include <boost/asio/io_context.hpp>
+namespace boost_asio_compat {
+    using io_service = boost::asio::io_context;
+}
+#else
 #include <boost/asio/io_service.hpp>
+namespace boost_asio_compat {
+    using io_service = boost::asio::io_service;
+}
+#endif
+
 #include <boost/thread/thread.hpp>
 #include <boost/bind.hpp>
 

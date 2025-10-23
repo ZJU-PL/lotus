@@ -1,6 +1,12 @@
 #include "CFL/Graspan/utilities/boost_throw_exception.h"
 #include "CFL/Graspan/edgecomp/engine.h"
 
+// For Boost 1.66+, we need the executor_work_guard header
+#include <boost/version.hpp>
+#if BOOST_VERSION >= 106600
+#include <boost/asio/executor_work_guard.hpp>
+#endif
+
 long newTotalEdges;
 long newRoundEdges;
 long newIterEdges;
@@ -16,9 +22,9 @@ void initCompSets(ComputationSet compsets[], vector<Vertex> &part1, vector<Verte
 
 void initLVIs(LoadedVertexInterval intervals[], vector<Vertex> &part1, vector<Vertex> &part2);
 
-void computeEdges(ComputationSet compsets[], int setSize, LoadedVertexInterval intervals[], Context &context, unsigned long long int sizeLim, boost::asio::io_service &ioServ);
+void computeEdges(ComputationSet compsets[], int setSize, LoadedVertexInterval intervals[], Context &context, unsigned long long int sizeLim, boost_asio_compat::io_service &ioServ);
 
-void computeOneIteration(ComputationSet compsets[], int setSize, int segsiz, int nSegs, LoadedVertexInterval intervals[], Context &context, boost::asio::io_service &ioServ);
+void computeOneIteration(ComputationSet compsets[], int setSize, int segsiz, int nSegs, LoadedVertexInterval intervals[], Context &context, boost_asio_compat::io_service &ioServ);
 
 void runUpdates(int lower, int upper, int nSegs, ComputationSet compsets[], LoadedVertexInterval intervals[], Context &context);
 
@@ -39,13 +45,18 @@ long run_computation(Context &context)
 	Partition *pp, *qp;
 	Repart r;
 
-	boost::asio::io_service ioServ;
+	boost_asio_compat::io_service ioServ;
 	boost::thread_group threadpool;
 
+#if BOOST_VERSION >= 106600
+	// In Boost 1.66+, use executor_work_guard instead of io_service::work
+	auto work = boost::asio::make_work_guard(ioServ);
+#else
 	boost::asio::io_service::work work(ioServ);
+#endif
 
 	for (int i = 0; i < context.getNumThreads(); i++)
-		threadpool.create_thread(boost::bind(&boost::asio::io_service::run, &ioServ));
+		threadpool.create_thread(boost::bind(&boost_asio_compat::io_service::run, &ioServ));
 
 	partitionid_t p, q, oldP = -1, oldQ = -1;
 	newTotalEdges = 0;
@@ -199,7 +210,7 @@ long run_computation(Context &context)
  *
  * @param compsets
  */
-void computeEdges(ComputationSet compsets[], int setSize, LoadedVertexInterval intervals[], Context &context, unsigned long long int sizeLim, boost::asio::io_service &ioServ)
+void computeEdges(ComputationSet compsets[], int setSize, LoadedVertexInterval intervals[], Context &context, unsigned long long int sizeLim, boost_asio_compat::io_service &ioServ)
 {
 	Timer iterTimer;
 	iterNo = 0;
@@ -242,7 +253,7 @@ void computeEdges(ComputationSet compsets[], int setSize, LoadedVertexInterval i
  *
  * 
  */
-void computeOneIteration(ComputationSet compsets[], int setSize, int segsiz, int nSegs, LoadedVertexInterval intervals[], Context &context, boost::asio::io_service &ioServ)
+void computeOneIteration(ComputationSet compsets[], int setSize, int segsiz, int nSegs, LoadedVertexInterval intervals[], Context &context, boost_asio_compat::io_service &ioServ)
 {
 	int lower, upper;
 	newIterEdges = 0;
