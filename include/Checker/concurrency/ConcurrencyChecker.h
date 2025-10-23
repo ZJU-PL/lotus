@@ -3,7 +3,10 @@
 
 #include "Analysis/Concurrency/MHPAnalysis.h"
 #include "Analysis/Concurrency/LockSetAnalysis.h"
-#include "Checker/Report/BugTypes.h"
+#include "Checker/concurrency/ConcurrencyBugReport.h"
+#include "Checker/concurrency/DataRaceChecker.h"
+#include "Checker/concurrency/DeadlockChecker.h"
+#include "Checker/concurrency/AtomicityChecker.h"
 
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
@@ -14,33 +17,9 @@
 //#include <unordered_map>
 #include <vector>
 #include <string>
+#include <memory>
 
 namespace concurrency {
-
-enum class ConcurrencyBugType {
-    DATA_RACE,
-    DEADLOCK,
-    ATOMICITY_VIOLATION
-};
-
-struct ConcurrencyBugReport {
-    ConcurrencyBugType bugType;
-    const llvm::Instruction* instruction1;
-    const llvm::Instruction* instruction2;
-    std::string description;
-    std::string location;
-    BugDescription::BugImportance importance;
-    BugDescription::BugClassification classification;
-
-    ConcurrencyBugReport(ConcurrencyBugType type,
-                        const llvm::Instruction* inst1,
-                        const llvm::Instruction* inst2,
-                        const std::string& desc,
-                        BugDescription::BugImportance imp = BugDescription::BI_HIGH,
-                        BugDescription::BugClassification cls = BugDescription::BC_ERROR)
-        : bugType(type), instruction1(inst1), instruction2(inst2),
-          description(desc), importance(imp), classification(cls) {}
-};
 
 /**
  * @brief Static checker for concurrency problems including data races, deadlocks, and atomicity violations
@@ -113,6 +92,11 @@ private:
     llvm::AAResults* m_aliasAnalysis;
     ThreadAPI* m_threadAPI;
 
+    // Specialized checker components
+    std::unique_ptr<DataRaceChecker> m_dataRaceChecker;
+    std::unique_ptr<DeadlockChecker> m_deadlockChecker;
+    std::unique_ptr<AtomicityChecker> m_atomicityChecker;
+
     // Configuration
     bool m_checkDataRaces = true;
     bool m_checkDeadlocks = true;
@@ -120,32 +104,6 @@ private:
 
     // Results tracking
     Statistics m_stats;
-    std::unordered_set<const llvm::Value*> m_sharedVariables;
-
-    // Helper methods for data race detection
-    bool mayAlias(const llvm::Value* v1, const llvm::Value* v2) const;
-    bool isMemoryAccess(const llvm::Instruction* inst) const;
-    bool isWriteAccess(const llvm::Instruction* inst) const;
-    bool isAtomicOperation(const llvm::Instruction* inst) const;
-    std::string getInstructionLocation(const llvm::Instruction* inst) const;
-
-    // Helper methods for deadlock detection
-    bool isLockOperation(const llvm::Instruction* inst) const;
-    mhp::LockID getLockID(const llvm::Instruction* inst) const;
-    std::vector<std::pair<mhp::LockID, mhp::LockID>> detectLockOrderViolations() const;
-
-    // Helper methods for atomicity violation detection
-    bool isAtomicSequence(const llvm::Instruction* start, const llvm::Instruction* end) const;
-    bool mayBeInterleaved(const llvm::Instruction* inst1, const llvm::Instruction* inst2) const;
-
-    // Additional helper methods
-    const llvm::Value* getMemoryLocation(const llvm::Instruction* inst) const;
-    std::string getInstructionDescription(const llvm::Instruction* inst) const;
-    std::string getLockDescription(mhp::LockID lock) const;
-    const llvm::Instruction* findMatchingUnlock(const llvm::Instruction* lockInst) const;
-    void checkCriticalSectionForAtomicityViolations(
-        const llvm::Instruction* lockInst, const llvm::Instruction* unlockInst,
-        std::vector<ConcurrencyBugReport>& reports);
 };
 
 } // namespace concurrency

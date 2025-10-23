@@ -12,4 +12,5 @@ add_library(CanaryTransform STATIC
         # FlattenInit.cpp
         # SoftFloat.cpp
         UnrollVectors.cpp
+        ExpandAssume.cpp
 )

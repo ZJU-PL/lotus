@@ -91,6 +91,7 @@ else()
     message(FATAL_ERROR "Boost not found and DOWNLOAD_BOOST=OFF. Please provide a valid CUSTOM_BOOST_ROOT or set DOWNLOAD_BOOST=ON.")
 endif()
 
+
 if (SVF_DIR)
 	set(HAVE_SVF ON)
 	add_definitions(-DHAVE_SVF)

@@ -17,9 +17,9 @@
 #include <Support/ProgressBar.h>
 #include <LLVMUtils/ThreadPool.h>
 
-#include <algorithm>
+//#include <algorithm>
 #include <random>
-#include <set>
+//#include <set>
 
 namespace ifds {
 
