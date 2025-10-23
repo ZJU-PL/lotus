@@ -1,10 +1,11 @@
 #include "CFL/Graspan/utilities/boost_throw_exception.h"
 #include "CFL/Graspan/edgecomp/engine.h"
 
-// For Boost 1.66+, we need the executor_work_guard header
+// For Boost 1.66+, we need additional headers
 #include <boost/version.hpp>
 #if BOOST_VERSION >= 106600
 #include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/post.hpp>
 #endif
 
 long newTotalEdges;
@@ -265,7 +266,12 @@ void computeOneIteration(ComputationSet compsets[], int setSize, int segsiz, int
 	{
 		lower = i * segsiz;
 		upper = (lower + segsiz < setSize) ? lower + segsiz : setSize;
+#if BOOST_VERSION >= 106600
+		// In Boost 1.66+, post is a free function
+		boost::asio::post(ioServ, boost::bind(runUpdates, lower, upper, nSegs, compsets, intervals, context));
+#else
 		ioServ.post(boost::bind(runUpdates, lower, upper, nSegs, compsets, intervals, context));
+#endif
 	}
 
 	std::unique_lock<std::mutex> lck(comp_mtx);
