@@ -49,7 +49,7 @@ z3::check_result SMTLibOptimizer::checkWithConstraint(const VariableInfo& var_in
     try {
         z3::expr_vector formulas = ctx.parse_string(smt_formula.c_str());
         z3::expr var_expr = ctx.int_const(var_info.name.c_str());
-        z3::expr constraint = var_expr >= ctx.int_val(value);
+        z3::expr constraint = var_expr >= ctx.int_val(static_cast<int64_t>(value));
 
         for (unsigned i = 0; i < formulas.size(); ++i) solver.add(formulas[i]);
         solver.add(constraint);

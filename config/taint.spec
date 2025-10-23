@@ -113,6 +113,11 @@ SOURCE calloc Ret D U
 SOURCE sprintf Arg0 D U
 SOURCE snprintf Arg0 D U
 SOURCE vsnprintf Arg0 D U
+# Format functions: propagate taint from variadic args to output buffer
+PIPE sprintf Arg0 D AfterArg1 D
+PIPE snprintf Arg0 D AfterArg2 D
+PIPE vsnprintf Arg0 D AfterArg2 D
+PIPE vsprintf Arg0 D AfterArg1 D
 SOURCE getenv Ret V U
 SOURCE socket Ret V U
 SOURCE connect Ret V U

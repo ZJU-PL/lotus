@@ -58,6 +58,12 @@ public:
     friend std::ostream& operator<<(std::ostream& os, const TaintFact& fact);
 };
 
+// Tracing strategies enumeration (outside class for template usage)
+enum class TracingStrategy {
+    BOUNDARY_ONLY,      // Function boundary-only tracing
+    SUMMARY_BASED       // Summary edge-based reconstruction (fastest)
+};
+
 } // namespace ifds
 
 // Hash function for TaintFact
@@ -108,6 +114,12 @@ public:
     void report_vulnerabilities_parallel(const ParallelIFDSSolver<TaintAnalysis>& solver,
                                         llvm::raw_ostream& OS,
                                         size_t max_vulnerabilities = 10) const;
+
+    // Enhanced reporting methods with configurable tracing strategies
+    void try_report_vulnerabilities_with_strategy(const IFDSSolver<TaintAnalysis>& solver,
+                                                llvm::raw_ostream& OS,
+                                                ifds::TracingStrategy strategy,
+                                                size_t max_vulnerabilities = 10) const;
     
     // Exposed for reporting utilities
     struct TaintPath {
@@ -115,12 +127,18 @@ public:
         std::vector<const llvm::Function*> intermediate_functions;
     };
 
-    TaintPath find_sources_for_sink(
+    // Tracing methods for reconstructing taint propagation paths
+    TaintPath trace_taint_sources_boundary_only(
         const IFDSSolver<TaintAnalysis>& solver,
         const llvm::CallInst* sink_call,
         const TaintFact& tainted_fact) const;
 
-    TaintPath find_sources_for_sink_parallel(
+    TaintPath trace_taint_sources_summary_based(
+        const IFDSSolver<TaintAnalysis>& solver,
+        const llvm::CallInst* sink_call,
+        const TaintFact& tainted_fact) const;
+
+    TaintPath trace_taint_sources_parallel(
         const ParallelIFDSSolver<TaintAnalysis>& solver,
         const llvm::CallInst* sink_call,
         const TaintFact& tainted_fact) const;
@@ -129,8 +147,8 @@ public:
     std::string format_tainted_arg(unsigned arg_index, const TaintFact& fact, const llvm::CallInst* call) const;
     void analyze_tainted_arguments(const llvm::CallInst* call, const FactSet& facts,
                                   std::string& tainted_args,
-                                  std::vector<const llvm::Instruction*>& all_sources,
-                                  std::vector<const llvm::Function*>& propagation_path) const;
+                                  std::vector<const llvm::Instruction*> all_sources,
+                                  std::vector<const llvm::Function*> propagation_path) const;
     void output_vulnerability_report(llvm::raw_ostream& OS, size_t vuln_num,
                                    const std::string& func_name, const llvm::CallInst* call,
                                    const std::string& tainted_args,
@@ -138,12 +156,14 @@ public:
                                    const std::vector<const llvm::Function*>& propagation_path,
                                    size_t max_vulnerabilities) const;
 
+    // Helper for boundary-only tracing
+    bool comes_before(const llvm::Instruction* first, const llvm::Instruction* second) const;
+
 private:
     bool kills_fact(const llvm::CallInst* call, const TaintFact& fact) const;
 
     // Internal helpers that need access to alias analysis utilities
     void propagate_tainted_memory_aliases(const llvm::Value* ptr, FactSet& result) const;
-    void handle_format_function_taint(const llvm::CallInst* call, const TaintFact& fact, FactSet& result) const;
     void handle_source_function_specs(const llvm::CallInst* call, FactSet& result) const;
     void handle_pipe_specifications(const llvm::CallInst* call, const TaintFact& fact, FactSet& result) const;
 
