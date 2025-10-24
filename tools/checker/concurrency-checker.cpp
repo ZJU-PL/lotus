@@ -1,13 +1,16 @@
 #include "Checker/concurrency/ConcurrencyChecker.h"
+#include "Checker/Report/BugReport.h"
+#include "Checker/Report/BugReportMgr.h"
+#include "Checker/Report/ReportOptions.h"
 
 #include <llvm/IR/Module.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/SourceMgr.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/raw_ostream.h>
 
-//#include <iostream>
 #include <string>
 
 using namespace llvm;
@@ -19,7 +22,11 @@ static cl::opt<bool> EnableDeadlocks("check-deadlocks", cl::desc("Enable deadloc
 static cl::opt<bool> EnableAtomicity("check-atomicity", cl::desc("Enable atomicity violation detection"), cl::init(true));
 
 int main(int argc, char** argv) {
-    cl::ParseCommandLineOptions(argc, argv, "Concurrency Checker Tool\n");
+    // Initialize centralized report options
+    report_options::initializeReportOptions();
+    
+    cl::ParseCommandLineOptions(argc, argv, "Concurrency Checker Tool\n"
+                                "  Use --report-json=<file> or --report-sarif=<file> for output\n");
 
     // Parse the input LLVM IR file
     SMDiagnostic err;
@@ -41,11 +48,11 @@ int main(int argc, char** argv) {
     checker.enableDeadlockCheck(EnableDeadlocks);
     checker.enableAtomicityCheck(EnableAtomicity);
 
-    // Run the checks
+    // Run the checks (bugs are automatically reported to BugReportMgr)
     outs() << "Running concurrency checks...\n";
-    auto reports = checker.runChecks();
+    checker.runChecks();
 
-    // Print results
+    // Print analysis statistics
     auto stats = checker.getStatistics();
     outs() << "\n=== Concurrency Analysis Statistics ===\n";
     outs() << "Total Instructions: " << stats.totalInstructions << "\n";
@@ -55,53 +62,27 @@ int main(int argc, char** argv) {
     outs() << "Deadlocks Found: " << stats.deadlocksFound << "\n";
     outs() << "Atomicity Violations Found: " << stats.atomicityViolationsFound << "\n";
 
-    if (reports.empty()) {
-        outs() << "\n✅ No concurrency issues found!\n";
-        return 0;
+    // Print bug report summary (Clearblue pattern - applies to all checkers)
+    BugReportMgr& mgr = BugReportMgr::get_instance();
+    mgr.print_summary(outs());
+    
+    // Handle centralized output formats (applies to all checkers)
+    if (!report_options::JsonOutputFile.empty()) {
+        std::error_code EC;
+        raw_fd_ostream json_out(report_options::JsonOutputFile, EC, sys::fs::OF_None);
+        if (!EC) {
+            mgr.generate_json_report(json_out, report_options::MinConfidenceScore);
+            outs() << "\nJSON report written to: " << report_options::JsonOutputFile << "\n";
+        } else {
+            errs() << "Error writing JSON report: " << EC.message() << "\n";
+        }
     }
-
-    outs() << "\n=== Concurrency Issues Found ===\n";
-
-    for (size_t i = 0; i < reports.size(); ++i) {
-        const auto& report = reports[i];
-
-        outs() << "\n" << (i + 1) << ". ";
-
-        switch (report.bugType) {
-            case ConcurrencyBugType::DATA_RACE:
-                outs() << "🚨 DATA RACE";
-                break;
-            case ConcurrencyBugType::DEADLOCK:
-                outs() << "🚨 DEADLOCK";
-                break;
-            case ConcurrencyBugType::ATOMICITY_VIOLATION:
-                outs() << "⚠️  ATOMICITY VIOLATION";
-                break;
-        }
-
-        outs() << "\n   " << report.description << "\n";
-
-        if (report.instruction1) {
-            outs() << "   Location 1: ";
-            report.instruction1->print(outs());
-            outs() << "\n";
-        }
-
-        if (report.instruction2) {
-            outs() << "   Location 2: ";
-            report.instruction2->print(outs());
-            outs() << "\n";
-        }
-
-        outs() << "   Severity: ";
-        switch (report.importance) {
-            case BugDescription::BI_LOW: outs() << "Low"; break;
-            case BugDescription::BI_MEDIUM: outs() << "Medium"; break;
-            case BugDescription::BI_HIGH: outs() << "High"; break;
-            default: outs() << "Unknown"; break;
-        }
-        outs() << "\n";
+    
+    if (!report_options::SarifOutputFile.empty()) {
+        // SARIF output would be implemented in BugReportMgr
+        outs() << "\nNote: SARIF output support coming soon (centralized in BugReportMgr)\n";
     }
-
-    return reports.empty() ? 0 : 1;
+    
+    int total_bugs = stats.dataRacesFound + stats.deadlocksFound + stats.atomicityViolationsFound;
+    return total_bugs > 0 ? 1 : 0;
 }

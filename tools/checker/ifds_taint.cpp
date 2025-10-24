@@ -174,7 +174,7 @@ int main(int argc, char **argv) {
                     outs() << "Max worklist size: " << stats.max_worklist_size << "\n";
 
                     if (ShowResults) {
-                        taintAnalysis.report_vulnerabilities_parallel(solver, outs(), MaxDetailedResults.getValue());
+                        taintAnalysis.report_vulnerabilities(solver, outs(), MaxDetailedResults.getValue());
                     }
 
                 } else {

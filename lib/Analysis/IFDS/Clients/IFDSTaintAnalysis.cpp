@@ -353,11 +353,11 @@ bool TaintAnalysis::kills_fact(const llvm::CallInst* call, const TaintFact& fact
 
 
 // ============================================================================
-// Coarse-Grained Function Boundary Tracing
+// Summary Edge-Based Trace Reconstruction
 // ============================================================================
 
-// Helper to find sources using only function boundary propagation (coarse-grained approach)
-TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_boundary_only(
+// Helper to find sources using function summary reconstruction
+TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_summary_based(
     const IFDSSolver<TaintAnalysis>& solver,
     const llvm::CallInst* sink_call,
     const TaintFact& tainted_fact) const {
@@ -369,28 +369,20 @@ TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_boundary_only(
     std::vector<SummaryEdge<TaintFact>> summary_edges;
     solver.get_summary_edges(summary_edges);
 
-    // Build a map from functions to their outgoing call sites for call graph traversal
+    // Build maps for efficient lookup
+    std::unordered_map<const llvm::CallInst*, std::vector<SummaryEdge<TaintFact>>> call_to_summaries;
     std::unordered_map<const llvm::Function*, std::vector<const llvm::CallInst*>> function_to_calls;
 
-    // Also build a map from call sites to their summary edges for fact flow analysis
-    std::unordered_map<const llvm::CallInst*, std::vector<SummaryEdge<TaintFact>>> call_to_summaries;
     for (const auto& edge : summary_edges) {
         call_to_summaries[edge.call_site].push_back(edge);
 
-        // Build call graph: function -> calls made by this function
+        // Build call graph
         const llvm::Function* caller_func = edge.call_site->getFunction();
         function_to_calls[caller_func].push_back(edge.call_site);
     }
 
-    // Build reverse call graph: function -> functions that call this function
-    std::unordered_map<const llvm::Function*, std::vector<const llvm::CallInst*>> function_to_incoming_calls;
-    for (const auto& edge : summary_edges) {
-        if (edge.call_site->getCalledFunction()) {
-            function_to_incoming_calls[edge.call_site->getCalledFunction()].push_back(edge.call_site);
-        }
-    }
-
-    // Start from the sink call and work backwards through function summaries
+    // Use a more sophisticated approach: trace back through the summary edges
+    // starting from the sink call and following the taint flow backwards
     std::unordered_set<const llvm::CallInst*> visited_calls;
     std::unordered_set<const llvm::Function*> visited_functions;
     std::vector<const llvm::CallInst*> worklist;
@@ -411,30 +403,41 @@ TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_boundary_only(
             continue;
         }
 
-        // Track intermediate functions for path visualization
+        // Track intermediate functions
         if (visited_functions.insert(current_func).second && result.intermediate_functions.size() < 10) {
             result.intermediate_functions.push_back(current_func);
         }
 
-        // Check for initial taint from function parameters (function entry)
+        // Check for initial taint from function entry
         if (current_call == &current_func->getEntryBlock().front()) {
             result.sources.push_back(current_call);
             continue;
         }
 
-        // Look for calls in the same function that happen before this call
-        auto calls_in_same_function = function_to_calls.find(current_func);
-        if (calls_in_same_function != function_to_calls.end()) {
-            for (const llvm::CallInst* other_call : calls_in_same_function->second) {
-                if (other_call != current_call && comes_before(other_call, current_call)) {
-                    // Check if this call could flow taint to our current call
-                    auto summaries = call_to_summaries.find(other_call);
+        // Find all summary edges for this call site
+                    auto summaries = call_to_summaries.find(current_call);
                     if (summaries != call_to_summaries.end()) {
                         for (const auto& summary : summaries->second) {
-                            // Check if the return fact from this call could reach our current call
-                            // This is a simplified check - in practice we'd need data flow analysis
-                            if (!visited_calls.count(other_call)) {
-                                worklist.push_back(other_call);
+                            (void)summary; // Suppress unused variable warning
+                            // Check if this summary edge could contribute to our tainted fact
+                // This is where we'd need more sophisticated taint flow analysis
+                // For now, we'll use a simplified approach
+
+                // Look for calls in the same function that could flow taint to this call
+                auto calls_in_func = function_to_calls.find(current_func);
+                if (calls_in_func != function_to_calls.end()) {
+                    for (const llvm::CallInst* other_call : calls_in_func->second) {
+                        if (other_call != current_call && comes_before(other_call, current_call)) {
+                            // Check if this other call's summary edges could flow to our call
+                            auto other_summaries = call_to_summaries.find(other_call);
+                            if (other_summaries != call_to_summaries.end()) {
+                                for (const auto& other_summary : other_summaries->second) {
+                                    (void)other_summary; // Suppress unused variable warning
+                                    // Simplified check: if the return fact could flow to our call fact
+                                    if (!visited_calls.count(other_call)) {
+                                        worklist.push_back(other_call);
+                                    }
+                                }
                             }
                         }
                     }
@@ -442,12 +445,13 @@ TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_boundary_only(
             }
         }
 
-        // Look for calls in functions that call the current function
-        auto incoming_calls = function_to_incoming_calls.find(current_func);
-        if (incoming_calls != function_to_incoming_calls.end()) {
-            for (const llvm::CallInst* caller_call : incoming_calls->second) {
-                if (!visited_calls.count(caller_call)) {
-                    worklist.push_back(caller_call);
+        // Also look for inter-procedural flows (calls from other functions)
+        // This requires more sophisticated call graph analysis
+        for (const auto& edge : summary_edges) {
+            if (edge.call_site->getCalledFunction() == current_func) {
+                // This call invokes the current function - trace back to the caller
+                if (!visited_calls.count(edge.call_site)) {
+                    worklist.push_back(edge.call_site);
                 }
             }
         }
@@ -459,13 +463,9 @@ TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_boundary_only(
     return result;
 }
 
-// ============================================================================
-// Summary Edge-Based Trace Reconstruction
-// ============================================================================
-
-// Helper to find sources using function summary reconstruction (most efficient approach)
+// Overload for ParallelIFDSSolver (uses same implementation as sequential version)
 TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_summary_based(
-    const IFDSSolver<TaintAnalysis>& solver,
+    const ParallelIFDSSolver<TaintAnalysis>& solver,
     const llvm::CallInst* sink_call,
     const TaintFact& tainted_fact) const {
     (void)tainted_fact; // Suppress unused parameter warning
@@ -595,85 +595,6 @@ bool TaintAnalysis::comes_before(const llvm::Instruction* first, const llvm::Ins
 }
 
 
-// Helper to find source instructions by backward traversal (parallel version)
-TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_parallel(
-    const ParallelIFDSSolver<TaintAnalysis>& solver,
-    const llvm::CallInst* sink_call,
-    const TaintFact& tainted_fact) const {
-
-    TaintAnalysis::TaintPath result;
-    std::unordered_set<const llvm::Instruction*> visited;
-    std::unordered_set<const llvm::Function*> visited_functions;
-    std::vector<const llvm::Instruction*> worklist;
-    worklist.push_back(sink_call);
-
-    // Get path edges from parallel solver
-    std::vector<PathEdge<TaintFact>> path_edges;
-    solver.get_path_edges(path_edges);
-
-    // Track intermediate functions for path visualization
-    visited_functions.insert(sink_call->getFunction());
-
-    // Backward search with depth limit to avoid performance issues
-    int depth = 0;
-    const int max_depth = 1000;
-
-    while (!worklist.empty() && result.sources.size() < 5 && depth < max_depth) {
-        const llvm::Instruction* current = worklist.back();
-        worklist.pop_back();
-
-        if (visited.count(current)) continue;
-        visited.insert(current);
-
-        // Check if this is a source instruction
-        if (is_source(current) || current == &current->getFunction()->getEntryBlock().front()) {
-            result.sources.push_back(current);
-            if (result.sources.size() >= 5) break; // Found enough sources
-        }
-
-        // Find all path edges that end at this instruction with the tainted fact
-        for (const auto& edge : path_edges) {
-            if (edge.target_node == current && edge.target_fact == tainted_fact) {
-                // This edge leads to our current instruction - trace back to source
-                if (!visited.count(edge.start_node)) {
-                    worklist.push_back(edge.start_node);
-
-                    // Track intermediate functions
-                    if (edge.start_node->getFunction() != current->getFunction()) {
-                        if (visited_functions.insert(edge.start_node->getFunction()).second) {
-                            result.intermediate_functions.push_back(edge.start_node->getFunction());
-                        }
-                    }
-                }
-            }
-        }
-
-        depth++;
-    }
-
-    // Reverse the intermediate functions to show the path order
-    std::reverse(result.intermediate_functions.begin(), result.intermediate_functions.end());
-
-    return result;
-}
-
-// Overloads to find sources for different solver types
-static TaintAnalysis::TaintPath find_sources_helper(
-    const TaintAnalysis& self,
-    const IFDSSolver<TaintAnalysis>& solver,
-    const llvm::CallInst* sink_call,
-    const TaintFact& tainted_fact) {
-    return self.trace_taint_sources_summary_based(solver, sink_call, tainted_fact);
-}
-
-static TaintAnalysis::TaintPath find_sources_helper(
-    const TaintAnalysis& self,
-    const ParallelIFDSSolver<TaintAnalysis>& solver,
-    const llvm::CallInst* sink_call,
-    const TaintFact& tainted_fact) {
-    return self.trace_taint_sources_parallel(solver, sink_call, tainted_fact);
-}
-
 // Helper function to handle alias propagation for tainted memory
 void TaintAnalysis::propagate_tainted_memory_aliases(const llvm::Value* ptr, FactSet& result) const {
     if (m_alias_analysis) {
@@ -797,8 +718,7 @@ std::string TaintAnalysis::format_tainted_arg(unsigned arg_index, const TaintFac
 
 // Helper function to analyze tainted arguments for a call
 void TaintAnalysis::analyze_tainted_arguments(const llvm::CallInst* call, const TaintAnalysis::FactSet& facts,
-                              std::string& tainted_args, std::vector<const llvm::Instruction*> all_sources,
-                              std::vector<const llvm::Function*> propagation_path) const {
+                              std::string& tainted_args) const {
     std::set<std::string> unique_tainted_args;
 
     for (unsigned i = 0; i < call->getNumOperands() - 1; ++i) {
@@ -902,7 +822,7 @@ void report_vulnerabilities_impl(const TaintAnalysis& self, const SolverType& so
         std::vector<const llvm::Instruction*> all_sources;
         std::vector<const llvm::Function*> propagation_path;
 
-        self.analyze_tainted_arguments(call, facts, tainted_args, all_sources, propagation_path);
+        self.analyze_tainted_arguments(call, facts, tainted_args);
 
         if (!tainted_args.empty()) {
             vulnerability_count++;
@@ -920,7 +840,7 @@ void report_vulnerabilities_impl(const TaintAnalysis& self, const SolverType& so
                 }
 
                 if (found_tainted) {
-                    auto path = find_sources_helper(self, solver, call, fact);
+                    auto path = self.trace_taint_sources_summary_based(solver, call, fact);
                     all_sources.insert(all_sources.end(), path.sources.begin(), path.sources.end());
                     if (propagation_path.empty()) {
                         propagation_path = path.intermediate_functions;
@@ -951,118 +871,10 @@ void TaintAnalysis::report_vulnerabilities(const IFDSSolver<TaintAnalysis>& solv
     report_vulnerabilities_impl(*this, solver, OS, max_vulnerabilities, "Sequential");
 }
 
-void TaintAnalysis::report_vulnerabilities_parallel(const ParallelIFDSSolver<TaintAnalysis>& solver,
-                                                   llvm::raw_ostream& OS,
-                                                   size_t max_vulnerabilities) const {
+void TaintAnalysis::report_vulnerabilities(const ParallelIFDSSolver<TaintAnalysis>& solver,
+                                          llvm::raw_ostream& OS,
+                                          size_t max_vulnerabilities) const {
     report_vulnerabilities_impl(*this, solver, OS, max_vulnerabilities, "Parallel");
-}
-
-// ============================================================================
-// Enhanced Vulnerability Reporting with Tracing Strategy Selection
-// ============================================================================
-
-// Template function for vulnerability reporting with configurable tracing strategy
-template<typename SolverType>
-void try_report_vulnerabilities_with_strategy_impl(
-    const TaintAnalysis& self,
-    const SolverType& solver,
-    llvm::raw_ostream& OS,
-    size_t max_vulnerabilities,
-    ifds::TracingStrategy strategy,
-    bool benchmark_strategies) {
-
-    std::string strategy_name;
-    switch (strategy) {
-        case ifds::TracingStrategy::BOUNDARY_ONLY:
-            strategy_name = "Boundary-Only";
-            break;
-        case ifds::TracingStrategy::SUMMARY_BASED:
-            strategy_name = "Summary-Based";
-            break;
-    }
-
-    OS << "\nTaint Analysis (" << strategy_name << " Tracing):\n";
-    OS << std::string(25 + strategy_name.length(), '=') << "\n";
-
-    const auto& results = solver.get_all_results();
-    size_t vulnerability_count = 0;
-
-    for (const auto& result : results) {
-        const auto& node = result.first;
-        const auto& facts = result.second;
-
-        if (facts.empty() || !node.instruction) continue;
-
-        auto* call = llvm::dyn_cast<llvm::CallInst>(node.instruction);
-        if (!call || !self.is_sink(call)) continue;
-
-        std::string func_name = taint_config::normalize_name(call->getCalledFunction()->getName().str());
-
-        std::string tainted_args;
-        std::vector<const llvm::Instruction*> all_sources;
-        std::vector<const llvm::Function*> propagation_path;
-
-        self.analyze_tainted_arguments(call, facts, tainted_args, all_sources, propagation_path);
-
-        if (!tainted_args.empty()) {
-            vulnerability_count++;
-
-            // Find sources using the selected strategy
-            TaintAnalysis::TaintPath path;
-
-            for (const auto& fact : facts) {
-                bool found_tainted = false;
-
-                // Check if any argument is tainted by this fact
-                for (unsigned i = 0; i < call->getNumOperands() - 1; ++i) {
-                    if (self.is_argument_tainted(call->getOperand(i), fact)) {
-                        found_tainted = true;
-                        break;
-                    }
-                }
-
-                if (found_tainted) {
-                    // Use the selected tracing strategy
-                    switch (strategy) {
-                        case ifds::TracingStrategy::BOUNDARY_ONLY:
-                            path = self.trace_taint_sources_boundary_only(solver, call, fact);
-                            break;
-                        case ifds::TracingStrategy::SUMMARY_BASED:
-                            path = self.trace_taint_sources_summary_based(solver, call, fact);
-                            break;
-                    }
-
-                    all_sources.insert(all_sources.end(), path.sources.begin(), path.sources.end());
-                    if (propagation_path.empty()) {
-                        propagation_path = path.intermediate_functions;
-                    }
-                    break;
-                }
-            }
-
-            self.output_vulnerability_report(OS, vulnerability_count, func_name, call,
-                                          tainted_args, all_sources, propagation_path, max_vulnerabilities);
-        }
-    }
-
-    if (vulnerability_count == 0) {
-        OS << "No vulnerabilities detected.\n";
-    } else {
-        OS << "\nSummary: " << vulnerability_count << " vulnerabilities";
-        if (vulnerability_count > max_vulnerabilities) {
-            OS << " (showing first " << max_vulnerabilities << ")";
-        }
-        OS << "\n";
-    }
-
-}
-
-// Method to report vulnerabilities with specific tracing strategy
-void TaintAnalysis::try_report_vulnerabilities_with_strategy(const IFDSSolver<TaintAnalysis>& solver,
-                                                            llvm::raw_ostream& OS,
-                                                            ifds::TracingStrategy strategy,
-                                                            size_t max_vulnerabilities) const {
-    try_report_vulnerabilities_with_strategy_impl(*this, solver, OS, max_vulnerabilities, strategy, false);
 }
 
 } // namespace ifds

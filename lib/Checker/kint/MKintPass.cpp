@@ -21,6 +21,19 @@ MKintPass::MKintPass() : m_solver(llvm::None), m_function_timeout(FunctionTimeou
     m_range_analysis = std::make_unique<RangeAnalysis>();
     m_taint_analysis = std::make_unique<TaintAnalysis>();
     m_bug_detection = std::make_unique<BugDetection>();
+    
+    // Register bug types with BugReportMgr (Clearblue pattern)
+    BugReportMgr& mgr = BugReportMgr::get_instance();
+    m_intOverflowTypeId = mgr.register_bug_type("Integer Overflow", BugDescription::BI_HIGH,
+                                                 BugDescription::BC_SECURITY, "CWE-190");
+    m_divByZeroTypeId = mgr.register_bug_type("Divide by Zero", BugDescription::BI_MEDIUM,
+                                               BugDescription::BC_ERROR, "CWE-369");
+    m_badShiftTypeId = mgr.register_bug_type("Bad Shift", BugDescription::BI_MEDIUM,
+                                              BugDescription::BC_ERROR, "Invalid shift amount");
+    m_arrayOOBTypeId = mgr.register_bug_type("Array Out of Bounds", BugDescription::BI_HIGH,
+                                              BugDescription::BC_SECURITY, "CWE-119, CWE-125");
+    m_deadBranchTypeId = mgr.register_bug_type("Dead Branch", BugDescription::BI_LOW,
+                                                BugDescription::BC_ERROR, "Unreachable code");
 }
 
 void MKintPass::backedge_analysis(const Function& F) {
@@ -137,10 +150,11 @@ PreservedAnalyses MKintPass::run(Module& M, ModuleAnalysisManager& MAM) {
     m_bug_detection->mark_errors(m_impossible_branches, m_gep_oob, 
                                 m_overflow_insts, m_bad_shift_insts, m_div_zero_insts);
 
-    // Generate SARIF output if requested
-    if (!SarifOutputFile.empty()) {
-        this->generateSarifReport(SarifOutputFile);
-    }
+    // Report bugs to BugReportMgr (Clearblue pattern)
+    reportBugsToManager();
+
+    // Note: SARIF/JSON output is now handled centrally by BugReportMgr
+    // in the tool driver, not by individual checkers
 
     return PreservedAnalyses::all();
 }

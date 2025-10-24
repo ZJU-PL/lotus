@@ -3,6 +3,8 @@
 #include "Checker/kint/RangeAnalysis.h"
 #include "Checker/kint/KINTTaintAnalysis.h"
 #include "Checker/kint/BugDetection.h"
+#include "Checker/Report/BugReport.h"
+#include "Checker/Report/BugReportMgr.h"
 
 // Forward declarations
 namespace kint {
@@ -39,6 +41,16 @@ struct MKintPass : public PassInfoMixin<MKintPass> {
     void generateSarifReport(const std::string& filename);
 
 private:
+    // Bug reporting to BugReportMgr 
+    void reportBugsToManager();
+    void reportBug(interr bug_type, const Instruction* inst, const std::vector<PathPoint>& path = {});
+    
+    // Bug type IDs (registered with BugReportMgr)
+    int m_intOverflowTypeId;
+    int m_divByZeroTypeId;
+    int m_badShiftTypeId;
+    int m_arrayOOBTypeId;
+    int m_deadBranchTypeId;
     void backedge_analysis(const Function& F);
     void init_ranges(Module& M);
     void pring_all_ranges() const;

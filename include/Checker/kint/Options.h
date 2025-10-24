@@ -39,12 +39,6 @@ extern llvm::cl::opt<bool> QuietLogging;
 extern llvm::cl::opt<bool> StderrLogging;
 extern llvm::cl::opt<std::string> LogFile;
 
-// Define a category for output options
-extern llvm::cl::OptionCategory OutputCategory;
-
-// Add output control options
-extern llvm::cl::opt<std::string> SarifOutputFile;
-
 // Initialize command line options
 void initializeCommandLineOptions();
 

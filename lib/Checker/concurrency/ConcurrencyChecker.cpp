@@ -2,14 +2,10 @@
 #include "Analysis/Concurrency/ThreadAPI.h"
 
 #include <llvm/IR/Constants.h>
-
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/Support/raw_ostream.h>
-
-//#include <algorithm>
-//#include <sstream>
 
 using namespace llvm;
 using namespace mhp;
@@ -34,6 +30,15 @@ ConcurrencyChecker::ConcurrencyChecker(Module& module)
     m_atomicityChecker = std::make_unique<AtomicityChecker>(module, m_mhpAnalysis.get(),
                                                            m_locksetAnalysis.get(), m_threadAPI);
 
+    // Register bug types with BugReportMgr (Clearblue pattern)
+    BugReportMgr& mgr = BugReportMgr::get_instance();
+    m_dataRaceTypeId = mgr.register_bug_type("Data Race", BugDescription::BI_HIGH, 
+                                              BugDescription::BC_SECURITY, "CWE-362");
+    m_deadlockTypeId = mgr.register_bug_type("Deadlock", BugDescription::BI_HIGH,
+                                              BugDescription::BC_ERROR, "Deadlock potential");
+    m_atomicityViolationTypeId = mgr.register_bug_type("Atomicity Violation", BugDescription::BI_MEDIUM,
+                                                        BugDescription::BC_ERROR, "Non-atomic operation sequence");
+
     // Collect statistics
     m_stats.totalInstructions = 0;
     m_stats.mhpPairs = m_mhpAnalysis->getStatistics().num_mhp_pairs;
@@ -49,49 +54,70 @@ ConcurrencyChecker::ConcurrencyChecker(Module& module)
     }
 }
 
-std::vector<ConcurrencyBugReport> ConcurrencyChecker::runChecks() {
-    std::vector<ConcurrencyBugReport> allReports;
-
+void ConcurrencyChecker::runChecks() {
     if (m_checkDataRaces) {
-        auto raceReports = checkDataRaces();
-        allReports.insert(allReports.end(), raceReports.begin(), raceReports.end());
-        m_stats.dataRacesFound = raceReports.size();
+        checkDataRaces();
     }
 
     if (m_checkDeadlocks) {
-        auto deadlockReports = checkDeadlocks();
-        allReports.insert(allReports.end(), deadlockReports.begin(), deadlockReports.end());
-        m_stats.deadlocksFound = deadlockReports.size();
+        checkDeadlocks();
     }
 
     if (m_checkAtomicityViolations) {
-        auto atomicityReports = checkAtomicityViolations();
-        allReports.insert(allReports.end(), atomicityReports.begin(), atomicityReports.end());
-        m_stats.atomicityViolationsFound = atomicityReports.size();
+        checkAtomicityViolations();
     }
-
-    return allReports;
 }
 
-std::vector<ConcurrencyBugReport> ConcurrencyChecker::checkDataRaces() {
+void ConcurrencyChecker::checkDataRaces() {
     if (m_dataRaceChecker) {
-        return m_dataRaceChecker->checkDataRaces();
+        auto reports = m_dataRaceChecker->checkDataRaces();
+        m_stats.dataRacesFound = reports.size();
+        for (const auto& report : reports) {
+            reportBug(report, m_dataRaceTypeId);
+        }
     }
-    return {};
 }
 
-std::vector<ConcurrencyBugReport> ConcurrencyChecker::checkDeadlocks() {
+void ConcurrencyChecker::checkDeadlocks() {
     if (m_deadlockChecker) {
-        return m_deadlockChecker->checkDeadlocks();
+        auto reports = m_deadlockChecker->checkDeadlocks();
+        m_stats.deadlocksFound = reports.size();
+        for (const auto& report : reports) {
+            reportBug(report, m_deadlockTypeId);
+        }
     }
-    return {};
 }
 
-std::vector<ConcurrencyBugReport> ConcurrencyChecker::checkAtomicityViolations() {
+void ConcurrencyChecker::checkAtomicityViolations() {
     if (m_atomicityChecker) {
-        return m_atomicityChecker->checkAtomicityViolations();
+        auto reports = m_atomicityChecker->checkAtomicityViolations();
+        m_stats.atomicityViolationsFound = reports.size();
+        for (const auto& report : reports) {
+            reportBug(report, m_atomicityViolationTypeId);
+        }
     }
-    return {};
+}
+
+void ConcurrencyChecker::reportBug(const ConcurrencyBugReport& bug_report, int bug_type_id) {
+    // Create a new BugReport following Clearblue pattern
+    BugReport* report = new BugReport(bug_type_id);
+    
+    // Add diagnostic steps showing the concurrency bug trace
+    if (bug_report.instruction1) {
+        report->append_step(const_cast<Instruction*>(bug_report.instruction1), 
+                           "First access: " + bug_report.description);
+    }
+    
+    if (bug_report.instruction2) {
+        report->append_step(const_cast<Instruction*>(bug_report.instruction2), 
+                           "Second conflicting access");
+    }
+    
+    // Set confidence score based on importance
+    report->set_conf_score(bug_report.importance == BugDescription::BI_HIGH ? 90 : 70);
+    
+    // Report to the manager
+    BugReportMgr::get_instance().insert_report(bug_type_id, report);
 }
 
 } // namespace concurrency

@@ -7,6 +7,8 @@
 #include "Checker/concurrency/DataRaceChecker.h"
 #include "Checker/concurrency/DeadlockChecker.h"
 #include "Checker/concurrency/AtomicityChecker.h"
+#include "Checker/Report/BugReport.h"
+#include "Checker/Report/BugReportMgr.h"
 
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
@@ -14,7 +16,6 @@
 #include <llvm/Analysis/AliasAnalysis.h>
 
 #include <unordered_set>
-//#include <unordered_map>
 #include <vector>
 #include <string>
 #include <memory>
@@ -35,28 +36,24 @@ public:
     ~ConcurrencyChecker() = default;
 
     /**
-     * @brief Run all concurrency checks
-     * @return Vector of detected concurrency bugs
+     * @brief Run all concurrency checks and report bugs to BugReportMgr
      */
-    std::vector<ConcurrencyBugReport> runChecks();
+    void runChecks();
 
     /**
-     * @brief Check for data races
-     * @return Vector of data race reports
+     * @brief Check for data races and report to BugReportMgr
      */
-    std::vector<ConcurrencyBugReport> checkDataRaces();
+    void checkDataRaces();
 
     /**
-     * @brief Check for deadlocks
-     * @return Vector of deadlock reports
+     * @brief Check for deadlocks and report to BugReportMgr
      */
-    std::vector<ConcurrencyBugReport> checkDeadlocks();
+    void checkDeadlocks();
 
     /**
-     * @brief Check for atomicity violations
-     * @return Vector of atomicity violation reports
+     * @brief Check for atomicity violations and report to BugReportMgr
      */
-    std::vector<ConcurrencyBugReport> checkAtomicityViolations();
+    void checkAtomicityViolations();
 
     /**
      * @brief Set alias analysis for better precision
@@ -102,8 +99,16 @@ private:
     bool m_checkDeadlocks = true;
     bool m_checkAtomicityViolations = true;
 
+    // Bug type IDs (registered with BugReportMgr)
+    int m_dataRaceTypeId;
+    int m_deadlockTypeId;
+    int m_atomicityViolationTypeId;
+
     // Results tracking
     Statistics m_stats;
+    
+    // Helper to convert ConcurrencyBugReport to BugReport
+    void reportBug(const ConcurrencyBugReport& bug_report, int bug_type_id);
 };
 
 } // namespace concurrency

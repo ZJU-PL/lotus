@@ -57,14 +57,6 @@ llvm::cl::opt<std::string> LogFile("log-to-file",
                                    llvm::cl::value_desc("filename"),
                                    llvm::cl::cat(LoggingCategory));
 
-// Output options
-llvm::cl::OptionCategory OutputCategory("Output Options", "Options for controlling output format");
-
-llvm::cl::opt<std::string> SarifOutputFile("sarif-output",
-                                           llvm::cl::desc("Output bug reports in SARIF format to the specified file"),
-                                           llvm::cl::value_desc("filename"),
-                                           llvm::cl::cat(OutputCategory));
-
 void initializeCommandLineOptions() {
     // This function can be used to initialize any additional command line options
     // if needed in the future
