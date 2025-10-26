@@ -92,9 +92,9 @@
   * Constructor
   *  * Build ICFG
   * 1) build ICFG nodes
-  *    statements for top level pointers (PAGEdges)
+  *    statements for top level pointers 
   * 2) connect ICFG edges
-  *    between two statements (PAGEdges)
+  *    between two statements 
   */
  ICFG::ICFG(): totalICFGNode(0) {}
  
