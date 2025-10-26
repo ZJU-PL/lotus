@@ -2,7 +2,7 @@
 
 Context::Context(int argc, char** argv) {
 	//if user don't typing input value
-	cout << "argc ==" << argc << endl;
+	cout << "argc ==" << argc << "\n";
 	char *p_token = NULL;
 	char *context = NULL;
 
@@ -16,42 +16,42 @@ Context::Context(int argc, char** argv) {
 		p_token = strtok_r(argv[i], "=", &context);
 		if (!strncmp(argv[i], INPUT_GRAPH_FILE_KEY.c_str(), INPUT_GRAPH_FILE_KEY.length())) {
 			filePath.insert(std::make_pair(INPUT_GRAPH_FILE_KEY, context));
-			cout << "INPUT_GRAPH_FILE_KEY =" << context << endl;
+			cout << "INPUT_GRAPH_FILE_KEY =" << context << "\n";
 		}
 		else if (!strncmp(argv[i], GRAMMAR_FILE_KEY.c_str(), GRAMMAR_FILE_KEY.length())) {
 			filePath.insert(std::make_pair(GRAMMAR_FILE_KEY, context));
-			cout << "GRAMMAR_FILE_KEY =" << context << endl;
+			cout << "GRAMMAR_FILE_KEY =" << context << "\n";
 		}
 		else if (!strncmp(argv[i], MEM_BUDGET_KEY.c_str(), MEM_BUDGET_KEY.length())) {
 			parameters.insert(std::make_pair(MEM_BUDGET_KEY, (unsigned long long int)atoi(context)*(unsigned long long int)1073741824));
 			memBudget = (unsigned long long int)atoi(context)*(unsigned long long int)1073741824;
-			cout << "MEM_BUDGET_KEY =" << memBudget << endl;
+			cout << "MEM_BUDGET_KEY =" << memBudget << "\n";
 		}
 		else if (!strncmp(argv[i], NUM_THREADS_KEY.c_str(), NUM_THREADS_KEY.length())) {
 			parameters.insert(std::make_pair(NUM_THREADS_KEY, atoi(context)));
-			cout << "NUM_THREADS_KEY = " << context << endl;
+			cout << "NUM_THREADS_KEY = " << context << "\n";
 		}
 		else if (!strncmp(argv[i], NUM_PARTITION_KEY.c_str(), NUM_PARTITION_KEY.length())) {
 			parameters.find(NUM_PARTITION_KEY)->second = atoi(context);
-			cout << "NUM_PARTITION_KEY =" << atoi(context) << endl;
+			cout << "NUM_PARTITION_KEY =" << atoi(context) << "\n";
 		}
 		else if (!strncmp(argv[i], MAX_EDGES_PER_PARTITION_KEY.c_str(), MAX_EDGES_PER_PARTITION_KEY.length())) {
 			parameters.insert(std::make_pair(MAX_EDGES_PER_PARTITION_KEY, atoi(context)));
-			cout << "MAX_EDGES_PER_PARTITION_KEY =" << atoi(context) << endl;
+			cout << "MAX_EDGES_PER_PARTITION_KEY =" << atoi(context) << "\n";
 		}
 		else if (!strncmp(argv[i], INSERT_SORT_FLAG.c_str(), INSERT_SORT_FLAG.length())) {
 			if (atoi(context) == 0)
 				flags.find(INSERT_SORT_FLAG)->second = false;
 			else
 				flags.find(INSERT_SORT_FLAG)->second = true;
-			cout << "INSERT_SORT_FLAG =" << atoi(context) << endl;
+			cout << "INSERT_SORT_FLAG =" << atoi(context) << "\n";
 		}
 		else if (!strncmp(argv[i], ALTER_SCHEDULE_FLAG.c_str(), ALTER_SCHEDULE_FLAG.length())) {
 			if (atoi(context) == 0)
 				flags.find(ALTER_SCHEDULE_FLAG)->second = false;
 			else
 				flags.find(ALTER_SCHEDULE_FLAG)->second = true;
-			cout << "ALTER_SCHEDULE_FLAG =" << atoi(context) << endl;
+			cout << "ALTER_SCHEDULE_FLAG =" << atoi(context) << "\n";
 		}
 	}
 

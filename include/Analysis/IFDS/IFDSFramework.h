@@ -26,9 +26,9 @@
 #include <thread>
 #include <set>
 #include <mutex>
-//#include <atomic>
-//#include <condition_variable>
-//#include <chrono>
+#include <atomic>
+#include <condition_variable>
+#include <chrono>
 #include <memory>
 
 // Forward declarations for solver classes (moved to separate headers)

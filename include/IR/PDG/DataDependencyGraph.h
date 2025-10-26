@@ -1,9 +1,10 @@
 #pragma once
 #include "IR/PDG/Graph.h"
+#include "IR/PDG/PDGAliasWrapper.h"
 #include "llvm/Analysis/MemoryDependenceAnalysis.h"
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/AliasAnalysis.h"
-
+#include <memory>
 
 namespace pdg
 {
@@ -23,5 +24,7 @@ namespace pdg
 
   private:
     llvm::MemoryDependenceResults *_mem_dep_res;
+    std::unique_ptr<PDGAliasWrapper> _alias_wrapper_over;  // For over-approximation (Andersen)
+    std::unique_ptr<PDGAliasWrapper> _alias_wrapper_under; // For under-approximation (syntactic)
   };
 } // namespace pdg

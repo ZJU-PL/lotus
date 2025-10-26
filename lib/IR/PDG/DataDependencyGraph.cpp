@@ -34,6 +34,12 @@ bool pdg::DataDependencyGraph::runOnModule(Module &M)
     g.bindDITypeToNodes(M);
   }
   
+  // Initialize two alias analysis wrappers:
+  // 1. Over-approximation using Andersen's analysis (precise, flow-insensitive)
+  // 2. Under-approximation using syntactic pattern matching (fast, conservative)
+  _alias_wrapper_over = PDGAliasFactory::create(M, AAType::Andersen);
+  _alias_wrapper_under = PDGAliasFactory::create(M, AAType::UnderApprox);
+  
   for (auto &F : M)
   {
     if (F.isDeclaration() || F.empty())
@@ -111,46 +117,32 @@ void pdg::DataDependencyGraph::addRAWEdges(Instruction &inst)
 
 llvm::AliasResult pdg::DataDependencyGraph::queryAliasUnderApproximate(llvm::Value &v1, llvm::Value &v2)
 {
-  // only check alias for pointer type variables
+  // Use the under-approximation wrapper (syntactic pattern matching)
+  // This only returns MustAlias for clear syntactic patterns, otherwise NoAlias
+  if (_alias_wrapper_under && _alias_wrapper_under->isInitialized())
+  {
+    return _alias_wrapper_under->query(&v1, &v2);
+  }
+  
+  // Fall back to simple check if wrapper is not available
   if (!v1.getType()->isPointerTy() || !v2.getType()->isPointerTy())
     return llvm::AliasResult::NoAlias;
-  // check bit cast
-  if (BitCastInst *bci = dyn_cast<BitCastInst>(&v1))
-  {
-    if (bci->getOperand(0) == &v2)
-      return llvm::AliasResult::MustAlias;
-  }
-  // handle load instruction
-  if (LoadInst *li = dyn_cast<LoadInst>(&v1))
-  {
-    auto load_addr = li->getPointerOperand();
-    for (auto user : load_addr->users())
-    {
-      if (StoreInst *si = dyn_cast<StoreInst>(user))
-      {
-        if (si->getPointerOperand() == load_addr)
-        {
-          if (si->getValueOperand() == &v2)
-            return llvm::AliasResult::MustAlias;
-        }
-      }
-      if (LoadInst *alias_load_inst = dyn_cast<LoadInst>(user))
-      {
-        if (alias_load_inst == &v2)
-          return llvm::AliasResult::MustAlias;
-      }
-    }
-  }
-  // Add return statement to prevent compiler warning
+  
   return llvm::AliasResult::NoAlias;
 }
 
-llvm::AliasResult pdg::DataDependencyGraph::queryAliasOverApproximate([[maybe_unused]] llvm::Value &v1, [[maybe_unused]] llvm::Value &v2)
- {
-  // FIXME: integrate the pointer analyses in lib/Alias (also the alias analyses inside LLVM?)
-  // FIXME: also refer to the implementation of DDG in the DG tool.
+llvm::AliasResult pdg::DataDependencyGraph::queryAliasOverApproximate(llvm::Value &v1, llvm::Value &v2)
+{
+  // Use the over-approximation wrapper (Andersen's analysis)
+  // This integrates precise pointer analysis from lib/Alias/Andersen
+  if (_alias_wrapper_over && _alias_wrapper_over->isInitialized())
+  {
+    return _alias_wrapper_over->query(&v1, &v2);
+  }
+  
+  // Fall back to conservative answer if wrapper is not available
   return llvm::AliasResult::MayAlias;
- }
+}
 
   void pdg::DataDependencyGraph::getAnalysisUsage(AnalysisUsage & AU) const
   {
