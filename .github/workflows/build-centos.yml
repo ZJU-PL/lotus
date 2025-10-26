@@ -9,61 +9,99 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        centos_version: ['quay.io/centos/centos:stream8', 'quay.io/centos/centos:stream9']
+        centos_version:
+          - 'quay.io/centos/centos:stream8'
+          - 'quay.io/centos/centos:stream9'
 
     container:
-      image: ${{ matrix['centos_version'] }}
+      image: ${{ matrix.centos_version }}
+      options: --dns=8.8.8.8  # reliable DNS inside container
 
     env:
       MAKEFLAGS: -j4
+      BUILD_DIR: build
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies and set up LLVM
+      # ------------------------------------------------------
+      # DNF Cache (to avoid refetching LLVM/deps each run)
+      # ------------------------------------------------------
+      - name: Cache DNF packages
+        id: cache-dnf
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/dnf
+            /var/cache/yum
+          key: dnf-${{ matrix.centos_version }}-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            dnf-${{ matrix.centos_version }}-
+
+      - name: Prepare and install dependencies
         run: |
-          set -e
+          set -euxo pipefail
+          echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
           dnf install -y dnf-plugins-core
 
           CENTOS_VERSION=$(rpm -E %{rhel})
+          echo "Detected RHEL/CentOS version: $CENTOS_VERSION"
 
           if [ "$CENTOS_VERSION" = "8" ]; then
-            # 使用 vault 替换 mirrorlist
-            sed -i 's|mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/CentOS-Stream-*.repo
-            sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Stream-*.repo
+            echo "Switching CentOS Stream 8 to vault mirrors"
+            sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/CentOS-Stream-*.repo || true
+            sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Stream-*.repo || true
             dnf clean all
-            dnf install -y \
-              https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
-            dnf config-manager --set-enabled powertools
+            dnf makecache
+            dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+            dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled PowerTools || true
           else
-            dnf install -y \
-              https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+            dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
             dnf config-manager --set-enabled crb
           fi
 
-          dnf install -y gcc gcc-c++ cmake ninja-build \
+          dnf install -y \
+            gcc gcc-c++ cmake ninja-build \
             gmp-devel boost-devel z3-devel python3 python3-pip \
             llvm llvm-devel llvm-static clang clang-devel
 
           echo "LLVM_CONFIG=$(command -v llvm-config)" >> "$GITHUB_ENV"
-          echo "CC=$(command -v clang)"           >> "$GITHUB_ENV"
-          echo "CXX=$(command -v clang++)"        >> "$GITHUB_ENV"
+          echo "CC=$(command -v clang)" >> "$GITHUB_ENV"
+          echo "CXX=$(command -v clang++)" >> "$GITHUB_ENV"
 
-      - name: Build and install
+      # ------------------------------------------------------
+      # Build Cache (speed up rebuilds)
+      # ------------------------------------------------------
+      - name: Cache build artifacts
+        id: cache-build
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: build-${{ matrix.centos_version }}-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            build-${{ matrix.centos_version }}-
+
+      # ------------------------------------------------------
+      # Build and Install
+      # ------------------------------------------------------
+      - name: Build and install Canary
         run: |
-          mkdir build && cd build
+          set -euxo pipefail
+          mkdir -p "$BUILD_DIR" && cd "$BUILD_DIR"
           LLVM_CMAKE_DIR=$(llvm-config --cmakedir)
 
           cmake -G Ninja .. \
             -DCMAKE_INSTALL_PREFIX="$HOME/canary" \
-            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_BUILD_PATH="$LLVM_CMAKE_DIR" \
             -DLLVM_CONFIG_PATH="$LLVM_CONFIG" \
             -DLLVM_DIR="$LLVM_CMAKE_DIR" \
             -DZ3_DIR="/usr"
 
-          ninja && ninja install
+          ninja -v
+          ninja install
 
       - name: Add Canary to PATH
         run: echo "$HOME/canary/bin" >> "$GITHUB_PATH"
