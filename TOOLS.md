@@ -203,18 +203,13 @@ Key options:
 - `-dump-stats`: Dump analysis statistics
 - `-verbose`: Print detailed vulnerability information
 
-The tool uses Dyck alias analysis and value flow analysis to detect potential vulnerabilities by tracking data flow from sources to sinks. It can detect:
+The tool uses Dyck alias analysis and value flow analysis to detect potential vulnerabilities by tracking data flow from sources to sinks. It can detect various memory bugs, such as NPD, UAF,...
 
-1. **Null pointer vulnerabilities**: Detects potential null pointer dereferences
-2. **Taint vulnerabilities**: Detects potential taint flow from sources to sinks
 
 Examples:
 ```bash
 # Null pointer analysis
 ./canary-gvfa input.bc
-
-# Taint analysis
-./canary-gvfa -vuln-type=taint input.bc
 
 # Context-sensitive analysis with statistics
 ./canary-gvfa -test-cfl-reachability -dump-stats -verbose input.bc
@@ -271,9 +266,6 @@ Examples:
 ./kint -quiet -log-to-file=analysis.log input.ll
 ```
 
-### canary-npa
-
-Null pointer analysis tool.
 
 ## Constraint Solving Tools
 

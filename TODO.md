@@ -22,11 +22,13 @@ Universal interface for the analyses in lib/Alias:
 - Pointer queries: points-to, alias pair, alias set, pointed-by set
 - Callgraph: callgraph edges, reachable methods, etc.
 - Optimizations: devirtualization, dead code elimination, ...
-- Security: control-flow integrity, code pointer integrity, ...
-- IR: Memory SSA, DDG, PDG, SDG, SVFG, etc.
+- Security: bug finding, guided fuzzing, control-flow integrity, code pointer integrity, ...
+- IR: Memory SSA, SSI, DDG, PDG, SDG, SVFG, ...
 - Slicing: forward, backward, thin slicing, tropping, ...
 
 **Note**: Currently, we may not focus on some "high-level clients" such as taint analysis and memory safety verification, which can require more reasoning capabilities dataflow tracking, numerical analysis, path sensitivity, etc.
+
+We have AliasWrapper.cpp that wraps various alias analyses (to be tested),
 
 
 ### Third-Party
@@ -60,6 +62,7 @@ Use VFG or PDG to answer slicing queries.
 
 * Program chopping
 * Thin slicing
+* ...
 
 (Maybe refer to the implementation in DG)
 

@@ -33,3 +33,15 @@ target_link_libraries(AndersenExample PRIVATE Andersen ${llvm_libs})
 # PDGExample needs CanaryPDG and LLVM libs
 target_link_libraries(PDGExample PRIVATE CanaryPDG ${llvm_libs})
 
+# PointerAnalysisExample needs AliasAnalysisWrapper and all its dependencies
+target_link_libraries(PointerAnalysisExample PRIVATE 
+    CanaryAliasAnalysisWrapper 
+    CanaryUnderApproxAA
+    Andersen
+    CanaryDyckAA
+    CanaryAllocAA
+    SeaDsaAnalysis
+    CFLAA
+    ${llvm_libs}
+)
+

@@ -13,7 +13,6 @@ add_library(CanaryPDG STATIC
   FunctionWrapper.cpp
   Graph.cpp
   GraphWriter.cpp
-  PDGAliasWrapper.cpp
   PDGCallGraph.cpp
   PDGNode.cpp
   PDGUtils.cpp
