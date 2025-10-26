@@ -34,11 +34,11 @@ public:
     return *this;
   }
 
-  bool operator==(const ViterbiSemiring& elem) const override {
+  bool operator==(const ViterbiSemiring& elem) const {
     return std::abs(val - elem.val) < 1e-10;
   }
 
-  ViterbiSemiring star() const override {
+  ViterbiSemiring star() const {
     return ViterbiSemiring::one();  // 1 for idempotent semiring
   }
 
@@ -50,7 +50,7 @@ public:
     return ViterbiSemiring(1.0);
   }
 
-  std::string string() const override {
+  std::string string() const {
     return std::to_string(val);
   }
 

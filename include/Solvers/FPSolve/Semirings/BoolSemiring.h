@@ -27,12 +27,12 @@ public:
 
   BoolSemiring operator+=(const BoolSemiring& elem);
   BoolSemiring operator*=(const BoolSemiring& elem);
-  bool operator==(const BoolSemiring& elem) const override;
-  BoolSemiring star() const override;
+  bool operator==(const BoolSemiring& elem) const;
+  BoolSemiring star() const;
 
   static BoolSemiring null();
   static BoolSemiring one();
-  std::string string() const override;
+  std::string string() const;
 
   static constexpr bool is_idempotent = true;
   static constexpr bool is_commutative = true;

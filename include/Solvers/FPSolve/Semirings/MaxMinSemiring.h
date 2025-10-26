@@ -33,11 +33,11 @@ public:
     return *this;
   }
 
-  bool operator==(const MaxMinSemiring& elem) const override {
+  bool operator==(const MaxMinSemiring& elem) const {
     return std::abs(val - elem.val) < 1e-10;
   }
 
-  MaxMinSemiring star() const override {
+  MaxMinSemiring star() const {
     return MaxMinSemiring::one();
   }
 
@@ -49,7 +49,7 @@ public:
     return MaxMinSemiring(std::numeric_limits<double>::infinity());
   }
 
-  std::string string() const override {
+  std::string string() const {
     if (std::isinf(val)) {
       return val < 0 ? "-inf" : "inf";
     }

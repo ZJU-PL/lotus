@@ -33,11 +33,11 @@ public:
     return *this;
   }
 
-  bool operator==(const FloatSemiring& elem) const override {
+  bool operator==(const FloatSemiring& elem) const {
     return std::abs(val - elem.val) < 1e-10;
   }
 
-  FloatSemiring star() const override {
+  FloatSemiring star() const {
     if (std::abs(val) < 1.0) {
       return FloatSemiring(1.0 / (1.0 - val));
     }
@@ -52,7 +52,7 @@ public:
     return FloatSemiring(1.0);
   }
 
-  std::string string() const override {
+  std::string string() const {
     return std::to_string(val);
   }
 

@@ -37,11 +37,11 @@ public:
     return *this;
   }
 
-  bool operator==(const TropicalSemiring& elem) const override {
+  bool operator==(const TropicalSemiring& elem) const {
     return val == elem.val;
   }
 
-  TropicalSemiring star() const override {
+  TropicalSemiring star() const {
     return TropicalSemiring::one(); // 0 in tropical
   }
 
@@ -53,7 +53,7 @@ public:
     return TropicalSemiring(0);
   }
 
-  std::string string() const override {
+  std::string string() const {
     if (val == INFTY) {
       return "inf";
     }

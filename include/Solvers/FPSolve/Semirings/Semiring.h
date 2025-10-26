@@ -5,6 +5,7 @@
 #ifndef FPSOLVE_SEMIRING_H
 #define FPSOLVE_SEMIRING_H
 
+#include <cstdint>
 #include <iosfwd>
 #include <string>
 #include <functional>

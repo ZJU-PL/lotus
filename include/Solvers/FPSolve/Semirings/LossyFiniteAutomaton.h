@@ -119,16 +119,16 @@ public:
     return *this;
   }
 
-  bool operator==(const LossyFiniteAutomaton& elem) const override {
+  bool operator==(const LossyFiniteAutomaton& elem) const {
     // Equality with respect to lossified versions
     return lossify().language == elem.lossify().language;
   }
 
-  LossyFiniteAutomaton star() const override {
+  LossyFiniteAutomaton star() const {
     return LossyFiniteAutomaton(language.star().minimize());
   }
 
-  std::string string() const override {
+  std::string string() const {
     try {
       return language.to_regexp();
     } catch (...) {

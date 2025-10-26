@@ -39,7 +39,7 @@ public:
     return FreeSemiring{factory_.GetEpsilon()};
   }
 
-  FreeSemiring star() const override {
+  FreeSemiring star() const {
     return FreeSemiring{factory_.NewStar(node_)};
   }
 
@@ -61,11 +61,11 @@ public:
     return *this;
   }
 
-  bool operator==(const FreeSemiring &x) const override {
+  bool operator==(const FreeSemiring &x) const {
     return node_ == x.node_;
   }
 
-  std::string string() const override {
+  std::string string() const {
     return NodeToString(*node_);
   }
 
@@ -104,7 +104,7 @@ public:
   FreeSemiringEvaluator(const ValuationMap<SR> &val) 
     : valuation_(val), result_(SR::null()) {}
 
-  void Visit(const Addition &a) override {
+  void Visit(const Addition &a) {
     FreeSemiringEvaluator left(valuation_);
     a.GetLhs()->Accept(left);
     FreeSemiringEvaluator right(valuation_);
@@ -112,7 +112,7 @@ public:
     result_ = left.result_ + right.result_;
   }
 
-  void Visit(const Multiplication &m) override {
+  void Visit(const Multiplication &m) {
     FreeSemiringEvaluator left(valuation_);
     m.GetLhs()->Accept(left);
     FreeSemiringEvaluator right(valuation_);
@@ -120,13 +120,13 @@ public:
     result_ = left.result_ * right.result_;
   }
 
-  void Visit(const Star &s) override {
+  void Visit(const Star &s) {
     FreeSemiringEvaluator inner(valuation_);
     s.GetNode()->Accept(inner);
     result_ = inner.result_.star();
   }
 
-  void Visit(const Element &e) override {
+  void Visit(const Element &e) {
     auto iter = valuation_.find(e.GetVar());
     if (iter != valuation_.end()) {
       result_ = iter->second;
@@ -135,11 +135,11 @@ public:
     }
   }
 
-  void Visit(const Epsilon &e) override {
+  void Visit(const Epsilon &e) {
     result_ = SR::one();
   }
 
-  void Visit(const Empty &e) override {
+  void Visit(const Empty &e) {
     result_ = SR::null();
   }
 
