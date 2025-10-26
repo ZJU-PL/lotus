@@ -34,6 +34,7 @@
 #include <llvm/ADT/Optional.h>
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/Statistic.h>
 #include <llvm/ADT/iterator_range.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/MemoryLocation.h>
@@ -65,6 +66,18 @@ using namespace llvm;
 using namespace llvm::cflaa;
 
 #define DEBUG_TYPE "cfl-anders-aa"
+
+STATISTIC(NumCFLAndersGraphNodes, "CFL-Anders: Number of graph nodes created");
+STATISTIC(NumCFLAndersAssignEdges, "CFL-Anders: Number of assignment edges");
+STATISTIC(NumCFLAndersRevAssignEdges, "CFL-Anders: Number of reverse assignment edges");
+STATISTIC(NumCFLAndersMemAliases, "CFL-Anders: Number of memory aliases computed");
+STATISTIC(NumCFLAndersReachablePairs, "CFL-Anders: Number of reachable value pairs");
+STATISTIC(NumCFLAndersWorkListItems, "CFL-Anders: Number of worklist items processed");
+STATISTIC(NumCFLAndersIterations, "CFL-Anders: Number of reachability iterations");
+STATISTIC(NumCFLAndersAttrPropagations, "CFL-Anders: Number of attribute propagations");
+STATISTIC(NumCFLAndersFunctionsCached, "CFL-Anders: Number of functions cached");
+STATISTIC(NumCFLAndersAliasQueries, "CFL-Anders: Number of alias queries");
+STATISTIC(NumCFLAndersValueMappings, "CFL-Anders: Number of value mappings");
 
 CFLAndersAAResult::CFLAndersAAResult(
     std::function<const TargetLibraryInfo &(Function &F)> GetTLI)
@@ -587,12 +600,18 @@ static void initializeWorkList(std::vector<WorkListItem> &WorkList,
     auto &ValueInfo = Mapping.second;
     assert(ValueInfo.getNumLevels() > 0);
 
+    ++NumCFLAndersValueMappings;
+    for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; ++I) {
+      ++NumCFLAndersGraphNodes;
+    }
+
     // Insert all immediate assignment neighbors to the worklist
     for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; ++I) {
       auto Src = InstantiatedValue{Val, I};
       // If there's an assignment edge from X to Y, it means Y is reachable from
       // X at S3 and X is reachable from Y at S1
       for (auto &Edge : ValueInfo.getNodeInfoAtLevel(I).Edges) {
+        ++NumCFLAndersAssignEdges;
         propagate(Edge.Other, Src, MatchState::FlowFromReadOnly, ReachSet,
                   WorkList);
         propagate(Src, Edge.Other, MatchState::FlowToWriteOnly, ReachSet,
@@ -662,13 +681,17 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
       propagate(FromNode, AssignEdge.Other, State, ReachSet, WorkList);
   };
   auto NextRevAssignState = [&](MatchState State) {
-    for (const auto &RevAssignEdge : NodeInfo->ReverseEdges)
+    for (const auto &RevAssignEdge : NodeInfo->ReverseEdges) {
+      ++NumCFLAndersRevAssignEdges;
       propagate(FromNode, RevAssignEdge.Other, State, ReachSet, WorkList);
+    }
   };
   auto NextMemState = [&](MatchState State) {
     if (auto AliasSet = MemSet.getMemoryAliases(ToNode)) {
-      for (const auto &MemAlias : *AliasSet)
+      for (const auto &MemAlias : *AliasSet) {
+        ++NumCFLAndersMemAliases;
         propagate(FromNode, MemAlias, State, ReachSet, WorkList);
+      }
     }
   };
 
@@ -734,8 +757,11 @@ static AliasAttrMap buildAttrMap(const CFLGraph &Graph,
       // Propagate attr on the same level
       for (const auto &Mapping : ReachSet.reachableValueAliases(Dst)) {
         auto Src = Mapping.first;
-        if (AttrMap.add(Src, DstAttr))
+        ++NumCFLAndersReachablePairs;
+        if (AttrMap.add(Src, DstAttr)) {
+          ++NumCFLAndersAttrPropagations;
           NextList.push_back(Src);
+        }
       }
 
       // Propagate attr to the levels below
@@ -770,8 +796,11 @@ CFLAndersAAResult::buildInfoFrom(const Function &Fn) {
   initializeWorkList(WorkList, ReachSet, Graph);
   // TODO: make sure we don't stop before the fix point is reached
   while (!WorkList.empty()) {
-    for (const auto &Item : WorkList)
+    ++NumCFLAndersIterations;
+    for (const auto &Item : WorkList) {
+      ++NumCFLAndersWorkListItems;
       processWorkListItem(Item, Graph, ReachSet, MemSet, NextList);
+    }
 
     NextList.swap(WorkList);
     NextList.clear();
@@ -790,6 +819,8 @@ void CFLAndersAAResult::scan(const Function &Fn) {
   (void)InsertPair;
   assert(InsertPair.second &&
          "Trying to scan a function that has already been cached");
+
+  ++NumCFLAndersFunctionsCached;
 
   // Note that we can't do Cache[Fn] = buildSetsFrom(Fn) here: the function call
   // may get evaluated after operator[], potentially triggering a DenseMap
@@ -823,6 +854,8 @@ const AliasSummary *CFLAndersAAResult::getAliasSummary(const Function &Fn) {
 
 AliasResult CFLAndersAAResult::query(const MemoryLocation &LocA,
                                      const MemoryLocation &LocB) {
+  ++NumCFLAndersAliasQueries;
+  
   auto *ValA = LocA.Ptr;
   auto *ValB = LocB.Ptr;
 

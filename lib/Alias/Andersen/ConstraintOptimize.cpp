@@ -1,6 +1,7 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SparseBitVector.h>
+#include <llvm/ADT/Statistic.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/ToolOutputFile.h>
@@ -14,7 +15,17 @@
 #include "Alias/Andersen/CycleDetector.h"
 #include "Alias/Andersen/SparseBitVectorGraph.h"
 
+#define DEBUG_TYPE "andersen"
+
 using namespace llvm;
+
+STATISTIC(NumConstraintsBeforeOpt, "Number of constraints before optimization");
+STATISTIC(NumConstraintsAfterOpt, "Number of constraints after optimization");
+STATISTIC(NumConstraintsEliminated, "Number of constraints eliminated");
+STATISTIC(NumNodesMergedInOpt, "Number of nodes merged during optimization");
+STATISTIC(NumPointerEquivClasses, "Number of pointer equivalence classes");
+STATISTIC(NumLoadToStoreOptimized, "Number of loads optimized to copies");
+STATISTIC(NumStoreToStoreOptimized, "Number of stores optimized to copies");
 
 cl::opt<bool> EnableHVN("enable-hvn",
                         cl::desc("Enable the HVN constraint optimization"));
@@ -239,6 +250,7 @@ protected:
       {
         // errs() << "MERGE " << i << "with" << revLabelMap[iLabel] << "\n";
         nodeFactory.mergeNode(revLabelMap[iLabel], node);
+        ++NumNodesMergedInOpt;
       }
     }
 
@@ -285,6 +297,7 @@ protected:
         if (srcTgtTgt > nodeFactory.getNumNodes()) {
           srcTgtTgt %= nodeFactory.getNumNodes();
           // errs() << "REPLACE " << srcTgt << " with &" << srcTgtTgt << "\n";
+          ++NumLoadToStoreOptimized;
           if (srcTgtTgt != destTgt)
             newConstraints.emplace_back(AndersConstraint::COPY, destTgt,
                                         srcTgtTgt);
@@ -302,6 +315,7 @@ protected:
         if (destTgtTgt > nodeFactory.getNumNodes()) {
           destTgtTgt %= nodeFactory.getNumNodes();
           // errs() << "REPLACE " << destTgt << " with &" << destTgtTgt << "\n";
+          ++NumStoreToStoreOptimized;
           if (destTgtTgt != srcTgt)
             newConstraints.emplace_back(AndersConstraint::COPY, destTgtTgt,
                                         srcTgt);
@@ -381,6 +395,9 @@ public:
             printPredecessorGraphNode(errs(), i);
             errs() << ", peLabel = " << peLabel[i] << "\n";
     }*/
+
+    // Track pointer equivalence classes
+    NumPointerEquivClasses = pointerEqClass;
 
     // We've done labelling. Now rewrite all constraints
     rewriteConstraint();
@@ -557,6 +574,9 @@ public:
 
 // Optimize the constraints by performing offline variable substitution
 void Andersen::optimizeConstraints() {
+  // Track constraints before optimization
+  NumConstraintsBeforeOpt = constraints.size();
+  
   // errs() << "\n#constraints = " << constraints.size() << "\n";
   // dumpConstraints();
 
@@ -585,4 +605,8 @@ void Andersen::optimizeConstraints() {
   // dumpConstraints();
 
   // errs() << "#constraints = " << constraints.size() << "\n";
+  
+  // Track constraints after optimization
+  NumConstraintsAfterOpt = constraints.size();
+  NumConstraintsEliminated = NumConstraintsBeforeOpt - NumConstraintsAfterOpt;
 }

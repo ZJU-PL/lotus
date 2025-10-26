@@ -5,6 +5,7 @@
 
 
 #include <llvm/ADT/STLExtras.h>
+#include <llvm/ADT/Statistic.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstIterator.h>
@@ -16,8 +17,24 @@
 
 #include "Alias/Andersen/Andersen.h"
 
+#define DEBUG_TYPE "andersen"
 
 using namespace llvm;
+
+STATISTIC(NumGlobalVariables, "Number of global variables");
+STATISTIC(NumGlobalObjects, "Number of global objects created");
+STATISTIC(NumAddrTakenFunctions, "Number of address-taken functions");
+STATISTIC(NumReturnNodes, "Number of return nodes created");
+STATISTIC(NumVarargNodes, "Number of vararg nodes created");
+STATISTIC(NumAllocaNodes, "Number of alloca nodes created");
+STATISTIC(NumObjectNodes, "Number of object nodes created");
+STATISTIC(NumDirectCalls, "Number of direct function calls");
+STATISTIC(NumIndirectCalls, "Number of indirect function calls");
+STATISTIC(NumExternalLibCalls, "Number of external library calls");
+STATISTIC(NumUnresolvedLibCalls, "Number of unresolved library calls");
+STATISTIC(NumCallSites, "Number of call sites processed");
+STATISTIC(NumFunctions, "Number of functions analyzed");
+STATISTIC(NumPointerInstructions, "Number of pointer instructions processed");
 
 // CollectConstraints - This stage scans the program, adding a constraint to the
 // Constraints list for each instruction in the program that induces a
@@ -54,6 +71,8 @@ void Andersen::collectConstraints(const Module &M) {
     if (f.isDeclaration() || f.isIntrinsic())
       continue;
 
+    ++NumFunctions;
+
     // Scan the function body
     // A visitor pattern might help modularity, but it needs more boilerplate
     // codes to set up, and it breaks down the main logic into pieces
@@ -65,8 +84,10 @@ void Andersen::collectConstraints(const Module &M) {
     for (const_inst_iterator itr = inst_begin(f), ite = inst_end(f); itr != ite;
          ++itr) {
       auto inst = &*itr.getInstructionIterator();
-      if (inst->getType()->isPointerTy())
+      if (inst->getType()->isPointerTy()) {
         nodeFactory.createValueNode(inst);
+        ++NumPointerInstructions;
+      }
     }
 
     // Now, collect constraint for each relevant instruction
@@ -84,6 +105,8 @@ void Andersen::collectConstraintsForGlobals(const Module &M) {
     NodeIndex gVal = nodeFactory.createValueNode(&globalVal);
     NodeIndex gObj = nodeFactory.createObjectNode(&globalVal);
     constraints.emplace_back(AndersConstraint::ADDR_OF, gVal, gObj);
+    ++NumGlobalVariables;
+    ++NumGlobalObjects;
   }
 
   // Functions and function pointers are also considered global
@@ -93,6 +116,7 @@ void Andersen::collectConstraintsForGlobals(const Module &M) {
       NodeIndex fVal = nodeFactory.createValueNode(&f);
       NodeIndex fObj = nodeFactory.createObjectNode(&f);
       constraints.emplace_back(AndersConstraint::ADDR_OF, fVal, fObj);
+      ++NumAddrTakenFunctions;
     }
 
     if (f.isDeclaration() || f.isIntrinsic())
@@ -101,11 +125,14 @@ void Andersen::collectConstraintsForGlobals(const Module &M) {
     // Create return node
     if (f.getFunctionType()->getReturnType()->isPointerTy()) {
       nodeFactory.createReturnNode(&f);
+      ++NumReturnNodes;
     }
 
     // Create vararg node
-    if (f.getFunctionType()->isVarArg())
+    if (f.getFunctionType()->isVarArg()) {
       nodeFactory.createVarargNode(&f);
+      ++NumVarargNodes;
+    }
 
     // Add nodes for all formal arguments.
     for (Function::const_arg_iterator itr = f.arg_begin(), ite = f.arg_end();
@@ -167,12 +194,15 @@ void Andersen::collectConstraintsForInstruction(const Instruction *inst) {
            "Failed to find alloca value node");
     NodeIndex objNode = nodeFactory.createObjectNode(inst);
     constraints.emplace_back(AndersConstraint::ADDR_OF, valNode, objNode);
+    ++NumAllocaNodes;
+    ++NumObjectNodes;
     break;
   }
   case Instruction::Call:
   case Instruction::Invoke: {
     if (const CallBase *cs = dyn_cast<CallBase>(inst)) {
       addConstraintForCall(cs);
+      ++NumCallSites;
     }
     break;
   }
@@ -326,10 +356,57 @@ void Andersen::collectConstraintsForInstruction(const Instruction *inst) {
     }
     break;
   }
-  case Instruction::ExtractValue:
+  case Instruction::ExtractValue: {
+    // ExtractValue extracts a value from an aggregate (struct/array)
+    if (inst->getType()->isPointerTy()) {
+      // We're extracting a pointer from a struct/array
+      // Conservative approach: the extracted pointer could point to anything
+      // that any pointer in the aggregate could point to
+      NodeIndex dstIndex = nodeFactory.getValueNodeFor(inst);
+      assert(dstIndex != AndersNodeFactory::InvalidIndex &&
+             "Failed to find extractvalue dst node");
+      
+      // Check if the aggregate operand is also tracked (it might be if it contains pointers)
+      Value *aggOperand = inst->getOperand(0);
+      NodeIndex srcIndex = nodeFactory.getValueNodeFor(aggOperand);
+      if (srcIndex != AndersNodeFactory::InvalidIndex) {
+        // Conservative: the extracted pointer inherits the points-to set of the aggregate
+        constraints.emplace_back(AndersConstraint::COPY, dstIndex, srcIndex);
+      } else {
+        // The aggregate is not tracked (no pointers involved in its creation)
+        // Most conservative: could point to anything
+        constraints.emplace_back(AndersConstraint::COPY, dstIndex,
+                                 nodeFactory.getUniversalPtrNode());
+      }
+    }
+    break;
+  }
   case Instruction::InsertValue: {
-    if (!inst->getType()->isPointerTy())
-      break;
+    // InsertValue inserts a value into an aggregate (struct/array)
+    if (inst->getType()->isPointerTy()) {
+      // The result type is a pointer-containing aggregate
+      NodeIndex dstIndex = nodeFactory.getValueNodeFor(inst);
+      assert(dstIndex != AndersNodeFactory::InvalidIndex &&
+             "Failed to find insertvalue dst node");
+      
+      // Conservative: the result aggregate may contain any pointers from:
+      // 1. The original aggregate
+      Value *aggOperand = inst->getOperand(0);
+      NodeIndex srcIndex = nodeFactory.getValueNodeFor(aggOperand);
+      if (srcIndex != AndersNodeFactory::InvalidIndex) {
+        constraints.emplace_back(AndersConstraint::COPY, dstIndex, srcIndex);
+      }
+      
+      // 2. The inserted value (if it's a pointer)
+      Value *insertedVal = inst->getOperand(1);
+      if (insertedVal->getType()->isPointerTy()) {
+        NodeIndex insertedIndex = nodeFactory.getValueNodeFor(insertedVal);
+        assert(insertedIndex != AndersNodeFactory::InvalidIndex &&
+               "Failed to find insertvalue inserted value node");
+        constraints.emplace_back(AndersConstraint::COPY, dstIndex, insertedIndex);
+      }
+    }
+    break;
   }
   // We have no intention to support exception-handling in the near future
   case Instruction::LandingPad:
@@ -357,14 +434,17 @@ void Andersen::collectConstraintsForInstruction(const Instruction *inst) {
 void Andersen::addConstraintForCall(const llvm::CallBase *cs) {
   if (const Function *f = cs->getCalledFunction()) // Direct call
   {
+    ++NumDirectCalls;
     if (f->isDeclaration() || f->isIntrinsic()) // External library call
     {
+      ++NumExternalLibCalls;
       // Handle libraries separately
       if (addConstraintForExternalLibrary(cs, f))
         return;
       else // Unresolved library call: ruin everything!
       {
-        errs() << "Unresolved ext function: " << f->getName() << "\n";
+        ++NumUnresolvedLibCalls;
+        // errs() << "Unresolved ext function: " << f->getName() << "\n";
         if (cs->getType()->isPointerTy()) {
           NodeIndex retIndex = nodeFactory.getValueNodeFor(cs);
           assert(retIndex != AndersNodeFactory::InvalidIndex &&
@@ -399,6 +479,7 @@ void Andersen::addConstraintForCall(const llvm::CallBase *cs) {
     }
   } else // Indirect call
   {
+    ++NumIndirectCalls;
     // We do the simplest thing here: just assume the returned value can be anything :)
     if (cs->getType()->isPointerTy()) {
       NodeIndex retIndex = nodeFactory.getValueNodeFor(cs);

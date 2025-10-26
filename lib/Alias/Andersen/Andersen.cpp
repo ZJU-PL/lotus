@@ -6,7 +6,16 @@
 
 #include "Alias/Andersen/Andersen.h"
 
+#define DEBUG_TYPE "andersen"
+
 using namespace llvm;
+
+STATISTIC(NumValueNodes, "Number of value nodes created");
+STATISTIC(NumConstraints, "Number of constraints collected");
+STATISTIC(NumAddrOfConstraints, "Number of addr-of constraints");
+STATISTIC(NumCopyConstraints, "Number of copy constraints");
+STATISTIC(NumLoadConstraints, "Number of load constraints");
+STATISTIC(NumStoreConstraints, "Number of store constraints");
 
 cl::opt<bool> DumpDebugInfo("dump-debug",
                             cl::desc("Dump debug info into stderr"),
@@ -56,6 +65,26 @@ bool Andersen::getPointsToSet(const llvm::Value *v,
 
 bool Andersen::runOnModule(const Module &M) {
   collectConstraints(M);
+  
+  // Update statistics after constraint collection
+  NumConstraints = constraints.size();
+  NumValueNodes = nodeFactory.getNumNodes();
+  for (const auto &c : constraints) {
+    switch (c.getType()) {
+    case AndersConstraint::ADDR_OF:
+      ++NumAddrOfConstraints;
+      break;
+    case AndersConstraint::COPY:
+      ++NumCopyConstraints;
+      break;
+    case AndersConstraint::LOAD:
+      ++NumLoadConstraints;
+      break;
+    case AndersConstraint::STORE:
+      ++NumStoreConstraints;
+      break;
+    }
+  }
 
   if (DumpDebugInfo)
     dumpConstraintsPlainVanilla();

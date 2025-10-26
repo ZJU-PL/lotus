@@ -144,7 +144,6 @@ private:
     bool kills_fact(const llvm::CallInst* call, const TaintFact& fact) const;
 
     // Internal helpers that need access to alias analysis utilities
-    void propagate_tainted_memory_aliases(const llvm::Value* ptr, FactSet& result) const;
     void handle_source_function_specs(const llvm::CallInst* call, FactSet& result) const;
     void handle_pipe_specifications(const llvm::CallInst* call, const TaintFact& fact, FactSet& result) const;
 

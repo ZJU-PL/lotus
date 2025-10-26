@@ -1,6 +1,7 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallSet.h>
+#include <llvm/ADT/Statistic.h>
 #include <llvm/ADT/iterator_range.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/raw_ostream.h>
@@ -12,8 +13,20 @@
 #include "Alias/Andersen/CycleDetector.h"
 #include "Alias/Andersen/SparseBitVectorGraph.h"
 
+#define DEBUG_TYPE "andersen"
 
 using namespace llvm;
+
+STATISTIC(NumIterations, "Number of constraint solving iterations");
+STATISTIC(NumWorkListProcessed, "Number of work list items processed");
+STATISTIC(NumCopyEdgesAdded, "Number of copy edges added");
+STATISTIC(NumLoadEdgesProcessed, "Number of load edges processed");
+STATISTIC(NumStoreEdgesProcessed, "Number of store edges processed");
+STATISTIC(NumCyclesDetected, "Number of cycles detected online");
+STATISTIC(NumNodesCollapsed, "Number of nodes collapsed during solving");
+STATISTIC(NumPtsSetUnions, "Number of points-to set unions");
+STATISTIC(MaxPtsSetSize, "Maximum points-to set size");
+STATISTIC(AvgPtsSetSize, "Average points-to set size");
 
 cl::opt<bool>
     EnableHCD("enable-hcd",
@@ -204,6 +217,9 @@ void collapseNodes(NodeIndex dst, NodeIndex src, AndersNodeFactory &nodeFactory,
   if (dst == src)
     return;
 
+  // Track node collapsing
+  ++NumNodesCollapsed;
+
   // Node merge
   nodeFactory.mergeNode(dst, src);
   if (ptsGraph.count(src))
@@ -216,7 +232,8 @@ void collapseNodes(NodeIndex dst, NodeIndex src, AndersNodeFactory &nodeFactory,
 }
 
 // Backward compatibility for the original version
-void collapseNodes(NodeIndex dst, NodeIndex src, AndersNodeFactory &nodeFactory,
+__attribute__((unused))
+static void collapseNodes(NodeIndex dst, NodeIndex src, AndersNodeFactory &nodeFactory,
                    std::map<NodeIndex, AndersPtsSet> &ptsGraph,
                    ConstraintGraph &constraintGraph) {
   collapseNodes<AndersPtsSet>(dst, src, nodeFactory, ptsGraph, constraintGraph);
@@ -234,20 +251,25 @@ template<typename PtsSetType>
 void collapseNodes(NodeIndex dst, NodeIndex src, AndersNodeFactory &nodeFactory,
                    std::map<NodeIndex, PtsSetType> &ptsGraph,
                    ConstraintGraph &constraintGraph, CCG &copyGraph) {
+  (void)copyGraph; // Unused in this version
   collapseNodes<PtsSetType>(dst, src, nodeFactory, ptsGraph, constraintGraph);
 }
 
 // Backward compatibility for the original version with CCG parameter
-void collapseNodes(NodeIndex dst, NodeIndex src, AndersNodeFactory &nodeFactory,
+__attribute__((unused))
+static void collapseNodes(NodeIndex dst, NodeIndex src, AndersNodeFactory &nodeFactory,
                    std::map<NodeIndex, AndersPtsSet> &ptsGraph,
                    ConstraintGraph &constraintGraph, CCG &copyGraph) {
+  (void)copyGraph; // Unused in this version
   collapseNodes<AndersPtsSet>(dst, src, nodeFactory, ptsGraph, constraintGraph);
 }
 
 // Add overload for DefaultPtsSet with CCG parameter
-void collapseNodes(NodeIndex dst, NodeIndex src, AndersNodeFactory &nodeFactory,
+__attribute__((unused))
+static void collapseNodes(NodeIndex dst, NodeIndex src, AndersNodeFactory &nodeFactory,
                    std::map<NodeIndex, DefaultPtsSet> &ptsGraph,
                    ConstraintGraph &constraintGraph, CCG &copyGraph) {
+  (void)copyGraph; // Unused in this version
   collapseNodes<DefaultPtsSet>(dst, src, nodeFactory, ptsGraph, constraintGraph);
 }
 
@@ -337,6 +359,7 @@ private:
   // Specify how to process the non-rep nodes if a cycle is found
   void processNodeOnCycle(const NodeType *node,
                           const NodeType *repNode) override {
+    (void)repNode; // Unused parameter
     scc.set(node->getNodeIndex());
   }
 
@@ -432,7 +455,8 @@ void buildConstraintGraph(ConstraintGraph &cGraph,
 }
 
 // Backward compatibility for the original version
-void buildConstraintGraph(ConstraintGraph &cGraph,
+__attribute__((unused))
+static void buildConstraintGraph(ConstraintGraph &cGraph,
                           const std::vector<AndersConstraint> &constraints,
                           AndersNodeFactory &nodeFactory,
                           std::map<NodeIndex, AndersPtsSet> &ptsGraph) {
@@ -473,6 +497,7 @@ private:
   
   // Specify how to process the rep nodes if a cycle is found
   void processCycleRepNode(const NodeType *node) override {
+    (void)node; // Unused parameter
     // Do nothing, I guess?
   }
 
@@ -552,11 +577,13 @@ void Andersen::solveConstraints() {
 
   while (!currWorkList->isEmpty()) {
     // Iteration begins
+    ++NumIterations;
 
     // First we've got to check if there is any cycle candidates in the last
     // iteration. If there is, detect and collapse cycle
     if (EnableLCD && !cycleCandidates.empty()) {
       // Detect and collapse cycles online
+      NumCyclesDetected += cycleCandidates.size();
       DefaultOnlineCycleDetector cycleDetector(nodeFactory, constraintGraph, ptsGraph,
                                       cycleCandidates);
       cycleDetector.run();
@@ -569,6 +596,7 @@ void Andersen::solveConstraints() {
 
     while (!currWorkList->isEmpty()) {
       NodeIndex node = currWorkList->dequeue();
+      ++NumWorkListProcessed;
       node = nodeFactory.getMergeTarget(node);
       // errs() << "Examining node " << node << "\n";
 
@@ -621,12 +649,14 @@ void Andersen::solveConstraints() {
 
           NodeIndex vRep = nodeFactory.getMergeTarget(v);
           for (auto const &dst : cNode->loads()) {
+            ++NumLoadEdgesProcessed;
             NodeIndex tgtNode = nodeFactory.getMergeTarget(dst);
             // errs() << "Examining load edge " << node << " -> " << tgtNode <<
             // "\n";
             if (constraintGraph.insertCopyEdge(vRep, tgtNode)) {
               // errs() << "\tInsert copy edge " << v << " -> " << tgtNode <<
               // "\n";
+              ++NumCopyEdgesAdded;
               nextWorkList->enqueue(vRep);
             }
 
@@ -642,10 +672,12 @@ void Andersen::solveConstraints() {
           updateMap.clear();
 
           for (auto const &dst : cNode->stores()) {
+            ++NumStoreEdgesProcessed;
             NodeIndex tgtNode = nodeFactory.getMergeTarget(dst);
             if (constraintGraph.insertCopyEdge(tgtNode, vRep)) {
               // errs() << "\tInsert copy edge " << tgtNode << " -> " << v <<
               // "\n";
+              ++NumCopyEdgesAdded;
               nextWorkList->enqueue(tgtNode);
             }
 
@@ -669,6 +701,7 @@ void Andersen::solveConstraints() {
           auto &tgtPtsSet = ptsGraph[tgtNode];
 
           // errs() << "pts[" << tgtNode << "] |= pts[" << node << "]\n";
+          ++NumPtsSetUnions;
           bool isChanged = tgtPtsSet.unionWith(ptsSet);
 
           if (isChanged) {
@@ -697,4 +730,23 @@ void Andersen::solveConstraints() {
     // Swap the current and the next worklist
     std::swap(currWorkList, nextWorkList);
   }
+  
+  // Calculate points-to set statistics
+  unsigned long long totalPtsSetSize = 0;
+  unsigned maxSize = 0;
+  unsigned numNonEmptyPtsSets = 0;
+  
+  for (const auto &mapping : ptsGraph) {
+    unsigned size = mapping.second.getSize();
+    if (size > 0) {
+      totalPtsSetSize += size;
+      ++numNonEmptyPtsSets;
+      if (size > maxSize)
+        maxSize = size;
+    }
+  }
+  
+  MaxPtsSetSize = maxSize;
+  if (numNonEmptyPtsSets > 0)
+    AvgPtsSetSize = totalPtsSetSize / numNonEmptyPtsSets;
 }

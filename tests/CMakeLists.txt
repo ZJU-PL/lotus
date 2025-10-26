@@ -5,7 +5,7 @@ find_package(GTest REQUIRED)
 add_definitions(${LLVM_DEFINITIONS})
 
 set(COMMON_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/utils ${CMAKE_CURRENT_SOURCE_DIR}/../include ${LLVM_INCLUDE_DIRS})
-set(COMMON_LIBS ${LLVM_LIBRARIES} GTest::gtest GTest::gtest_main IFDS Annotation CanaryDyckAA LLVMIRReader CanaryPDG Concurrency)
+set(COMMON_LIBS ${LLVM_LIBRARIES} GTest::gtest GTest::gtest_main IFDS Annotation CanaryAliasAnalysisWrapper CanaryDyckAA LLVMIRReader CanaryPDG Concurrency)
 
 add_library(lotus_test_utils INTERFACE)
 target_include_directories(lotus_test_utils INTERFACE ${COMMON_INCLUDES})

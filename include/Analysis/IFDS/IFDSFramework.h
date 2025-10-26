@@ -17,7 +17,7 @@
 #include <llvm/IR/CFG.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/CallGraph.h>
-#include <Alias/DyckAA/DyckAliasAnalysis.h>
+#include <Alias/AliasAnalysisWrapper.h>
 
 #include <functional>
 #include <unordered_map>
@@ -31,8 +31,10 @@
 #include <chrono>
 #include <memory>
 
-// Forward declaration (real class defined in Alias/DyckAA/DyckAliasAnalysis.h)
-class DyckAliasAnalysis;
+// Forward declaration
+namespace lotus {
+class AliasAnalysisWrapper;
+}
 
 namespace ifds {
 
@@ -314,19 +316,17 @@ public:
     virtual FactSet initial_facts(const llvm::Function* main) = 0;
     
     // Alias analysis integration
-    virtual void set_alias_analysis(DyckAliasAnalysis* aa);
+    virtual void set_alias_analysis(lotus::AliasAnalysisWrapper* aa);
     
     // Helper methods for common operations
     virtual bool is_source(const llvm::Instruction* inst) const;
     virtual bool is_sink(const llvm::Instruction* inst) const;
     
 protected:
-    DyckAliasAnalysis* m_alias_analysis = nullptr;
+    lotus::AliasAnalysisWrapper* m_alias_analysis = nullptr;
     
-    // Alias analysis helpers using Dyck AA
+    // Alias analysis helper using AliasAnalysisWrapper
     bool may_alias(const llvm::Value* v1, const llvm::Value* v2) const;
-    std::vector<const llvm::Value*> get_points_to_set(const llvm::Value* ptr) const;
-    std::vector<const llvm::Value*> get_alias_set(const llvm::Value* val) const;
 };
 
 // ============================================================================
@@ -465,7 +465,7 @@ struct hash<ifds::SummaryEdge<Fact>> {
 namespace ifds {
 
 template<typename Fact>
-inline void IFDSProblem<Fact>::set_alias_analysis(DyckAliasAnalysis* aa) {
+inline void IFDSProblem<Fact>::set_alias_analysis(lotus::AliasAnalysisWrapper* aa) {
     m_alias_analysis = aa;
 }
 
@@ -482,31 +482,7 @@ inline bool IFDSProblem<Fact>::is_sink(const llvm::Instruction*) const {
 template<typename Fact>
 inline bool IFDSProblem<Fact>::may_alias(const llvm::Value* v1, const llvm::Value* v2) const {
     if (!m_alias_analysis || !v1 || !v2) return false;
-    return m_alias_analysis->mayAlias(const_cast<llvm::Value*>(v1), const_cast<llvm::Value*>(v2));
-}
-
-template<typename Fact>
-inline std::vector<const llvm::Value*>
-IFDSProblem<Fact>::get_points_to_set(const llvm::Value* ptr) const {
-    std::vector<const llvm::Value*> result;
-    if (!m_alias_analysis || !ptr) return result;
-    if (const std::set<llvm::Value*>* as = m_alias_analysis->getAliasSet(const_cast<llvm::Value*>(ptr))) {
-        result.reserve(as->size());
-        for (llvm::Value* v : *as) result.push_back(v);
-    }
-    return result;
-}
-
-template<typename Fact>
-inline std::vector<const llvm::Value*>
-IFDSProblem<Fact>::get_alias_set(const llvm::Value* val) const {
-    std::vector<const llvm::Value*> result;
-    if (!m_alias_analysis || !val) return result;
-    if (const std::set<llvm::Value*>* as = m_alias_analysis->getAliasSet(const_cast<llvm::Value*>(val))) {
-        result.reserve(as->size());
-        for (llvm::Value* v : *as) result.push_back(v);
-    }
-    return result;
+    return m_alias_analysis->mayAlias(v1, v2);
 }
 
 } // namespace ifds

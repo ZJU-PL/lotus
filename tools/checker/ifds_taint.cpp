@@ -9,8 +9,9 @@
 #include <Analysis/IFDS/IFDSFramework.h>
 #include <Analysis/IFDS/IFDSSolvers.h>
 #include <Analysis/IFDS/Clients/IFDSTaintAnalysis.h>
-#include <Alias/DyckAA/DyckAliasAnalysis.h>
+#include <Alias/AliasAnalysisWrapper.h>
 
+#include <llvm/ADT/Statistic.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -41,7 +42,9 @@ static cl::opt<bool> Verbose("verbose", cl::desc("Enable verbose output"), cl::i
 static cl::opt<int> AnalysisType("analysis", cl::desc("Type of analysis to run: 0=taint"),
                                  cl::init(0));
 
-// Using Dyck alias analysis by default
+static cl::opt<std::string> AliasAnalysisType("aa", 
+    cl::desc("Alias analysis type: andersen, dyck, cfl-anders, cfl-steens, seadsa, allocaa, basic, combined (default: dyck)"),
+    cl::init("dyck"));
 
 static cl::opt<bool> ShowResults("show-results", cl::desc("Show detailed analysis results"), 
                                  cl::init(true));
@@ -68,6 +71,9 @@ static cl::opt<unsigned> WorklistBatchSize("batch-size", cl::desc("Worklist batc
 static cl::opt<unsigned> SyncFrequency("sync-freq", cl::desc("Synchronization frequency (edges between syncs)"),
                                       cl::init(1000));
 
+static cl::opt<bool> PrintStats("print-stats", cl::desc("Print LLVM statistics"),
+                                cl::init(false));
+
 // Helper function to parse comma-separated function names
 std::vector<std::string> parseFunctionList(const std::string& input) {
     std::vector<std::string> functions;
@@ -83,10 +89,40 @@ std::vector<std::string> parseFunctionList(const std::string& input) {
     return functions;
 }
 
+// Helper function to parse alias analysis type from string
+lotus::AAType parseAliasAnalysisType(const std::string& aaTypeStr) {
+    std::string lowerStr = aaTypeStr;
+    std::transform(lowerStr.begin(), lowerStr.end(), lowerStr.begin(), ::tolower);
+    
+    if (lowerStr == "andersen") return lotus::AAType::Andersen;
+    if (lowerStr == "dyck" || lowerStr == "dyckaa") return lotus::AAType::DyckAA;
+    if (lowerStr == "cfl-anders" || lowerStr == "cflanders") return lotus::AAType::CFLAnders;
+    if (lowerStr == "cfl-steens" || lowerStr == "cflsteens") return lotus::AAType::CFLSteens;
+    if (lowerStr == "seadsa") return lotus::AAType::SeaDsa;
+    if (lowerStr == "allocaa" || lowerStr == "alloc") return lotus::AAType::AllocAA;
+    if (lowerStr == "basic" || lowerStr == "basicaa") return lotus::AAType::BasicAA;
+    if (lowerStr == "tbaa") return lotus::AAType::TBAA;
+    if (lowerStr == "globals" || lowerStr == "globalsaa") return lotus::AAType::GlobalsAA;
+    if (lowerStr == "scevaa" || lowerStr == "scev") return lotus::AAType::SCEVAA;
+    if (lowerStr == "sraa") return lotus::AAType::SRAA;
+    if (lowerStr == "combined") return lotus::AAType::Combined;
+    if (lowerStr == "underapprox") return lotus::AAType::UnderApprox;
+    
+    // Default to DyckAA
+    errs() << "Warning: Unknown alias analysis type '" << aaTypeStr 
+           << "', defaulting to DyckAA\n";
+    return lotus::AAType::DyckAA;
+}
+
 int main(int argc, char **argv) {
     InitLLVM X(argc, argv);
     
     cl::ParseCommandLineOptions(argc, argv, "LLVM IFDS/IDE Analysis Tool\n");
+    
+    // Enable statistics collection if requested
+    if (PrintStats) {
+        llvm::EnableStatistics();
+    }
     
     // Set up LLVM context and source manager
     LLVMContext Context;
@@ -104,16 +140,17 @@ int main(int argc, char **argv) {
         outs() << "Functions in module: " << M->size() << "\n";
     }
     
-    // Set up Dyck alias analysis
+    // Set up alias analysis wrapper
+    lotus::AAType aaType = parseAliasAnalysisType(AliasAnalysisType.getValue());
+    auto aliasWrapper = std::make_unique<lotus::AliasAnalysisWrapper>(*M, aaType);
+    
     if (Verbose) {
-        outs() << "Using Dyck alias analysis\n";
+        outs() << "Using alias analysis: " << lotus::AliasAnalysisFactory::getTypeName(aaType) << "\n";
     }
     
-    legacy::PassManager PM;
-    auto dyckPass = std::make_unique<DyckAliasAnalysis>();
-    DyckAliasAnalysis* dyckAA = dyckPass.get();
-    PM.add(dyckPass.release());
-    PM.run(*M);
+    if (!aliasWrapper->isInitialized()) {
+        errs() << "Warning: Alias analysis failed to initialize properly\n";
+    }
     
     // Run the selected analysis
     try {
@@ -135,7 +172,7 @@ int main(int argc, char **argv) {
                 }
 
                 // Set up alias analysis
-                taintAnalysis.set_alias_analysis(dyckAA);
+                taintAnalysis.set_alias_analysis(aliasWrapper.get());
 
                 auto analysisStart = std::chrono::high_resolution_clock::now();
 
@@ -212,6 +249,8 @@ int main(int argc, char **argv) {
         errs() << "Error running analysis: " << e.what() << "\n";
         return 1;
     }
+    
+    // Statistics will be printed automatically at program exit if enabled
     
     return 0;
 }

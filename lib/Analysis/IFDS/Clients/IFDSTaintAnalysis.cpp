@@ -152,7 +152,6 @@ TaintAnalysis::FactSet TaintAnalysis::normal_flow(const llvm::Instruction* stmt,
         
         if (fact.is_tainted_var() && fact.get_value() == value) {
             result.insert(TaintFact::tainted_memory(ptr));
-            propagate_tainted_memory_aliases(ptr, result);
         }
         
         if (fact.is_tainted_memory() && may_alias(fact.get_memory_location(), ptr)) {
@@ -595,17 +594,6 @@ bool TaintAnalysis::comes_before(const llvm::Instruction* first, const llvm::Ins
 }
 
 
-// Helper function to handle alias propagation for tainted memory
-void TaintAnalysis::propagate_tainted_memory_aliases(const llvm::Value* ptr, FactSet& result) const {
-    if (m_alias_analysis) {
-        auto alias_set = get_alias_set(ptr);
-        for (const llvm::Value* alias : alias_set) {
-            if (alias != ptr && alias->getType()->isPointerTy()) {
-                result.insert(TaintFact::tainted_memory(alias));
-            }
-        }
-    }
-}
 
 // Helper function to handle source function specifications from config
 void TaintAnalysis::handle_source_function_specs(const llvm::CallInst* call, FactSet& result) const {
@@ -621,7 +609,6 @@ void TaintAnalysis::handle_source_function_specs(const llvm::CallInst* call, Fac
                     const llvm::Value* arg = call->getOperand(spec.arg_index);
                     if (arg->getType()->isPointerTy()) {
                         result.insert(TaintFact::tainted_memory(arg));
-                        propagate_tainted_memory_aliases(arg, result);
                     }
                 }
             } else if (spec.location == TaintSpec::AFTER_ARG && spec.access_mode == TaintSpec::DEREF) {
@@ -630,7 +617,6 @@ void TaintAnalysis::handle_source_function_specs(const llvm::CallInst* call, Fac
                     const llvm::Value* arg = call->getOperand(i);
                     if (arg->getType()->isPointerTy()) {
                         result.insert(TaintFact::tainted_memory(arg));
-                        propagate_tainted_memory_aliases(arg, result);
                     }
                 }
             }
@@ -687,7 +673,6 @@ void TaintAnalysis::handle_pipe_specifications(const llvm::CallInst* call, const
                         } else {
                             if (to_arg->getType()->isPointerTy()) {
                             result.insert(TaintFact::tainted_memory(to_arg));
-                            propagate_tainted_memory_aliases(to_arg, result);
                             }
                         }
                     }

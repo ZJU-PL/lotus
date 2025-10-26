@@ -34,6 +34,7 @@ add_executable(ifds-taint ifds_taint.cpp)
 target_link_libraries(ifds-taint
   IFDS
   Annotation
+  CanaryAliasAnalysisWrapper
   CanaryDyckAA
   CanaryLLVMUtils
   LLVMIRReader
