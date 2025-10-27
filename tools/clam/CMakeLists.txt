@@ -29,11 +29,6 @@ target_link_libraries(clam
 target_include_directories(clam PRIVATE ${CLAM_TOOLS_INCLUDES})
 target_compile_definitions(clam PRIVATE ${CLAM_TOOLS_DEFINITIONS})
 
-set_target_properties(clam PROPERTIES
-  CXX_STANDARD 14
-  CXX_STANDARD_REQUIRED ON
-)
-
 install(TARGETS clam RUNTIME DESTINATION bin)
 
 # ============================================================================

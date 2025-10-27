@@ -35,9 +35,6 @@ target_link_libraries(ifds-taint
   IFDS
   Annotation
   CanaryAliasAnalysisWrapper
-  CanaryDyckAA
-  CanaryLLVMUtils
-  LLVMIRReader
 )
 
 # Concurrency Checker Tool
