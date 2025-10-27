@@ -1,48 +1,10 @@
-# FIXME: Indeed, the Mono dir is independent from WPDS
-# Besides, the WPDS implementaton is very likely unfinished.
-set(WPDS_SOURCES
-  Mono/DataFlowAnalysis.cpp
-  Mono/DataFlowEngine.cpp
-  Mono/DataFlowResult.cpp
-  WPDS/DataFlowFacts.cpp
-  WPDS/GenKillTransformer.cpp
-  WPDS/InterProceduralDataFlowEngine.cpp
-)
-add_library(DataFlow STATIC ${WPDS_SOURCES})
-
-set(CanaryNullPointer_SOURCES
-  NullPointer/LocalNullCheckAnalysis.cpp
-  NullPointer/NullCheckAnalysis.cpp
-  NullPointer/NullEquivalenceAnalysis.cpp
-  NullPointer/NullFlowAnalysis.cpp
-  NullPointer/ContextSensitiveLocalNullCheckAnalysis.cpp
-  NullPointer/ContextSensitiveNullCheckAnalysis.cpp
-  NullPointer/ContextSensitiveNullFlowAnalysis.cpp
-  NullPointer/AliasAnalysisAdapter.cpp
-)
-add_library(CanaryNullPointer STATIC ${CanaryNullPointer_SOURCES})
-target_link_libraries(CanaryNullPointer CanaryLLVMUtils CanaryDyckAA)
-
-set(GVFA_SOURCES
-  GVFA/GlobalValueFlowAnalysis.cpp
-  GVFA/ReachabilityAlgorithms.cpp
-  GVFA/GVFAUtils.cpp
-)
-add_library(GVFA STATIC ${GVFA_SOURCES})
-target_link_libraries(GVFA CanaryDyckAA Annotation)
-
-set(Concurrency_SOURCES
-  Concurrency/ThreadAPI.cpp
-  Concurrency/LockSetAnalysis.cpp
-  Concurrency/MHPAnalysis.cpp
-)
-add_library(Concurrency STATIC ${Concurrency_SOURCES})
-target_link_libraries(Concurrency CanaryLLVMUtils CanaryDyckAA)
-
-add_subdirectory(sparta)
+add_subdirectory(NullPointer)
+add_subdirectory(Concurrency)
+add_subdirectory(GVFA)
 add_subdirectory(IFDS)
+add_subdirectory(MONO)
 add_subdirectory(Clam)
-
+add_subdirectory(sparta) # Relies on LVVM 17
 
 
 

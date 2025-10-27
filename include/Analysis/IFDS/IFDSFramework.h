@@ -1,5 +1,5 @@
 /*
- * IFDS/IDE Framework for Sparta
+ * IFDS/IDE Framework
  * 
  * This header provides a comprehensive IFDS/IDE framework built on top of 
  * the Sparta abstract interpretation library, with integration for LLVM alias analysis.

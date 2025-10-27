@@ -1,5 +1,5 @@
 /*
- * IDE Solver for Sparta
+ * IDE Solver
  *
  * This header provides the IDE (Interprocedural Distributive Environment)
  * solver implementation for the IFDS framework.

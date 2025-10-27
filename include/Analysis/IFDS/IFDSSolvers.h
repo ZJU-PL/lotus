@@ -1,5 +1,5 @@
 /*
- * IFDS Solvers for Sparta
+ * IFDS Solvers
  *
  * This header provides IFDS solver implementations:
  * - IFDSSolver: Sequential IFDS solver
