@@ -744,15 +744,13 @@ Pass *createDsaPrintCallGraphStatsPass() { return new CompleteCallGraph(true); }
 
 } // namespace seadsa
 
-// Replace problematic INITIALIZE_PASS_* macros
-/*
+using namespace llvm;
+using namespace seadsa;
 INITIALIZE_PASS_BEGIN(CompleteCallGraph, "seadsa-complete-callgraph",
                       "Construct SeaDsa call graph pass", false, false)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(AllocWrapInfo)
 INITIALIZE_PASS_DEPENDENCY(DsaLibFuncInfo)
-INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_END(CompleteCallGraph, "seadsa-complete-callgraph",
                     "Construct SeaDsa call graph pass", false, false)
-*/

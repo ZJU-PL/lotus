@@ -494,11 +494,10 @@ Pass *createDsaInfoPass() { return new seadsa::DsaInfoPass(); }
 
 char seadsa::DsaInfoPass::ID = 0;
 
-// Replace problematic INITIALIZE_PASS_* macros
-/*
+using namespace llvm;
+using namespace seadsa;
 INITIALIZE_PASS_BEGIN(DsaInfoPass, "seadsa-info",
                      "Gather info about SeaDsa memory graphs", false, false)
-INITIALIZE_PASS_DEPENDENCY(DsaAnalysis)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_END(DsaInfoPass, "seadsa-info",
                      "Gather info about SeaDsa memory graphs", false, false)
-*/

@@ -179,13 +179,11 @@ llvm::Optional<unsigned> AllocSiteInfo::getAllocSiteSize(const Value &v) {
 // static llvm::RegisterPass<seadsa::AllocSiteInfo> X("seadsa-alloc-site-info",
 //                                                    "Detects allocation sites");
 
+using namespace llvm;
 using namespace seadsa;
-// Replace problematic INITIALIZE_PASS_* macros
-/*
 INITIALIZE_PASS_BEGIN(AllocSiteInfo, "seadsa-alloc-site-info",
                      "Detects allocation sites", false, false)
 INITIALIZE_PASS_DEPENDENCY(AllocWrapInfo)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_END(AllocSiteInfo, "seadsa-alloc-site-info",
-                     "Detects allocation sites", false, false)
-*/
+		    "Detects allocation sites", false, false)

@@ -208,8 +208,7 @@ void SeaDsaAAWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
 }
 } // namespace seadsa
 
-// Comment out the problematic INITIALIZE_PASS macro
-/*
+using namespace llvm;
+using namespace seadsa;
 INITIALIZE_PASS(SeaDsaAAWrapperPass, "seadsa-aa", "SeaDsa-Based Alias Analysis",
                 false, true)
-*/

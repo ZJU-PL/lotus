@@ -41,6 +41,7 @@ target_link_libraries(Concurrency CanaryLLVMUtils CanaryDyckAA)
 
 add_subdirectory(sparta)
 add_subdirectory(IFDS)
+add_subdirectory(Clam)
 
 
 

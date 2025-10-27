@@ -249,11 +249,10 @@ bool isNotStored(Value *V) {
 
 char AllocWrapInfo::ID = 0;
 
-// Replace problematic INITIALIZE_PASS_* macros
-/*
+using namespace llvm;
+using namespace seadsa;
 INITIALIZE_PASS_BEGIN(AllocWrapInfo, "seadsa-alloc-wrap-info",
                       "Detects allocator wrappers", false, false)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_END(AllocWrapInfo, "seadsa-alloc-wrap-info",
                       "Detects allocator wrappers", false, false)
-*/

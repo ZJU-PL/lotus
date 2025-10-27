@@ -121,17 +121,15 @@ bool DsaAnalysis::runOnModule(Module &M) {
 
 char DsaAnalysis::ID = 0;
 
+using namespace llvm;
 using namespace seadsa;
-// Replace problematic INITIALIZE_PASS_* macros
-/*
 INITIALIZE_PASS_BEGIN(DsaAnalysis, "dsa-wrapper", "Entry point for DSA analyses", false, false)
 INITIALIZE_PASS_DEPENDENCY(RemovePtrToInt)
-
-INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
+INITIALIZE_PASS_DEPENDENCY(AllocSiteInfo)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(AllocWrapInfo)
 INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DsaLibFuncInfo)
 INITIALIZE_PASS_END(DsaAnalysis, "dsa-wrapper",
                          "Entry point for DSA analyses", false, false)
-*/

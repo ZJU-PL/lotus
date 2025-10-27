@@ -373,11 +373,9 @@ namespace seadsa {
 llvm::Pass *createDsaLibFuncInfoPass() { return new DsaLibFuncInfo(); }
 } // namespace seadsa
 
-// Comment out the problematic INITIALIZE_PASS_* macros
-/*
+using namespace llvm;
+using namespace seadsa;
 INITIALIZE_PASS_BEGIN(DsaLibFuncInfo, "seadsa-spec-graph-info",
                       "Creates local analysis from spec", false, false)
-INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_END(DsaLibFuncInfo, "seadsa-spec-graph-info",
                      "Creates local analysis from spec", false, false)
-*/

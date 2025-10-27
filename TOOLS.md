@@ -267,6 +267,58 @@ Examples:
 ```
 
 
+## Abstract Interpretation Tools
+
+### clam
+
+Abstract interpretation-based static analysis tool for LLVM bitcode.
+
+```bash
+./clam [options] <input.bc>
+```
+
+Key options:
+- `--crab-dom=<domain>`: Select abstract domain (int, zones, oct, pk, etc.)
+- `--crab-inter`: Enable interprocedural analysis
+- `--crab-check=<type>`: Enable property checking (assert, null, bounds, uaf)
+- `--crab-print-invariants=true`: Print computed invariants
+- `-ojson=<file>`: Output results in JSON format
+
+Examples:
+```bash
+# Interval domain analysis with assertion checking
+./clam --crab-dom=int --crab-check=assert program.bc
+
+# Interprocedural analysis with zones domain
+./clam --crab-inter --crab-dom=zones --crab-check=null program.bc
+```
+
+### clam-diff
+
+Compare JSON outputs from two CLAM analyses for differential verification.
+
+```bash
+./clam-diff [options] <first.json> <second.json>
+```
+
+Key options:
+- `--dom=<domain>`: Domain for semantic comparison
+- `--semdiff=<bool>`: Enable semantic differencing (default: true)
+
+### clam-pp
+
+LLVM bitcode preprocessor for CLAM analysis.
+
+```bash
+./clam-pp [options] <input.bc> -o <output.bc>
+```
+
+Key options:
+- `--crab-lower-unsigned-icmp`: Lower unsigned comparisons
+- `--crab-lower-select`: Lower select instructions
+- `--crab-devirt`: Perform devirtualization
+- `-o <file>`: Output file
+
 ## Constraint Solving Tools
 
 ### SMT Solver (owl)

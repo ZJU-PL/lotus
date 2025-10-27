@@ -2012,9 +2012,8 @@ char StripShadowMemPass::ID = 0;
 
 } // namespace seadsa
 
+using namespace llvm;
 using namespace seadsa;
-// Comment out the problematic INITIALIZE_PASS_* macros
-/*
 INITIALIZE_PASS_BEGIN(ShadowMemPass, "shadow-sea-dsa",
                       "Add shadow.mem pseudo-functions", false, false)
 INITIALIZE_PASS_DEPENDENCY(DsaAnalysis)
@@ -2030,4 +2029,3 @@ INITIALIZE_PASS_BEGIN(StripShadowMemPass, "strip-shadow-sea-dsa",
                       "Remove shadow.mem pseudo-functions", false, false)
 INITIALIZE_PASS_END(StripShadowMemPass, "strip-shadow-sea-dsa",
                     "Remove shadow.mem pseudo-functions", false, false)
-*/

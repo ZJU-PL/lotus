@@ -5,6 +5,11 @@ add_subdirectory(csr)
 add_subdirectory(graspan)
 add_subdirectory(pdg-query)
 
+# CLAM tools (clam, clam-diff, clam-pp)
+if(ENABLE_CLAM)
+    add_subdirectory(clam)
+endif()
+
 
 option(BUILD_CSR "Build indexing context-sensitive reachability solver" OFF)
 option(BUILD_DYNAA "Build dynamic alias analyses" OFF)

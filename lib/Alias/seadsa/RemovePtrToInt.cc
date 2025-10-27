@@ -550,12 +550,11 @@ void RemovePtrToInt::getAnalysisUsage(llvm::AnalysisUsage &AU) const {
 Pass *createRemovePtrToIntPass() { return new RemovePtrToInt(); }
 } // namespace seadsa
 
-// Replace problematic INITIALIZE_PASS_* macros
-/*
+using namespace llvm;
+using namespace seadsa;
 INITIALIZE_PASS_BEGIN(RemovePtrToInt, "sea-remove-ptrtoint",
                       "Remove ptrtoint instructions", false, false)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
 INITIALIZE_PASS_END(RemovePtrToInt, "sea-remove-ptrtoint",
                     "Remove ptrtoint instructions", false, false)
-*/
