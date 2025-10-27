@@ -119,16 +119,17 @@ private:
     ParallelIFDSConfig m_config;
     bool m_show_progress = false;
 
-    // Thread-safe data structures
+    // Thread-safe data structures with sharding for reduced lock contention
     ThreadSafeSet<PathEdgeType> m_path_edges;
     ThreadSafeSet<SummaryEdgeType> m_summary_edges;
     ThreadSafeVector<PathEdgeType> m_worklist;
-    ThreadSafeMap<const llvm::Instruction*, FactSet> m_entry_facts;
-    ThreadSafeMap<const llvm::Instruction*, FactSet> m_exit_facts;
+    ShardedMap<const llvm::Instruction*, FactSet> m_entry_facts;
+    ShardedMap<const llvm::Instruction*, FactSet> m_exit_facts;
 
-    // Indexed data structures for fast lookup (read-only after initialization)
-    std::unordered_map<const llvm::CallInst*, std::vector<SummaryEdgeType>> m_summary_index;
-    std::unordered_map<const llvm::Instruction*, std::vector<PathEdgeType>> m_path_edges_at;
+    // Indexed data structures for fast lookup - use sets to avoid duplicates
+    // Protected by sharded mutexes (computed per call site)
+    std::unordered_map<const llvm::CallInst*, std::set<SummaryEdgeType>> m_summary_index;
+    std::unordered_map<const llvm::Instruction*, std::set<PathEdgeType>> m_path_edges_at;
 
     // Call graph information (read-only after initialization)
     std::unordered_map<const llvm::CallInst*, const llvm::Function*> m_call_to_callee;
@@ -145,6 +146,11 @@ private:
     std::atomic<size_t> m_edges_processed{0};
     std::condition_variable m_termination_cv;
     mutable std::mutex m_termination_mutex;
+    std::atomic<bool> m_terminate_flag{false};
+    
+    // Epoch-based termination detection
+    std::atomic<size_t> m_current_epoch{0};
+    std::atomic<size_t> m_threads_in_current_epoch{0};
 
     // Performance tracking
     mutable PerformanceStats m_stats;

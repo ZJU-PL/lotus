@@ -30,6 +30,8 @@
 #include <condition_variable>
 #include <chrono>
 #include <memory>
+#include <array>
+#include <algorithm>
 
 // Forward declaration
 namespace lotus {
@@ -154,6 +156,25 @@ public:
             func(item);
         }
     }
+    
+    // Union operation for set-valued maps (IFDS M_A[n] semantics)
+    // Returns true if any new element was added
+    template<typename T>
+    bool union_with(const K& key, const T& new_element) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_map.find(key);
+        if (it != m_map.end()) {
+            // Key exists - perform set union
+            auto result = it->second.insert(new_element);
+            return result.second; // true if element was newly inserted
+        } else {
+            // Key doesn't exist - create new set with element
+            V new_set;
+            new_set.insert(new_element);
+            m_map[key] = new_set;
+            return true;
+        }
+    }
 };
 
 template<typename T>
@@ -187,10 +208,118 @@ public:
         m_vector.pop_back();
         return SimpleOptional<T>(value);
     }
+    
+    // Bulk pop for better performance
+    std::vector<T> pop_batch(size_t max_count) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<T> batch;
+        size_t count = std::min(max_count, m_vector.size());
+        if (count > 0) {
+            batch.reserve(count);
+            auto begin_it = m_vector.end() - count;
+            batch.insert(batch.end(), begin_it, m_vector.end());
+            m_vector.erase(begin_it, m_vector.end());
+        }
+        return batch;
+    }
 
     void clear() {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_vector.clear();
+    }
+};
+
+// Sharded map for reduced lock contention (performance optimization)
+template<typename K, typename V, size_t NumShards = 64>
+class ShardedMap {
+private:
+    struct Shard {
+        mutable std::mutex mutex;
+        std::unordered_map<K, V> map;
+    };
+    
+    std::array<Shard, NumShards> m_shards;
+    
+    size_t get_shard_index(const K& key) const {
+        return std::hash<K>{}(key) % NumShards;
+    }
+    
+    Shard& get_shard(const K& key) {
+        return m_shards[get_shard_index(key)];
+    }
+    
+    const Shard& get_shard(const K& key) const {
+        return m_shards[get_shard_index(key)];
+    }
+
+public:
+    bool insert_or_assign(const K& key, const V& value) {
+        auto& shard = get_shard(key);
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        auto it = shard.map.find(key);
+        if (it != shard.map.end()) {
+            it->second = value;
+            return false;
+        } else {
+            shard.map[key] = value;
+            return true;
+        }
+    }
+
+    SimpleOptional<V> get(const K& key) const {
+        const auto& shard = get_shard(key);
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        auto it = shard.map.find(key);
+        return it != shard.map.end() ? SimpleOptional<V>(it->second) : SimpleOptional<V>();
+    }
+
+    bool contains(const K& key) const {
+        const auto& shard = get_shard(key);
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        return shard.map.find(key) != shard.map.end();
+    }
+
+    size_t size() const {
+        size_t total = 0;
+        for (const auto& shard : m_shards) {
+            std::lock_guard<std::mutex> lock(shard.mutex);
+            total += shard.map.size();
+        }
+        return total;
+    }
+
+    void clear() {
+        for (auto& shard : m_shards) {
+            std::lock_guard<std::mutex> lock(shard.mutex);
+            shard.map.clear();
+        }
+    }
+
+    template<typename Func>
+    void for_each(Func func) const {
+        for (const auto& shard : m_shards) {
+            std::lock_guard<std::mutex> lock(shard.mutex);
+            for (const auto& item : shard.map) {
+                func(item);
+            }
+        }
+    }
+    
+    // Union operation for set-valued maps
+    template<typename T>
+    bool union_with(const K& key, const T& new_element) {
+        auto& shard = get_shard(key);
+        std::lock_guard<std::mutex> lock(shard.mutex);
+        auto it = shard.map.find(key);
+        if (it != shard.map.end()) {
+            auto result = it->second.insert(new_element);
+            return result.second;
+        } else {
+            V new_set;
+            new_set.insert(new_element);
+            shard.map[key] = new_set;
+            return true;
+        }
     }
 };
 
@@ -208,8 +337,9 @@ struct ParallelIFDSConfig {
     };
     ParallelMode parallel_mode = ParallelMode::WORKLIST_PARALLELISM;
 
-    // Worklist batch size for load balancing
-    size_t worklist_batch_size = 100;
+    // Worklist batch size for load balancing (tuned for performance)
+    // Empirically optimal range is 256-1024 (?)
+    size_t worklist_batch_size = 512;
 
     // Synchronization frequency (how often to sync shared data structures)
     size_t sync_frequency = 1000;

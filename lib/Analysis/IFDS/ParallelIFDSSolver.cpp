@@ -16,10 +16,6 @@
 #include <Support/ProgressBar.h>
 #include <LLVMUtils/ThreadPool.h>
 
-//#include <algorithm>
-#include <random>
-//#include <set>
-
 namespace ifds {
 
 // ============================================================================
@@ -131,36 +127,80 @@ template<typename Problem>
 void ParallelIFDSSolver<Problem>::worker_thread_function() {
     m_active_threads.fetch_add(1);
 
-    // Seed random number generator for work stealing
-    std::random_device rd;
-    std::mt19937 gen(rd());
-
     size_t local_edges_processed = 0;
+    size_t consecutive_empty_batches = 0;
+    const size_t MAX_EMPTY_BATCHES = 3;  // Try a few times before declaring idle
 
     try {
-        while (!should_terminate()) {
+        while (!m_terminate_flag.load()) {
             // Get a batch of work from the worklist
             auto batch = get_worklist_batch();
 
-            // If no work available, break
             if (batch.empty()) {
-                break;
+                // No work found - enter termination detection protocol
+                consecutive_empty_batches++;
+                
+                if (consecutive_empty_batches >= MAX_EMPTY_BATCHES) {
+                    // Participate in epoch-based termination detection
+                    m_threads_in_current_epoch.fetch_add(1);
+                    
+                    // Small delay to allow other threads to catch up
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    
+                    // Check if all threads have reached this epoch
+                    if (m_threads_in_current_epoch.load() >= m_active_threads.load()) {
+                        // All threads are idle - check worklist one more time
+                        if (m_worklist.empty()) {
+                            // Truly done - set termination flag
+                            m_terminate_flag.store(true);
+                            signal_termination();
+                            break;
+                        } else {
+                            // Work appeared - reset epoch
+                            m_current_epoch.fetch_add(1);
+                            m_threads_in_current_epoch.store(0);
+                            consecutive_empty_batches = 0;
+                        }
+                    } else {
+                        // Not all threads idle yet - wait a bit and retry
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        consecutive_empty_batches = 0;
+                    }
+                }
+                continue;
+            }
+
+            // Found work - reset idle counter and leave epoch
+            consecutive_empty_batches = 0;
+            if (m_threads_in_current_epoch.load() > 0) {
+                m_threads_in_current_epoch.fetch_sub(1);
             }
 
             // Process the batch
             for (const auto& edge : batch) {
-                if (should_terminate()) break;
+                if (m_terminate_flag.load()) break;
 
                 const llvm::Instruction* curr = edge.target_node;
                 const Fact& fact = edge.target_fact;
 
                 // Process different instruction types
                 if (auto* call = llvm::dyn_cast<llvm::CallInst>(curr)) {
-                    auto it = m_call_to_callee.find(call);
-                    if (it != m_call_to_callee.end()) {
-                        process_call_edge(call, it->second, fact);
+                    // Handle regular call instructions (not invoke)
+                    if (!llvm::isa<llvm::InvokeInst>(curr)) {
+                        auto it = m_call_to_callee.find(call);
+                        if (it != m_call_to_callee.end()) {
+                            process_call_edge(call, it->second, fact);
+                        } else {
+                            process_call_to_return_edge(call, fact);
+                        }
                     } else {
-                        process_call_to_return_edge(call, fact);
+                        // Handle invoke instructions inline
+                        auto* invoke = llvm::cast<llvm::InvokeInst>(curr);
+                        if (const llvm::Function* callee = invoke->getCalledFunction()) {
+                            process_call_edge(call, callee, fact);
+                        } else {
+                            process_call_to_return_edge(call, fact);
+                        }
                     }
                 } else if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(curr)) {
                     process_return_edge(ret, fact);
@@ -196,11 +236,7 @@ void ParallelIFDSSolver<Problem>::worker_thread_function() {
     }
 
     m_active_threads.fetch_sub(1);
-
-    // If this is the last active thread, signal termination
-    if (m_active_threads.load() == 0) {
-        signal_termination();
-    }
+    signal_termination();
 }
 
 // ============================================================================
@@ -217,9 +253,57 @@ bool ParallelIFDSSolver<Problem>::propagate_path_edge(const PathEdgeType& edge) 
     // Add to worklist for processing
     m_worklist.push_back(edge);
 
-    // Update entry/exit facts for queries (thread-safe)
-    m_entry_facts.insert_or_assign(edge.start_node, FactSet{edge.start_fact});
-    m_exit_facts.insert_or_assign(edge.target_node, FactSet{edge.target_fact});
+    // Update entry/exit facts with set-union semantics (IFDS M_A[n])
+    m_entry_facts.union_with(edge.start_node, edge.start_fact);
+    m_exit_facts.union_with(edge.target_node, edge.target_fact);
+    
+    // Maintain path-edge index P[c] for retroactive summary application
+    // If target_node is a call instruction, record this path edge
+    if (auto* call = llvm::dyn_cast<llvm::CallInst>(edge.target_node)) {
+        std::vector<PathEdgeType> new_edges;
+        
+        // Critical section: update path edge index and collect applicable summaries
+        {
+            std::lock_guard<std::mutex> lock(m_global_mutex);
+            // Use set for automatic deduplication
+            m_path_edges_at[edge.target_node].insert(edge);
+            
+            // BUG FIX: Apply existing summaries to this new path edge
+            // This handles the case where the summary arrived before this path edge
+            auto summary_it = m_summary_index.find(call);
+            if (summary_it != m_summary_index.end()) {
+                const llvm::Instruction* return_site = get_return_site(call);
+                if (return_site) {
+                    // Iterate over ALL summaries for this call site (set automatically deduplicates)
+                    for (const auto& summary : summary_it->second) {
+                        // Check if summary applies to this path edge's call_fact
+                        if (summary.call_fact == edge.target_fact) {
+                            // Get the callee function for return_flow
+                            auto callee_it = m_call_to_callee.find(call);
+                            const llvm::Function* callee = (callee_it != m_call_to_callee.end()) 
+                                ? callee_it->second : nullptr;
+                            
+                            if (callee && !callee->isDeclaration()) {
+                                FactSet return_facts = m_problem.return_flow(call, callee,
+                                                                           summary.return_fact, 
+                                                                           summary.call_fact);
+                                for (const auto& return_fact : return_facts) {
+                                    // Create path edge from the start of the calling context
+                                    new_edges.emplace_back(edge.start_node, edge.start_fact,
+                                                         return_site, return_fact);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } // lock released here
+        
+        // Add new edges outside the critical section to avoid deadlock
+        if (!new_edges.empty()) {
+            add_edges_to_worklist(new_edges);
+        }
+    }
 
     return true;
 }
@@ -242,9 +326,13 @@ template<typename Problem>
 void ParallelIFDSSolver<Problem>::process_call_edge(const llvm::CallInst* call,
                                                    const llvm::Function* callee,
                                                    const Fact& fact) {
+    std::vector<PathEdgeType> new_edges;
+    
+    // ALWAYS generate call-to-return edges (textbook IFDS requirement)
+    process_call_to_return_edge(call, fact);
+    
     if (!callee || callee->isDeclaration()) {
-        // External call - handle with call-to-return flow
-        process_call_to_return_edge(call, fact);
+        // External call - only C2R flow applies (already handled above)
         return;
     }
 
@@ -254,27 +342,33 @@ void ParallelIFDSSolver<Problem>::process_call_edge(const llvm::CallInst* call,
     // Apply call flow function
     FactSet call_facts = m_problem.call_flow(call, callee, fact);
 
-    std::vector<PathEdgeType> new_edges;
     for (const auto& call_fact : call_facts) {
         new_edges.emplace_back(call, fact, callee_entry, call_fact);
     }
 
     add_edges_to_worklist(new_edges);
+    new_edges.clear();
 
-    // Check if we have existing summary edges for this call
+    // Check if we have existing summary edges for this call and apply retroactively
+    // BUG FIX: Iterate over ALL summaries that match the call_fact
+    std::lock_guard<std::mutex> lock(m_global_mutex);
     auto summary_it = m_summary_index.find(call);
     if (summary_it != m_summary_index.end()) {
         const llvm::Instruction* return_site = get_return_site(call);
         if (return_site) {
+            // Apply ALL summaries that have matching call_fact
+            // (there may be multiple with different return_facts)
             for (const auto& summary : summary_it->second) {
                 if (summary.call_fact == fact) {
-                    // Apply existing summary
+                    // Apply this summary with CORRECT fact parameter
+                    // The 4th parameter must be summary.call_fact, not the incoming fact
                     FactSet return_facts = m_problem.return_flow(call, callee,
-                                                               summary.return_fact, fact);
+                                                               summary.return_fact, summary.call_fact);
                     for (const auto& return_fact : return_facts) {
                         new_edges.emplace_back(call, fact, return_site, return_fact);
                     }
                 }
+                // Note: we continue iterating to apply ALL matching summaries
             }
         }
     }
@@ -293,34 +387,41 @@ void ParallelIFDSSolver<Problem>::process_return_edge(const llvm::ReturnInst* re
     auto it = m_callee_to_calls.find(func);
     if (it == m_callee_to_calls.end()) return;
 
-    SummaryEdgeType new_summary(nullptr, m_problem.zero_fact(), fact);
-
     for (const llvm::CallInst* call : it->second) {
-        new_summary.call_site = call;
-
-        // Check if this summary edge already exists
-        if (m_summary_edges.insert(new_summary)) {
-            // Add to index for fast lookup
-            m_summary_index[call].push_back(new_summary);
-
-            // Apply summary to all existing path edges ending at this call
-            auto path_it = m_path_edges_at.find(call);
-            if (path_it != m_path_edges_at.end()) {
-                const llvm::Instruction* return_site = get_return_site(call);
-                if (return_site) {
-                    std::vector<PathEdgeType> new_edges;
-                    for (const auto& path_edge : path_it->second) {
-                        FactSet return_facts = m_problem.return_flow(call, func,
-                                                                   fact, path_edge.target_fact);
-                        for (const auto& return_fact : return_facts) {
-                            new_edges.emplace_back(call, path_edge.target_fact,
-                                                 return_site, return_fact);
-                        }
-                    }
-                    if (!new_edges.empty()) {
-                        add_edges_to_worklist(new_edges);
+        const llvm::Instruction* return_site = get_return_site(call);
+        if (!return_site) continue;
+        
+        // Apply summary to all existing path edges ending at this call (retroactive application)
+        // This is the core IFDS tabulation: for each path edge <s_p, d_1> -> <n, d_2> 
+        // reaching call site n, and a summary edge <n, d_2, d_3>, 
+        // create path edge <s_p, d_1> -> <return_site, d_4> where d_4 = return_flow(d_3, d_2)
+        std::lock_guard<std::mutex> lock(m_global_mutex);
+        auto path_it = m_path_edges_at.find(call);
+        if (path_it != m_path_edges_at.end()) {
+            std::vector<PathEdgeType> new_edges;
+            for (const auto& path_edge : path_it->second) {
+                // path_edge.target_fact is the call_fact (d_2)
+                const Fact& call_fact = path_edge.target_fact;
+                
+                // Create summary edge with the actual call_fact
+                SummaryEdgeType new_summary(call, call_fact, fact);
+                
+                // Only process if this is a new summary
+                if (m_summary_edges.insert(new_summary)) {
+                    // Add to index for fast lookup (set automatically deduplicates)
+                    m_summary_index[call].insert(new_summary);
+                    
+                    // Apply return flow: exit_fact is 'fact', call_fact is from path edge
+                    FactSet return_facts = m_problem.return_flow(call, func, fact, call_fact);
+                    for (const auto& return_fact : return_facts) {
+                        // Create path edge from the start of the calling context
+                        new_edges.emplace_back(path_edge.start_node, path_edge.start_fact,
+                                             return_site, return_fact);
                     }
                 }
+            }
+            if (!new_edges.empty()) {
+                add_edges_to_worklist(new_edges);
             }
         }
     }
@@ -349,16 +450,8 @@ void ParallelIFDSSolver<Problem>::process_call_to_return_edge(const llvm::CallIn
 template<typename Problem>
 std::vector<typename ParallelIFDSSolver<Problem>::PathEdgeType>
 ParallelIFDSSolver<Problem>::get_worklist_batch() {
-    std::vector<PathEdgeType> batch;
-    size_t batch_size = m_config.worklist_batch_size;
-
-    for (size_t i = 0; i < batch_size; ++i) {
-        auto edge = m_worklist.pop_back();
-        if (!edge.has_value()) break;
-        batch.push_back(edge.value());
-    }
-
-    return batch;
+    // Use bulk pop for better performance (single lock acquisition)
+    return m_worklist.pop_batch(m_config.worklist_batch_size);
 }
 
 template<typename Problem>
@@ -377,8 +470,8 @@ void ParallelIFDSSolver<Problem>::add_edges_to_worklist(const std::vector<PathEd
 
 template<typename Problem>
 bool ParallelIFDSSolver<Problem>::should_terminate() const {
-    // Terminate if worklist is empty and no threads are actively processing
-    return m_worklist.empty() && m_active_threads.load() == 0;
+    // Termination is controlled by the termination flag set by epoch-based detection
+    return m_terminate_flag.load();
 }
 
 template<typename Problem>
@@ -401,7 +494,28 @@ void ParallelIFDSSolver<Problem>::signal_termination() {
 
 template<typename Problem>
 const llvm::Instruction* ParallelIFDSSolver<Problem>::get_return_site(const llvm::CallInst* call) const {
-    return call->getNextNode();
+    // If call is not a terminator, next instruction is the return site
+    if (!call->isTerminator()) {
+        return call->getNextNode();
+    }
+    
+    // If call is a terminator (e.g., invoke), the return site is in a successor block
+    // For invoke instructions, normal return is to the "normal" destination
+    if (auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(call)) {
+        return &invoke->getNormalDest()->front();
+    }
+    
+    // For other terminating calls, we may have multiple successors
+    // Return the first successor's first instruction (conservative)
+    const llvm::BasicBlock* parent = call->getParent();
+    if (parent && parent->getTerminator() == call) {
+        auto* term = parent->getTerminator();
+        if (term->getNumSuccessors() > 0) {
+            return &term->getSuccessor(0)->front();
+        }
+    }
+    
+    return nullptr;
 }
 
 template<typename Problem>
@@ -434,11 +548,14 @@ void ParallelIFDSSolver<Problem>::initialize_call_graph(const llvm::Module& modu
                 if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&inst)) {
                     returns.push_back(ret);
                 } else if (auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                    // Handle regular call instructions
                     if (const llvm::Function* callee = call->getCalledFunction()) {
                         m_call_to_callee[call] = callee;
                         m_callee_to_calls[callee].push_back(call);
                     }
                 }
+                // Note: InvokeInst handling is done inline in worker thread 
+                // since InvokeInst and CallInst are separate types in modern LLVM
             }
         }
         m_function_returns[&func] = returns;
@@ -458,12 +575,26 @@ void ParallelIFDSSolver<Problem>::build_cfg_successors(const llvm::Module& modul
                 std::vector<const llvm::Instruction*> succs;
 
                 if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                    // Handle branch instructions
                     for (unsigned i = 0; i < br->getNumSuccessors(); ++i) {
                         succs.push_back(&br->getSuccessor(i)->front());
                     }
-                } else if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&inst)) {
-                    // Returns have no intraprocedural successors
+                } else if (auto* sw = llvm::dyn_cast<llvm::SwitchInst>(&inst)) {
+                    // Handle switch instructions
+                    for (unsigned i = 0; i < sw->getNumSuccessors(); ++i) {
+                        succs.push_back(&sw->getSuccessor(i)->front());
+                    }
+                } else if (auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(&inst)) {
+                    // Handle invoke instructions (both normal and exceptional edges)
+                    // Normal destination (non-exceptional return)
+                    succs.push_back(&invoke->getNormalDest()->front());
+                    // Exceptional destination (unwind/exception handler)
+                    succs.push_back(&invoke->getUnwindDest()->front());
+                } else if (llvm::isa<llvm::ReturnInst>(&inst) || 
+                          llvm::isa<llvm::UnreachableInst>(&inst)) {
+                    // Returns and unreachable have no intraprocedural successors
                 } else if (const llvm::Instruction* next = inst.getNextNode()) {
+                    // Regular sequential flow
                     succs.push_back(next);
                 }
 
@@ -515,6 +646,11 @@ void ParallelIFDSSolver<Problem>::run_parallel_tabulation() {
         return;
     }
 
+    // Initialize termination detection state
+    m_terminate_flag.store(false);
+    m_current_epoch.store(0);
+    m_threads_in_current_epoch.store(0);
+
     std::vector<std::thread> workers;
     workers.reserve(m_config.num_threads);
 
@@ -554,11 +690,22 @@ void ParallelIFDSSolver<Problem>::run_sequential_tabulation() {
 
         // Process different instruction types (same as worker function)
         if (auto* call = llvm::dyn_cast<llvm::CallInst>(curr)) {
-            auto it = m_call_to_callee.find(call);
-            if (it != m_call_to_callee.end()) {
-                process_call_edge(call, it->second, fact);
+            // Handle regular call instructions (not invoke)
+            if (!llvm::isa<llvm::InvokeInst>(curr)) {
+                auto it = m_call_to_callee.find(call);
+                if (it != m_call_to_callee.end()) {
+                    process_call_edge(call, it->second, fact);
+                } else {
+                    process_call_to_return_edge(call, fact);
+                }
             } else {
-                process_call_to_return_edge(call, fact);
+                // Handle invoke instructions inline
+                auto* invoke = llvm::cast<llvm::InvokeInst>(curr);
+                if (const llvm::Function* callee = invoke->getCalledFunction()) {
+                    process_call_edge(call, callee, fact);
+                } else {
+                    process_call_to_return_edge(call, fact);
+                }
             }
         } else if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(curr)) {
             process_return_edge(ret, fact);
