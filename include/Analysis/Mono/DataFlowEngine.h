@@ -5,13 +5,29 @@
 #include "LLVMUtils/SystemHeaders.h"
 #include "Analysis/Mono/DataFlowResult.h"
 
+// Forward declarations for optional memory analysis support
+namespace llvm {
+  class AAResults;
+  class MemorySSA;
+}
 
 class DataFlowEngine {
 public:
   /*
-   * Methods
+   * Constructors
    */
   DataFlowEngine();
+  
+  // Constructor with optional alias analysis and memory SSA support
+  DataFlowEngine(AAResults *AA, MemorySSA *MSSA = nullptr);
+  
+  /*
+   * Accessors for optional analysis results
+   */
+  AAResults *getAliasAnalysis() const { return AA; }
+  MemorySSA *getMemorySSA() const { return MSSA; }
+  bool hasAliasAnalysis() const { return AA != nullptr; }
+  bool hasMemorySSA() const { return MSSA != nullptr; }
 
   DataFlowResult *applyForward(
       Function *f,
@@ -104,6 +120,12 @@ private:
           getOutSetOfInst,
       std::function<BasicBlock::iterator(BasicBlock *)> getEndIterator,
       std::function<void(BasicBlock::iterator &)> incrementIterator);
+
+  /*
+   * Optional analysis results for memory-aware analyses
+   */
+  AAResults *AA;
+  MemorySSA *MSSA;
 };
 
 #endif // ANALYSIS_DATAFLOWENGINE_H_

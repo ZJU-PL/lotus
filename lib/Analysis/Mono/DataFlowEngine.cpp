@@ -1,6 +1,11 @@
 #include "Analysis/Mono/DataFlowEngine.h"
 
-DataFlowEngine::DataFlowEngine() {
+DataFlowEngine::DataFlowEngine() : AA(nullptr), MSSA(nullptr) {
+  return;
+}
+
+DataFlowEngine::DataFlowEngine(AAResults *AA, MemorySSA *MSSA) 
+    : AA(AA), MSSA(MSSA) {
   return;
 }
 
