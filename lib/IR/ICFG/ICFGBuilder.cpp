@@ -1,3 +1,5 @@
+/// @file ICFGBuilder.cpp
+/// @brief Implementation of ICFG builder for constructing interprocedural CFG.
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstIterator.h>
@@ -12,9 +14,7 @@
  using namespace llvm;
  
  
- /*!
-  * Create ICFG nodes and edges
-  */
+/// @brief Builds the ICFG for all non-declaration functions in the module.
  void ICFGBuilder::build(llvm::Module* module)
  {
      for (auto& func : *module)

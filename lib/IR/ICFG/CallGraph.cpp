@@ -1,3 +1,6 @@
+/// @file CallGraph.cpp
+/// @brief Implementation of custom call graph for Lotus framework.
+
 #include <algorithm>
 #include <iostream>
  
@@ -8,8 +11,8 @@
 
  
  //===----------------------------------------------------------------------===//
- // Implementations of the LTCallGraph class methods.
- //
+// Implementations of the LTCallGraph class methods.
+//
  
 LTCallGraph::LTCallGraph(Module &M)
         : M(M), ExternalCallingNode(getOrInsertFunction(nullptr)),
@@ -89,12 +92,7 @@ LTCallGraph::LTCallGraph(Module &M)
         }
  }
  
- // removeFunctionFromModule - Unlink the function from this module, returning
- // it.  Because this removes the function from the module, the call graph node
- // is destroyed.  This is only valid if the function does not call any other
- // functions (ie, there are no edges in it's CGN).  The easiest way to do this
- // is to dropAllReferences before calling this.
- //
+/// @brief Removes a function from the module and destroys its call graph node.
  Function *LTCallGraph::removeFunctionFromModule(LTCallGraphNode *CGN) {
      assert(CGN->empty() && "Cannot remove function from call "
                             "graph if it references other functions!");

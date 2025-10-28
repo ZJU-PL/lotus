@@ -13,4 +13,5 @@ add_library(CanaryTransform STATIC
         # SoftFloat.cpp
         UnrollVectors.cpp
         ExpandAssume.cpp
+        ElimPhi.cpp
 )

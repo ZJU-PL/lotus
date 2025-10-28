@@ -1,3 +1,6 @@
+/// @file ICFGNode.h
+/// @brief ICFG node representations for basic blocks.
+
 #pragma once
 
  #include <llvm/IR/Module.h>
@@ -13,11 +16,11 @@
  
 
  
- class ICFGNode;
- 
- /*!
-  * Interprocedural control-flow graph node.
-  */
+class ICFGNode;
+
+/// @brief Base class for interprocedural control-flow graph nodes.
+///
+/// Each node represents a program point in the ICFG (typically a basic block).
  typedef GenericNode<ICFGNode, ICFGEdge> GenericICFGNodeTy;
  
  class ICFGNode : public GenericICFGNodeTy
@@ -30,76 +33,84 @@
          IntraBlock, FunEntryBlock, FunRetBlock
      };
  
- public:
-     /// Constructor
-     ICFGNode(NodeID i, ICFGNodeK k) : GenericICFGNodeTy(i, k), _function(nullptr), _basic_block(nullptr)
-     {
- 
-     }
- 
-     /// Return the function of this ICFGNode
-     virtual const llvm::Function* getFunction() const
-     {
-         return _function;
-     }
- 
-     /// Return the function of this ICFGNode
-     virtual const llvm::BasicBlock* getBasicBlock() const
-     {
-         return _basic_block;
-     }
- 
-     /// Overloading operator << for dumping ICFG node ID
-     //@{
-     friend llvm::raw_ostream &operator<<(llvm::raw_ostream &o, const ICFGNode &node)
-     {
-         o << node.toString();
-         return o;
-     }
-     //@}
- 
-     virtual std::string toString() const;
- 
-     void dump() const;
+public:
+    /// @brief Constructs an ICFG node.
+    /// @param i Node ID.
+    /// @param k Node kind.
+    ICFGNode(NodeID i, ICFGNodeK k) : GenericICFGNodeTy(i, k), _function(nullptr), _basic_block(nullptr)
+    {
+
+    }
+
+    /// @brief Returns the function containing this node.
+    /// @return Pointer to the parent function.
+    virtual const llvm::Function* getFunction() const
+    {
+        return _function;
+    }
+
+    /// @brief Returns the basic block represented by this node.
+    /// @return Pointer to the basic block.
+    virtual const llvm::BasicBlock* getBasicBlock() const
+    {
+        return _basic_block;
+    }
+
+    /// @brief Stream operator for printing node information.
+    friend llvm::raw_ostream &operator<<(llvm::raw_ostream &o, const ICFGNode &node)
+    {
+        o << node.toString();
+        return o;
+    }
+
+    /// @brief Returns a string representation of this node.
+    /// @return String description.
+    virtual std::string toString() const;
+
+    /// @brief Dumps node information to standard output.
+    void dump() const;
  
  protected:
      const llvm::Function* _function;
      const llvm::BasicBlock* _basic_block;
  };
  
- /*!
-  * ICFG node stands for a basic block
-  */
- class IntraBlockNode : public ICFGNode
- {
- 
- public:
-     IntraBlockNode(NodeID id, const llvm::BasicBlock* bb) : ICFGNode(id, IntraBlock)
-     {
-         _basic_block = bb;
-         _function = bb->getParent();
-     }
- 
-     /// Methods for support type inquiry through isa, cast, and dyn_cast:
-     //@{
-     static inline bool classof(const IntraBlockNode*)
-     {
-         return true;
-     }
- 
-     static inline bool classof(const ICFGNode *node)
-     {
-         return node->getNodeKind() == IntraBlock;
-     }
- 
-     static inline bool classof(const GenericICFGNodeTy *node)
-     {
-         return node->getNodeKind() == IntraBlock;
-     }
-     //@}
- 
-     std::string toString() const;
- };
+/// @brief ICFG node representing a basic block within a function.
+///
+/// This is the primary node type for intraprocedural control flow.
+class IntraBlockNode : public ICFGNode
+{
+
+public:
+    /// @brief Constructs an intra-block node.
+    /// @param id Node ID.
+    /// @param bb Basic block this node represents.
+    IntraBlockNode(NodeID id, const llvm::BasicBlock* bb) : ICFGNode(id, IntraBlock)
+    {
+        _basic_block = bb;
+        _function = bb->getParent();
+    }
+
+    /// @brief Type inquiry support for LLVM-style RTTI.
+    static inline bool classof(const IntraBlockNode*)
+    {
+        return true;
+    }
+
+    static inline bool classof(const ICFGNode *node)
+    {
+        return node->getNodeKind() == IntraBlock;
+    }
+
+    static inline bool classof(const GenericICFGNodeTy *node)
+    {
+        return node->getNodeKind() == IntraBlock;
+    }
+
+    /// @brief Returns a string representation of this intra-block node.
+    /// @return String description including block name.
+    std::string toString() const;
+};
  
  ///*!
  // * Function entry ICFGNode containing a set of FormalParmVFGNodes of a function

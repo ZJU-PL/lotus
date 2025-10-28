@@ -1,14 +1,17 @@
- #include <iostream>
+/// @file ICFG.cpp
+/// @brief Implementation of ICFG node and edge operations.
 
- #include "IR/ICFG/ICFG.h"
+#include <iostream>
+
+#include "IR/ICFG/ICFG.h"
  
- using namespace llvm;
+using namespace llvm;
  
- //
- //=============================================================================
- // ICFG Node
- //=============================================================================
- //
+//
+//=============================================================================
+// ICFG Node
+//=============================================================================
+//
  
  std::string ICFGNode::toString() const {
      std::string str;
@@ -82,25 +85,16 @@
      return rawstr.str();
  }
  
- //
- //=============================================================================
- // ICFG
- //=============================================================================
- //
- 
- /*!
-  * Constructor
-  *  * Build ICFG
-  * 1) build ICFG nodes
-  *    statements for top level pointers 
-  * 2) connect ICFG edges
-  *    between two statements 
-  */
- ICFG::ICFG(): totalICFGNode(0) {}
- 
- /*!
-  * Whether we has an intra ICFG edge
-  */
+//
+//=============================================================================
+// ICFG
+//=============================================================================
+//
+
+/// @brief Constructs an empty ICFG.
+ICFG::ICFG(): totalICFGNode(0) {}
+
+/// @brief Checks if an intraprocedural edge exists between two nodes.
  ICFGEdge* ICFG::hasIntraICFGEdge(ICFGNode* src, ICFGNode* dst, ICFGEdge::ICFGEdgeK kind)
  {
      ICFGEdge edge(src, dst, kind);
@@ -115,9 +109,7 @@
          return nullptr;
  }
  
- /*!
-  * Whether we has an inter ICFG edge
-  */
+/// @brief Checks if an interprocedural edge exists between two nodes.
  ICFGEdge* ICFG::hasInterICFGEdge(ICFGNode* src, ICFGNode* dst, ICFGEdge::ICFGEdgeK kind)
  {
      ICFGEdge edge(src, dst, kind);
@@ -132,9 +124,7 @@
          return nullptr;
  }
  
- /*!
-  * Return the corresponding ICFGEdge
-  */
+/// @brief Retrieves an edge between two nodes of a specific kind.
  ICFGEdge* ICFG::getICFGEdge(const ICFGNode* src, const ICFGNode* dst, ICFGEdge::ICFGEdgeK kind)
  {
      ICFGEdge * edge = nullptr;
@@ -151,9 +141,7 @@
      return edge;
  }
  
- /*!
-  * Add intraprocedural edges between two nodes
-  */
+/// @brief Adds an intraprocedural edge between two nodes.
  ICFGEdge* ICFG::addIntraEdge(ICFGNode* srcNode, ICFGNode* dstNode)
  {
      checkIntraEdgeParents(srcNode, dstNode);
@@ -169,9 +157,7 @@
      }
  }
  
- /*!
-  * Add interprocedural call edges between two nodes
-  */
+/// @brief Adds an interprocedural call edge from caller to callee.
  ICFGEdge* ICFG::addCallEdge(ICFGNode* srcNode, ICFGNode* dstNode, const llvm::Instruction*  cs)
  {
      if(ICFGEdge* edge = hasInterICFGEdge(srcNode,dstNode, ICFGEdge::CallCF))
@@ -186,9 +172,7 @@
      }
  }
  
- /*!
-  * Add interprocedural return edges between two nodes
-  */
+/// @brief Adds an interprocedural return edge from callee to caller.
  ICFGEdge* ICFG::addRetEdge(ICFGNode* srcNode, ICFGNode* dstNode, const llvm::Instruction*  cs)
  {
      if(ICFGEdge* edge = hasInterICFGEdge(srcNode,dstNode, ICFGEdge::RetCF))

@@ -1,3 +1,9 @@
+/// @file CallGraph.h
+/// @brief Custom call graph implementation for Lotus framework.
+///
+/// Provides an explicit call graph that omits address-taken functions,
+/// focusing on direct function calls only.
+
 #ifndef LT_CALL_GRAPH_H
 #define LT_CALL_GRAPH_H
  
@@ -13,13 +19,13 @@
  
 
  
- class LTCallGraphNode;
- 
- /// The basic data container for the call graph of a \c llvm::Module of IR.
- ///
- /// This class exposes both the interface to the call graph for a module of IR.
- ///
- /// The core call graph itself can also be updated to reflect changes to the IR.
+class LTCallGraphNode;
+
+/// @brief Custom call graph for LLVM modules.
+///
+/// Similar to LLVM's CallGraph but builds only explicit (direct) call relationships,
+/// excluding implicit calls through address-taken functions. This provides a more
+/// precise call graph for interprocedural analysis.
  class LTCallGraph {
      llvm::Module &M;
  
@@ -48,19 +54,27 @@
      /// functions that it calls.
      void addToCallGraph(llvm::Function *F);
  
- public:
-     explicit LTCallGraph(llvm::Module &M);
-     LTCallGraph(LTCallGraph &&Arg);
-     ~LTCallGraph();
- 
-     /// Print out this call graph node.
-     void dump() const;
- 
-     using iterator = FunctionMapTy::iterator;
-     using const_iterator = FunctionMapTy::const_iterator;
- 
-     /// Returns the module the call graph corresponds to.
-     llvm::Module &getModule() const { return M; }
+public:
+    /// @brief Constructs a call graph for the given module.
+    /// @param M LLVM module.
+    explicit LTCallGraph(llvm::Module &M);
+    
+    /// @brief Move constructor.
+    /// @param Arg Call graph to move from.
+    LTCallGraph(LTCallGraph &&Arg);
+    
+    /// @brief Destructor.
+    ~LTCallGraph();
+
+    /// @brief Dumps the call graph to standard output.
+    void dump() const;
+
+    using iterator = FunctionMapTy::iterator;
+    using const_iterator = FunctionMapTy::const_iterator;
+
+    /// @brief Returns the module this call graph represents.
+    /// @return Reference to the LLVM module.
+    llvm::Module &getModule() const { return M; }
  
      inline iterator begin() { return FunctionMap.begin(); }
      inline iterator end() { return FunctionMap.end(); }
@@ -107,21 +121,21 @@
      LTCallGraphNode *getOrInsertFunction(const llvm::Function *F);
  };
  
- /// A node in the call graph for a module.
- ///
- /// Typically represents a function in the call graph. There are also special
- /// "null" nodes used to represent theoretical entries in the call graph.
+/// @brief A node in the call graph representing a function.
+///
+/// Each node corresponds to a function and maintains edges to its callees.
+/// Special null nodes represent external or unknown call targets.
  class LTCallGraphNode {
- public:
-     /// A pair of the calling instruction (a call or invoke)
-     /// and the call graph node being called.
-     using CallRecord = std::pair<llvm::Value*, LTCallGraphNode*>;
- 
- public:
-     using CalledFunctionsVector = std::vector<CallRecord>;
- 
-     /// Creates a node for the specified function.
-     inline LTCallGraphNode(llvm::Function *F) : F(F) {}
+public:
+    /// @brief A call record: (call instruction, callee node).
+    using CallRecord = std::pair<llvm::Value*, LTCallGraphNode*>;
+
+public:
+    using CalledFunctionsVector = std::vector<CallRecord>;
+
+    /// @brief Constructs a call graph node for a function.
+    /// @param F Function this node represents.
+    inline LTCallGraphNode(llvm::Function *F) : F(F) {}
  
      LTCallGraphNode(const LTCallGraphNode &) = delete;
      LTCallGraphNode &operator=(const LTCallGraphNode &) = delete;

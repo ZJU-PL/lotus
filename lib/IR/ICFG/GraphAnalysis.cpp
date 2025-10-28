@@ -1,3 +1,8 @@
+/// @file GraphAnalysis.cpp
+/// @brief Implementation of graph analysis algorithms for ICFG and CFG.
+///
+/// Provides back edge detection, shortest path computation, and reachability
+/// analysis for both intraprocedural and interprocedural control flow graphs.
 
  #include <set>
  #include <map>
