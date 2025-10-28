@@ -1,8 +1,11 @@
 /*
- * LotusAA - Pointer Operation Transfer Functions
+ * LotusAA - Pointer Instruction Transfer Functions
  * 
- * Transfer functions for pointer manipulation: PHI, select, GEP, casts.
- * Also contains the main processBasePointer() dispatcher.
+ * Transfer functions for all pointer-related instructions:
+ * - Memory access: Load/Store
+ * - Control flow: PHI/Select
+ * - Pointer manipulation: GEP/Casts
+ * - Base pointer dispatcher: processBasePointer()
  */
 
 #include "Alias/LotusAA/Engine/IntraProceduralAnalysis.h"
@@ -12,6 +15,62 @@
 #include <llvm/IR/Operator.h>
 
 using namespace llvm;
+
+//===----------------------------------------------------------------------===//
+// Memory Access Operations
+//===----------------------------------------------------------------------===//
+
+void IntraLotusAA::processLoad(LoadInst *load_inst) {
+  Value *load_ptr = load_inst->getPointerOperand();
+  processBasePointer(load_ptr);
+
+  if (!load_inst->getType()->isPointerTy())
+    return;
+
+  mem_value_t result;
+  loadPtrAt(load_ptr, load_inst, result, true);
+
+  PTResult *load_pts = findPTResult(load_inst, true);
+
+  for (auto &load_pair : result) {
+    Value *fld_val = load_pair.val;
+
+    if (fld_val == LocValue::FREE_VARIABLE ||
+        fld_val == LocValue::UNDEF_VALUE ||
+        fld_val == LocValue::SUMMARY_VALUE)
+      continue;
+
+    PTResult *fld_pts = processBasePointer(fld_val);
+    load_pts->add_derived_target(fld_pts, 0);
+  }
+  
+  PTResultIterator iter(load_pts, this);
+}
+
+void IntraLotusAA::processStore(StoreInst *store) {
+  Value *ptr = store->getPointerOperand();
+  Value *store_value = store->getValueOperand();
+  PTResult *res = processBasePointer(ptr);
+  assert(res && "Store pointer not processed");
+
+  PTResultIterator iter(res, this);
+
+  for (auto loc : iter) {
+    MemObject *obj = loc->getObj();
+    if (obj->isNull() || obj->isUnknown())
+      continue;
+
+    loc->storeValue(store_value, store, 0);
+  }
+
+  if (store_value->getType()->isPointerTy()) {
+    processBasePointer(store_value);
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Control Flow Operations
+//===----------------------------------------------------------------------===//
 
 PTResult *IntraLotusAA::processPhi(PHINode *phi) {
   PTResult *phi_pts = findPTResult(phi, true);
@@ -44,6 +103,10 @@ PTResult *IntraLotusAA::processSelect(SelectInst *select) {
   PTResultIterator iter(select_pts, this);
   return select_pts;
 }
+
+//===----------------------------------------------------------------------===//
+// Pointer Manipulation Operations
+//===----------------------------------------------------------------------===//
 
 PTResult *IntraLotusAA::processGepBitcast(Value *ptr) {
   // Track pointer through GEP/bitcast operations
@@ -79,6 +142,10 @@ PTResult *IntraLotusAA::processCast(CastInst *cast) {
   PTResultIterator iter(ret, this);
   return ret;
 }
+
+//===----------------------------------------------------------------------===//
+// Base Pointer Dispatcher
+//===----------------------------------------------------------------------===//
 
 PTResult *IntraLotusAA::processBasePointer(Value *base_ptr) {
   PTResult *res = findPTResult(base_ptr);

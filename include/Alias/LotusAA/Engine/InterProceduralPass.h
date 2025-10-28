@@ -20,8 +20,8 @@
 
 #include "Alias/LotusAA/MemoryModel/Types.h"
 #include "Alias/LotusAA/Support/Compat.h"
-#include "Alias/LotusAA/Engine/CallGraphState.h"
-#include "Alias/LotusAA/Engine/FunctionPointerResults.h"
+#include "Alias/LotusAA/Support/CallGraphState.h"
+#include "Alias/LotusAA/Support/FunctionPointerResults.h"
 
 namespace llvm {
 

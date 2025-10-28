@@ -14,8 +14,7 @@ set(LOTUSAA_ENGINE_SOURCES
   Engine/InterProceduralPass.cpp
   
   # Transfer functions for different constructs
-  Engine/TransferFunctions/MemoryOps.cpp
-  Engine/TransferFunctions/PointerOps.cpp
+  Engine/TransferFunctions/PointerInstructions.cpp
   Engine/TransferFunctions/BasicOps.cpp
   Engine/TransferFunctions/CallHandling.cpp
   Engine/TransferFunctions/SummaryBuilder.cpp
