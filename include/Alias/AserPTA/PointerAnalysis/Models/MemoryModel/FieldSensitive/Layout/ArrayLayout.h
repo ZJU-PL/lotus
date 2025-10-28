@@ -5,6 +5,7 @@
 #ifndef ASER_PTA_ARRAYLAYOUT_H
 #define ASER_PTA_ARRAYLAYOUT_H
 
+#include <cstddef>
 #include <map>
 #include <cassert>
 #include <limits>
