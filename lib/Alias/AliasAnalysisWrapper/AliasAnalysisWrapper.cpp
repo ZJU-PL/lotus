@@ -386,7 +386,8 @@ AliasResult AliasAnalysisWrapper::queryUnderApprox(const Value *v1, const Value 
   if (!_underapprox_aa || !_initialized)
     return AliasResult::NoAlias;
 
-  return _underapprox_aa->query(v1, v2);
+  return _underapprox_aa->mustAlias(v1, v2) ? AliasResult::MustAlias
+                                            : AliasResult::NoAlias;
 }
 
 AliasResult AliasAnalysisWrapper::queryCFLAnders(const Value *v1, const Value *v2)
