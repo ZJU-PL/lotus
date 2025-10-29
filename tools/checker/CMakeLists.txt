@@ -45,4 +45,5 @@ target_link_libraries(lotus-concur
   CanaryReport
   LLVMIRReader
   LLVMAnalysis
+  LLVMDemangle
 )
