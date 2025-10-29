@@ -1,5 +1,5 @@
-#include "LLVMUtils/TopologicalOrder.h"
-#include "LLVMUtils/SortTopo.h"
+#include "Analysis/CFG/TopologicalOrder.h"
+#include "Analysis/CFG/SortTopo.h"
 
 #include "llvm/Analysis/CFG.h"
 

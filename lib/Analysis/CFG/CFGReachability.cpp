@@ -1,8 +1,8 @@
-#include "LLVMUtils/CFG.h"
+#include "Analysis/CFG/CFGReachability.h"
 #include <llvm/IR/CFG.h>
 
-// Constructs a CFG analyzer for the given function.
-CFG::CFG(Function *F) : AnalyzedVec(F->size(), false) {
+// Constructs a CFG reachability analyzer for the given function.
+CFGReachability::CFGReachability(Function *F) : AnalyzedVec(F->size(), false) {
   ReachableVecPtr = new ReachableVec[F->size()];
   int Idx = 0;
   for (auto &B : *F) {
@@ -14,17 +14,17 @@ CFG::CFG(Function *F) : AnalyzedVec(F->size(), false) {
 }
 
 // Destructor cleans up the reachability vectors.
-CFG::~CFG() { delete[] ReachableVecPtr; }
+CFGReachability::~CFGReachability() { delete[] ReachableVecPtr; }
 
 // Returns true if there is a path from From to To in the CFG.
-bool CFG::reachable(BasicBlock *From, BasicBlock *To) {
+bool CFGReachability::reachable(BasicBlock *From, BasicBlock *To) {
   assert(From && To);
   if (From == To)
     return true;
 
   assert(BB2ID.count(To) && BB2ID.count(From));
   const unsigned DstBlockID = BB2ID.at(To);
-  // If we haven't AnalyzedVect the destination node, run the analysis now
+  // If we haven't analyzed the destination node, run the analysis now
   if (!AnalyzedVec[DstBlockID]) {
     analyze(To);
     AnalyzedVec[DstBlockID] = true;
@@ -35,7 +35,7 @@ bool CFG::reachable(BasicBlock *From, BasicBlock *To) {
 }
 
 // Returns true if there is a path from From to To instruction.
-bool CFG::reachable(Instruction *From, Instruction *To) {
+bool CFGReachability::reachable(Instruction *From, Instruction *To) {
   assert(From && To);
   if (From == To)
     return true;
@@ -55,7 +55,7 @@ bool CFG::reachable(Instruction *From, Instruction *To) {
 }
 
 // Analyzes reachability to the given basic block using BFS.
-void CFG::analyze(BasicBlock *ToBB) {
+void CFGReachability::analyze(BasicBlock *ToBB) {
   BitVector VisitedVec(AnalyzedVec.size());
   ReachableVec &ToReachability = ReachableVecPtr[BB2ID[ToBB]];
   std::vector<BasicBlock *> Worklist;
@@ -76,3 +76,4 @@ void CFG::analyze(BasicBlock *ToBB) {
       Worklist.push_back(Pred);
   }
 }
+

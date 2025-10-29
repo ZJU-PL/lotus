@@ -1,7 +1,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/Pass.h"
 
-#include "LLVMUtils/WeakTopologicalOrder.h"
+#include "Analysis/CFG/WeakTopologicalOrder.h"
 
 using namespace llvm;
 

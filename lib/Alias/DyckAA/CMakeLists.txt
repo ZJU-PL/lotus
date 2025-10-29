@@ -11,4 +11,4 @@ add_library(CanaryDyckAA STATIC
         MRAnalyzer.cpp
 )
 
-target_link_libraries(CanaryDyckAA CanaryLLVMUtils)
+target_link_libraries(CanaryDyckAA CanaryLLVMUtils CanaryCFG)

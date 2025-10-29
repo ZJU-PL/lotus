@@ -23,13 +23,13 @@
 #include "Alias/DyckAA/DyckGraphNode.h"
 #include "Alias/DyckAA/DyckModRefAnalysis.h"
 #include "Alias/DyckAA/DyckVFG.h"
-#include "LLVMUtils/CFG.h"
+#include "Analysis/CFG/CFGReachability.h"
 #include "LLVMUtils/RecursiveTimer.h"
 #include "LLVMUtils/ThreadPool.h"
 
 DyckVFG::DyckVFG(DyckAliasAnalysis *DAA, DyckModRefAnalysis *DMRA, Module *M) {
     // create a VFG for each function
-    std::map<Function *, CFGRef> LocalCFGMap;
+    std::map<Function *, CFGReachabilityRef> LocalCFGMap;
     for (auto &F: *M) {
         if (F.empty()) continue;
         LocalCFGMap[&F] = nullptr;
@@ -39,7 +39,7 @@ DyckVFG::DyckVFG(DyckAliasAnalysis *DAA, DyckModRefAnalysis *DMRA, Module *M) {
     for (auto &F: *M) {
         if (F.empty()) continue;
         ThreadPool::get()->enqueue([this, DAA, &F, &LocalCFGMap](){
-            auto LocalCFG = std::make_shared<CFG>(&F);
+            auto LocalCFG = std::make_shared<CFGReachability>(&F);
             LocalCFGMap.at(&F) = LocalCFG;
             buildLocalVFG(DAA, LocalCFG.get(), &F);
         });
@@ -114,7 +114,7 @@ void DyckVFG::buildLocalVFG(Function &F) {
     }
 }
 
-void DyckVFG::buildLocalVFG(DyckAliasAnalysis *DAA, CFG *CtrlFlow, Function *F) const {
+void DyckVFG::buildLocalVFG(DyckAliasAnalysis *DAA, CFGReachability *CtrlFlow, Function *F) const {
     // indirect value flow through load/store
     auto *DG = DAA->getDyckGraph();
     std::map<DyckGraphNode *, std::vector<LoadInst *>> LoadMap; // ptr -> load
@@ -174,7 +174,7 @@ DyckVFGNode *DyckVFG::getOrCreateVFGNode(Value *V) {
 
 static void collectValues(std::set<DyckGraphNode *>::iterator Begin, std::set<DyckGraphNode *>::iterator End,
                           std::set<Value *> &CallerVals, std::set<Value *> &CalleeVals, Call *C, Function *Callee,
-                          CFG *Ctrl) {
+                          CFGReachability *Ctrl) {
     auto *Caller = C->getInstruction()->getFunction();
     for (auto It = Begin; It != End; ++It) {
         auto *N = *It;
@@ -192,7 +192,7 @@ static void collectValues(std::set<DyckGraphNode *>::iterator Begin, std::set<Dy
     }
 }
 
-void DyckVFG::connect(DyckModRefAnalysis *DMRA, Call *C, Function *Callee, CFG *Ctrl) {
+void DyckVFG::connect(DyckModRefAnalysis *DMRA, Call *C, Function *Callee, CFGReachability *Ctrl) {
     // connect direct inputs
     for (unsigned K = 0; K < C->numArgs(); ++K) {
         if (K >= Callee->arg_size()) continue; // ignore var args

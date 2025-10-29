@@ -24,7 +24,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
-#include "LLVMUtils/CFG.h"
+#include "Analysis/CFG/CFGReachability.h"
 #include "Support/ADT/MapIterators.h"
 
 using namespace llvm;
@@ -90,9 +90,9 @@ public:
 private:
     DyckVFGNode *getOrCreateVFGNode(Value *);
 
-    void connect(DyckModRefAnalysis *, Call *, Function *, CFG *);
+    void connect(DyckModRefAnalysis *, Call *, Function *, CFGReachability *);
 
-    void buildLocalVFG(DyckAliasAnalysis *DAA, CFG *DMRA, Function *F) const;
+    void buildLocalVFG(DyckAliasAnalysis *DAA, CFGReachability *DMRA, Function *F) const;
 
     void buildLocalVFG(Function &);
 };
