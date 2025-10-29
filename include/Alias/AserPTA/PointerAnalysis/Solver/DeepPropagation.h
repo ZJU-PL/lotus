@@ -5,7 +5,7 @@
 #ifndef ASER_PTA_DEEPPROPAGATION_H
 #define ASER_PTA_DEEPPROPAGATION_H
 
-#include "SolverBase.h"
+#include "Alias/AserPTA/PointerAnalysis/Solver/SolverBase.h"
 #include "Alias/AserPTA/PointerAnalysis/Graph/ConstraintGraph/SCCIterator.h"
 
 namespace aser {

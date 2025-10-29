@@ -91,7 +91,24 @@ The build system will automatically download and build Boost if it's not found o
 
 ## Publications
 
-- **ISSTA 2025**: Program Analysis Combining Generalized Bit-Level and Word-Level Abstractions.  
-Guangsheng Fan, Liqian Chen, Banghu Yin, Wenyu Zhang, Peisen Yao, and Ji Wang.
-The ACM SIGSOFT International Symposium on Software Testing and Analysis.
+If you use Lotus in your research or work, please cite the following:
 
+```bibtex
+@misc{lotus2025,
+  title = {Lotus: A Program Analysis and Verification Framework},
+  author = {Yao, Peisen and Shi,  Qingkai},
+  year = {2025},
+  url = {https://github.com/ZJU-Automated-Reasoning-Group/lotus},
+  note = {Program analysis framework built on LLVM}
+}
+```
+
+### Papers that use Lotus
+
+- **ISSTA 2025**: Program Analysis Combining Generalized Bit-Level and Word-Level Abstractions.  
+  Guangsheng Fan, Liqian Chen, Banghu Yin, Wenyu Zhang, Peisen Yao, and Ji Wang.  
+  *The ACM SIGSOFT International Symposium on Software Testing and Analysis.*
+
+- **TSE 2024**: Fast and Precise Static Null Exception Analysis with Synergistic Preprocessing.  
+  Yi Sun, Chengpeng Wang, Gang Fan, Qingkai Shi, Xiangyu Zhang.  
+  *The IEEE Transactions on Software Engineering.*

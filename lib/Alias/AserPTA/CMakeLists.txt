@@ -19,14 +19,9 @@ add_library(AserPTA STATIC
     Util/Util.cpp
 )
 
-target_include_directories(AserPTA PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-)
-
 target_compile_options(AserPTA PRIVATE
     -fno-rtti
     -Wno-c++14-extensions
-   # -Wno-c++17-extensions
     -DSPDLOG_ACTIVE_LEVEL=2
 )
 
