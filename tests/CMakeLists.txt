@@ -1,3 +1,5 @@
+# TODO: Following the code of clam to add the tests in tests/clam
+
 cmake_minimum_required(VERSION 3.10)
 find_package(LLVM REQUIRED CONFIG)
 find_package(GTest REQUIRED)

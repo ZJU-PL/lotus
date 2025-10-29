@@ -1,0 +1,93 @@
+; RUN: %clam -O0 --crab-print-invariants=false --crab-opt=add-invariants --crab-opt-invariants-loc=all --crab-track=sing-mem "%s".c -o %s.bc
+; RUN: %llvm_dis < %s.bc | OutputCheck %s --comment=";"
+
+; ModuleID = '/Users/jorge/Repos/clam14/tests/demo/demo2.bc'
+source_filename = "/Users/jorge/Repos/clam14/tests/demo/demo2.c"
+target datalayout = "e-m:o-p:32:32-Fi8-f64:32:64-v64:32:64-v128:32:128-a:0:32-n32-S32"
+target triple = "armv4t-apple-macosx12.0.0"
+
+@a = internal unnamed_addr global [10 x i32] zeroinitializer, align 4
+
+; Function Attrs: noinline nounwind ssp
+define i32 @main() local_unnamed_addr #0 {
+entry:
+  br label %for.cond
+
+for.cond:                                         ; preds = %for.inc, %entry
+  %i.0 = phi i32 [ 0, %entry ], [ %inc, %for.inc ]
+  call void @verifier.assume(i1 true)
+  %crab_3 = icmp slt i32 %i.0, 11
+  call void @verifier.assume(i1 %crab_3)
+  %cmp = icmp slt i32 %i.0, 10
+  br i1 %cmp, label %for.body, label %for.end
+
+for.body:                                         ; preds = %for.cond
+  call void @verifier.assume(i1 true)
+  call void @verifier.assume(i1 true)
+  %call = call i32 @nd_int() #3
+  %tobool.not = icmp eq i32 %call, 0
+  br i1 %tobool.not, label %if.else, label %if.then
+
+if.then:                                          ; preds = %for.body
+  call void @verifier.assume(i1 true)
+  %crab_11 = icmp slt i32 %i.0, 10
+  call void @verifier.assume(i1 %crab_11)
+  %arrayidx = getelementptr inbounds [10 x i32], [10 x i32]* @a, i32 0, i32 %i.0
+  store i32 0, i32* %arrayidx, align 4
+  br label %for.inc
+
+if.else:                                          ; preds = %for.body
+  call void @verifier.assume(i1 true)
+  %crab_15 = icmp slt i32 %i.0, 10
+  call void @verifier.assume(i1 %crab_15)
+  call void @verifier.assume(i1 true)
+  call void @verifier.assume(i1 true)
+  %arrayidx1 = getelementptr inbounds [10 x i32], [10 x i32]* @a, i32 0, i32 %i.0
+  store i32 5, i32* %arrayidx1, align 4
+  br label %for.inc
+
+for.inc:                                          ; preds = %if.else, %if.then
+  call void @verifier.assume(i1 true)
+  %crab_23 = icmp slt i32 %i.0, 10
+  call void @verifier.assume(i1 %crab_23)
+  %inc = add nuw nsw i32 %i.0, 1
+  br label %for.cond, !llvm.loop !6
+
+for.end:                                          ; preds = %for.cond
+  %sub = add nsw i32 %i.0, -1
+  %arrayidx2 = getelementptr inbounds [10 x i32], [10 x i32]* @a, i32 0, i32 %sub
+  %_0 = load i32, i32* %arrayidx2, align 4
+  %crab_25 = icmp ult i32 %_0, -2147483647
+  call void @verifier.assume(i1 %crab_25)
+  ; CHECK: icmp slt i32 %_0, 6
+  %crab_27 = icmp slt i32 %_0, 6
+  ; CHECK: assume
+  call void @verifier.assume(i1 %crab_27)
+  %crab_29 = sub i32 %_0, %i.0
+  %crab_30 = icmp slt i32 %crab_29, 5
+  call void @verifier.assume(i1 %crab_30)
+  ret i32 %_0
+}
+
+; Function Attrs: argmemonly nounwind
+declare i32 @nd_int() local_unnamed_addr #1
+
+; Function Attrs: inaccessiblememonly noinline norecurse nounwind optnone
+declare void @verifier.assume(i1) #2
+
+attributes #0 = { noinline nounwind ssp "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="arm7tdmi" "target-features"="+armv4t,+soft-float,+strict-align,-aes,-bf16,-d32,-dotprod,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fp64,-fpregs,-fullfp16,-mve,-mve.fp,-neon,-sha2,-thumb-mode,-vfp2,-vfp2sp,-vfp3,-vfp3d16,-vfp3d16sp,-vfp3sp,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp" "use-soft-float"="true" }
+attributes #1 = { argmemonly nounwind "frame-pointer"="all" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="arm7tdmi" "target-features"="+armv4t,+soft-float,+strict-align,-aes,-bf16,-d32,-dotprod,-fp-armv8,-fp-armv8d16,-fp-armv8d16sp,-fp-armv8sp,-fp16,-fp16fml,-fp64,-fpregs,-fullfp16,-mve,-mve.fp,-neon,-sha2,-thumb-mode,-vfp2,-vfp2sp,-vfp3,-vfp3d16,-vfp3d16sp,-vfp3sp,-vfp4,-vfp4d16,-vfp4d16sp,-vfp4sp" "use-soft-float"="true" }
+attributes #2 = { inaccessiblememonly noinline norecurse nounwind optnone }
+attributes #3 = { argmemonly nounwind }
+
+!llvm.module.flags = !{!0, !1, !2, !3, !4}
+!llvm.ident = !{!5}
+
+!0 = !{i32 2, !"SDK Version", [2 x i32] [i32 12, i32 3]}
+!1 = !{i32 1, !"wchar_size", i32 4}
+!2 = !{i32 1, !"min_enum_size", i32 4}
+!3 = !{i32 7, !"PIC Level", i32 2}
+!4 = !{i32 7, !"frame-pointer", i32 2}
+!5 = !{!"Apple clang version 14.0.0 (clang-1400.0.29.102)"}
+!6 = distinct !{!6, !7}
+!7 = !{!"llvm.loop.mustprogress"}

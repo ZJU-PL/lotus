@@ -531,6 +531,8 @@ def getClamPP():
         crabpp_cmd = os.environ ['CLAMPP']
     if not isexec(crabpp_cmd):
         crabpp_cmd = os.path.join(root, "bin/clam-pp")
+    if not isexec(crabpp_cmd):
+        crabpp_cmd = os.path.join(root, "build/bin/clam-pp")
     if not isexec(crabpp_cmd): crabpp_cmd = which('clam-pp')
     if not isexec(crabpp_cmd):
         raise IOError("Cannot find clam pre-processor")
