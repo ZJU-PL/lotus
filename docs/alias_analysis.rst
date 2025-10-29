@@ -13,7 +13,7 @@ Unification-based, exhaustive alias analysis with high precision.
 **Usage**:
 .. code-block:: bash
 
-   ./build/bin/canary -print-alias-set-info example.bc
+   ./build/bin/dyck-aa -print-alias-set-info example.bc
 
 **Key Options**:
 * ``-print-alias-set-info``: Print alias sets in DOT format

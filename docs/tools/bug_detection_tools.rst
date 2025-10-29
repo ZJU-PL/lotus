@@ -36,27 +36,7 @@ Static bug finder for integer-related and taint-style bugs.
    ./build/bin/lotus-kint -check-int-overflow -check-div-by-zero example.ll
    ./build/bin/lotus-kint -function-timeout=30 -log-level=debug example.ll
 
-Null Pointer Analysis Tool
---------------------------
 
-**Binary**: ``build/bin/canary-npa``
-
-Context-sensitive null pointer analysis.
-
-**Usage**:
-.. code-block:: bash
-
-   ./build/bin/canary-npa [options] <input bitcode file>
-
-**Options**:
-* ``-verbose``: Verbose output
-* ``-dump-stats``: Print statistics
-* ``-context-sensitive``: Enable context-sensitive analysis
-
-**Example**:
-.. code-block:: bash
-
-   ./build/bin/canary-npa -verbose -dump-stats example.bc
 
 Buffer Overflow Detection
 -------------------------
@@ -80,8 +60,7 @@ Memory Safety Analysis
 **Comprehensive Analysis**:
 .. code-block:: bash
 
-   ./build/bin/canary-npa example.bc
-   ./build/bin/lotus-kint -check-array-oob example.ll
+   ./build/bin/lotus-kint -check-array-oob example.l   
    ./build/bin/lotus-gvfa -vuln-type=nullpointer example.bc
 
 Bug Detection Workflow
@@ -97,7 +76,6 @@ Bug Detection Workflow
    .. code-block:: bash
 
       ./build/bin/lotus-kint -check-all example.ll
-      ./build/bin/canary-npa example.bc
       ./build/bin/lotus-taint example.bc
 
 3. **Review Results**: Check vulnerabilities, validate findings, prioritize fixes
@@ -140,6 +118,5 @@ Tool Selection
 | Bug Type | Tool | Options |
 |----------|------|---------|
 | Integer Bugs | Lotus Kint | ``-check-int-overflow``, ``-check-div-by-zero`` |
-| Memory Bugs | canary-npa, Lotus Kint | ``-check-array-oob`` |
-| Security Bugs | lotus-taint, lotus-gvfa | Various options |
-| Performance Bugs | Lotus Kint | ``-check-dead-branch`` |
+| Memory Bugs | lotus-gvfa, lotus-kint | ``-check-array-oob`` |
+| Taint Bugs | lotus-taint | Various options |

@@ -1,4 +1,4 @@
-name: Build Canary on macOS
+name: Build Lotus on macOS
 on:
   push:
   pull_request:
@@ -21,21 +21,21 @@ jobs:
           export CPPFLAGS="-I/opt/homebrew/opt/llvm@14/include"
           echo "LDFLAGS=$LDFLAGS" >> $GITHUB_ENV
           echo "CPPFLAGS=$CPPFLAGS" >> $GITHUB_ENV
-      - name: Compile Canary
+      - name: Compile Lotus
         run: |
           mkdir build
           cd build
           cmake \
-            -DCMAKE_INSTALL_PREFIX="$HOME/canary" \
+            -DCMAKE_INSTALL_PREFIX="$HOME/lotus" \
             -DCMAKE_BUILD_TYPE="Release" \
             -DLLVM_BUILD_PATH="/opt/homebrew/opt/llvm@14/lib/cmake/llvm" \
             -DZ3_DIR="/usr/local" \
             ..
           make -j$(nproc || sysctl -n hw.ncpu)
           make install
-      - name: Add Canary to the path
+      - name: Add Lotus to the path
         run: |
-          echo "$HOME/canary/bin" >> $GITHUB_PATH
+          echo "$HOME/lotus/bin" >> $GITHUB_PATH
       - name: Confirm that it runs
         run: |
-          canary --version || echo "Canary built successfully"
+          lotus --version || echo "Lotus built successfully"

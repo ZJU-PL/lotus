@@ -59,13 +59,6 @@ Z3 Installation
    cd z3 && python scripts/mk_make.py
    cd build && make && sudo make install
 
-Verification
-------------
-
-.. code-block:: bash
-
-   ls build/bin/
-   ./build/bin/canary --help
 
 Troubleshooting
 ---------------

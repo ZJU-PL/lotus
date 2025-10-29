@@ -5,7 +5,8 @@ endif()
 
 file(GLOB RegressionScript regression.sh)
 add_custom_target(regression
-        COMMAND ${BASH_BIN} ${RegressionScript} ${CMAKE_BINARY_DIR}/bin/canary ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
-        DEPENDS canary
+        COMMAND ${BASH_BIN} ${RegressionScript} ${CMAKE_BINARY_DIR}/bin/lotus
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+        DEPENDS lotus
         SOURCES regression.sh
 )

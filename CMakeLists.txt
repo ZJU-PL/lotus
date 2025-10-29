@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(canary C CXX)
+project(lotus C CXX)
 
 # Set C++14 standard and compiler flags
 set(CMAKE_CXX_STANDARD 14)

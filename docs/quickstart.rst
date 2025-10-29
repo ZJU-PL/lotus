@@ -18,34 +18,54 @@ Alias Analysis
 
 .. code-block:: bash
 
-   ./build/bin/canary example.bc                    # Basic analysis
-   ./build/bin/fpa example.bc                       # Function pointers
-   ./build/bin/origin_aa example.bc                 # Context-sensitive
+   ./build/bin/ander-aa example.bc           # Andersen's analysis
+   ./build/bin/dyck-aa example.bc            # Unification-based analysis
+   ./build/bin/aser-aa example.bc            # Inclusion-based, flow-insensitive context-sensitive
+   ./build/bin/fpa example.bc                # Function pointer analysis
+   ./build/bin/lotus-aa example.bc           # Inclusion-based, flow-sensitive context-sensitive
+   ./build/bin/graspan example.bc            # Graph-based CFL-reachability analysis
+   ./build/bin/sea-dsa-dg --sea-dsa-dot example.bc  # Unification-based, flow-insensitive, context-sensitive
+   ./build/bin/seadsa-tool --sea-dsa-dot --outdir results/ example.bc
 
-Taint Analysis
---------------
-
-.. code-block:: bash
-
-   ./build/bin/lotus-taint example.bc                # Basic taint analysis
-   ./build/bin/lotus-taint -sources="read,scanf" -sinks="system,exec" example.bc
 
 Bug Detection
 -------------
 
 .. code-block:: bash
 
+   # Integer and array bugs
    ./build/bin/lotus-kint -check-int-overflow example.ll  # Integer overflow
-   ./build/bin/canary-npa example.bc                      # Null pointer
+   ./build/bin/lotus-kint -check-array-oob example.ll     # Array out of bounds
    ./build/bin/lotus-kint -check-all example.ll           # All checks
+   
+   # Memory safety bugs
+   ./build/bin/lotus-gvfa -vuln-type=nullpointer example.bc  # Null pointer dereference
+   ./build/bin/lotus-gvfa -vuln-type=uaf example.bc          # Use-after-free
 
-Memory Analysis
----------------
+    # IFDS-based, taint-style bugs  
+   ./build/bin/lotus-taint example.bc                # Basic taint analysis
+   ./build/bin/lotus-taint -sources="read,scanf" -sinks="system,exec" example.bc
+
+   # Concurrency bugs
+   ./build/bin/lotus-concur example.bc            # Concurrency bug detection
+
+
+Abstract Interpretation
+------------------------
 
 .. code-block:: bash
 
-   ./build/bin/sea-dsa-dg --sea-dsa-dot example.bc
-   ./build/bin/seadsa-tool --sea-dsa-dot --outdir results/ example.bc
+   ./build/bin/clam example.bc                    # Clam analyzer
+   ./build/bin/clam-pp example.bc                 # Clam pretty-printer
+   ./build/bin/clam-diff old.bc new.bc            # Differential analysis
+
+Program Dependence Graph
+------------------------
+
+.. code-block:: bash
+
+   ./build/bin/pdg-query example.bc               # Query PDG
+
 
 Dynamic Validation
 ------------------
@@ -85,6 +105,8 @@ Analysis commands:
 .. code-block:: bash
 
    clang -emit-llvm -c example.c -o example.bc
+   clang -emit-llvm -S example.c -o example.ll
    ./build/bin/lotus-taint example.bc                   # Detect taint flow
    ./build/bin/lotus-kint -check-array-oob example.ll   # Check buffer overflow
+   ./build/bin/lotus-gvfa -vuln-type=nullpointer example.bc  # Null pointer checks
    ./build/bin/sea-dsa-dg --sea-dsa-dot example.bc      # Memory analysis

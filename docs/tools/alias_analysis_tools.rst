@@ -3,17 +3,17 @@ Alias Analysis Tools
 
 Command-line tools for alias analysis in Lotus.
 
-DyckAA Tool (canary)
+DyckAA Tool (dyck-aa)
 --------------------
 
-**Binary**: ``build/bin/canary``
+**Binary**: ``build/bin/dyck-aa``
 
 Unification-based alias analysis tool.
 
 **Usage**:
 .. code-block:: bash
 
-   ./build/bin/canary [options] <input bitcode file>
+   ./build/bin/dyck-aa [options] <input bitcode file>
 
 **Key Options**:
 * ``-print-alias-set-info``: Print alias sets in DOT format
@@ -24,8 +24,8 @@ Unification-based alias analysis tool.
 **Examples**:
 .. code-block:: bash
 
-   ./build/bin/canary -print-alias-set-info example.bc
-   ./build/bin/canary -dot-dyck-callgraph -with-labels example.bc
+   ./build/bin/dyck-aa -print-alias-set-info example.bc
+   ./build/bin/dyck-aa -dot-dyck-callgraph -with-labels example.bc
 
 AserPTA Tool
 ------------
@@ -120,8 +120,8 @@ Tool Comparison
 
 | Tool | Precision | Performance | Best For |
 |------|-----------|-------------|----------|
-| canary | High | Moderate | General analysis |
-| origin_aa | Very High | Moderate | Precise analysis |
-| fpa | High | Good | Function pointers |
+| dyck-aa | Very High | Very High | Exhaustive analysis |
+| aser-aa | High | Moderate | Context-sensitive analysis |
+| fpa     | High | Good | Function pointers |
 | dynaa-* | Runtime | Runtime | Validation |
-| sea-dsa-* | High | Good | Memory analysis |
+| sea-dsa-* | High | Good | Context-sensitive |

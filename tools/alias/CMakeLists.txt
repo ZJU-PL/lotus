@@ -45,6 +45,13 @@ target_link_libraries(ander-aa PRIVATE
   ${LLVM_LINK_COMPONENTS}
 )
 
+# DyckAA Pointer Analysis Tool
+add_executable(dyck-aa dyck-aa.cpp)
+target_link_libraries(dyck-aa PRIVATE
+  CanaryDyckAA
+  ${LLVM_LINK_COMPONENTS}
+)
+
 # Dynamic Alias Analysis tools (only built if BUILD_DYNAA is enabled)
 if(BUILD_DYNAA)
   add_subdirectory(dynaa)

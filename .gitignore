@@ -29,7 +29,7 @@ Makefile.common
 Makefile.llvm.config
 *.exe
 *.swp
-canary.zip
+lotus.zip
 .sconsign.dblite
 bin
 *~
