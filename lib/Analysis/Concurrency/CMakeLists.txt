@@ -5,5 +5,5 @@ set(Concurrency_SOURCES
   MemUseDefAnalysis.cpp
 )
 add_library(Concurrency STATIC ${Concurrency_SOURCES})
-target_link_libraries(Concurrency CanaryLLVMUtils CanaryDyckAA)
+target_link_libraries(Concurrency CanaryLLVMUtils CanaryAliasAnalysisWrapper)
 

@@ -12,8 +12,19 @@
 
 #include <vector>
 #include <string>
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/SmallVector.h>
 
 namespace concurrency {
+
+/**
+ * @brief Represents a critical section (acquire-release pair)
+ */
+struct CriticalSection {
+    const llvm::Instruction* Acquire;
+    const llvm::Instruction* Release;
+    llvm::SmallVector<const llvm::Instruction*, 16> Body;
+};
 
 /**
  * @brief Specialized checker for atomicity violation detection
@@ -42,8 +53,15 @@ private:
     mhp::LockSetAnalysis* m_locksetAnalysis;
     ThreadAPI* m_threadAPI;
 
+    // Cache of critical sections per function
+    llvm::DenseMap<llvm::Function*, llvm::SmallVector<CriticalSection, 4>> m_csPerFunc;
+
+    // Collect all critical sections in the module
+    void collectCriticalSections();
+
     // Helper methods for atomicity violation detection
-    bool isLockOperation(const llvm::Instruction* inst) const;
+    bool isAcquire(const llvm::Instruction* inst) const;
+    bool isRelease(const llvm::Instruction* inst) const;
     mhp::LockID getLockID(const llvm::Instruction* inst) const;
     std::string getInstructionLocation(const llvm::Instruction* inst) const;
     const llvm::Instruction* findMatchingUnlock(const llvm::Instruction* lockInst) const;

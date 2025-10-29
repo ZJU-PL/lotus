@@ -1,4 +1,5 @@
 #include "Checker/concurrency/ConcurrencyChecker.h"
+#include "Alias/AliasAnalysisWrapper.h"
 #include "Analysis/Concurrency/ThreadAPI.h"
 
 #include <llvm/IR/Constants.h>
@@ -9,6 +10,7 @@
 
 using namespace llvm;
 using namespace mhp;
+using namespace lotus;
 
 namespace concurrency {
 

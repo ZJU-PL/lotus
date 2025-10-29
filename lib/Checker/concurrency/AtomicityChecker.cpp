@@ -1,5 +1,30 @@
+//===----------------------------------------------------------------------===//
+// AtomicityChecker.cpp – detect atomicity violations
+// Implements a two–phase algorithm:
+//
+//  1. Discover critical sections (acquire … release pairs) once per function.
+//  2. Compare memory accesses of critical-section pairs that may run in
+//     parallel according to MHPAnalysis.
+//
+// This version uses modern LLVM ranges, dominance / post-dominance matching,
+// SmallVector / DenseMap for performance, and emits user-friendly diagnostics.
+//===----------------------------------------------------------------------===//
+
 #include "Checker/concurrency/AtomicityChecker.h"
 
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/Optional.h>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/Analysis/AliasAnalysis.h>
+#include <llvm/Analysis/CFG.h>
+#include <llvm/Analysis/DominanceFrontier.h>
+#include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Analysis/PostDominators.h>
+#include <llvm/IR/DebugInfoMetadata.h>
+#include <llvm/IR/InstIterator.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Module.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
@@ -9,160 +34,161 @@ using namespace mhp;
 
 namespace concurrency {
 
-AtomicityChecker::AtomicityChecker(Module& module,
-                                 MHPAnalysis* mhpAnalysis,
-                                 LockSetAnalysis* locksetAnalysis,
-                                 ThreadAPI* threadAPI)
-    : m_module(module), m_mhpAnalysis(mhpAnalysis),
-      m_locksetAnalysis(locksetAnalysis), m_threadAPI(threadAPI) {}
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// Helpers
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+
+static std::string formatLoc(const Instruction &I) {
+  if (const DebugLoc &DL = I.getDebugLoc()) {
+    return (Twine(DL->getFilename()) + ":" + Twine(DL->getLine())).str();
+  }
+  // Fallback: print function and basic-block name.
+  std::string S;
+  raw_string_ostream OS(S);
+  OS << I.getFunction()->getName() << ':' << I.getParent()->getName();
+  return OS.str();
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// Construction
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+
+AtomicityChecker::AtomicityChecker(Module &M, MHPAnalysis *MHP,
+                                   LockSetAnalysis *LSA, ThreadAPI *TAPI)
+    : m_module(M), m_mhpAnalysis(MHP), m_locksetAnalysis(LSA),
+      m_threadAPI(TAPI) {}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// Phase 0 – collect critical sections
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+
+void AtomicityChecker::collectCriticalSections() {
+  m_csPerFunc.clear();
+
+  for (Function &F : m_module) {
+    if (F.isDeclaration())
+      continue;
+
+    DominatorTree DT(F);
+    PostDominatorTree PDT(F);
+
+    SmallVector<const Instruction *, 4> LockStack;
+
+    for (Instruction &I : instructions(F)) {
+      if (m_threadAPI->isTDAcquire(&I)) {
+        LockStack.push_back(&I);
+        continue;
+      }
+
+      if (m_threadAPI->isTDRelease(&I) && !LockStack.empty()) {
+        const Instruction *Acq = LockStack.pop_back_val();
+        if (!Acq)
+          continue;
+
+        const Instruction *Rel = &I;
+
+        // Validate the pair with dominance / post-dominance.
+        if (!(DT.dominates(Acq, Rel) &&
+              PDT.dominates(Rel, F.getEntryBlock().getTerminator())))
+          continue;
+
+        // Build the critical section body.
+        CriticalSection CS{Acq, Rel};
+        bool InBody = false;
+        for (Instruction &J : instructions(F)) {
+          if (&J == Acq)
+            InBody = true;
+          else if (&J == Rel)
+            InBody = false;
+          else if (InBody)
+            CS.Body.push_back(&J);
+        }
+        m_csPerFunc[&F].push_back(std::move(CS));
+      }
+    }
+  }
+}
+
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// Phase 1 – bug detection
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+
+bool AtomicityChecker::isMemoryAccess(const Instruction *inst) const {
+  return isa<LoadInst>(inst) || isa<StoreInst>(inst) || isa<AtomicRMWInst>(inst) ||
+         isa<AtomicCmpXchgInst>(inst);
+}
+
+static bool isWrite(const Instruction &I) {
+  if (auto *S = dyn_cast<StoreInst>(&I))
+    return !S->isVolatile();
+  if (auto *RMW = dyn_cast<AtomicRMWInst>(&I))
+    return true;
+  if (auto *CAS = dyn_cast<AtomicCmpXchgInst>(&I))
+    return true;
+  return false;
+}
 
 std::vector<ConcurrencyBugReport> AtomicityChecker::checkAtomicityViolations() {
-    std::vector<ConcurrencyBugReport> reports;
+  collectCriticalSections(); // build cache once
 
-    // Look for potential atomicity violations in critical sections
-    for (Function& func : m_module) {
-        if (func.isDeclaration()) continue;
+  std::vector<ConcurrencyBugReport> Reports;
 
-        for (inst_iterator I = inst_begin(func), E = inst_end(func); I != E; ++I) {
-            const Instruction* inst = &*I;
+  // Compare every pair of CS that may run in parallel.
+  for (auto &FuncPair : m_csPerFunc) {
+    auto &Sections = FuncPair.second;
+    for (size_t i = 0; i < Sections.size(); ++i) {
+      for (size_t j = i + 1; j < Sections.size(); ++j) {
+        const CriticalSection &CS1 = Sections[i];
+        const CriticalSection &CS2 = Sections[j];
 
-            // Look for lock acquire instructions
-            if (isLockOperation(inst) && m_threadAPI->isTDAcquire(inst)) {
-                // This is the start of a critical section
-                const Instruction* lockInst = inst;
+        // Cheap filter: if acquires are on different locks, skip.
+        if (m_threadAPI->getLockVal(CS1.Acquire) !=
+            m_threadAPI->getLockVal(CS2.Acquire))
+          continue;
 
-                // Find the corresponding unlock
-                const Instruction* unlockInst = findMatchingUnlock(lockInst);
+        // May these CS execute concurrently?
+        if (!m_mhpAnalysis->mayHappenInParallel(CS1.Acquire, CS2.Acquire))
+          continue;
 
-                if (unlockInst) {
-                    // Check for operations within the critical section that might be atomicity violations
-                    checkCriticalSectionForAtomicityViolations(lockInst, unlockInst, reports);
-                }
-            }
+        // Compare memory accesses.
+        for (const Instruction *I1 : CS1.Body) {
+          if (!isMemoryAccess(I1))
+            continue;
+
+          for (const Instruction *I2 : CS2.Body) {
+            if (!isMemoryAccess(I2))
+              continue;
+
+            // At least one write?
+            if (!(isWrite(*I1) || isWrite(*I2)))
+              continue;
+
+            // Found a potential violation.
+            std::string Desc =
+                "Potential atomicity violation between accesses at " +
+                formatLoc(*I1) + " and " + formatLoc(*I2);
+
+            Reports.emplace_back(ConcurrencyBugType::ATOMICITY_VIOLATION, I1,
+                                 I2, std::move(Desc),
+                                 BugDescription::BI_MEDIUM,
+                                 BugDescription::BC_WARNING);
+          }
         }
+      }
     }
-
-    return reports;
+  }
+  return Reports; // NRVO — no extra copy
 }
 
-void AtomicityChecker::checkCriticalSectionForAtomicityViolations(
-    const Instruction* lockInst, const Instruction* unlockInst,
-    std::vector<ConcurrencyBugReport>& reports) {
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// Thin wrappers delegating to ThreadAPI
+//―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
 
-    // This is a simplified implementation
-    // In practice, this would need more sophisticated analysis
-
-    // For now, we'll flag any non-atomic operations in critical sections
-    // that could potentially be problematic
-
-    const BasicBlock* lockBB = lockInst->getParent();
-    const BasicBlock* unlockBB = unlockInst->getParent();
-
-    // If lock and unlock are in different basic blocks, we need to be more careful
-    // For simplicity, we'll assume they're in the same function for now
-
-    if (lockBB->getParent() != unlockBB->getParent()) {
-        return; // Skip cross-function analysis for now
-    }
-
-    // Find instructions between lock and unlock
-    bool inCriticalSection = false;
-    const Function* func = lockBB->getParent();
-
-    for (const BasicBlock& bb : *func) {
-        for (const Instruction& inst : bb) {
-            if (&inst == lockInst) {
-                inCriticalSection = true;
-                continue;
-            }
-
-            if (&inst == unlockInst) {
-                inCriticalSection = false;
-                continue;
-            }
-
-            if (inCriticalSection && isMemoryAccess(&inst)) {
-                // Check if this memory access might be interleaved with operations from other threads
-                // This is a simplified check - in practice, we'd need more sophisticated analysis
-
-                if (!isAtomicOperation(&inst)) {
-                    // This could be an atomicity violation if the operation should be atomic
-                    std::string description = "Potential atomicity violation: non-atomic operation in critical section";
-                    description += " at ";
-                    description += getInstructionLocation(&inst);
-
-                    reports.emplace_back(
-                        ConcurrencyBugType::ATOMICITY_VIOLATION,
-                        lockInst, &inst, description,
-                        BugDescription::BI_MEDIUM,
-                        BugDescription::BC_WARNING
-                    );
-                }
-            }
-        }
-    }
+bool AtomicityChecker::isAcquire(const Instruction *I) const {
+  return m_threadAPI->isTDAcquire(I);
 }
-
-bool AtomicityChecker::isAtomicSequence(const Instruction* start, const Instruction* end) const {
-    // Simplified implementation - in practice this would be more sophisticated
-    // For now, assume sequences are atomic if they're simple operations
-    return false;
-}
-
-bool AtomicityChecker::mayBeInterleaved(const Instruction* inst1, const Instruction* inst2) const {
-    // Check if two instructions from different threads may be interleaved
-    // This is a simplified check - in practice, this would need more sophisticated analysis
-    return m_mhpAnalysis->mayHappenInParallel(inst1, inst2);
-}
-
-bool AtomicityChecker::isLockOperation(const Instruction* inst) const {
-    return m_threadAPI->isTDAcquire(inst) || m_threadAPI->isTDRelease(inst);
-}
-
-mhp::LockID AtomicityChecker::getLockID(const Instruction* inst) const {
-    return m_threadAPI->getLockVal(inst);
-}
-
-std::string AtomicityChecker::getInstructionLocation(const Instruction* inst) const {
-    std::string location;
-    raw_string_ostream os(location);
-
-    if (const Function* func = inst->getFunction()) {
-        os << func->getName();
-    }
-
-    if (const BasicBlock* bb = inst->getParent()) {
-        os << ":" << bb->getName();
-    }
-
-    return os.str();
-}
-
-const Instruction* AtomicityChecker::findMatchingUnlock(const Instruction* lockInst) const {
-    if (!lockInst) return nullptr;
-
-    mhp::LockID lock = getLockID(lockInst);
-    if (!lock) return nullptr;
-
-    auto releases = m_locksetAnalysis->getLockReleases(lock);
-
-    // Find the next release after this acquire
-    for (const Instruction* release : releases) {
-        if (m_mhpAnalysis->mustPrecede(lockInst, release)) {
-            return release;
-        }
-    }
-
-    return nullptr;
-}
-
-bool AtomicityChecker::isMemoryAccess(const Instruction* inst) const {
-    return isa<LoadInst>(inst) || isa<StoreInst>(inst) ||
-           isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst);
-}
-
-bool AtomicityChecker::isAtomicOperation(const Instruction* inst) const {
-    return isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst);
+bool AtomicityChecker::isRelease(const Instruction *I) const {
+  return m_threadAPI->isTDRelease(I);
 }
 
 } // namespace concurrency

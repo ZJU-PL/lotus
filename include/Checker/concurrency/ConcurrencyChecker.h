@@ -13,12 +13,15 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/InstIterator.h>
-#include <llvm/Analysis/AliasAnalysis.h>
 
 #include <unordered_set>
 #include <vector>
 #include <string>
 #include <memory>
+
+namespace lotus {
+class AliasAnalysisWrapper;
+}
 
 namespace concurrency {
 
@@ -56,9 +59,9 @@ public:
     void checkAtomicityViolations();
 
     /**
-     * @brief Set alias analysis for better precision
+     * @brief Set alias analysis wrapper for better precision
      */
-    void setAliasAnalysis(llvm::AAResults* aa) { m_aliasAnalysis = aa; }
+    void setAliasAnalysis(lotus::AliasAnalysisWrapper* aa) { m_aliasAnalysis = aa; }
 
     /**
      * @brief Enable/disable specific checks
@@ -86,7 +89,7 @@ private:
     llvm::Module& m_module;
     std::unique_ptr<mhp::MHPAnalysis> m_mhpAnalysis;
     std::unique_ptr<mhp::LockSetAnalysis> m_locksetAnalysis;
-    llvm::AAResults* m_aliasAnalysis;
+    lotus::AliasAnalysisWrapper* m_aliasAnalysis;
     ThreadAPI* m_threadAPI;
 
     // Specialized checker components

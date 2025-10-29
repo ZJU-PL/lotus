@@ -4,11 +4,9 @@
  */
 
 #include "Analysis/Concurrency/LockSetAnalysis.h"
-#include "Alias/DyckAA/DyckAliasAnalysis.h"
-#include "Alias/DyckAA/DyckCallGraph.h"
-#include "Alias/DyckAA/DyckCallGraphNode.h"
+#include "Alias/AliasAnalysisWrapper.h"
 
-#include <llvm/Analysis/AliasAnalysis.h>
+#include <llvm/Analysis/CallGraph.h>
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/InstIterator.h>
@@ -30,12 +28,12 @@ using namespace mhp;
 LockSetAnalysis::LockSetAnalysis(Module &module)
     : m_module(&module), m_single_function(nullptr),
       m_thread_api(ThreadAPI::getThreadAPI()), m_alias_analysis(nullptr),
-      m_dyck_aa(nullptr) {}
+      m_call_graph(nullptr) {}
 
 LockSetAnalysis::LockSetAnalysis(Function &func)
     : m_module(nullptr), m_single_function(&func),
       m_thread_api(ThreadAPI::getThreadAPI()), m_alias_analysis(nullptr),
-      m_dyck_aa(nullptr) {}
+      m_call_graph(nullptr) {}
 
 void LockSetAnalysis::analyze() {
   errs() << "Starting Lock Set Analysis...\n";
@@ -511,12 +509,12 @@ void LockSetAnalysis::computeIntraproceduralLockSets(Function *func) {
 }
 
 void LockSetAnalysis::computeInterproceduralLockSets() {
-  if (!m_dyck_aa) {
-    errs() << "Warning: DyckAA not set. Skipping interprocedural analysis.\n";
+  if (!m_call_graph) {
+    errs() << "Warning: CallGraph not set. Skipping interprocedural analysis.\n";
     return;
   }
 
-  errs() << "Computing interprocedural lock sets using DyckAA...\n";
+  errs() << "Computing interprocedural lock sets using CallGraph...\n";
   
   // Perform bottom-up traversal of call graph to compute function summaries
   bottomUpTraversal();
@@ -578,7 +576,7 @@ LockSet LockSetAnalysis::transfer(const Instruction *inst,
     } else if (!m_thread_api->isTDAcquire(call) && 
                !m_thread_api->isTDRelease(call)) {
       // Handle regular function calls with interprocedural summaries
-      if (m_dyck_aa) {
+      if (m_call_graph) {
         auto callees = getCallees(call);
         for (Function *callee : callees) {
           if (callee && !callee->isDeclaration()) {
@@ -692,20 +690,12 @@ bool LockSetAnalysis::mayAlias(LockID lock1, LockID lock2) const {
   if (lock1 == lock2)
     return true;
 
-  // Try DyckAA first for better precision
-  if (m_dyck_aa && lock1 && lock2) {
-    return m_dyck_aa->mayAlias(const_cast<Value*>(lock1), 
-                               const_cast<Value*>(lock2));
-  }
-
-  // Fall back to standard alias analysis
+  // Use alias analysis wrapper if available
   if (m_alias_analysis && lock1 && lock2) {
-    MemoryLocation loc1 = MemoryLocation(lock1, LocationSize::beforeOrAfterPointer());
-    MemoryLocation loc2 = MemoryLocation(lock2, LocationSize::beforeOrAfterPointer());
-    return m_alias_analysis->alias(loc1, loc2) != AliasResult::NoAlias;
+    return m_alias_analysis->mayAlias(lock1, lock2);
   }
 
-  // Conservative: assume may alias
+  // Conservative: assume may alias if no analysis available
   return false;
 }
 
@@ -732,48 +722,29 @@ LockID LockSetAnalysis::getLockValue(const Instruction *inst) const {
 std::set<Function *> LockSetAnalysis::getCallees(const CallInst *call) const {
   std::set<Function *> callees;
   
-  if (!m_dyck_aa || !call) {
+  if (!call) {
     return callees;
   }
   
-  DyckCallGraph *cg = m_dyck_aa->getDyckCallGraph();
-  if (!cg) {
-    return callees;
-  }
-  
-  Function *caller = const_cast<Function*>(call->getFunction());
-  if (!caller) {
-    return callees;
-  }
-  
-  DyckCallGraphNode *caller_node = cg->getFunction(caller);
-  if (!caller_node) {
-    return callees;
-  }
-  
-  // Get the Call object from DyckAA for this instruction
-  Call *dyck_call = caller_node->getCall(const_cast<Instruction*>(
-                                         static_cast<const Instruction*>(call)));
-  
-  if (!dyck_call) {
-    // If not found in DyckAA, try direct call
-    if (Function *direct_callee = call->getCalledFunction()) {
+  // Try direct call first
+  if (Function *direct_callee = call->getCalledFunction()) {
+    if (!direct_callee->isDeclaration()) {
       callees.insert(direct_callee);
     }
     return callees;
   }
   
-  // Handle common calls (direct calls)
-  if (CommonCall *common_call = dyn_cast<CommonCall>(dyck_call)) {
-    if (Function *callee = common_call->getCalledFunction()) {
-      callees.insert(callee);
-    }
-  }
-  // Handle pointer calls (indirect calls)
-  else if (PointerCall *ptr_call = dyn_cast<PointerCall>(dyck_call)) {
-    for (auto it = ptr_call->begin(); it != ptr_call->end(); ++it) {
-      if (*it) {
-        callees.insert(*it);
+  // For indirect calls, use call graph if available
+  if (m_call_graph) {
+    Function *caller = const_cast<Function*>(call->getFunction());
+    if (CallGraphNode *cgNode = (*m_call_graph)[caller]) {
+      // Iterate over all callees from this caller
+      for (auto &callRecord : *cgNode) {
+        if (Function *callee = callRecord.second->getFunction()) {
+          if (!callee->isDeclaration()) {
+            callees.insert(callee);
+          }
+        }
       }
     }
   }
@@ -890,8 +861,8 @@ void LockSetAnalysis::applyFunctionSummary(const CallInst *call,
   for (LockID lock : summary.may_release) {
     may_locks.erase(lock);
     
-    // Also remove aliases
-    if (m_dyck_aa) {
+    // Also remove aliases if alias analysis is available
+    if (m_alias_analysis) {
       LockSet to_remove;
       for (auto l : may_locks) {
         if (mayAlias(l, lock)) {
@@ -907,8 +878,8 @@ void LockSetAnalysis::applyFunctionSummary(const CallInst *call,
   for (LockID lock : summary.must_release) {
     must_locks.erase(lock);
     
-    // Also remove aliases
-    if (m_dyck_aa) {
+    // Also remove aliases if alias analysis is available
+    if (m_alias_analysis) {
       LockSet to_remove;
       for (auto l : must_locks) {
         if (mayAlias(l, lock)) {
@@ -923,24 +894,18 @@ void LockSetAnalysis::applyFunctionSummary(const CallInst *call,
 }
 
 void LockSetAnalysis::bottomUpTraversal() {
-  if (!m_dyck_aa) {
-    return;
-  }
-  
-  DyckCallGraph *cg = m_dyck_aa->getDyckCallGraph();
-  if (!cg) {
-    errs() << "Warning: Cannot get DyckCallGraph\n";
+  if (!m_call_graph) {
     return;
   }
   
   errs() << "Performing bottom-up call graph traversal...\n";
   
-  // Compute post-order traversal for bottom-up analysis
+  // Compute post-order traversal for bottom-up analysis using LLVM CallGraph
   std::vector<Function *> post_order;
   std::set<Function *> visited;
   std::stack<std::pair<Function *, bool>> stack;
   
-  // Find all functions in the module
+  // Start from all functions in the module
   for (Function &func : *m_module) {
     if (!func.isDeclaration()) {
       if (visited.find(&func) == visited.end()) {
@@ -964,28 +929,10 @@ void LockSetAnalysis::bottomUpTraversal() {
           visited.insert(current);
           stack.push({current, true});
           
-          // Get callees from DyckAA
-          DyckCallGraphNode *node = cg->getFunction(current);
-          if (node) {
-            // Iterate over common calls
-            for (auto call_it = node->common_call_begin(); 
-                 call_it != node->common_call_end(); ++call_it) {
-              CommonCall *common_call = *call_it;
-              if (Function *callee = common_call->getCalledFunction()) {
-                if (!callee->isDeclaration() && 
-                    visited.find(callee) == visited.end()) {
-                  stack.push({callee, false});
-                }
-              }
-            }
-            
-            // Iterate over pointer calls
-            for (auto call_it = node->pointer_call_begin(); 
-                 call_it != node->pointer_call_end(); ++call_it) {
-              PointerCall *ptr_call = *call_it;
-              for (auto func_it = ptr_call->begin(); 
-                   func_it != ptr_call->end(); ++func_it) {
-                Function *callee = *func_it;
+          // Get callees from LLVM CallGraph
+          if (CallGraphNode *cgNode = (*m_call_graph)[current]) {
+            for (auto &callRecord : *cgNode) {
+              if (Function *callee = callRecord.second->getFunction()) {
                 if (callee && !callee->isDeclaration() && 
                     visited.find(callee) == visited.end()) {
                   stack.push({callee, false});

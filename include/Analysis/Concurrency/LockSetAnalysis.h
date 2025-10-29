@@ -41,12 +41,13 @@
 #include <unordered_set>
 #include <vector>
 
-namespace llvm {
-class AAResults;
+namespace lotus {
+class AliasAnalysisWrapper;
 }
 
-class DyckAliasAnalysis;
-class DyckCallGraph;
+namespace llvm {
+class CallGraph;
+}
 
 namespace mhp {
 
@@ -103,16 +104,18 @@ public:
   void analyze();
 
   /**
-   * @brief Set alias analysis for better precision
-   * @param aa Alias analysis instance
+   * @brief Set alias analysis wrapper for better precision
+   * @param aa_wrapper Alias analysis wrapper instance
    */
-  void setAliasAnalysis(llvm::AAResults *aa) { m_alias_analysis = aa; }
+  void setAliasAnalysis(lotus::AliasAnalysisWrapper *aa_wrapper) { 
+    m_alias_analysis = aa_wrapper; 
+  }
 
   /**
-   * @brief Set DyckAA for interprocedural precision
-   * @param dyck_aa DyckAA analysis instance
+   * @brief Set call graph for interprocedural analysis
+   * @param cg LLVM CallGraph instance
    */
-  void setDyckAA(DyckAliasAnalysis *dyck_aa) { m_dyck_aa = dyck_aa; }
+  void setCallGraph(llvm::CallGraph *cg) { m_call_graph = cg; }
 
   // ========================================================================
   // Query Interface
@@ -266,8 +269,8 @@ private:
   llvm::Module *m_module;
   llvm::Function *m_single_function; // For single-function analysis
   ThreadAPI *m_thread_api;
-  llvm::AAResults *m_alias_analysis;
-  DyckAliasAnalysis *m_dyck_aa;
+  lotus::AliasAnalysisWrapper *m_alias_analysis;
+  llvm::CallGraph *m_call_graph;  // For interprocedural analysis
 
   // Lockset results
   std::unordered_map<const llvm::Instruction *, LockSet> m_may_locksets_entry;
@@ -396,7 +399,7 @@ private:
                             LockSet &may_locks, LockSet &must_locks) const;
 
   /**
-   * @brief Get callees at a call site using DyckAA
+   * @brief Get callees at a call site using CallGraph
    */
   std::set<llvm::Function *> getCallees(const llvm::CallInst *call) const;
 

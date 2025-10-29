@@ -7,11 +7,14 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/InstIterator.h>
-#include <llvm/Analysis/AliasAnalysis.h>
 
 #include <unordered_map>
 #include <vector>
 #include <string>
+
+namespace lotus {
+class AliasAnalysisWrapper;
+}
 
 namespace concurrency {
 
@@ -25,7 +28,7 @@ class DataRaceChecker {
 public:
     explicit DataRaceChecker(llvm::Module& module,
                            mhp::MHPAnalysis* mhpAnalysis,
-                           llvm::AAResults* aliasAnalysis = nullptr);
+                           lotus::AliasAnalysisWrapper* aliasAnalysis = nullptr);
 
     /**
      * @brief Check for data races in the module
@@ -37,7 +40,7 @@ private:
     // Analysis components
     llvm::Module& m_module;
     mhp::MHPAnalysis* m_mhpAnalysis;
-    llvm::AAResults* m_aliasAnalysis;
+    lotus::AliasAnalysisWrapper* m_aliasAnalysis;
 
     // Helper methods for data race detection
     bool mayAlias(const llvm::Value* v1, const llvm::Value* v2) const;
@@ -50,8 +53,8 @@ private:
     // Data race detection logic
     void collectVariableAccesses(std::unordered_map<const llvm::Value*,
                                  std::vector<const llvm::Instruction*>>& variableAccesses);
-    bool hasPotentialDataRace(const llvm::Instruction* inst1,
-                             const llvm::Instruction* inst2);
+    bool mayAccessSameLocation(const llvm::Instruction* inst1,
+                              const llvm::Instruction* inst2) const;
 };
 
 } // namespace concurrency
