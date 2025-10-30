@@ -31,7 +31,7 @@ static bool expandNestedGEP(Function &F, IRBuilder<NoFolder> &builder) {
         for (auto &BB : F) {
             for (auto &I : BB) {
                 // for every instruction in the Function, try
-                for (int i = 0; i < I.getNumOperands(); i++) {
+                for (unsigned i = 0; i < I.getNumOperands(); i++) {
                     Value *op = I.getOperand(i);
                     if (auto CE = dyn_cast<ConstantExpr>(op)) {
                         changed = true;
@@ -75,13 +75,16 @@ static bool splitVariableGEP(Function &F, IRBuilder<NoFolder> &builder) {
                     // since we skip the first index, we now start from gep 0,
                     consIndices.push_back(zero);
                     GTI++;
-                } else if (auto *idx = cast<Constant>(GTI.getOperand()); !idx->isZeroValue()) {
-                    // the first index is constant, but is not a zero
-                    // getelementptr %ptr, 4, %idx1, ...
-                    lastBasePtr = builder.CreateGEP(GEP->getSourceElementType(), lastBasePtr, idx);
-                    LOG_TRACE("{}", *lastBasePtr);
-                    consIndices.push_back(zero);
-                    GTI++;
+                } else {
+                    auto *idx = cast<Constant>(GTI.getOperand());
+                    if (!idx->isZeroValue()) {
+                        // the first index is constant, but is not a zero
+                        // getelementptr %ptr, 4, %idx1, ...
+                        lastBasePtr = builder.CreateGEP(GEP->getSourceElementType(), lastBasePtr, idx);
+                        LOG_TRACE("{}", *lastBasePtr);
+                        consIndices.push_back(zero);
+                        GTI++;
+                    }
                 }
 
                 for (gep_type_iterator GTE = gep_type_end(GEP); GTI != GTE; GTI++) {

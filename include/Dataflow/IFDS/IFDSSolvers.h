@@ -9,6 +9,9 @@
 #pragma once
 
 #include "Dataflow/IFDS/IFDSFramework.h"
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 
 namespace ifds {
 
