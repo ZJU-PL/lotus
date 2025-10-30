@@ -4,6 +4,7 @@
 set(IFDS_FRAMEWORK_SOURCES
   IDESolver.cpp
   IFDSDebugUtils.cpp
+  IFDSSolver.cpp
   ParallelIFDSSolver.cpp
 )
 

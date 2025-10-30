@@ -1,6 +1,10 @@
 /*
  * Parallel IFDS Solver Implementation
  *
+ // Lock order (must NOT be violated):
+//   1) m_global_mutex
+//   2) internal mutexes of concurrent containers
+
  * This implements a parallel version of the IFDS tabulation algorithm with:
  * - Thread-safe data structures using shared mutexes
  * - Multiple worker threads processing worklist items in parallel
@@ -128,8 +132,9 @@ void ParallelIFDSSolver<Problem>::worker_thread_function() {
     m_active_threads.fetch_add(1);
 
     size_t local_edges_processed = 0;
-    size_t consecutive_empty_batches = 0;
-    const size_t MAX_EMPTY_BATCHES = 3;  // Try a few times before declaring idle
+    size_t consecutive_empty_polls = 0;
+    const size_t MAX_EMPTY_POLLS = 10;  // Try multiple times before considering termination
+    bool marked_as_idle = false;  // Track if this thread contributed to idle count
 
     try {
         while (!m_terminate_flag.load()) {
@@ -137,43 +142,64 @@ void ParallelIFDSSolver<Problem>::worker_thread_function() {
             auto batch = get_worklist_batch();
 
             if (batch.empty()) {
-                // No work found - enter termination detection protocol
-                consecutive_empty_batches++;
+                // No work found - check for termination
+                consecutive_empty_polls++;
                 
-                if (consecutive_empty_batches >= MAX_EMPTY_BATCHES) {
-                    // Participate in epoch-based termination detection
-                    m_threads_in_current_epoch.fetch_add(1);
+                if (consecutive_empty_polls >= MAX_EMPTY_POLLS) {
+                    // Sleep briefly to allow other threads to add work
+                    std::this_thread::sleep_for(std::chrono::microseconds(10));
                     
-                    // Small delay to allow other threads to catch up
-                    std::this_thread::sleep_for(std::chrono::microseconds(100));
-                    
-                    // Check if all threads have reached this epoch
-                    if (m_threads_in_current_epoch.load() >= m_active_threads.load()) {
-                        // All threads are idle - check worklist one more time
-                        if (m_worklist.empty()) {
-                            // Truly done - set termination flag
-                            m_terminate_flag.store(true);
-                            signal_termination();
-                            break;
+                    // Check one final time before considering termination
+                    if (m_worklist.empty()) {
+                        // Signal that this thread is idle (only if not already marked)
+                        if (!marked_as_idle) {
+                            size_t idle_count = m_threads_in_current_epoch.fetch_add(1) + 1;
+                            marked_as_idle = true;
+                            
+                            // Check if all active threads are idle
+                            if (idle_count >= m_active_threads.load()) {
+                                // Double-check worklist is still empty
+                                if (m_worklist.empty()) {
+                                    // Set termination flag - all threads will exit
+                                    m_terminate_flag.store(true);
+                                    signal_termination();
+                                    break;
+                                } else {
+                                    // Work appeared, reset and continue
+                                    m_threads_in_current_epoch.store(0);
+                                    marked_as_idle = false;
+                                    consecutive_empty_polls = 0;
+                                }
+                            } else {
+                                // Not all threads idle, wait and recheck
+                                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                // Unmark ourselves since we're going to try again
+                                m_threads_in_current_epoch.fetch_sub(1);
+                                marked_as_idle = false;
+                                consecutive_empty_polls = 0;
+                            }
                         } else {
-                            // Work appeared - reset epoch
-                            m_current_epoch.fetch_add(1);
-                            m_threads_in_current_epoch.store(0);
-                            consecutive_empty_batches = 0;
+                            // Already marked as idle, just wait
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         }
                     } else {
-                        // Not all threads idle yet - wait a bit and retry
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        consecutive_empty_batches = 0;
+                        consecutive_empty_polls = 0;
+                        // Found work in worklist, unmark if we were idle
+                        if (marked_as_idle) {
+                            m_threads_in_current_epoch.fetch_sub(1);
+                            marked_as_idle = false;
+                        }
                     }
                 }
                 continue;
             }
 
-            // Found work - reset idle counter and leave epoch
-            consecutive_empty_batches = 0;
-            if (m_threads_in_current_epoch.load() > 0) {
+            // Found work - reset counters and process
+            consecutive_empty_polls = 0;
+            // Unmark ourselves as idle if we were marked
+            if (marked_as_idle) {
                 m_threads_in_current_epoch.fetch_sub(1);
+                marked_as_idle = false;
             }
 
             // Process the batch
@@ -245,68 +271,44 @@ void ParallelIFDSSolver<Problem>::worker_thread_function() {
 
 template<typename Problem>
 bool ParallelIFDSSolver<Problem>::propagate_path_edge(const PathEdgeType& edge) {
-    // Try to insert the edge - if already exists, return false
-    if (!m_path_edges.insert(edge)) {
+    /* lock hierarchy: m_global_mutex → container mutexes */
+    std::lock_guard<std::mutex> guard(m_global_mutex);
+
+    // 1. insert into global path-edge set (takes P-lock AFTER global lock)
+    if (!m_path_edges.insert(edge))
         return false;
-    }
 
-    // Add to worklist for processing
+    // 2. worklist & fact caches
     m_worklist.push_back(edge);
+    m_entry_facts.union_with(edge.start_node,  edge.start_fact);
+    m_exit_facts.union_with (edge.target_node, edge.target_fact);
 
-    // Update entry/exit facts with set-union semantics (IFDS M_A[n])
-    m_entry_facts.union_with(edge.start_node, edge.start_fact);
-    m_exit_facts.union_with(edge.target_node, edge.target_fact);
-    
-    // Maintain path-edge index P[c] for retroactive summary application
-    // If target_node is a call instruction, record this path edge
+    // 3. bookkeeping for call sites
     if (auto* call = llvm::dyn_cast<llvm::CallInst>(edge.target_node)) {
-        std::vector<PathEdgeType> new_edges;
-        
-        // Critical section: update path edge index and collect applicable summaries
-        {
-            std::lock_guard<std::mutex> lock(m_global_mutex);
-            // Use set for automatic deduplication
-            m_path_edges_at[edge.target_node].insert(edge);
-            
-            // BUG FIX: Apply existing summaries to this new path edge
-            // This handles the case where the summary arrived before this path edge
-            auto summary_it = m_summary_index.find(call);
-            if (summary_it != m_summary_index.end()) {
-                const llvm::Instruction* return_site = get_return_site(call);
-                if (return_site) {
-                    // Iterate over ALL summaries for this call site (set automatically deduplicates)
-                    for (const auto& summary : summary_it->second) {
-                        // Check if summary applies to this path edge's call_fact
-                        if (summary.call_fact == edge.target_fact) {
-                            // Get the callee function for return_flow
-                            auto callee_it = m_call_to_callee.find(call);
-                            const llvm::Function* callee = (callee_it != m_call_to_callee.end()) 
-                                ? callee_it->second : nullptr;
-                            
-                            if (callee && !callee->isDeclaration()) {
-                                FactSet return_facts = m_problem.return_flow(call, callee,
-                                                                           summary.return_fact, 
-                                                                           summary.call_fact);
-                                for (const auto& return_fact : return_facts) {
-                                    // Create path edge from the start of the calling context
-                                    new_edges.emplace_back(edge.start_node, edge.start_fact,
-                                                         return_site, return_fact);
-                                }
-                            }
+        m_path_edges_at[call].insert(edge);  // safe: still inside guard
+
+        // apply summaries that were discovered earlier
+        auto sIt = m_summary_index.find(call);
+        if (sIt != m_summary_index.end()) {
+            const llvm::Instruction* retSite = get_return_site(call);
+            if (retSite) {
+                auto callee = m_call_to_callee.count(call) ? m_call_to_callee.at(call) : nullptr;
+                for (const auto& summ : sIt->second)
+                    if (summ.call_fact == edge.target_fact && callee && !callee->isDeclaration()) {
+                        for (const auto& rf :
+                             m_problem.return_flow(call, callee,
+                                                   summ.return_fact, summ.call_fact)) {
+                            PathEdgeType ne(edge.start_node, edge.start_fact, retSite, rf);
+                            if (m_path_edges.insert(ne))
+                                m_worklist.push_back(ne);
                         }
                     }
-                }
             }
-        } // lock released here
-        
-        // Add new edges outside the critical section to avoid deadlock
-        if (!new_edges.empty()) {
-            add_edges_to_worklist(new_edges);
         }
     }
-
     return true;
 }
+
 
 template<typename Problem>
 void ParallelIFDSSolver<Problem>::process_normal_edge(const llvm::Instruction* curr,
@@ -351,28 +353,31 @@ void ParallelIFDSSolver<Problem>::process_call_edge(const llvm::CallInst* call,
 
     // Check if we have existing summary edges for this call and apply retroactively
     // BUG FIX: Iterate over ALL summaries that match the call_fact
-    std::lock_guard<std::mutex> lock(m_global_mutex);
-    auto summary_it = m_summary_index.find(call);
-    if (summary_it != m_summary_index.end()) {
-        const llvm::Instruction* return_site = get_return_site(call);
-        if (return_site) {
-            // Apply ALL summaries that have matching call_fact
-            // (there may be multiple with different return_facts)
-            for (const auto& summary : summary_it->second) {
-                if (summary.call_fact == fact) {
-                    // Apply this summary with CORRECT fact parameter
-                    // The 4th parameter must be summary.call_fact, not the incoming fact
-                    FactSet return_facts = m_problem.return_flow(call, callee,
-                                                               summary.return_fact, summary.call_fact);
-                    for (const auto& return_fact : return_facts) {
-                        new_edges.emplace_back(call, fact, return_site, return_fact);
+    {
+        std::lock_guard<std::mutex> lock(m_global_mutex);
+        auto summary_it = m_summary_index.find(call);
+        if (summary_it != m_summary_index.end()) {
+            const llvm::Instruction* return_site = get_return_site(call);
+            if (return_site) {
+                // Apply ALL summaries that have matching call_fact
+                // (there may be multiple with different return_facts)
+                for (const auto& summary : summary_it->second) {
+                    if (summary.call_fact == fact) {
+                        // Apply this summary with CORRECT fact parameter
+                        // The 4th parameter must be summary.call_fact, not the incoming fact
+                        FactSet return_facts = m_problem.return_flow(call, callee,
+                                                                   summary.return_fact, summary.call_fact);
+                        for (const auto& return_fact : return_facts) {
+                            new_edges.emplace_back(call, fact, return_site, return_fact);
+                        }
                     }
+                    // Note: we continue iterating to apply ALL matching summaries
                 }
-                // Note: we continue iterating to apply ALL matching summaries
             }
         }
-    }
+    } // lock released here
 
+    // Add new edges outside the critical section to avoid deadlock
     if (!new_edges.empty()) {
         add_edges_to_worklist(new_edges);
     }
@@ -395,34 +400,40 @@ void ParallelIFDSSolver<Problem>::process_return_edge(const llvm::ReturnInst* re
         // This is the core IFDS tabulation: for each path edge <s_p, d_1> -> <n, d_2> 
         // reaching call site n, and a summary edge <n, d_2, d_3>, 
         // create path edge <s_p, d_1> -> <return_site, d_4> where d_4 = return_flow(d_3, d_2)
-        std::lock_guard<std::mutex> lock(m_global_mutex);
-        auto path_it = m_path_edges_at.find(call);
-        if (path_it != m_path_edges_at.end()) {
-            std::vector<PathEdgeType> new_edges;
-            for (const auto& path_edge : path_it->second) {
-                // path_edge.target_fact is the call_fact (d_2)
-                const Fact& call_fact = path_edge.target_fact;
-                
-                // Create summary edge with the actual call_fact
-                SummaryEdgeType new_summary(call, call_fact, fact);
-                
-                // Only process if this is a new summary
-                if (m_summary_edges.insert(new_summary)) {
-                    // Add to index for fast lookup (set automatically deduplicates)
-                    m_summary_index[call].insert(new_summary);
+        std::vector<PathEdgeType> new_edges;
+        
+        // Critical section: update summary edges and collect path edges to process
+        {
+            std::lock_guard<std::mutex> lock(m_global_mutex);
+            auto path_it = m_path_edges_at.find(call);
+            if (path_it != m_path_edges_at.end()) {
+                for (const auto& path_edge : path_it->second) {
+                    // path_edge.target_fact is the call_fact (d_2)
+                    const Fact& call_fact = path_edge.target_fact;
                     
-                    // Apply return flow: exit_fact is 'fact', call_fact is from path edge
-                    FactSet return_facts = m_problem.return_flow(call, func, fact, call_fact);
-                    for (const auto& return_fact : return_facts) {
-                        // Create path edge from the start of the calling context
-                        new_edges.emplace_back(path_edge.start_node, path_edge.start_fact,
-                                             return_site, return_fact);
+                    // Create summary edge with the actual call_fact
+                    SummaryEdgeType new_summary(call, call_fact, fact);
+                    
+                    // Only process if this is a new summary
+                    if (m_summary_edges.insert(new_summary)) {
+                        // Add to index for fast lookup (set automatically deduplicates)
+                        m_summary_index[call].insert(new_summary);
+                        
+                        // Apply return flow: exit_fact is 'fact', call_fact is from path edge
+                        FactSet return_facts = m_problem.return_flow(call, func, fact, call_fact);
+                        for (const auto& return_fact : return_facts) {
+                            // Create path edge from the start of the calling context
+                            new_edges.emplace_back(path_edge.start_node, path_edge.start_fact,
+                                                 return_site, return_fact);
+                        }
                     }
                 }
             }
-            if (!new_edges.empty()) {
-                add_edges_to_worklist(new_edges);
-            }
+        } // lock released here
+        
+        // Add new edges outside the critical section to avoid deadlock
+        if (!new_edges.empty()) {
+            add_edges_to_worklist(new_edges);
         }
     }
 }
@@ -745,84 +756,11 @@ const llvm::Function* ParallelIFDSSolver<Problem>::get_main_function(const llvm:
 }
 
 // ============================================================================
-// IFDSSolver Implementation (Sequential wrapper around ParallelIFDSSolver)
-// ============================================================================
-
-template<typename Problem>
-IFDSSolver<Problem>::IFDSSolver(Problem& problem) 
-    : m_problem(problem) {
-    // Create sequential config
-    ParallelIFDSConfig config;
-    config.enable_parallel_processing = false;
-    config.num_threads = 1;
-    m_parallel_solver = new ParallelIFDSSolver<Problem>(problem, config);
-}
-
-template<typename Problem>
-IFDSSolver<Problem>::~IFDSSolver() {
-    delete m_parallel_solver;
-}
-
-template<typename Problem>
-void IFDSSolver<Problem>::solve(const llvm::Module& module) {
-    m_parallel_solver->solve(module);
-}
-
-template<typename Problem>
-void IFDSSolver<Problem>::set_show_progress(bool show) {
-    m_parallel_solver->set_show_progress(show);
-}
-
-template<typename Problem>
-typename IFDSSolver<Problem>::FactSet 
-IFDSSolver<Problem>::get_facts_at_entry(const llvm::Instruction* inst) const {
-    return m_parallel_solver->get_facts_at_entry(inst);
-}
-
-template<typename Problem>
-typename IFDSSolver<Problem>::FactSet 
-IFDSSolver<Problem>::get_facts_at_exit(const llvm::Instruction* inst) const {
-    return m_parallel_solver->get_facts_at_exit(inst);
-}
-
-template<typename Problem>
-void IFDSSolver<Problem>::get_path_edges(std::vector<PathEdge<Fact>>& out_edges) const {
-    m_parallel_solver->get_path_edges(out_edges);
-}
-
-template<typename Problem>
-void IFDSSolver<Problem>::get_summary_edges(std::vector<SummaryEdge<Fact>>& out_edges) const {
-    m_parallel_solver->get_summary_edges(out_edges);
-}
-
-template<typename Problem>
-bool IFDSSolver<Problem>::fact_reaches(const Fact& fact, const llvm::Instruction* inst) const {
-    return m_parallel_solver->fact_reaches(fact, inst);
-}
-
-template<typename Problem>
-std::unordered_map<typename IFDSSolver<Problem>::Node, 
-                   typename IFDSSolver<Problem>::FactSet, 
-                   typename IFDSSolver<Problem>::NodeHash>
-IFDSSolver<Problem>::get_all_results() const {
-    return m_parallel_solver->get_all_results();
-}
-
-template<typename Problem>
-typename IFDSSolver<Problem>::FactSet 
-IFDSSolver<Problem>::get_facts_at(const Node& node) const {
-    return m_parallel_solver->get_facts_at(node);
-}
-
-// ============================================================================
 // Explicit Template Instantiations
 // ============================================================================
-
-// Provide explicit instantiation for commonly used solver(s)
 
 } // namespace ifds
 
 // Explicit instantiation for commonly used solver(s)
 #include <Dataflow/IFDS/Clients/IFDSTaintAnalysis.h>
 template class ifds::ParallelIFDSSolver<ifds::TaintAnalysis>;
-template class ifds::IFDSSolver<ifds::TaintAnalysis>;

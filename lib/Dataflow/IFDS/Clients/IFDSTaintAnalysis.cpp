@@ -215,18 +215,34 @@ TaintAnalysis::FactSet TaintAnalysis::call_flow(const llvm::CallInst* call, cons
     }
     
     // Map caller facts to callee facts
-    for (unsigned i = 0; i < call->getNumOperands() - 1; ++i) {
-        const llvm::Value* arg = call->getOperand(i);
+    // Ensure we don't go beyond the number of actual function parameters
+    unsigned num_args = std::min(call->arg_size(), (unsigned)std::distance(callee->arg_begin(), callee->arg_end()));
+    
+    for (unsigned i = 0; i < num_args; ++i) {
+        const llvm::Value* arg = call->getArgOperand(i);
+        if (!arg) continue;  // Skip null arguments
+        
         auto param_it = callee->arg_begin();
         std::advance(param_it, i);
+        if (param_it == callee->arg_end()) break;  // Safety check
         
-        if (fact.is_tainted_var() && (arg == fact.get_value() || may_alias(arg, fact.get_value()))) {
-            result.insert(TaintFact::tainted_var(&*param_it));
+        if (fact.is_tainted_var()) {
+            const llvm::Value* fact_val = fact.get_value();
+            if (fact_val) {
+                // Direct pointer comparison first, then alias check
+                if (arg == fact_val) {
+                    result.insert(TaintFact::tainted_var(&*param_it));
+                } else if (fact_val->getType() && fact_val->getType()->isPointerTy() && may_alias(arg, fact_val)) {
+                    result.insert(TaintFact::tainted_var(&*param_it));
+                }
+            }
         }
         
-        if (fact.is_tainted_memory() && arg->getType()->isPointerTy() && 
-            may_alias(arg, fact.get_memory_location())) {
-            result.insert(TaintFact::tainted_memory(&*param_it));
+        if (fact.is_tainted_memory() && arg->getType() && arg->getType()->isPointerTy()) {
+            const llvm::Value* fact_mem = fact.get_memory_location();
+            if (fact_mem && fact_mem->getType() && fact_mem->getType()->isPointerTy() && may_alias(arg, fact_mem)) {
+                result.insert(TaintFact::tainted_memory(&*param_it));
+            }
         }
     }
     
@@ -355,11 +371,13 @@ bool TaintAnalysis::kills_fact(const llvm::CallInst* call, const TaintFact& fact
 // Summary Edge-Based Trace Reconstruction
 // ============================================================================
 
-// Helper to find sources using function summary reconstruction
-TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_summary_based(
-    const IFDSSolver<TaintAnalysis>& solver,
+// Internal template implementation to avoid code duplication
+template<typename SolverType>
+TaintAnalysis::TaintPath trace_taint_sources_impl(
+    const TaintAnalysis& self,
+    const SolverType& solver,
     const llvm::CallInst* sink_call,
-    const TaintFact& tainted_fact) const {
+    const TaintFact& tainted_fact) {
     (void)tainted_fact; // Suppress unused parameter warning
 
     TaintAnalysis::TaintPath result;
@@ -397,7 +415,7 @@ TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_summary_based(
         const llvm::Function* current_func = current_call->getFunction();
 
         // Check if this is a source function
-        if (is_source(current_call)) {
+        if (self.is_source(current_call)) {
             result.sources.push_back(current_call);
             continue;
         }
@@ -414,11 +432,11 @@ TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_summary_based(
         }
 
         // Find all summary edges for this call site
-                    auto summaries = call_to_summaries.find(current_call);
-                    if (summaries != call_to_summaries.end()) {
-                        for (const auto& summary : summaries->second) {
-                            (void)summary; // Suppress unused variable warning
-                            // Check if this summary edge could contribute to our tainted fact
+        auto summaries = call_to_summaries.find(current_call);
+        if (summaries != call_to_summaries.end()) {
+            for (const auto& summary : summaries->second) {
+                (void)summary; // Suppress unused variable warning
+                // Check if this summary edge could contribute to our tainted fact
                 // This is where we'd need more sophisticated taint flow analysis
                 // For now, we'll use a simplified approach
 
@@ -426,7 +444,7 @@ TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_summary_based(
                 auto calls_in_func = function_to_calls.find(current_func);
                 if (calls_in_func != function_to_calls.end()) {
                     for (const llvm::CallInst* other_call : calls_in_func->second) {
-                        if (other_call != current_call && comes_before(other_call, current_call)) {
+                        if (other_call != current_call && self.comes_before(other_call, current_call)) {
                             // Check if this other call's summary edges could flow to our call
                             auto other_summaries = call_to_summaries.find(other_call);
                             if (other_summaries != call_to_summaries.end()) {
@@ -462,111 +480,19 @@ TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_summary_based(
     return result;
 }
 
-// Overload for ParallelIFDSSolver (uses same implementation as sequential version)
+// Public API methods that delegate to the template implementation
+TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_summary_based(
+    const IFDSSolver<TaintAnalysis>& solver,
+    const llvm::CallInst* sink_call,
+    const TaintFact& tainted_fact) const {
+    return trace_taint_sources_impl(*this, solver, sink_call, tainted_fact);
+}
+
 TaintAnalysis::TaintPath TaintAnalysis::trace_taint_sources_summary_based(
     const ParallelIFDSSolver<TaintAnalysis>& solver,
     const llvm::CallInst* sink_call,
     const TaintFact& tainted_fact) const {
-    (void)tainted_fact; // Suppress unused parameter warning
-
-    TaintAnalysis::TaintPath result;
-
-    // Get all summary edges from the solver
-    std::vector<SummaryEdge<TaintFact>> summary_edges;
-    solver.get_summary_edges(summary_edges);
-
-    // Build maps for efficient lookup
-    std::unordered_map<const llvm::CallInst*, std::vector<SummaryEdge<TaintFact>>> call_to_summaries;
-    std::unordered_map<const llvm::Function*, std::vector<const llvm::CallInst*>> function_to_calls;
-
-    for (const auto& edge : summary_edges) {
-        call_to_summaries[edge.call_site].push_back(edge);
-
-        // Build call graph
-        const llvm::Function* caller_func = edge.call_site->getFunction();
-        function_to_calls[caller_func].push_back(edge.call_site);
-    }
-
-    // Use a more sophisticated approach: trace back through the summary edges
-    // starting from the sink call and following the taint flow backwards
-    std::unordered_set<const llvm::CallInst*> visited_calls;
-    std::unordered_set<const llvm::Function*> visited_functions;
-    std::vector<const llvm::CallInst*> worklist;
-    worklist.push_back(sink_call);
-
-    while (!worklist.empty() && result.sources.size() < 10) {
-        const llvm::CallInst* current_call = worklist.back();
-        worklist.pop_back();
-
-        if (visited_calls.count(current_call)) continue;
-        visited_calls.insert(current_call);
-
-        const llvm::Function* current_func = current_call->getFunction();
-
-        // Check if this is a source function
-        if (is_source(current_call)) {
-            result.sources.push_back(current_call);
-            continue;
-        }
-
-        // Track intermediate functions
-        if (visited_functions.insert(current_func).second && result.intermediate_functions.size() < 10) {
-            result.intermediate_functions.push_back(current_func);
-        }
-
-        // Check for initial taint from function entry
-        if (current_call == &current_func->getEntryBlock().front()) {
-            result.sources.push_back(current_call);
-            continue;
-        }
-
-        // Find all summary edges for this call site
-                    auto summaries = call_to_summaries.find(current_call);
-                    if (summaries != call_to_summaries.end()) {
-                        for (const auto& summary : summaries->second) {
-                            (void)summary; // Suppress unused variable warning
-                            // Check if this summary edge could contribute to our tainted fact
-                // This is where we'd need more sophisticated taint flow analysis
-                // For now, we'll use a simplified approach
-
-                // Look for calls in the same function that could flow taint to this call
-                auto calls_in_func = function_to_calls.find(current_func);
-                if (calls_in_func != function_to_calls.end()) {
-                    for (const llvm::CallInst* other_call : calls_in_func->second) {
-                        if (other_call != current_call && comes_before(other_call, current_call)) {
-                            // Check if this other call's summary edges could flow to our call
-                            auto other_summaries = call_to_summaries.find(other_call);
-                            if (other_summaries != call_to_summaries.end()) {
-                                for (const auto& other_summary : other_summaries->second) {
-                                    (void)other_summary; // Suppress unused variable warning
-                                    // Simplified check: if the return fact could flow to our call fact
-                                    if (!visited_calls.count(other_call)) {
-                                        worklist.push_back(other_call);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Also look for inter-procedural flows (calls from other functions)
-        // This requires more sophisticated call graph analysis
-        for (const auto& edge : summary_edges) {
-            if (edge.call_site->getCalledFunction() == current_func) {
-                // This call invokes the current function - trace back to the caller
-                if (!visited_calls.count(edge.call_site)) {
-                    worklist.push_back(edge.call_site);
-                }
-            }
-        }
-    }
-
-    // Reverse intermediate functions so they go from source to sink
-    std::reverse(result.intermediate_functions.begin(), result.intermediate_functions.end());
-
-    return result;
+    return trace_taint_sources_impl(*this, solver, sink_call, tainted_fact);
 }
 
 // Helper to check if one instruction comes before another in the same function
@@ -783,83 +709,61 @@ void TaintAnalysis::output_vulnerability_report(llvm::raw_ostream& OS, size_t vu
 }
 
 // Template function for vulnerability reporting with different solver types
+// Simplified to just count reachable sinks
 template<typename SolverType>
 void report_vulnerabilities_impl(const TaintAnalysis& self, const SolverType& solver, llvm::raw_ostream& OS,
-                                size_t max_vulnerabilities, const std::string& report_type) {
-    OS << "\nTaint Analysis (" << report_type << "):\n";
-    OS << std::string(20 + report_type.length(), '=') << "\n";
+                                size_t max_vulnerabilities) {
+    (void)max_vulnerabilities; // Suppress unused parameter warning
+    
+    OS << "\nTaint Analysis Results:\n";
+    OS << "========================\n";
 
-    const auto& results = solver.get_all_results();
-    size_t vulnerability_count = 0;
+    size_t reachable_sinks = 0;
 
-    for (const auto& result : results) {
-        const auto& node = result.first;
-        const auto& facts = result.second;
-
+    // Get all results from the solver
+    auto results = solver.get_all_results();
+    
+    for (const auto& pair : results) {
+        const typename SolverType::Node& node = pair.first;
+        const typename SolverType::FactSet& facts = pair.second;
+        
         if (facts.empty() || !node.instruction) continue;
 
         auto* call = llvm::dyn_cast<llvm::CallInst>(node.instruction);
         if (!call || !self.is_sink(call)) continue;
 
-        std::string func_name = taint_config::normalize_name(call->getCalledFunction()->getName().str());
-
-        std::string tainted_args;
-        std::vector<const llvm::Instruction*> all_sources;
-        std::vector<const llvm::Function*> propagation_path;
-
-        self.analyze_tainted_arguments(call, facts, tainted_args);
-
-        if (!tainted_args.empty()) {
-            vulnerability_count++;
-
-            // Find sources using the appropriate solver method
+        // Check if any argument is tainted
+        bool found_tainted = false;
+        for (unsigned i = 0; i < call->getNumOperands() - 1; ++i) {
+            const llvm::Value* arg = call->getOperand(i);
             for (const auto& fact : facts) {
-                bool found_tainted = false;
-
-                // Check if any argument is tainted by this fact
-                for (unsigned i = 0; i < call->getNumOperands() - 1; ++i) {
-                    if (self.is_argument_tainted(call->getOperand(i), fact)) {
-                        found_tainted = true;
-                        break;
-                    }
-                }
-
-                if (found_tainted) {
-                    auto path = self.trace_taint_sources_summary_based(solver, call, fact);
-                    all_sources.insert(all_sources.end(), path.sources.begin(), path.sources.end());
-                    if (propagation_path.empty()) {
-                        propagation_path = path.intermediate_functions;
-                    }
-                    break;
+                if (self.is_argument_tainted(arg, fact)) {
+                    reachable_sinks++;
+                    found_tainted = true;
+                    break; // Count this sink once and move to next
                 }
             }
-
-            self.output_vulnerability_report(OS, vulnerability_count, func_name, call,
-                                      tainted_args, all_sources, propagation_path, max_vulnerabilities);
+            if (found_tainted) break;
         }
     }
 
-    if (vulnerability_count == 0) {
-        OS << "No vulnerabilities detected.\n";
+    if (reachable_sinks == 0) {
+        OS << "No reachable sinks detected.\n";
     } else {
-        OS << "\nSummary: " << vulnerability_count << " vulnerabilities";
-        if (vulnerability_count > max_vulnerabilities) {
-            OS << " (showing first " << max_vulnerabilities << ")";
-        }
-        OS << "\n";
+        OS << "Summary: " << reachable_sinks << " reachable sinks detected.\n";
     }
 }
 
 void TaintAnalysis::report_vulnerabilities(const IFDSSolver<TaintAnalysis>& solver,
                                           llvm::raw_ostream& OS,
                                           size_t max_vulnerabilities) const {
-    report_vulnerabilities_impl(*this, solver, OS, max_vulnerabilities, "Sequential");
+    report_vulnerabilities_impl(*this, solver, OS, max_vulnerabilities);
 }
 
 void TaintAnalysis::report_vulnerabilities(const ParallelIFDSSolver<TaintAnalysis>& solver,
                                           llvm::raw_ostream& OS,
                                           size_t max_vulnerabilities) const {
-    report_vulnerabilities_impl(*this, solver, OS, max_vulnerabilities, "Parallel");
+    report_vulnerabilities_impl(*this, solver, OS, max_vulnerabilities);
 }
 
 } // namespace ifds

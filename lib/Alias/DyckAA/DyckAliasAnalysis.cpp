@@ -58,11 +58,17 @@ void DyckAliasAnalysis::getAnalysisUsage(AnalysisUsage &AU) const {
 
 const std::set<Value *> *DyckAliasAnalysis::getAliasSet(Value *Ptr) const {
     DyckGraphNode *V = DyckPTG->retrieveDyckVertex(Ptr).first;
+    if (!V) return nullptr;
     return (const std::set<Value *> *) V->getEquivalentSet();
 }
 
 bool DyckAliasAnalysis::mayAlias(Value *V1, Value *V2) const {
-    return getAliasSet(V1)->count(V2);
+    const std::set<Value *> *aliasSet = getAliasSet(V1);
+    if (!aliasSet) {
+        // Conservative: if we don't have alias set info, assume may alias
+        return true;
+    }
+    return aliasSet->count(V2);
 }
 
 bool DyckAliasAnalysis::mayNull(Value *V) const {
