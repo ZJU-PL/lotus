@@ -17,6 +17,8 @@ using namespace std;
 
 void IntraLotusAA::processUnknownLibraryCall(CallBase *call) {
   // Mark all pointer arguments as potentially modified
+  // TODO: this operation may lead to imprecision in the analysis;
+  // Another choicse is to treat UnknownLibraryCall a "noop" (does nothing?)
   for (unsigned i = 0; i < call->arg_size(); i++) {
     Value *arg = call->getArgOperand(i);
     if (!arg->getType()->isPointerTy())
@@ -206,26 +208,15 @@ void IntraLotusAA::processCalleeInput(
   }
 }
 
-void IntraLotusAA::processCalleeOutput(
+std::vector<Value *> &IntraLotusAA::createPseudoOutputNodes(
     std::vector<OutputItem *> &callee_output,
-    set<MemObject *, mem_obj_cmp> &callee_escape,
     Instruction *callsite, Function *callee) {
-
-  auto &func_arg_all = func_arg[callsite];
-
-  if (!func_arg_all.count(callee)) {
-    // Inputs for callee function is not processed
-    return;
-  }
-
-  func_arg_t &callee_func_arg = func_arg_all[callee];
-
-  // (1) Create pseudo-nodes for return value and the side-effect outputs
-  // Each pseudo-node is an Argument
+  
   assert(!func_ret[callsite].count(callee) && "callsite already processed!!!");
 
   std::vector<Value *> &out_values = func_ret[callsite][callee];
   out_values.push_back(callsite);
+  
   for (size_t idx = 1; idx < callee_output.size(); idx++) {
     OutputItem *output = callee_output[idx];
     Type *output_type = output->getType();
@@ -251,9 +242,15 @@ void IntraLotusAA::processCalleeOutput(
 
   assert(out_values.size() == callee_output.size() &&
          "Incorrect collection of outputs");
+  
+  return out_values;
+}
 
-  // (2) Create the objects that escape to this caller function
-  map<Value *, MemObject *, llvm_cmp> escape_object_map;
+void IntraLotusAA::createEscapedObjects(
+    set<MemObject *, mem_obj_cmp> &callee_escape,
+    Instruction *callsite, Function *callee,
+    map<Value *, MemObject *, llvm_cmp> &escape_object_map) {
+  
   int escape_obj_idx = 0;
 
   for (MemObject *callee_escape_obj : callee_escape) {
@@ -292,64 +289,160 @@ void IntraLotusAA::processCalleeOutput(
     // Cache the escape mapping
     func_escape[callsite][callee][callee_escape_obj] = escaped_obj_to;
   }
+}
 
+void IntraLotusAA::linkOutputPointsToResults(
+    OutputItem *output, Value *curr_output,
+    map<Value *, MemObject *, llvm_cmp> &escape_object_map,
+    func_arg_t &callee_func_arg,
+    std::set<PTResult *> &visited) {
+  
+  auto &callee_point_to = output->getPseudoPointTo();
+  PTResult *curr_output_pts = nullptr;
+  int func_level = output->getFuncLevel();
+
+  if (func_level == ObjectLocator::FUNC_LEVEL_UNDEFINED) {
+    func_level = 0;
+    output->func_level = 0;
+  }
+
+  // Link the pointer-result and the values
+  for (auto &callee_point_to_item_info : callee_point_to) {
+    Value *callee_point_to_item_parent_ptr = callee_point_to_item_info.getParentPtr();
+    int64_t callee_point_to_item_offset = callee_point_to_item_info.getOffset();
+    
+    if (callee_point_to_item_parent_ptr == nullptr) {
+      // Pointer pointing to null or unknown object
+      curr_output_pts = curr_output_pts ? curr_output_pts : findPTResult(curr_output, true);
+      curr_output_pts->add_target(MemObject::UnknownObj, callee_point_to_item_offset);
+    } else if (isa<GlobalValue>(callee_point_to_item_parent_ptr)) {
+      PTResult *linked_pts = processBasePointer(callee_point_to_item_parent_ptr);
+      curr_output_pts = curr_output_pts ? curr_output_pts : findPTResult(curr_output, true);
+      curr_output_pts->add_derived_target(linked_pts, callee_point_to_item_offset);
+    } else if (escape_object_map.count(callee_point_to_item_parent_ptr)) {
+      // Escaped_obj from callee
+      MemObject *curr_obj = escape_object_map[callee_point_to_item_parent_ptr];
+      curr_output_pts = curr_output_pts ? curr_output_pts : findPTResult(curr_output, true);
+      curr_output_pts->add_target(curr_obj, callee_point_to_item_offset);
+    } else {
+      // The point-to object is from the analyzed function (caller function)
+      if (!callee_func_arg.count(callee_point_to_item_parent_ptr))
+        continue;
+        
+      auto &callee_arg_vals = callee_func_arg[callee_point_to_item_parent_ptr];
+
+      if (!callee_arg_vals.empty()) {
+        curr_output_pts = curr_output_pts ? curr_output_pts : findPTResult(curr_output, true);
+        visited.emplace(curr_output_pts);
+      }
+      for (auto &arg_point_to : callee_arg_vals) {
+        Value *pointer = arg_point_to.val;
+
+        PTResult *linked_pts = processBasePointer(pointer);
+        curr_output_pts->add_derived_target(linked_pts, callee_point_to_item_offset);
+      }
+    }
+  }
+}
+
+void IntraLotusAA::linkOutputValues(
+    OutputItem *output, Value *curr_output, size_t idx,
+    map<Value *, MemObject *, llvm_cmp> &escape_object_map,
+    func_arg_t &callee_func_arg,
+    Instruction *callsite,
+    std::unordered_map<PTResult *, PTResultIterator> &pt_result_cache) {
+  
+  if (idx == 0) {
+    // idx=0 means that the real return value, which do not need special linkage
+    return;
+  }
+  
+  AccessPath output_info = output->getSymbolicInfo();
+  Value *output_parent = output_info.getParentPtr();
+  int64_t output_offset = output_info.getOffset();
+  
+  if (escape_object_map.count(output_parent)) {
+    // Escaped_obj from callee
+    MemObject *curr_obj = escape_object_map[output_parent];
+    ObjectLocator *locator = curr_obj->findLocator(output_offset, true);
+    locator->storeValue(curr_output, callsite, 0);
+  } else {
+    if (!callee_func_arg.count(output_parent))
+      return;
+
+    auto &callee_arg_vals = callee_func_arg[output_parent];
+
+    if (callee_arg_vals.empty() && isa<GlobalValue>(output_parent)) {
+      mem_value_item_t global_value(nullptr, output_parent);
+      callee_arg_vals.push_back(global_value);
+    }
+
+    for (auto &arg_point_to : callee_arg_vals) {
+      Value *pointer = arg_point_to.val;
+      if (pointer == LocValue::FREE_VARIABLE) {
+        continue;
+      }
+
+      PTResult *pt_res = findPTResult(pointer);
+      if (pt_res == nullptr) {
+        if (isa<Argument>(pointer)) {
+          Argument *parent_value_to_arg = dyn_cast<Argument>(pointer);
+          pt_res = processArg(parent_value_to_arg);
+        } else if (isa<GlobalValue>(pointer)) {
+          GlobalValue *global = dyn_cast<GlobalValue>(pointer);
+          pt_res = processGlobal(global);
+        } else {
+          continue;
+        }
+      }
+
+      if (!pt_result_cache.count(pt_res)) {
+        PTResultIterator pt_iter(pt_res, this);
+        pt_result_cache.emplace(pt_res, std::move(pt_iter));
+      }
+
+      for (auto loc : pt_result_cache.at(pt_res)) {
+        ObjectLocator *revised_locator = loc->offsetBy(output_offset);
+        revised_locator->storeValue(curr_output, callsite, 0);
+      }
+    }
+  }
+}
+
+void IntraLotusAA::processCalleeOutput(
+    std::vector<OutputItem *> &callee_output,
+    set<MemObject *, mem_obj_cmp> &callee_escape,
+    Instruction *callsite, Function *callee) {
+
+  auto &func_arg_all = func_arg[callsite];
+
+  if (!func_arg_all.count(callee)) {
+    // Inputs for callee function is not processed
+    return;
+  }
+
+  func_arg_t &callee_func_arg = func_arg_all[callee];
+
+  // (1) Create pseudo-nodes for return value and the side-effect outputs
+  std::vector<Value *> &out_values = createPseudoOutputNodes(callee_output, callsite, callee);
+
+  // (2) Create the objects that escape to this caller function
+  map<Value *, MemObject *, llvm_cmp> escape_object_map;
+  createEscapedObjects(callee_escape, callsite, callee, escape_object_map);
+
+  // (3) Link the point-to results and values for each output
   std::set<PTResult *> visited;
   std::unordered_map<PTResult *, PTResultIterator> pt_result_cache;
   
   for (size_t idx = 0; idx < callee_output.size(); idx++) {
-    // (3) Link the point-to results for pseudo outputs
     OutputItem *output = callee_output[idx];
-    auto &callee_point_to = output->getPseudoPointTo();
-    AccessPath output_info = output->getSymbolicInfo();
-    Value *output_parent = output_info.getParentPtr();
-    int64_t output_offset = output_info.getOffset();
     Value *curr_output = out_values[idx];
-    PTResult *curr_output_pts = nullptr;
-    int func_level = output->getFuncLevel();
-
-    if (func_level == ObjectLocator::FUNC_LEVEL_UNDEFINED) {
-      func_level = 0;
-      output->func_level = 0;
-    }
-
-    // Link the pointer-result and the values
-    for (auto &callee_point_to_item_info : callee_point_to) {
-      Value *callee_point_to_item_parent_ptr = callee_point_to_item_info.getParentPtr();
-      int64_t callee_point_to_item_offset = callee_point_to_item_info.getOffset();
-      
-      if (callee_point_to_item_parent_ptr == nullptr) {
-        // Pointer pointing to null or unknown object
-        curr_output_pts = curr_output_pts ? curr_output_pts : findPTResult(curr_output, true);
-        curr_output_pts->add_target(MemObject::UnknownObj, callee_point_to_item_offset);
-      } else if (isa<GlobalValue>(callee_point_to_item_parent_ptr)) {
-        PTResult *linked_pts = processBasePointer(callee_point_to_item_parent_ptr);
-        curr_output_pts = curr_output_pts ? curr_output_pts : findPTResult(curr_output, true);
-        curr_output_pts->add_derived_target(linked_pts, callee_point_to_item_offset);
-      } else if (escape_object_map.count(callee_point_to_item_parent_ptr)) {
-        // Escaped_obj from callee
-        MemObject *curr_obj = escape_object_map[callee_point_to_item_parent_ptr];
-        curr_output_pts = curr_output_pts ? curr_output_pts : findPTResult(curr_output, true);
-        curr_output_pts->add_target(curr_obj, callee_point_to_item_offset);
-      } else {
-        // The point-to object is from the analyzed function (caller function)
-        if (!callee_func_arg.count(callee_point_to_item_parent_ptr))
-          continue;
-          
-        auto &callee_arg_vals = callee_func_arg[callee_point_to_item_parent_ptr];
-
-        if (!callee_arg_vals.empty()) {
-          curr_output_pts = curr_output_pts ? curr_output_pts : findPTResult(curr_output, true);
-          visited.emplace(curr_output_pts);
-        }
-        for (auto &arg_point_to : callee_arg_vals) {
-          Value *pointer = arg_point_to.val;
-
-          PTResult *linked_pts = processBasePointer(pointer);
-          curr_output_pts->add_derived_target(linked_pts, callee_point_to_item_offset);
-        }
-      }
-    }
     
+    // Link the point-to results for pseudo outputs
+    linkOutputPointsToResults(output, curr_output, escape_object_map, 
+                               callee_func_arg, visited);
+    
+    // Cache PT result iterators
     for (PTResult *visited_item : visited) {
       if (!pt_result_cache.count(visited_item)) {
         PTResultIterator iter(visited_item, this);
@@ -357,56 +450,9 @@ void IntraLotusAA::processCalleeOutput(
       }
     }
 
-    // (4) Link the value
-    if (idx != 0) {
-      // idx=0 means that the real return value, which do not need special linkage
-      if (escape_object_map.count(output_parent)) {
-        // Escaped_obj from callee
-        MemObject *curr_obj = escape_object_map[output_parent];
-        ObjectLocator *locator = curr_obj->findLocator(output_offset, true);
-        locator->storeValue(curr_output, callsite, 0);
-      } else {
-        if (!callee_func_arg.count(output_parent))
-          continue;
-
-        auto &callee_arg_vals = callee_func_arg[output_parent];
-
-        if (callee_arg_vals.empty() && isa<GlobalValue>(output_parent)) {
-          mem_value_item_t global_value(nullptr, output_parent);
-          callee_arg_vals.push_back(global_value);
-        }
-
-        for (auto &arg_point_to : callee_arg_vals) {
-          Value *pointer = arg_point_to.val;
-          if (pointer == LocValue::FREE_VARIABLE) {
-            continue;
-          }
-
-          PTResult *pt_res = findPTResult(pointer);
-          if (pt_res == nullptr) {
-            if (isa<Argument>(pointer)) {
-              Argument *parent_value_to_arg = dyn_cast<Argument>(pointer);
-              pt_res = processArg(parent_value_to_arg);
-            } else if (isa<GlobalValue>(pointer)) {
-              GlobalValue *global = dyn_cast<GlobalValue>(pointer);
-              pt_res = processGlobal(global);
-            } else {
-              continue;
-            }
-          }
-
-          if (!pt_result_cache.count(pt_res)) {
-            PTResultIterator pt_iter(pt_res, this);
-            pt_result_cache.emplace(pt_res, std::move(pt_iter));
-          }
-
-          for (auto loc : pt_result_cache.at(pt_res)) {
-            ObjectLocator *revised_locator = loc->offsetBy(output_offset);
-            revised_locator->storeValue(curr_output, callsite, 0);
-          }
-        }
-      }
-    }
+    // Link the value
+    linkOutputValues(output, curr_output, idx, escape_object_map, 
+                     callee_func_arg, callsite, pt_result_cache);
   }
 }
 

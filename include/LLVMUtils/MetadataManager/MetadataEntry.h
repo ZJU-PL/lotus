@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 - 2024  Angelo Matni, Simone Campanoni
+ * Copyright 2021  Simone Campanoni
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
@@ -19,40 +19,27 @@
  OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
  OR OTHER DEALINGS IN THE SOFTWARE.
  */
- #ifndef NOELLE_SRC_CORE_DOMINATORS_DOMINATORNODE_H_
- #define NOELLE_SRC_CORE_DOMINATORS_DOMINATORNODE_H_
+ #ifndef NOELLE_SRC_CORE_METADATA_MANAGER_METADATAENTRY_H_
+ #define NOELLE_SRC_CORE_METADATA_MANAGER_METADATAENTRY_H_
  
- #include "llvm/Analysis/PostDominators.h"
  #include "LLVMUtils/SystemHeaders.h"
  
  namespace noelle {
  
- namespace DTAliases {
- using Node = DomTreeNodeBase<BasicBlock>;
- }
- 
- class DominatorNode {
+ class MetadataEntry {
  public:
-   DominatorNode(const DTAliases::Node &node);
-   DominatorNode(const DominatorNode &node);
+   MetadataEntry(const std::string metadataName,
+                 const std::string metadataValue);
  
-   BasicBlock *getBlock(void) const;
-   DominatorNode *getParent(void) const;
-   std::vector<DominatorNode *> getChildren(void) const;
-   uint32_t getLevel(void) const;
+   std::string getName(void) const;
  
-   raw_ostream &print(raw_ostream &stream, std::string prefixToUse = "");
- 
-   friend class DominatorForest;
+   std::string getValue(void) const;
  
  private:
-   BasicBlock *B;
-   uint32_t level;
- 
-   DominatorNode *parent;
-   std::vector<DominatorNode *> children;
+   const std::string name;
+   const std::string value;
  };
  
- } // namespace lotus
+ } // namespace noelle
  
- #endif // NOELLE_SRC_CORE_DOMINATORS_DOMINATORNODE_H_
+ #endif // NOELLE_SRC_CORE_METADATA_MANAGER_METADATAENTRY_H_

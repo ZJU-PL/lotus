@@ -43,6 +43,6 @@ add_executable(lotus-concur lotus_concur.cpp)
 target_link_libraries(lotus-concur
   ConcurrencyChecker
   CanaryReport
-  LLVMIRReader
-  LLVMAnalysis
+  #LLVMIRReader
+  #LLVMAnalysis
 )

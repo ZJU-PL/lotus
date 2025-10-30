@@ -183,6 +183,25 @@ private:
                            std::set<MemObject *, mem_obj_cmp> &callee_escape,
                            Instruction *callsite, Function *callee);
 
+  // Helper functions for processCalleeOutput
+  std::vector<Value *> &createPseudoOutputNodes(std::vector<OutputItem *> &callee_output,
+                                                 Instruction *callsite, Function *callee);
+  
+  void createEscapedObjects(std::set<MemObject *, mem_obj_cmp> &callee_escape,
+                            Instruction *callsite, Function *callee,
+                            std::map<Value *, MemObject *, llvm_cmp> &escape_object_map);
+  
+  void linkOutputPointsToResults(OutputItem *output, Value *curr_output,
+                                  std::map<Value *, MemObject *, llvm_cmp> &escape_object_map,
+                                  func_arg_t &callee_func_arg,
+                                  std::set<PTResult *> &visited);
+  
+  void linkOutputValues(OutputItem *output, Value *curr_output, size_t idx,
+                        std::map<Value *, MemObject *, llvm_cmp> &escape_object_map,
+                        func_arg_t &callee_func_arg,
+                        Instruction *callsite,
+                        std::unordered_map<PTResult *, PTResultIterator> &pt_result_cache);
+
   void collectOutputs();
   void collectInputs();
   void finalizeInterface();

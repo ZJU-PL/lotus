@@ -91,13 +91,11 @@ void TaintConfigParser::parse_line(const std::string& line, TaintConfig& config)
         if (tokens.size() >= 6) {
             PipeSpec pipe_spec;
             // Parse 'from' spec (tokens 2-3, assuming taint type is implicit)
-            if (tokens.size() >= 6) {
-                std::vector<std::string> from_tokens = {tokens[2], tokens[3], "T"};
-                if (parse_taint_spec(from_tokens, 0, pipe_spec.from)) {
-                    std::vector<std::string> to_tokens = {tokens[4], tokens[5], "T"};
-                    if (parse_taint_spec(to_tokens, 0, pipe_spec.to)) {
-                        config.function_specs[func_name].pipe_specs.push_back(pipe_spec);
-                    }
+            std::vector<std::string> from_tokens = {tokens[2], tokens[3], "T"};
+            if (parse_taint_spec(from_tokens, 0, pipe_spec.from)) {
+                std::vector<std::string> to_tokens = {tokens[4], tokens[5], "T"};
+                if (parse_taint_spec(to_tokens, 0, pipe_spec.to)) {
+                    config.function_specs[func_name].pipe_specs.push_back(pipe_spec);
                 }
             }
         }
