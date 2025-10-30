@@ -4,7 +4,7 @@
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 #include <sstream>
-#include <iostream>
+//#include <iostream>
 
 namespace lotus {
 namespace lsp {
@@ -14,7 +14,7 @@ LSPServer::~LSPServer() = default;
 
 bool LSPServer::loadModule(const std::string &bitcodeFile) {
   llvm::SMDiagnostic err;
-  module_ = llvm::parseIRFile(bitcodeFile, err, llvm::getGlobalContext());
+  module_ = llvm::parseIRFile(bitcodeFile, err, context_);
   if (!module_) {
     err.print("LSPServer", llvm::errs());
     return false;

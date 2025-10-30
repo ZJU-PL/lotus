@@ -1,6 +1,7 @@
 #pragma once
 
 #include <llvm/IR/Module.h>
+#include <llvm/IR/LLVMContext.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,6 +36,7 @@ public:
   std::string exportAsDOT();
   
 private:
+  llvm::LLVMContext context_;
   std::unique_ptr<llvm::Module> module_;
   CallGraphData callGraph_;
   std::map<std::string, std::set<std::string>> transitiveClosure_;

@@ -4,7 +4,6 @@
 * Provides callgraph analysis and queries for LLVM IR
 */
 
-#include <LSP/LSP.h>
 #include <LSP/LSPServer.h>
 #include <iostream>
 #include <fstream>
@@ -27,16 +26,16 @@ void printUsage() {
               << "  lsp program.bc export-dot > graph.dot\n";
 }
 
-void lsp(int argc, char **argv) {
+int main(int argc, char **argv) {
     if (argc < 3 || std::string(argv[1]) == "-h") {
         printUsage();
-        return;
+        return 0;
     }
     
     LSPServer server;
     if (!server.loadModule(argv[1])) {
         std::cerr << "Failed to load: " << argv[1] << std::endl;
-        return;
+        return 1;
     }
     server.buildCallGraph();
     
@@ -76,6 +75,9 @@ void lsp(int argc, char **argv) {
     else {
         std::cerr << "Unknown or incomplete command\n";
         printUsage();
+        return 1;
     }
+    
+    return 0;
 }
 
