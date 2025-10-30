@@ -7,9 +7,9 @@
  *      Author: Yuxiang Lei
  */
 
-#include "CFLSolver/CFLBase.h"
-#include "Util/SVFUtil.h"
-#include "CFLData/IVFG.h"
+#include "CFL/POCR/CFLSolver/CFLBase.h"
+#include "Util/SVFUtil.h" // need SVF?
+#include "CFL/POCR/CFLData/IVFG.h"
 #include <iostream>
 
 using namespace SVF;

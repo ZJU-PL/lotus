@@ -96,7 +96,7 @@ If you use Lotus in your research or work, please cite the following:
 ```bibtex
 @misc{lotus2025,
   title = {Lotus: A Versatile and Industrial-Scale Program Analysis Framework},
-  author = {Yao, Peisen},
+  author = {ZJU Programming Languages and Automated Reasoning Group},
   year = {2025},
   url = {https://github.com/ZJU-Automated-Reasoning-Group/lotus},
   note = {Program analysis framework built on LLVM}

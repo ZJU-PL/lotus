@@ -2,8 +2,8 @@
 // Created by kisslune on 7/5/22.
 //
 
-#include "CFLSolver/CFLBase.h"
-#include "CFLData/CFG.h"
+#include "CFL/POCR/CFLSolver/CFLBase.h"
+#include "CFL/POCR/CFLData/CFG.h"
 #include <iostream>
 
 using namespace SVF;

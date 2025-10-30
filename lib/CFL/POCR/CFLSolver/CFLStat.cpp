@@ -5,8 +5,8 @@
 
 
 #include <iomanip>
-#include "CFLSolver/CFLStat.h"
-#include "CFLSolver/CFLSolver.h"
+#include "CFL/POCR/CFLSolver/CFLStat.h"
+#include "CFL/POCR/CFLSolver/CFLSolver.h"
 
 using namespace SVF;
 

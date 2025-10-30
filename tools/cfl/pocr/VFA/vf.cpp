@@ -5,7 +5,7 @@
  */
 
 #include "SVF-LLVM/LLVMUtil.h"
-#include "VFA/VFAnalysis.h"
+#include "CFL/POCR/VFA/VFAnalysis.h"
 
 using namespace SVF;
 

@@ -7,7 +7,7 @@
  *      Author: Yuxiang Lei
  */
 
-#include "VFA/VFAnalysis.h"
+#include "CFL/POCR/VFA/VFAnalysis.h"
 
 using namespace SVF;
 using namespace SVFUtil;

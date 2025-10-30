@@ -3,8 +3,8 @@
 // Created by kisslune on 4/27/23.
 //
 
-#include "CFLData/ECG.h"
-#include "CFLSolver/CFLOpt.h"
+#include "CFL/POCR/CFLData/ECG.h"
+#include "CFL/POCR/CFLSolver/CFLOpt.h"
 
 using namespace SVF;
 

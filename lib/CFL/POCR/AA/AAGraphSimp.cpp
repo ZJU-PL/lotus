@@ -2,7 +2,7 @@
 // Created by kisslune on 2/22/23.
 //
 
-#include "CFL/POCR/AA/AAGraphSimp.h"
+#include "CFL/POCR/AA/AliasAnalysis.h"
 
 using namespace SVF;
 

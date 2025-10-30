@@ -8,8 +8,8 @@
  */
 
 #include <iomanip>
-#include "VFA/VFAStat.h"
-#include "VFA/VFAnalysis.h"
+#include "CFL/POCR/VFA/VFAStat.h"
+#include "CFL/POCR/VFA/VFAnalysis.h"
 
 using namespace SVF;
 
