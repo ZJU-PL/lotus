@@ -56,6 +56,17 @@ else()
     message(STATUS "Compiling sea-dsa without sanity checks")
 endif()
 
+# SeaHorn configuration
+set(SeaHorn_VERSION_INFO "dev")
+set(HAVE_CLAM ${HAVE_CLAM})
+set(HAVE_DSA ON)
+set(HAVE_LLVM_SEAHORN ON)
+configure_file(
+  ${CMAKE_SOURCE_DIR}/include/seahorn/config.h.cmake
+  ${CMAKE_BINARY_DIR}/include/seahorn/config.h
+)
+include_directories(${CMAKE_BINARY_DIR}/include)
+
 # Add subdirectories
 add_subdirectory(lib)
 add_subdirectory(tools)
