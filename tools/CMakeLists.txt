@@ -4,15 +4,23 @@ add_subdirectory(checker)
 add_subdirectory(pdg-query)
 add_subdirectory(lsp)
 
-# CLAM tools (clam, clam-diff, clam-pp)
+
+# Verifier
+## CLAM tools (clam, clam-diff, clam-pp)
 if(ENABLE_CLAM)
-    add_subdirectory(clam)
+    add_subdirectory(verifier/clam)
 endif()
 
-# Seahorn tools
+## Seahorn tools
 #if(ENABLE_SEAHORN)
-#    add_subdirectory(seahorn)
+#    add_subdirectory(verifier/seahorn)
 #endif()
+
+## horn-ice
+option(BUILD_HORN_ICE "Build ICE learning for CHC and Boogie" OFF)
+if(BUILD_HORN_ICE)
+    add_subdirectory(verifier/horn-ice)
+endif()
 
 # CFL reachability
 option(BUILD_CSR "Build indexing context-sensitive reachability solver" OFF)
@@ -31,13 +39,9 @@ if(BUILD_DYNAA)
     add_subdirectory(alias/dynaa)
 endif()
 
-# Optional SMT and verification tools
+# Optional SMT tools
 option(BUILD_OWL "Build Owl SMT solver" OFF)
-option(BUILD_HORN_ICE "Build ICE learning for CHC and Boogie" OFF)
 
 if(BUILD_OWL)
     add_subdirectory(owl)
-endif()
-if(BUILD_HORN_ICE)
-    add_subdirectory(horn-ice)
 endif()
