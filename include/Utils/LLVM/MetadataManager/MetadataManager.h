@@ -23,7 +23,7 @@
  #define NOELLE_SRC_CORE_METADATA_MANAGER_METADATAMANAGER_H_
  
  #include "Utils/LLVM/SystemHeaders.h"
- #include "Utils/LLVM/MetadataManager/MetaDataEntry.h"
+ #include "Utils/LLVM/MetadataManager/MetadataEntry.h"
  #include "Utils/LLVM/MetadataManager/LoopStructure.h"
  
  namespace noelle {

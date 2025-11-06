@@ -9,7 +9,7 @@
 #include <set>
 
 namespace lotus {
-namespace lsp {
+namespace mcp {
 
 struct CallGraphData {
   std::map<std::string, std::set<std::string>> callees;
@@ -18,10 +18,10 @@ struct CallGraphData {
   std::vector<std::string> indirectCalls;
 };
 
-class LSPServer {
+class MCPServer {
 public:
-  LSPServer();
-  ~LSPServer();
+  MCPServer();
+  ~MCPServer();
   
   bool loadModule(const std::string &bitcodeFile);
   void buildCallGraph();
@@ -45,6 +45,6 @@ private:
   void computeTransitiveClosure();
 };
 
-} // namespace lsp
+} // namespace mcp
 } // namespace lotus
 

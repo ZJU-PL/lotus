@@ -1,17 +1,17 @@
-/* 
-* LSP (Language Service Protocol) Tool for Lotus
-* 
+/*
+* MCP (Model Context Protocol) Tool for Lotus
+*
 * Provides callgraph analysis and queries for LLVM IR
 */
 
-#include <LSP/LSPServer.h>
+#include <MCP/MCPServer.h>
 #include <iostream>
 #include <fstream>
 
-using namespace lotus::lsp;
+using namespace lotus::mcp;
 
 void printUsage() {
-    std::cout << "Usage: lsp <bitcode> <command> [args]\n\n"
+    std::cout << "Usage: mcp <bitcode> <command> [args]\n\n"
               << "Commands:\n"
               << "  list                   List all functions\n"
               << "  callees <func>         Get direct callees\n"
@@ -21,9 +21,9 @@ void printUsage() {
               << "  export-json            Export as JSON\n"
               << "  export-dot             Export as DOT (Graphviz)\n\n"
               << "Examples:\n"
-              << "  lsp program.bc callees main\n"
-              << "  lsp program.bc can-reach main exit\n"
-              << "  lsp program.bc export-dot > graph.dot\n";
+              << "  mcp program.bc callees main\n"
+              << "  mcp program.bc can-reach main exit\n"
+              << "  mcp program.bc export-dot > graph.dot\n";
 }
 
 int main(int argc, char **argv) {
@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     
-    LSPServer server;
+    MCPServer server;
     if (!server.loadModule(argv[1])) {
         std::cerr << "Failed to load: " << argv[1] << std::endl;
         return 1;

@@ -17,7 +17,7 @@ add_library(CanaryLLVMUtils STATIC
         MetadataManager/MetadataManager_Module.cpp
         MetadataManager/MetadataManager_Instruction.cpp
         MetadataManager/MetadataManager_annotation.cpp
-        MetadataManager/MeatadataEntry.cpp
+        MetadataManager/MetadataEntry.cpp
         MetadataManager/LoopStructure.cpp
 )
 

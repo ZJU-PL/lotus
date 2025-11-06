@@ -1,4 +1,4 @@
-#include <LSP/LSPServer.h>
+#include <MCP/MCPServer.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Support/SourceMgr.h>
@@ -7,29 +7,29 @@
 //#include <iostream>
 
 namespace lotus {
-namespace lsp {
+namespace mcp {
 
-LSPServer::LSPServer() = default;
-LSPServer::~LSPServer() = default;
+MCPServer::MCPServer() = default;
+MCPServer::~MCPServer() = default;
 
-bool LSPServer::loadModule(const std::string &bitcodeFile) {
+bool MCPServer::loadModule(const std::string &bitcodeFile) {
   llvm::SMDiagnostic err;
   module_ = llvm::parseIRFile(bitcodeFile, err, context_);
   if (!module_) {
-    err.print("LSPServer", llvm::errs());
+    err.print("MCPServer", llvm::errs());
     return false;
   }
   return true;
 }
 
-void LSPServer::buildCallGraph() {
+void MCPServer::buildCallGraph() {
   if (!module_) return;
   callGraph_ = CallGraphData();
   extractCallGraph();
   computeTransitiveClosure();
 }
 
-void LSPServer::extractCallGraph() {
+void MCPServer::extractCallGraph() {
   for (auto &F : *module_) {
     if (!F.isDeclaration()) 
       callGraph_.allFunctions.insert(F.getName().str());
@@ -61,7 +61,7 @@ void LSPServer::extractCallGraph() {
   }
 }
 
-void LSPServer::computeTransitiveClosure() {
+void MCPServer::computeTransitiveClosure() {
   transitiveClosure_ = callGraph_.callees;
   
   bool changed = true;
@@ -80,40 +80,40 @@ void LSPServer::computeTransitiveClosure() {
   }
 }
 
-std::vector<std::string> LSPServer::getCallees(const std::string &func) {
+std::vector<std::string> MCPServer::getCallees(const std::string &func) {
   auto it = callGraph_.callees.find(func);
   return it != callGraph_.callees.end() ? 
     std::vector<std::string>(it->second.begin(), it->second.end()) : 
     std::vector<std::string>{};
 }
 
-std::vector<std::string> LSPServer::getCallers(const std::string &func) {
+std::vector<std::string> MCPServer::getCallers(const std::string &func) {
   auto it = callGraph_.callers.find(func);
   return it != callGraph_.callers.end() ? 
     std::vector<std::string>(it->second.begin(), it->second.end()) : 
     std::vector<std::string>{};
 }
 
-std::vector<std::string> LSPServer::getAllFunctions() {
+std::vector<std::string> MCPServer::getAllFunctions() {
   return std::vector<std::string>(
     callGraph_.allFunctions.begin(), 
     callGraph_.allFunctions.end()
   );
 }
 
-std::vector<std::string> LSPServer::getReachableFunctions(const std::string &from) {
+std::vector<std::string> MCPServer::getReachableFunctions(const std::string &from) {
   auto it = transitiveClosure_.find(from);
   return it != transitiveClosure_.end() ? 
     std::vector<std::string>(it->second.begin(), it->second.end()) : 
     std::vector<std::string>{};
 }
 
-bool LSPServer::canReach(const std::string &from, const std::string &to) {
+bool MCPServer::canReach(const std::string &from, const std::string &to) {
   auto it = transitiveClosure_.find(from);
   return it != transitiveClosure_.end() && it->second.count(to);
 }
 
-std::string LSPServer::exportAsJSON() {
+std::string MCPServer::exportAsJSON() {
   std::stringstream ss;
   ss << "{\"functions\":[";
   bool first = true;
@@ -137,7 +137,7 @@ std::string LSPServer::exportAsJSON() {
   return ss.str();
 }
 
-std::string LSPServer::exportAsDOT() {
+std::string MCPServer::exportAsDOT() {
   std::stringstream ss;
   ss << "digraph CallGraph {\n  node [shape=box];\n";
   for (const auto &entry : callGraph_.callees)
@@ -147,5 +147,5 @@ std::string LSPServer::exportAsDOT() {
   return ss.str();
 }
 
-} // namespace lsp
+} // namespace mcp
 } // namespace lotus

@@ -2,7 +2,7 @@
 add_subdirectory(alias)
 add_subdirectory(checker)
 add_subdirectory(pdg-query)
-add_subdirectory(lsp)
+add_subdirectory(mcp)
 
 
 # Verifier
