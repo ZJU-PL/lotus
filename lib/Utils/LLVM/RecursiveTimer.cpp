@@ -1,4 +1,3 @@
-
 #include "Utils/LLVM/RecursiveTimer.h"
 
 // Current depth of nested timers for indentation.

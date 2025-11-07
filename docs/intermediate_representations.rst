@@ -1,19 +1,16 @@
 Intermediate Representations
-==============================
+===============================
 
-Lotus provides several intermediate representations for program analysis.
+Lotus provides intermediate representations for advanced program analysis.
 
 Program Dependence Graph (PDG)
 -------------------------------
 
-Captures data and control dependencies in programs.
+Captures data and control dependencies between statements.
 
 **Location**: ``lib/IR/PDG``
 
-**Features**:
-* Data and control dependence edges
-* Memory dependence via alias analysis
-* Program slicing support
+**Features**: RAW/WAR/WAW edges, control dependencies, slicing support.
 
 **Usage**:
 .. code-block:: cpp
@@ -24,13 +21,9 @@ Captures data and control dependencies in programs.
 Value Flow Graph (VFG)
 -----------------------
 
-Tracks value flow through programs, including memory operations.
+Tracks value flow and def-use relationships.
 
-**Types**:
-* **DyckVFG**: Integrated with DyckAA
-* **SVFG**: Sparse Value Flow Graph (planned)
-
-**Applications**: Null pointer analysis, memory safety, taint analysis
+**Types**: DyckVFG (with DyckAA), SVFG (sparse, demand-driven).
 
 **Usage**:
 .. code-block:: cpp
@@ -38,47 +31,47 @@ Tracks value flow through programs, including memory operations.
    #include <Alias/DyckAA/DyckVFG.h>
    auto vfg = dyckAA->getValueFlowGraph();
 
-Call Graph
-----------
+**Applications**: Null pointer analysis, taint analysis, memory safety.
 
-Captures function call relationships.
+Call Graph Construction
+-----------------------
 
-**Types**:
-* Static call graph (direct calls)
-* Dynamic call graph (indirect calls)
-* Context-sensitive call graph
+Builds function call relationships.
 
-**Visualization**:
-.. code-block:: bash
+**Types**: Static (direct calls), dynamic (runtime), context-sensitive (CFL-based).
 
-   ./build/bin/canary -dot-dyck-callgraph example.bc
+**Tools**: ``pdg-query``, ``graspan``
 
 Memory Graph (Sea-DSA)
 ----------------------
 
-Detailed memory usage representation from Sea-DSA.
+Memory layout and pointer relationships.
 
-**Usage**:
+**Location**: ``lib/Alias/seadsa``
+
+**Tools**:
 .. code-block:: bash
 
    ./build/bin/sea-dsa-dg --sea-dsa-dot example.bc
    ./build/bin/seadsa-tool --sea-dsa-dot --outdir results/ example.bc
 
-**Output**: DOT files, memory layout, pointer relationships
+Control Flow Graph (CFG)
+------------------------
 
-Analysis Pipeline
------------------
+Enhanced control flow with analysis support.
+
+**Features**: LLVM CFG, ICFG, loop-aware, path profiling (Nisse), fuzzing distances.
+
+Static Single Information (SSI)
+-------------------------------
+
+Extension of SSA form (planned).
+
+IR Construction Pipeline
+------------------------
 
 1. Load LLVM module
 2. Run alias analysis
-3. Build intermediate representation
-4. Perform analysis on IR
-5. Generate results
-
-**Example**:
-.. code-block:: cpp
-
-   auto module = loadLLVMModule("example.bc");
-   auto aliasAnalysis = runDyckAA(module);
-   auto pdg = buildPDG(module, aliasAnalysis);
-   auto slice = pdg->computeSlice(targetInstruction);
+3. Build representations (PDG, VFG, call graph)
+4. Perform analysis
+5. Export/visualize results

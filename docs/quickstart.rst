@@ -23,7 +23,6 @@ Alias Analysis
    ./build/bin/aser-aa example.bc            # Inclusion-based, flow-insensitive context-sensitive
    ./build/bin/fpa example.bc                # Function pointer analysis
    ./build/bin/lotus-aa example.bc           # Inclusion-based, flow-sensitive context-sensitive
-   ./build/bin/graspan example.bc            # Graph-based CFL-reachability analysis
    ./build/bin/sea-dsa-dg --sea-dsa-dot example.bc  # Unification-based, flow-insensitive, context-sensitive
    ./build/bin/seadsa-tool --sea-dsa-dot --outdir results/ example.bc
 
@@ -109,4 +108,3 @@ Analysis commands:
    ./build/bin/lotus-taint example.bc                   # Detect taint flow
    ./build/bin/lotus-kint -check-array-oob example.ll   # Check buffer overflow
    ./build/bin/lotus-gvfa -vuln-type=nullpointer example.bc  # Null pointer checks
-   ./build/bin/sea-dsa-dg --sea-dsa-dot example.bc      # Memory analysis

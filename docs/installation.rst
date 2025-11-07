@@ -38,10 +38,18 @@ Building Lotus
 Configuration Options
 ---------------------
 
+**Required:**
 * ``-DLLVM_BUILD_PATH``: Path to LLVM build directory (required)
+
+**Optional:**
 * ``-DCUSTOM_BOOST_ROOT``: Path to custom Boost installation
 * ``-DBUILD_TESTS=ON``: Enable building tests
 * ``-DENABLE_SANITY_CHECKS=ON``: Enable sea-dsa sanity checks
+* ``-DENABLE_CLAM=ON``: Build CLAM abstract interpretation tools
+* ``-DBUILD_HORN_ICE=OFF``: Build ICE learning tools for CHC (default: OFF)
+* ``-DBUILD_GRASPAN=OFF``: Build Graspan CFL-reachability solver (default: OFF)
+* ``-DBUILD_DYNAA=OFF``: Build dynamic alias analysis tools (default: OFF)
+* ``-DBUILD_OWL=OFF``: Build OWL SMT solver (default: OFF)
 
 Z3 Installation
 ---------------

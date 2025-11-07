@@ -496,7 +496,7 @@ SMTExpr SMTExpr::bool2bv1() {
     z3::expr const_bv1 =
         const_array(Expr.get_sort().array_domain(), ctx.bv_val(1, 1));
 
-    Z3_ast mapargs[3] = {Expr, const_bv0, const_bv1};
+    Z3_ast  mapargs[3] = {Expr, const_bv0, const_bv1};
 
     z3::expr bvret(ctx, Z3_mk_map(ctx, func, 3, mapargs));
     return SMTExpr(&getSMTFactory(), bvret);

@@ -7,32 +7,24 @@ Lotus is a comprehensive program analysis, verification, and optimization framew
    :maxdepth: 2
    :caption: Getting Started
 
-   installation
    quickstart
+   installation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Components
+   :caption: Analysis Components
 
    alias_analysis
+   data_flow_analysis
+   numerical_abstract_interpretation
+   smt_model_checking
+   cfl_reachability
+   concurrency_bug_checker
    intermediate_representations
    constraint_solving
+   slicing_primitives
+   fuzzing_support
    utilities
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Tools
-
-   tools/alias_analysis_tools
-   tools/dataflow_tools
-   tools/bug_detection_tools
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Development
-
-   development
-   contributing
 
 Features
 --------
