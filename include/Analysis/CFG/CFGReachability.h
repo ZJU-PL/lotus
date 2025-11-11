@@ -13,7 +13,7 @@ using namespace llvm;
 /// instructions within a function's control flow graph.
 class CFGReachability {
 private:
-    typedef BitVector ReachableVec;
+    using ReachableVec = BitVector;
     ReachableVec AnalyzedVec;
     ReachableVec *ReachableVecPtr;
 
@@ -37,7 +37,7 @@ private:
     void analyze(BasicBlock *);
 };
 
-typedef std::shared_ptr<CFGReachability> CFGReachabilityRef;
+using CFGReachabilityRef = std::shared_ptr<CFGReachability>;
 
 #endif // ANALYSIS_CFG_CFGREACHABILITY_H
 

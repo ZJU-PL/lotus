@@ -20,7 +20,7 @@
 
 #include "Solvers/FPSolve/Polynomials/NonCommutativeMonomial.h"
 #include "Solvers/FPSolve/Polynomials/NonCommutativePolynomial.h"
-#include "lossy_Solvers/FPSolve/Polynomials/NonCommutativeMonomial.h"
+#include "Solvers/FPSolve/Polynomials/LossyNonCommutativeMonomial.h"
 
 #include "Solvers/FPSolve/Semirings/Semiring.h"
 #include "Solvers/FPSolve/Semirings/LossyFiniteAutomaton.h"

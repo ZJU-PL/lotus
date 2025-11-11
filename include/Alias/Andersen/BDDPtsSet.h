@@ -51,9 +51,9 @@ public:
   unsigned getSize() const {
     return bitvec.count(); // NOT a constant time operation!
   }
-  bool
-  isEmpty() const // Always prefer using this function to perform empty test
-  {
+
+  // Always prefer using this function to perform empty test
+  bool isEmpty() const {
     return bitvec.empty();
   }
 
