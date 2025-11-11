@@ -8,7 +8,7 @@ Overview
 
 CLAM computes program invariants and verifies properties using abstract domains.
 
-**Location**: ``tools/verifier/clam``, ``lib/clam``
+**Location**: ``tools/verifier/clam``, ``lib/Apps/clam``
 
 **Features**: Multiple domains (intervals, zones, octagons, polyhedra), memory safety checking, Sea-DSA integration.
 

@@ -8,7 +8,7 @@ Overview
 
 Integrates AFLGo, Hawkeye, DAFL algorithms with Nisse path profiling.
 
-**Location**: ``lib/Fuzzing/``
+**Location**: ``lib/Apps/Fuzzing/``
 
 **Components**: Directed fuzzing algorithms, distance analysis, target detection, path profiling.
 

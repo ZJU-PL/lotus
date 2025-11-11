@@ -13,8 +13,8 @@ if(GIT_FOUND)
   )
 endif()
 configure_file(
-  "${CMAKE_SOURCE_DIR}/lib/seahorn/Support/GitSHA1.cc.in"
-  "${CMAKE_SOURCE_DIR}/lib/seahorn/Support/GitSHA1.cc"
+  "${CMAKE_SOURCE_DIR}/lib/Apps/seahorn/Support/GitSHA1.cc.in"
+  "${CMAKE_SOURCE_DIR}/lib/Apps/seahorn/Support/GitSHA1.cc"
   @ONLY
 )
 
@@ -24,10 +24,10 @@ set(HAVE_CLAM ${HAVE_CLAM})
 set(HAVE_DSA ON)
 set(HAVE_LLVM_SEAHORN OFF)
 configure_file(
-  ${CMAKE_SOURCE_DIR}/include/seahorn/config.h.cmake
-  ${CMAKE_BINARY_DIR}/include/seahorn/config.h
+  ${CMAKE_SOURCE_DIR}/include/Apps/seahorn/config.h.cmake
+  ${CMAKE_BINARY_DIR}/include/Apps/seahorn/config.h
 )
-include_directories(${CMAKE_BINARY_DIR}/include)
+include_directories(${CMAKE_BINARY_DIR}/include ${CMAKE_BINARY_DIR}/include/Apps)
 
 # SeaHorn Verification Integration
 option(ENABLE_SEAHORN "Enable seahorn verifier" ON)

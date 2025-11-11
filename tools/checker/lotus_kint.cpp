@@ -1,10 +1,10 @@
 // Kint: A Bug-Finding Tool for C Programs (Refactored version)
 
-#include "Checker/kint/MKintPass.h"
-#include "Checker/kint/Options.h"
-#include "Checker/kint/Log.h"
-#include "Checker/Report/BugReportMgr.h"
-#include "Checker/Report/ReportOptions.h"
+#include "Apps/Checker/kint/MKintPass.h"
+#include "Apps/Checker/kint/Options.h"
+#include "Apps/Checker/kint/Log.h"
+#include "Apps/Checker/Report/BugReportMgr.h"
+#include "Apps/Checker/Report/ReportOptions.h"
 
 #include <llvm/IR/PassManager.h>
 #include <llvm/Passes/PassBuilder.h>

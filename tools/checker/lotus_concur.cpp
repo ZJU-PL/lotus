@@ -1,7 +1,7 @@
-#include "Checker/concurrency/ConcurrencyChecker.h"
-//#include "Checker/Report/BugReport.h"
-#include "Checker/Report/BugReportMgr.h"
-#include "Checker/Report/ReportOptions.h"
+#include "Apps/Checker/concurrency/ConcurrencyChecker.h"
+#include "Apps/Checker/Report/BugReport.h"
+#include "Apps/Checker/Report/BugReportMgr.h"
+#include "Apps/Checker/Report/ReportOptions.h"
 
 #include <llvm/IR/Module.h>
 #include <llvm/IR/LLVMContext.h>

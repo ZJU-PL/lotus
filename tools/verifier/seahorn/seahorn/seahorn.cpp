@@ -22,34 +22,34 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO.h"
 
-#include "seahorn/HornCex.hh"
-#include "seahorn/HornSolver.hh"
-#include "seahorn/HornWrite.hh"
-#include "seahorn/HornifyModule.hh"
-#include "seahorn/Houdini.hh"
-#include "seahorn/InitializePasses.hh"
-#include "seahorn/Passes.hh"
-#include "seahorn/PredicateAbstraction.hh"
-#include "seahorn/Support/SeaLog.hh"
-#include "seahorn/Transforms/Scalar/LowerCstExpr.hh"
-#include "seahorn/Transforms/Scalar/LowerGvInitializers.hh"
-#include "seahorn/Transforms/Scalar/PromoteVerifierCalls.hh"
-#include "seahorn/Transforms/Utils/RemoveUnreachableBlocksPass.hh"
-#include "seahorn/config.h"
+#include "Apps/seahorn/HornCex.hh"
+#include "Apps/seahorn/HornSolver.hh"
+#include "Apps/seahorn/HornWrite.hh"
+#include "Apps/seahorn/HornifyModule.hh"
+#include "Apps/seahorn/Houdini.hh"
+#include "Apps/seahorn/InitializePasses.hh"
+#include "Apps/seahorn/Passes.hh"
+#include "Apps/seahorn/PredicateAbstraction.hh"
+#include "Apps/seahorn/Support/SeaLog.hh"
+#include "Apps/seahorn/Transforms/Scalar/LowerCstExpr.hh"
+#include "Apps/seahorn/Transforms/Scalar/LowerGvInitializers.hh"
+#include "Apps/seahorn/Transforms/Scalar/PromoteVerifierCalls.hh"
+#include "Apps/seahorn/Transforms/Utils/RemoveUnreachableBlocksPass.hh"
+#include "Apps/seahorn/config.h"
 
 #ifdef HAVE_CLAM
-#include "seahorn/clam_Clam.hh"
+#include "Apps/seahorn/clam_Clam.hh"
 #endif
 
 #include "Alias/seadsa/DsaAnalysis.hh"
 #include "Alias/seadsa/InitializePasses.hh"
 #include "Alias/seadsa/support/RemovePtrToInt.hh"
 
-#include "seahorn/Expr/Smt/EZ3.hh"
-#include "seahorn/Support/Stats.hh"
-#include "seahorn/Transforms/Utils/NameValues.hh"
+#include "Apps/seahorn/Expr/Smt/EZ3.hh"
+#include "Apps/seahorn/Support/Stats.hh"
+#include "Apps/seahorn/Transforms/Utils/NameValues.hh"
 
-#include "seahorn/Support/GitSHA1.h"
+#include "Apps/seahorn/Support/GitSHA1.h"
 void print_seahorn_version(llvm::raw_ostream &OS) {
   OS << "SeaHorn (http://seahorn.github.io/):\n"
      << "  SeaHorn version " << SEAHORN_VERSION_INFO << "-" << g_GIT_SHA1

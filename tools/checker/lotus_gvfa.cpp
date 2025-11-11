@@ -2,13 +2,14 @@
 // Unified tool for vulnerability detection (null pointer, use-after-free, etc.)
 // Integrates GVFA with optional NullCheckAnalysis for improved precision
 
+
+#include "Apps/Checker/gvfa/NullPointerChecker.h"
+#include "Apps/Checker/gvfa/UseAfterFreeChecker.h"
+#include "Apps/Checker/gvfa/UseOfUninitializedVariableChecker.h"
+#include "Apps/Checker/gvfa/FreeOfNonHeapMemoryChecker.h"
+#include "Apps/Checker/gvfa/InvalidUseOfStackAddressChecker.h"
+#include "Apps/Checker/Report/BugReportMgr.h"
 #include "Analysis/GVFA/GlobalValueFlowAnalysis.h"
-#include "Checker/gvfa/NullPointerChecker.h"
-#include "Checker/gvfa/UseAfterFreeChecker.h"
-#include "Checker/gvfa/UseOfUninitializedVariableChecker.h"
-#include "Checker/gvfa/FreeOfNonHeapMemoryChecker.h"
-#include "Checker/gvfa/InvalidUseOfStackAddressChecker.h"
-#include "Checker/Report/BugReportMgr.h"
 #include "Analysis/NullPointer/NullCheckAnalysis.h"
 #include "Analysis/NullPointer/ContextSensitiveNullCheckAnalysis.h"
 #include "Alias/DyckAA/DyckAliasAnalysis.h"

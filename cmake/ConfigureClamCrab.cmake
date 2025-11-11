@@ -82,11 +82,11 @@ if(ENABLE_CLAM)
         set(CLAM_IS_TOPLEVEL FALSE)
         
         configure_file(
-            ${CMAKE_CURRENT_SOURCE_DIR}/include/clam/config.h.cmake
-            ${CMAKE_BINARY_DIR}/include/clam/config.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/Apps/clam/config.h.cmake
+            ${CMAKE_BINARY_DIR}/include/Apps/clam/config.h
         )
         
-        include_directories(BEFORE ${CMAKE_BINARY_DIR}/include)
+        include_directories(BEFORE ${CMAKE_BINARY_DIR}/include ${CMAKE_BINARY_DIR}/include/Apps)
         add_definitions(-DHAVE_CLAM)
         
         # Set CLAM libraries - must include both ClamAnalysis and Crab

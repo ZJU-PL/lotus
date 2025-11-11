@@ -37,7 +37,12 @@ else()
 endif()
 
 # Configure LLVM
-include_directories(${LLVM_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+include_directories(${LLVM_INCLUDE_DIRS}
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/Apps
+  ${CMAKE_BINARY_DIR}/include
+  ${CMAKE_BINARY_DIR}/include/Apps
+  )
 add_definitions(${LLVM_DEFINITIONS})
 link_directories(${LLVM_LIBRARY_DIRS})
 

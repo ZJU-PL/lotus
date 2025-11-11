@@ -3,7 +3,6 @@
 # Common include directories for all CLAM tools
 set(CLAM_TOOLS_INCLUDES
   ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/include/Alias
   ${CRAB_ROOT}/include
   ${LLVM_INCLUDE_DIRS}
 )

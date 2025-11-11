@@ -22,14 +22,14 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO.h"
 
-#include "clam/Passes.hh"
-#include "clam/config.h"
+#include "Apps/clam/Passes.hh"
+#include "Apps/clam/config.h"
 
 #ifdef HAVE_LLVM_SEAHORN
 #include "llvm_seahorn/Transforms/Scalar.h"
 #endif
 
-#include "seadsa/InitializePasses.hh"
+#include "Alias/seadsa/InitializePasses.hh"
 
 static llvm::cl::opt<std::string>
     InputFilename(llvm::cl::Positional,
