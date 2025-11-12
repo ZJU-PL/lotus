@@ -1,4 +1,4 @@
-# SVF (Static Value-Flow) configuration
+# SVF configuration
 if (SVF_DIR)
 	set(HAVE_SVF ON)
 	add_definitions(-DHAVE_SVF)

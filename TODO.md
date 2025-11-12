@@ -93,6 +93,11 @@ Some related publications
 * Revise the monotone data flow analysis module
 * Let the WPDS engine work 
 
+## Supporting other Languages
+
+- Rust?: https://github.com/seahorn/verify-rust
+  - FMCAD 22: Bounded Model Checking for LLVM
+  - FMCAD 25: A Tale of Two Case Studies: A Unified Explorationof Rust Verification with SEABMC
 
 ## Investigate More Related Work
 

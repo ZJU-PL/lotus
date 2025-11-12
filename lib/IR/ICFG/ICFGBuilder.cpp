@@ -11,7 +11,7 @@
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/ICFG/GraphAnalysis.h"
  
- using namespace llvm;
+using namespace llvm;
  
  
 /// @brief Builds the ICFG for all non-declaration functions in the module.
