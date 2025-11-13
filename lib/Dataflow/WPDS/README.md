@@ -1,0 +1,5 @@
+# WPDS
+
+WPDS is a solver for distributive data-flow problems. WPDS is very similar to IDE.  But instead of building an exploded super-graph using the user's flow- and edge function implementations a (weighted) pushdown system is build whose rules are drawn from the user's analysis description. Mathematically, IDE and WPDS are equally powerful but WPDS has some additional neat properties. Each rule in the rule set of the pushdown system corresponds to an edge in the exploded super-graph. The analysis problem---encoded in a pushdown system---is then solved using a stack automaton that is obtained by the post* or pre* algorithm. We use the WALi library (lib/Solvers/WPDS) for that task. 
+
+In order to write a WPDS analysis one basically needs to write an IDE analysis. The WPDS analysis has its own problem interface WPDSProblem that can be used to encode an WPDS problem. In addition, an existing concrete IDEProblem can be easily transformed into a concrete WPDSProblem as both are distributive problems. 
