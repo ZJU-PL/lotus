@@ -4,23 +4,35 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'docs/source/**'
-      - 'docs/requirements.txt'
-      - 'docs/Makefille'
-      - '.github/workflows/docs.yml'
   pull_request:
-    paths:
-      - 'docs/source/**'
-      - 'docs/requirements.txt'
-      - 'docs/Makefille'
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  check-docs-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_changed: ${{ steps.filter.outputs.docs }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect docs changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - '.github/workflows/docs.yml'
+
   build-docs:
+    needs: check-docs-changes
+    if: needs.check-docs-changes.outputs.docs_changed == 'true'
     runs-on: ubuntu-latest
 
     steps:
