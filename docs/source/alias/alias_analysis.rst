@@ -1,7 +1,92 @@
 Alias Analysis Components
 ==========================
 
-Lotus provides several alias analysis algorithms with different precision/performance trade-offs.
+Lotus provides several alias analysis algorithms with different precision/performance trade-offs. Each analysis makes different trade-offs between precision, scalability, and analysis cost.
+
+Analysis Selection Guide
+-------------------------
+
+Choose the right analysis for your needs:
+
+**For Large Codebases (Speed Priority)**:
+
+- **Andersen**: Fastest, context-insensitive, inclusion-based
+- **AserPTA (CI mode)**: Fast with field sensitivity option
+- **AllocAA**: Lightweight heuristic-based tracking
+
+**For Balanced Precision/Performance**:
+
+- **AserPTA (1-CFA)**: Good precision with reasonable cost
+- **FPA (KELP)**: Specialized for function pointer resolution
+- **SRAA**: Range-based for proving non-aliasing
+
+**For Maximum Precision**:
+
+- **DyckAA**: Unification-based with Dyck-CFL reachability
+- **LotusAA**: Flow-sensitive and field-sensitive
+- **Sea-DSA**: Context-sensitive memory graphs
+
+**For Specific Scenarios**:
+
+- **Concurrent programs**: AserPTA with origin sensitivity
+- **Dynamic validation**: DynAA for runtime verification
+- **Function pointers only**: FPA (FLTA, MLTA, KELP)
+
+Comparison Table
+----------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 15 15 15 15 20
+
+   * - Analysis
+     - Context
+     - Flow
+     - Field
+     - Speed
+     - Use Case
+   * - Andersen
+     - Insensitive
+     - Insensitive
+     - Insensitive
+     - Fast
+     - Quick scanning
+   * - AserPTA-CI
+     - Insensitive
+     - Insensitive
+     - Sensitive
+     - Fast
+     - Balanced analysis
+   * - AserPTA-1CFA
+     - 1-Call-Site
+     - Insensitive
+     - Sensitive
+     - Moderate
+     - Good precision
+   * - DyckAA
+     - Insensitive
+     - Insensitive
+     - Sensitive
+     - Slow
+     - High precision
+   * - LotusAA
+     - Sensitive
+     - Sensitive
+     - Sensitive
+     - Slowest
+     - Maximum precision
+   * - Sea-DSA
+     - Sensitive
+     - Insensitive
+     - Sensitive
+     - Moderate
+     - Memory graphs
+   * - FPA-KELP
+     - Sensitive
+     - Insensitive
+     - Sensitive
+     - Moderate
+     - Function pointers
 
 AllocAA
 -------
@@ -10,14 +95,72 @@ Simple heuristic-based alias analysis for basic allocation tracking.
 
 **Location**: ``lib/Alias/AllocAA``
 
+**Algorithm**: Tracks allocation sites and uses simple heuristics to determine aliasing.
+
+**Strengths**:
+
+- Extremely fast
+- Low memory overhead
+- Good for preliminary analysis
+
+**Limitations**:
+
+- Imprecise, many false positives
+- No interprocedural analysis
+- Limited to allocation sites
+
 **Usage**: Integrated as LLVM ModulePass for basic alias queries.
 
-AserAA
-------
+AserPTA
+-------
 
 High-performance pointer analysis with multiple context sensitivities and solver algorithms.
 
-**Location**: ``lib/Alias/AserAA``
+**Location**: ``lib/Alias/AserPTA``
+
+**Architecture**:
+
+.. code-block:: text
+
+   LLVM IR
+      ↓
+   [Preprocessing]
+      ├─ Canonicalize GEP instructions
+      ├─ Lower memcpy operations
+      ├─ Normalize heap APIs
+      └─ Remove exception handlers
+      ↓
+   [Constraint Collection]
+      ├─ addr_of: p = &obj
+      ├─ copy: p = q
+      ├─ load: p = *q
+      ├─ store: *p = q
+      └─ offset: p = &obj->field
+      ↓
+   [Constraint Graph Construction]
+      ├─ Pointer nodes (CGPtrNode)
+      ├─ Object nodes (CGObjNode)
+      └─ Constraint edges
+      ↓
+   [Solving with Context]
+      ├─ Context evolution (NoCtx/KCallSite/KOrigin)
+      ├─ Propagation strategy
+      └─ SCC detection & collapsing
+      ↓
+   Points-to Sets (BitVector representation)
+
+**Constraint Types**:
+
+1. **Address-of** (``p = &obj``): Pointer directly addresses object
+2. **Copy** (``p = q``): Pointer assignment
+3. **Load** (``p = *q``): Dereference and copy
+4. **Store** (``*p = q``): Store through pointer
+5. **Offset** (``p = &obj->field``): Field access via GEP
+
+**Memory Models**:
+
+- **Field-Insensitive**: Treats objects as single entities (faster)
+- **Field-Sensitive**: Models individual fields (more precise)
 
 **Analysis Modes**:
 * ``ci``: Context-insensitive (default)
@@ -45,9 +188,63 @@ High-performance pointer analysis with multiple context sensitivities and solver
 DyckAA
 ------
 
-Unification-based, exhaustive alias analysis with high precision.
+Unification-based, exhaustive alias analysis with high precision using Dyck-CFL reachability.
 
 **Location**: ``lib/Alias/DyckAA``
+
+**Algorithm**: Uses Dyck Context-Free Language (CFL) reachability to model pointer relationships:
+
+.. code-block:: text
+
+   LLVM IR
+      ↓
+   [Build Dyck Graph]
+      ├─ Nodes: Values (pointers, objects)
+      ├─ Edges with labels:
+      │  ├─ *(* : Dereference
+      │  ├─ *)* : Reference
+      │  ├─ *[field]* : Field access
+      │  └─ Assignment edges
+      ↓
+   [Dyck-CFL Reachability]
+      ├─ Find balanced paths
+      ├─ Unify equivalent nodes
+      └─ Build alias sets
+      ↓
+   [Applications]
+      ├─ Alias queries
+      ├─ Call graph construction
+      ├─ ModRef analysis
+      └─ Value flow analysis
+
+**Dyck Language**: Balanced parentheses language that captures pointer semantics:
+
+- ``( ... )`` : Dereference operations must balance
+- ``[ ... ]`` : Field accesses must match
+- Paths between nodes indicate aliasing
+
+**Example**:
+
+.. code-block:: c
+
+   int x;
+   int *p = &x;    // Edge: p -*)->* x
+   int **q = &p;   // Edge: q -*)->* p
+   int *r = *q;    // Path: r = *q, q points to p, so r = p
+                   // Dyck path: r -*(*-* q -*)->* p
+
+**Strengths**:
+
+- Highly precise through CFL reachability
+- Handles complex pointer patterns
+- Good for function pointer resolution
+- Builds precise call graphs
+
+**Limitations**:
+
+- Computationally expensive
+- High memory usage for large programs
+- Context-insensitive (single analysis per function)
 
 **Usage**:
 .. code-block:: bash
@@ -59,6 +256,12 @@ Unification-based, exhaustive alias analysis with high precision.
 * ``-count-fp``: Count function pointers
 * ``-dot-dyck-callgraph``: Generate call graph visualization
 * ``-no-function-type-check``: Disable function type checking
+
+**Advanced Features**:
+
+- **DyckVFG**: Value Flow Graph construction for tracking value propagation
+- **ModRef Analysis**: Modified/Referenced analysis for optimization
+- **Call Graph**: Precise indirect call resolution
 
 CFLAA
 -----

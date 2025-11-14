@@ -48,26 +48,4 @@ WPDS library for interprocedural program analysis.
 
 **Features**: Pushdown systems, weight domains, reachability analysis
 
-**Usage**:
-.. code-block:: cpp
 
-   #include <Solvers/WPDS/WPDS.h>
-   auto wpds = std::make_unique<WPDS>();
-   wpds->addRule(fromState, stackSymbol, toState, weight);
-   auto result = wpds->reachability(initialState, targetState);
-
-Solver Selection
-----------------
-
-| Solver | Best For | Performance | Memory |
-|--------|----------|-------------|---------|
-| SMT (Z3) | Complex constraints, bit-vectors | Good | Moderate |
-| BDD (CUDD) | Boolean constraints, sets | Excellent | Can be high |
-| WPDS | Interprocedural analysis | Good | Moderate |
-
-**Unified Interface**:
-.. code-block:: cpp
-
-   auto solver = createSolver(SolverType::SMT);
-   auto solver = createSolver(SolverType::BDD);
-   auto solver = createSolver(SolverType::WPDS);

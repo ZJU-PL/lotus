@@ -1,38 +1,128 @@
 Checker Tools
 =============
 
-**lotus_concur** – Concurrency bug checker
+This page summarizes the bug-finding tools under ``tools/checker/``. For a
+feature-oriented overview and examples, see :doc:`../bug_detection`.
 
-**Location**: ``tools/checker/lotus_concur.cpp``
+lotus_kint – Integer and Array Bug Finder
+-----------------------------------------
+
+Static analyzer focused on integer-related and array bounds bugs.
+
+**Binary**: ``lotus_kint``  
+**Location**: ``tools/checker/lotus_kint.cpp``
+
+**Detects**:
+
+- Integer overflow
+- Division by zero
+- Bad shifts
+- Array out-of-bounds
+- Dead branches
 
 **Usage**:
+
 .. code-block:: bash
 
-   ./build/bin/lotus_concur [options] input.bc
+   ./build/bin/lotus_kint [options] input.ll
 
-**lotus_gvfa** – Global value flow analysis checker
+Common options (see ``TOOLS.md`` and :doc:`../bug_detection`):
 
+- ``-check-all`` – Enable all checkers
+- ``-check-int-overflow`` – Integer overflow
+- ``-check-div-by-zero`` – Division by zero
+- ``-check-bad-shift`` – Invalid shifts
+- ``-check-array-oob`` – Array out-of-bounds
+- ``-check-dead-branch`` – Dead branches
+
+lotus_gvfa – Global Value Flow Analysis
+---------------------------------------
+
+Interprocedural value-flow-based bug detector for memory safety and taint-style
+issues.
+
+**Binary**: ``lotus_gvfa``  
 **Location**: ``tools/checker/lotus_gvfa.cpp``
 
+**Detects**:
+
+- Null pointer dereferences
+- Use-after-free (via value-flow modeling)
+- Taint-style flows (when configured)
+
 **Usage**:
+
 .. code-block:: bash
 
    ./build/bin/lotus_gvfa [options] input.bc
 
-**lotus_kint** – Numerical analysis checker
+Key options:
 
-**Location**: ``tools/checker/lotus_kint.cpp``
+- ``-vuln-type=nullpointer`` – Null pointer analysis (default)
+- ``-vuln-type=taint`` – Taint-style vulnerability detection
+- ``-test-cfl-reachability`` – Use CFL reachability for higher precision
+- ``-dump-stats`` – Print analysis statistics
+- ``-verbose`` – Detailed per-bug output
 
-**Usage**:
-.. code-block:: bash
+See :doc:`../bug_detection` for complete examples.
 
-   ./build/bin/lotus_kint [options] input.bc
+lotus_taint – Taint Analysis
+----------------------------
 
-**lotus_taint** – Taint analysis checker
+IFDS-based interprocedural taint analysis tool.
 
+**Binary**: ``lotus_taint``  
 **Location**: ``tools/checker/lotus_taint.cpp``
 
+**Detects**:
+
+- Flows from untrusted sources (e.g., input) to sensitive sinks (e.g., system calls)
+- Optional reaching-definitions analysis mode
+
 **Usage**:
+
 .. code-block:: bash
 
    ./build/bin/lotus_taint [options] input.bc
+
+Key options:
+
+- ``-analysis=0`` – Taint analysis (default)
+- ``-analysis=1`` – Reaching-definitions analysis
+- ``-sources=<f1,f2,...>`` – Custom source functions
+- ``-sinks=<f1,f2,...>`` – Custom sink functions
+- ``-max-results=<N>`` – Limit number of detailed flows
+- ``-verbose`` – Detailed path information
+
+For end-to-end examples (command injection, SQL injection, etc.), see
+:doc:`../bug_detection`.
+
+lotus_concur – Concurrency Bug Checker
+--------------------------------------
+
+Static analysis for data races and other concurrency issues.
+
+**Binary**: ``lotus_concur``  
+**Location**: ``tools/checker/lotus_concur.cpp``
+
+**Detects**:
+
+- Data races on shared variables
+- Locking discipline violations
+- Potential deadlocks (lock ordering issues)
+
+**Usage**:
+
+.. code-block:: bash
+
+   ./build/bin/lotus_concur [options] input.bc
+
+Typical workflow:
+
+1. Compile multi-threaded C/C++ program to LLVM bitcode
+2. Run ``lotus_concur`` on the bitcode
+3. Inspect reported shared variables and threads involved in races
+
+Detailed concurrency examples and recommended patterns are in
+:doc:`../bug_detection`.
+

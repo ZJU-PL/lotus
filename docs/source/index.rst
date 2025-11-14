@@ -10,6 +10,7 @@ Lotus is a comprehensive program analysis, verification, and optimization framew
    :caption: Overview
 
    major_components
+   architecture
 
 .. toctree::
    :maxdepth: 2
@@ -17,12 +18,16 @@ Lotus is a comprehensive program analysis, verification, and optimization framew
 
    quickstart
    installation
+   tutorials
 
 .. toctree::
    :maxdepth: 2
-   :caption: Tools
+   :caption: User Guide
 
    tools/index
+   bug_detection
+   pdg_query_language
+   troubleshooting
 
 .. toctree::
    :maxdepth: 2
@@ -38,6 +43,13 @@ Lotus is a comprehensive program analysis, verification, and optimization framew
    solvers/index
    transform/index
    utils/index
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer Documentation
+
+   api_reference
+   developer_guide
 
 Features
 --------
