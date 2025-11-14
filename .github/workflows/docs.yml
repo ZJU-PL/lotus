@@ -62,6 +62,10 @@ jobs:
       run: |
         cd docs && make html
 
+    - name: Add .nojekyll file
+      run: |
+        touch ./docs/build/html/.nojekyll
+
     - name: Check for broken links
       run: |
         cd docs && make linkcheck || true
