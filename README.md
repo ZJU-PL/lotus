@@ -21,6 +21,12 @@ If you use Lotus in your research or work, please cite the following:
 }
 ```
 
+## Docs
+
+~~~~
+https://zju-automated-reasoning-group.github.io/lotus
+~~~~
+
 ### Papers that use Lotus
 
 - **ISSTA 2025**: Program Analysis Combining Generalized Bit-Level and Word-Level Abstractions. Guangsheng Fan, Liqian Chen, Banghu Yin, Wenyu Zhang, Peisen Yao, and Ji Wang.  

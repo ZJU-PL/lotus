@@ -74,3 +74,4 @@ jobs:
         publish_dir: ./docs/build/html
         publish_branch: gh-pages
         force_orphan: true
+        enable_jekyll: false
