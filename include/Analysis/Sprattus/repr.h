@@ -16,8 +16,11 @@
 #include <cctype>
 #include <vector>
 
-// automatically enable LLVM support if llvm-c/Core.h was included
-#ifdef LLVM_C_CORE_H
+// Enable LLVM-aware pretty-printing in this integration.
+// The original library used LLVM_C_CORE_H to auto-detect inclusion via the C API,
+// but in Lotus/Sprattus we always have access to the C++ IR headers, so we
+// unconditionally enable the LLVM support here.
+#ifndef ENABLE_REPR_LLVM
 #define ENABLE_REPR_LLVM 1
 #endif
 

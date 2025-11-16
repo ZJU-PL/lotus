@@ -6,8 +6,191 @@
 #include "Analysis/Sprattus/ParamStrategy.h"
 #include "Analysis/Sprattus/domains/Product.h"
 
+#include <map>
+#include <string>
+
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/StringRef.h>
+#include <llvm/Support/raw_ostream.h>
+
 namespace sprattus
 {
+namespace configparser
+{
+
+// Specialization of Config::get for DomainConstructor that understands
+// AbstractDomain and ParamStrategy.* entries from the plain-text .conf files.
+template <>
+DomainConstructor Config::get(const char* module, const char* key,
+                              DomainConstructor default_value) const
+{
+    // Helper to split comma-separated domain lists
+    auto splitCommaSeparated = [](const std::string& s)
+        -> std::vector<std::string> {
+        std::vector<std::string> out;
+        llvm::StringRef sr(s);
+        llvm::SmallVector<llvm::StringRef, 4> pieces;
+        sr.split(pieces, ',');
+        for (auto piece : pieces) {
+            auto trimmed = piece.trim();
+            if (!trimmed.empty())
+                out.push_back(trimmed.str());
+        }
+        return out;
+    };
+
+    // Helper to look up a registered domain by name
+    auto findDomainByName = [](const std::string& name)
+        -> DomainConstructor {
+        const auto& all = DomainConstructor::all();
+        for (const auto& d : all) {
+            if (d.name() == name)
+                return d;
+        }
+        return DomainConstructor();
+    };
+
+    // Very small parser for ParamStrategy strings used in the .conf files.
+    // Supported:
+    //   NonPointerPairs(symmetric=true|false)
+    //   NonPointers
+    //   AllValuePairs(symmetric=true|false)
+    auto parseParamStrategy = [](const std::string& spec) -> ParamStrategy {
+        llvm::StringRef sr(spec);
+        sr = sr.trim();
+
+        auto parseSymmetric = [](llvm::StringRef args) {
+            // Look for "symmetric=true" (ignoring whitespace and case)
+            std::string lower = args.lower();
+            return llvm::StringRef(lower).contains("symmetric=true");
+        };
+
+        if (sr.startswith("NonPointerPairs")) {
+            bool symmetric = false;
+            auto lparen = sr.find('(');
+            auto rparen = sr.rfind(')');
+            if (lparen != llvm::StringRef::npos && rparen != llvm::StringRef::npos &&
+                rparen > lparen + 1) {
+                auto args = sr.slice(lparen + 1, rparen);
+                symmetric = parseSymmetric(args);
+            }
+            return ParamStrategy::NonPointerPairs(symmetric);
+        }
+
+        if (sr.startswith("NonPointers")) {
+            return ParamStrategy::NonPointers();
+        }
+
+        if (sr.startswith("AllValuePairs")) {
+            bool symmetric = false;
+            auto lparen = sr.find('(');
+            auto rparen = sr.rfind(')');
+            if (lparen != llvm::StringRef::npos && rparen != llvm::StringRef::npos &&
+                rparen > lparen + 1) {
+                auto args = sr.slice(lparen + 1, rparen);
+                symmetric = parseSymmetric(args);
+            }
+            return ParamStrategy::AllValuePairs(symmetric);
+        }
+
+        // Fallback: use a very generic strategy
+        return ParamStrategy::AllValues();
+    };
+
+    // Build the key used in the config map
+    std::string fullKey = std::string(module) + "." + std::string(key);
+
+    // Special-case: for domains we also support plain "AbstractDomain = ..."
+    // in addition to "AbstractDomain.Variant = ...".
+    std::string value;
+    auto it = ConfigDict_->find(fullKey);
+    if (it != ConfigDict_->end()) {
+        value = it->second;
+    } else if (std::string(module) == "AbstractDomain") {
+        auto it2 = ConfigDict_->find("AbstractDomain");
+        if (it2 != ConfigDict_->end())
+            value = it2->second;
+    }
+
+    if (value.empty()) {
+        return default_value;
+    }
+
+    // Parse the domain list
+    auto domainNames = splitCommaSeparated(value);
+    if (domainNames.empty())
+        return default_value;
+
+    // Collect per-domain parametrization strategies from the config.
+    // Keys look like:
+    //   ParamStrategy.NumRels.Signed = NonPointerPairs(symmetric=true)
+    //   ParamStrategy.NumRels.Zero   = NonPointers
+    std::map<std::string, ParamStrategy> paramStrategies;
+    for (const auto& kv : *ConfigDict_) {
+        llvm::StringRef k(kv.first);
+        if (!k.startswith("ParamStrategy."))
+            continue;
+
+        llvm::StringRef rest = k.drop_front(strlen("ParamStrategy."));
+        rest = rest.trim(); // e.g. "NumRels.Signed"
+        if (rest.empty())
+            continue;
+
+        ParamStrategy ps = parseParamStrategy(kv.second);
+        auto keyStr = rest.str();
+        auto itPs = paramStrategies.find(keyStr);
+        if (itPs == paramStrategies.end()) {
+            paramStrategies.emplace(keyStr, ps);
+        } else {
+            itPs->second = ps;
+        }
+    }
+
+    std::vector<DomainConstructor> domains;
+    domains.reserve(domainNames.size());
+
+    for (const auto& name : domainNames) {
+        DomainConstructor dom = findDomainByName(name);
+        if (dom.isInvalid()) {
+            llvm::errs() << "Warning: Unknown abstract domain '" << name
+                         << "' in configuration; ignoring.\n";
+            continue;
+        }
+
+        // Apply parametrization if there is a matching ParamStrategy entry.
+        auto itPsExact = paramStrategies.find(name);
+        if (itPsExact != paramStrategies.end()) {
+            dom = dom.parameterize(itPsExact->second);
+        } else {
+            // Also allow prefixes like "NumRels" to match "NumRels.Unsigned"
+            // or "NumRels.Signed".
+            for (const auto& kv : paramStrategies) {
+                llvm::StringRef keyName(kv.first);
+                if (keyName == name)
+                    continue;
+                // If the param-strategy key is a prefix of the domain name,
+                // treat it as applicable.
+                if (name.size() > kv.first.size() &&
+                    llvm::StringRef(name).startswith(keyName) &&
+                    name[keyName.size()] == '.') {
+                    dom = dom.parameterize(kv.second);
+                    break;
+                }
+            }
+        }
+
+        domains.push_back(dom);
+    }
+
+    if (domains.empty())
+        return default_value;
+    if (domains.size() == 1)
+        return domains.front();
+
+    return DomainConstructor::product(domains);
+}
+
+} // namespace configparser
 std::vector<DomainConstructor>* DomainConstructor::KnownDomains_;
 
 DomainConstructor::DomainConstructor(const configparser::Config& config)

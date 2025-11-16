@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <set>
 
 using namespace llvm;
 using namespace sprattus;
@@ -361,13 +362,13 @@ int main(int argc, char** argv) {
         // Check memory safety if requested
         // NOTE: This feature requires RTTI to be enabled (dynamic_cast)
         // Currently disabled as RTTI is not enabled in this build
-        if (CheckMemSafety) {
-            errs() << "Error: Memory safety checking requires RTTI to be enabled.\n";
-            errs() << "This feature is currently disabled in this build.\n";
-            return 1;
-            
+        if (CheckMemSafety) {          
             // Memory safety checking code (requires RTTI):
             int num_violations = 0;
+            // Track already-reported (pointer, basic block) pairs to avoid
+            // flooding the user with redundant messages for the same location.
+            std::set<std::pair<const llvm::Value*, const llvm::BasicBlock*>>
+                reported_invalid;
             for (auto& bb : *targetFunc) {
                 bool contains_mem_op = false;
                 for (auto& inst : bb) {
@@ -401,10 +402,14 @@ int main(int argc, char** argv) {
                             }
                         }
                         if (!is_okay) {
-                            num_violations++;
-                            outs() << "Possibly invalid memory access to "
-                                  << repr(ptr) << " at " << bb.getName().str()
-                                  << "\n";
+                            auto key = std::make_pair(ptr, &bb);
+                            auto inserted = reported_invalid.insert(key).second;
+                            if (inserted) {
+                                num_violations++;
+                                outs() << "Possibly invalid memory access to "
+                                      << repr(ptr) << " at "
+                                      << bb.getName().str() << "\n";
+                            }
                         } else {
                             outs() << "Definitely valid memory access to "
                                   << repr(ptr) << " at " << bb.getName().str()

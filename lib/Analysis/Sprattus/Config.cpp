@@ -1,7 +1,6 @@
 #include "Analysis/Sprattus/Config.h"
 
 #include "Analysis/Sprattus/utils.h"
-#include "Analysis/Sprattus/DomainConstructor.h"
 
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
@@ -131,14 +130,6 @@ int Config::get(const char* module, const char* key, int default_value) const
     } catch (...) {
         return default_value;
     }
-}
-
-template <>
-DomainConstructor Config::get(const char* /*module*/, const char* /*key*/,
-                              DomainConstructor default_value) const
-{
-    // Return default domain constructor
-    return default_value;
 }
 
 void Config::set(const char* module, const char* key, llvm::StringRef value)
