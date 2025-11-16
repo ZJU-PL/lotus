@@ -50,7 +50,8 @@ PreservedAnalyses DAFLInstrumentationPass::run(Module &M,
   auto &C = M.getContext();
   auto *VoidTy = Type::getVoidTy(C);
   auto *Int64Ty = Type::getInt64Ty(C);
-  auto Fn = M.getOrInsertFunction(AFLGoTraceBBDAFL, VoidTy, Int64Ty);
+  FunctionType *FT = FunctionType::get(VoidTy, {Int64Ty}, false);
+  auto Fn = M.getOrInsertFunction(AFLGoTraceBBDAFL, FT);
 
   for (auto &F : M) {
     auto IsFnReachable = false;

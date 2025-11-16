@@ -72,8 +72,9 @@ std::vector<CallInst*> TaintAnalysis::get_taint_source(Function& F) {
         for (auto& arg : F.args()) {
             auto call_name = name.str() + MKINT_TAINT_SRC_SUFFX + std::to_string(arg.getArgNo());
             MKINT_LOG() << "Taint Analysis -> taint src arg -> call inst: " << call_name;
-            auto call_inst = CallInst::Create(F.getParent()->getOrInsertFunction(call_name, arg.getType()),
-                arg.getName(), &*F.getEntryBlock().getFirstInsertionPt());
+            FunctionType *FT = FunctionType::get(arg.getType(), /*isVarArg=*/false);
+            auto Callee = F.getParent()->getOrInsertFunction(call_name, FT);
+            auto call_inst = CallInst::Create(Callee, arg.getName(), &*F.getEntryBlock().getFirstInsertionPt());
             ret.push_back(call_inst);
             arg.replaceAllUsesWith(call_inst);
         }

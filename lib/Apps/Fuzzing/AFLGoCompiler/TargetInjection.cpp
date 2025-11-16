@@ -91,8 +91,9 @@ PreservedAnalyses AFLGoTargetInjectionPass::run(Module &M,
   auto &C = M.getContext();
   auto *VoidTy = Type::getVoidTy(C);
   auto *Int32Ty = Type::getInt32Ty(C);
+  FunctionType *FT = FunctionType::get(VoidTy, {Int32Ty}, false);
   auto AFLGoTraceBBTarget = M.getOrInsertFunction(
-      AFLGoTargetDetectionAnalysis::TargetFunctionName, VoidTy, Int32Ty);
+      AFLGoTargetDetectionAnalysis::TargetFunctionName, FT);
 
   SmallSetVector<Target *, 16> Seen;
 

@@ -14,8 +14,8 @@ PreservedAnalyses FunctionDistancePass::run(Module &M,
   auto &C = M.getContext();
   auto *VoidTy = Type::getVoidTy(C);
   auto *DoubleTy = Type::getDoubleTy(C);
-  auto AFLGoTraceFunDistance =
-      M.getOrInsertFunction(AFLGoTraceFunDistanceName, VoidTy, DoubleTy);
+  FunctionType *FT = FunctionType::get(VoidTy, {DoubleTy}, false);
+  auto AFLGoTraceFunDistance = M.getOrInsertFunction(AFLGoTraceFunDistanceName, FT);
 
   auto FunctionDistances = MAM.getResult<AFLGoFunctionDistanceAnalysis>(M);
   for (auto &Entry : FunctionDistances) {

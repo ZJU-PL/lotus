@@ -52,6 +52,9 @@ target_link_libraries(dyck-aa PRIVATE
   ${LLVM_LINK_COMPONENTS}
 )
 
+# Dynamic alias analysis
+option(BUILD_DYNAA "Build dynamic alias analyses" OFF)
+
 # Dynamic Alias Analysis tools (only built if BUILD_DYNAA is enabled)
 if(BUILD_DYNAA)
   add_subdirectory(dynaa)

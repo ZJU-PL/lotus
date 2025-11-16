@@ -14,8 +14,8 @@ AFLGoDistanceInstrumentationPass::run(Module &M, ModuleAnalysisManager &AM) {
   auto &C = M.getContext();
   auto *VoidTy = Type::getVoidTy(C);
   auto *Int64Ty = Type::getInt64Ty(C);
-  auto AFLGoTraceBBDistance =
-      M.getOrInsertFunction(AFLGoTraceBBDistanceName, VoidTy, Int64Ty);
+  FunctionType *FT = FunctionType::get(VoidTy, {Int64Ty}, false);
+  auto AFLGoTraceBBDistance = M.getOrInsertFunction(AFLGoTraceBBDistanceName, FT);
 
   auto &BBDistanceResult = AM.getResult<AFLGoBasicBlockDistanceAnalysis>(M);
 

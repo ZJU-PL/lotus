@@ -52,13 +52,9 @@ static BasicBlock *createTerminatingBlock(Function *F,
 
   F->getBasicBlockList().push_back(block);
 
+  FunctionType *AssumeTy = FunctionType::get(Type::getVoidTy(Ctx), {Type::getInt32Ty(Ctx)}, false);
   auto assume = M->getOrInsertFunction("__VERIFIER_assume",
-                                       Type::getVoidTy(Ctx),
-                                       Type::getInt32Ty(Ctx)
-#if LLVM_VERSION_MAJOR < 5
-                                       , nullptr
-#endif
-                         );
+                                       AssumeTy);
   // The contents of the block is:
   //  __VERIFIER_assume(0)
   //  unreachable

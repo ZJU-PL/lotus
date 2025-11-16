@@ -40,7 +40,8 @@ FunctionCallee getConvert(Module* M,
   Name.append(typeName(RetTy));
   Name.append(Suffix.str());
 
-  return M->getOrInsertFunction(Name, RetTy, ArgTy);
+  FunctionType *FT = FunctionType::get(RetTy, {ArgTy}, false);
+  return M->getOrInsertFunction(Name, FT);
 }
 
 void replaceConvert(Module* M, Instruction& I, StringRef Prefix, StringRef Suffix, bool Signed) {
@@ -87,7 +88,8 @@ FunctionCallee getUnary(Module* M, StringRef BaseName, Type* T) {
   Name.append(typeName(T));
   Name.append("2");
 
-  return M->getOrInsertFunction(Name, T, T);
+  FunctionType *FT = FunctionType::get(T, {T}, false);
+  return M->getOrInsertFunction(Name, FT);
 }
 
 void replaceUnary(Module* M, Instruction& I, StringRef BaseName) {
@@ -105,7 +107,8 @@ FunctionCallee getBinary(Module* M, StringRef BaseName, Type* T) {
   Name.append(typeName(T));
   Name.append("3");
 
-  return M->getOrInsertFunction(Name, T, T, T);
+  FunctionType *FT = FunctionType::get(T, {T, T}, false);
+  return M->getOrInsertFunction(Name, FT);
 }
 
 void replaceBinary(Module* M, Instruction& I, StringRef BaseName) {
@@ -125,7 +128,8 @@ FunctionCallee getCompare(Module* M, StringRef BaseName, Type* T) {
   Name.append("2");
 
   Type* I32Type = IntegerType::get(M->getContext(), 32);
-  return M->getOrInsertFunction(Name, I32Type, T, T);
+  FunctionType *FT = FunctionType::get(I32Type, {T, T}, false);
+  return M->getOrInsertFunction(Name, FT);
 }
 
 Value* getFCmpReplacement(Module* M, FCmpInst& I) {
