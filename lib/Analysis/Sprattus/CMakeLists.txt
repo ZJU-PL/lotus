@@ -5,6 +5,8 @@
 set(SPRATTUS_SOURCES
     utils.cpp
     Analyzer.cpp
+    UnilateralAnalyzer.cpp
+    BilateralAnalyzer.cpp
     FunctionContext.cpp
     ModuleContext.cpp
     Checks.cpp
