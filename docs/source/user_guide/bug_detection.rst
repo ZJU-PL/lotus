@@ -763,8 +763,8 @@ Use SARIF output with VS Code SARIF viewer extension.
 See Also
 --------
 
-- :doc:`tutorials` - Hands-on examples
+- :doc:`../getting_started/tutorials` - Hands-on examples
 - :doc:`troubleshooting` - Common issues
-- :doc:`tools/checker` - Detailed tool documentation
-- :doc:`api_reference` - Programmatic usage
+- :doc:`../tools/checker` - Detailed tool documentation
+- :doc:`../developer/api_reference` - Programmatic usage
 

@@ -2,7 +2,7 @@ CFL Tools
 =========
 
 This page documents the CFL-related tools under ``tools/cfl/``. For the
-underlying theory and components, see :doc:`../cfl/cfl_reachability`.
+underlying theory and components, see :doc:`../../analysis/cfl_reachability`.
 
 CSR: Context-Sensitive Reachability
 -----------------------------------

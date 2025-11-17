@@ -1,5 +1,5 @@
 PDG Query – Program Dependence Graph Queries
-=============================================
+==============================================
 
 Interactive and batch query engine for the Program Dependence Graph (PDG).
 
@@ -26,6 +26,6 @@ Key features:
 - Security policy checks
 - Subgraph export (DOT)
 
-See :doc:`../pdg_query_language` and ``examples/pdg-queries/`` for a complete
+See :doc:`../../user_guide/pdg_query_language` and ``examples/pdg-queries/`` for a complete
 language reference and examples.
 

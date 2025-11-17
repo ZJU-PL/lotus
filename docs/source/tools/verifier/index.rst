@@ -27,7 +27,7 @@ checking safety properties over LLVM bitcode.
    # Compare analysis results
    ./build/bin/clam-diff baseline.json modified.json
 
-For detailed documentation, see :doc:`verifier_clam`.
+For detailed documentation, see :doc:`clam/index`.
 
 Sprattus – Symbolic Abstraction Framework
 ------------------------------------------
@@ -49,7 +49,7 @@ compositional way.
    # Analyze specific function
    ./build/bin/sprattus --function=foo example.bc
 
-For detailed documentation, see :doc:`verifier_sprattus`.
+For detailed documentation, see :doc:`sprattus/index`.
 
 SeaHorn – Verification Framework
 ---------------------------------
@@ -70,7 +70,7 @@ Horn clauses (CHC), symbolic execution, and abstraction-refinement.
    # CHC-based verification
    ./build/bin/seahorn --horn program.c
 
-For detailed documentation, see :doc:`../apps/seahorn`.
+For detailed documentation, see :doc:`seahorn/index`.
 
 Horn-ICE – CHC Verification with Learning
 -----------------------------------------
@@ -91,5 +91,5 @@ learning capabilities.
    # CHC verification with learning
    ./build/bin/hice-dt input.smt2
 
-For more information, see the Horn-ICE README at ``tools/verifier/horn-ice/README.md``.
+For detailed documentation, see :doc:`horn-ice/index`.
 

@@ -555,7 +555,7 @@ A: Generate DOT files:
 
 **Q: Can I integrate Lotus into my own tool?**
 
-A: Yes! See :doc:`api_reference` for programmatic usage.
+A: Yes! See :doc:`../developer/api_reference` for programmatic usage.
 
 Analysis Questions
 ~~~~~~~~~~~~~~~~~~
@@ -610,7 +610,7 @@ A: Yes:
                       -sinks="my_sink1,my_sink2" \
                       input.bc
 
-Or create custom analysis (see :doc:`developer_guide`).
+Or create custom analysis (see :doc:`../developer/developer_guide`).
 
 CLAM Questions
 ~~~~~~~~~~~~~~
@@ -805,10 +805,10 @@ Documentation
 ~~~~~~~~~~~~~
 
 - :doc:`index` - Main documentation
-- :doc:`architecture` - Framework architecture
-- :doc:`api_reference` - API documentation
-- :doc:`tutorials` - Usage examples
-- :doc:`developer_guide` - Extending Lotus
+- :doc:`../overview/architecture` - Framework architecture
+- :doc:`../developer/api_reference` - API documentation
+- :doc:`../getting_started/tutorials` - Usage examples
+- :doc:`../developer/developer_guide` - Extending Lotus
 
 Support Channels
 ~~~~~~~~~~~~~~~~
@@ -868,12 +868,12 @@ Example bug report:
 Contributing
 ~~~~~~~~~~~~
 
-See :doc:`developer_guide` for how to contribute code, documentation, or tests.
+See :doc:`../developer/developer_guide` for how to contribute code, documentation, or tests.
 
 See Also
 --------
 
-- :doc:`installation` - Installation guide
-- :doc:`quickstart` - Quick start guide  
+- :doc:`../getting_started/installation` - Installation guide
+- :doc:`../getting_started/quickstart` - Quick start guide  
 - :doc:`tools/index` - Tool documentation
 

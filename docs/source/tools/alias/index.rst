@@ -2,7 +2,7 @@ Alias Analysis Tools
 ====================
 
 This page documents the command-line tools under ``tools/alias/``. For the
-underlying algorithms and architecture, see :doc:`../alias/alias_analysis`.
+underlying algorithms and architecture, see :doc:`../../analysis/alias_analysis`.
 
 Andersen (ander-aa)
 -------------------
@@ -39,7 +39,7 @@ sensitivities and solver algorithms.
 
    ./build/bin/aser-aa [options] input.bc
 
-**Key Options** (see also :doc:`../alias/alias_analysis` and ``TOOLS.md``):
+**Key Options** (see also :doc:`../../analysis/alias_analysis` and ``TOOLS.md``):
 
 - **Analysis mode**:
 
@@ -223,3 +223,4 @@ Dynamic checker that validates static alias analyses against runtime behavior.
 - Support research on alias analysis accuracy
 
 See also the detailed description in ``tools/alias/dynaa/README.md``.
+

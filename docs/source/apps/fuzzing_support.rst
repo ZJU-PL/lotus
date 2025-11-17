@@ -12,6 +12,11 @@ Integrates AFLGo, Hawkeye, and DAFL algorithms for directed greybox fuzzing. The
 
 **Components**: Directed fuzzing algorithms, distance analysis, target detection, compiler/linker plugins, IR mutation utilities.
 
+**Algorithms Supported**:
+* **AFLGo (CCS 17)**: Distance-based power scheduling, call graph distances
+* **Hawkeye (CCS 18)**: Function-level analysis, rare branch prioritization
+* **DAFL (USENIX Security 23)**: Data dependency guided, taint integration
+
 Directed Greybox Fuzzing Algorithms
 ------------------------------------
 
@@ -75,8 +80,7 @@ IR Mutation
 
 **IRMutate/** – LLVM IR mutation utilities:
 
-* ``llvm_mutate.cpp`` – IR mutation passes for fuzzing
-* ``mutate.sh`` – Mutation script utilities
+* ``llvm_mutate.cpp`` – LLVM IR mutation passes
 
 Target Detection
 ----------------

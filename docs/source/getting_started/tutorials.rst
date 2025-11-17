@@ -824,7 +824,7 @@ Next Steps
 ----------
 
 - Explore :doc:`tools/index` for detailed tool documentation
-- Read :doc:`architecture` to understand the framework design
-- See :doc:`developer_guide` to extend Lotus with custom analyses
-- Check :doc:`api_reference` for programmatic usage
+- Read :doc:`../overview/architecture` to understand the framework design
+- See :doc:`../developer/developer_guide` to extend Lotus with custom analyses
+- Check :doc:`../developer/api_reference` for programmatic usage
 

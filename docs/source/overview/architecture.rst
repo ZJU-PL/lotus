@@ -475,5 +475,5 @@ Adding New Abstract Domains
 3. Register with CLAM
 4. Add command-line option
 
-See :doc:`developer_guide` for detailed instructions.
+See :doc:`../developer/developer_guide` for detailed instructions.
 

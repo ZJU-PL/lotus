@@ -1,5 +1,5 @@
 OWL – SMT/Model Checking Front-End
-==================================
+===================================
 
 ``owl`` is a lightweight front-end for feeding SMT-LIB2 problems to the
 configured SMT solver (Z3 in the default build).
@@ -22,5 +22,5 @@ CMake configuration.
 
    ./build/bin/owl examples/solver/example.smt2
 
-See :doc:`../solvers/smt_model_checking` for details about the solver stack.
+See :doc:`../../solvers/smt_model_checking` for details about the solver stack.
 

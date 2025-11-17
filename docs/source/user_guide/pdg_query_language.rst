@@ -762,7 +762,7 @@ You can define custom node predicates (requires code changes):
 Extending the Query Language
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-See :doc:`developer_guide` for how to add new query operations.
+See :doc:`../developer/developer_guide` for how to add new query operations.
 
 Integration with Other Tools
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -833,7 +833,7 @@ See Also
 --------
 
 - :doc:`ir/intermediate_representations` - PDG construction details
-- :doc:`tutorials` - PDG usage examples
-- :doc:`api_reference` - Programmatic PDG access
+- :doc:`../getting_started/tutorials` - PDG usage examples
+- :doc:`../developer/api_reference` - Programmatic PDG access
 - ``examples/pdg-queries/`` - More example queries
 

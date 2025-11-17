@@ -2,7 +2,7 @@ Checker Tools
 =============
 
 This page summarizes the bug-finding tools under ``tools/checker/``. For a
-feature-oriented overview and examples, see :doc:`../bug_detection`.
+feature-oriented overview and examples, see :doc:`../../user_guide/bug_detection`.
 
 lotus_kint – Integer and Array Bug Finder
 -----------------------------------------
@@ -26,7 +26,7 @@ Static analyzer focused on integer-related and array bounds bugs.
 
    ./build/bin/lotus_kint [options] input.ll
 
-Common options (see ``TOOLS.md`` and :doc:`../bug_detection`):
+Common options (see ``TOOLS.md`` and :doc:`../../user_guide/bug_detection`):
 
 - ``-check-all`` – Enable all checkers
 - ``-check-int-overflow`` – Integer overflow
@@ -64,7 +64,7 @@ Key options:
 - ``-dump-stats`` – Print analysis statistics
 - ``-verbose`` – Detailed per-bug output
 
-See :doc:`../bug_detection` for complete examples.
+See :doc:`../../user_guide/bug_detection` for complete examples.
 
 lotus_taint – Taint Analysis
 ----------------------------
@@ -95,7 +95,7 @@ Key options:
 - ``-verbose`` – Detailed path information
 
 For end-to-end examples (command injection, SQL injection, etc.), see
-:doc:`../bug_detection`.
+:doc:`../../user_guide/bug_detection`.
 
 lotus_concur – Concurrency Bug Checker
 --------------------------------------
@@ -124,5 +124,5 @@ Typical workflow:
 3. Inspect reported shared variables and threads involved in races
 
 Detailed concurrency examples and recommended patterns are in
-:doc:`../bug_detection`.
+:doc:`../../user_guide/bug_detection`.
 

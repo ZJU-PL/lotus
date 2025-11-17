@@ -29,10 +29,10 @@ Structure
 The SeaHorn framework is organized into the following subdirectories:
 
 * **seahorn/** – Core SeaHorn verification engine
-  * Horn clause generation and solving
+  * Horn clause generation and solving (HornifyFunction, HornifyModule)
   * Symbolic execution engines (BvOpSem, ClpOpSem, UfoOpSem)
-  * Bounded model checking (BMC, PathBMC)
-  * Counterexample generation
+  * Bounded model checking (Bmc, PathBmc)
+  * Counterexample generation (CexHarness, CexExeGenerator)
   * **Smt/** – SMT solver integration (Z3, Yices2)
 
 * **Analysis/** – Analysis passes for verification
@@ -45,8 +45,7 @@ The SeaHorn framework is organized into the following subdirectories:
   * ``CutPointGraph.cc`` – Cut point graph construction
   * ``GateAnalysis.cc`` – Gate analysis for verification
   * ``StaticTaint.cc`` – Static taint analysis
-  * ``TopologicalOrder.cc`` – Topological ordering
-  * ``WeakTopologicalOrder.cc`` – Weak topological ordering
+  * ``TopologicalOrder.cc``, ``WeakTopologicalOrder.cc`` – Ordering analyses
 
 * **Transforms/** – LLVM IR transformations for verification
   * **Instrumentation/** – Property instrumentation
@@ -54,7 +53,6 @@ The SeaHorn framework is organized into the following subdirectories:
     * ``NullCheck.cc`` – Null pointer checking
     * ``SimpleMemoryCheck.cc`` – Memory safety checks
     * ``MixedSemantics.cc`` – Mixed operational semantics
-    * ``GeneratePartialFnPass.cc`` – Partial function generation
   * **Scalar/** – Scalar optimizations
     * ``CutLoops.cc`` – Loop cutting
     * ``LoopPeeler.cc`` – Loop peeling
@@ -73,7 +71,6 @@ The SeaHorn framework is organized into the following subdirectories:
   * ``GitSHA1.cc`` – Version information
   * ``Profiler.cc`` – Profiling support
   * ``Stats.cc`` – Statistics collection
-  * ``SeaDebug.cc``, ``SeaLog.cc`` – Debugging and logging
 
 Components
 ----------
@@ -116,48 +113,4 @@ Generate executable counterexamples:
 
    ./build/bin/seahorn --cex=harness.ll program.c
    clang -m64 -g program.c harness.ll -o counterexample
-
-Horn-ICE CHC Verification
--------------------------
-
-CHC verification with invariant learning.
-
-**Usage**:
-
-.. code-block:: bash
-
-   ./build/bin/chc-verifier <input.smt2>
-   ./build/bin/hice-dt <input.smt2>  # With learning
-
-**CHC Format**: SMT-LIB2 with Horn clauses
-
-Verification Workflow
----------------------
-
-1. Compile: ``clang -c -emit-llvm program.c -o program.bc``
-2. Verify: ``./build/bin/seahorn program.c``
-3. Debug: ``./build/bin/seahorn --cex=harness.ll program.c``
-
-Solver Guide
-------------
-
-SeaHorn relies on several solver backends described in :doc:`../solvers/index`:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 18 32 32
-
-   * - Solver
-     - Strengths
-     - Best For
-   * - Spacer
-     - Fast, robust CHC solving in Z3
-     - General safety verification and reachability
-   * - Horn-ICE
-     - Invariant learning via ICE-style algorithms
-     - Programs requiring complex invariants
-   * - CLAM
-     - Abstract interpretation over numerical domains
-     - Numerical properties and over-approximate invariants
-
 

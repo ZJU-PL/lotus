@@ -8,7 +8,7 @@ you can find deeper usage guides and configuration details.
 Alias Analysis
 --------------
 
-See :doc:`alias_analysis` for detailed instructions and command examples.
+See :doc:`../alias/alias_analysis` for detailed instructions and command examples.
 
 * **AllocAA** – Lightweight alias analysis built from simple heuristics for
   allocation tracking.
@@ -30,7 +30,7 @@ See :doc:`alias_analysis` for detailed instructions and command examples.
 Intermediate Representations
 ----------------------------
 
-See :doc:`intermediate_representations` for builder APIs and code snippets.
+See :doc:`../ir/index` for builder APIs and code snippets.
 
 * **Program Dependence Graph (PDG)** – Captures fine-grained data/control
   dependencies.
@@ -42,7 +42,7 @@ See :doc:`intermediate_representations` for builder APIs and code snippets.
 Constraint Solving
 ------------------
 
-See :doc:`constraint_solving` and :doc:`smt_model_checking` for solver APIs.
+See :doc:`../solvers/index` for solver APIs.
 
 * **SMT Solving** – Z3-backed reasoning under ``lib/Solvers/SMT``.
 * **Binary Decision Diagram (BDD)** – CUDD-based symbolic set operations
@@ -53,7 +53,7 @@ See :doc:`constraint_solving` and :doc:`smt_model_checking` for solver APIs.
 Abstract Interpretation
 -----------------------
 
-See :doc:`numerical_abstract_interpretation` for CLAM and :doc:`symbolic_abstraction`
+See :doc:`../tools/verifier/clam/index` for CLAM and :doc:`../tools/verifier/sprattus/index`
 for higher-level abstractions.
 
 * **CLAM** – Modular AI-driven static analyzer with multiple abstract domains
@@ -64,7 +64,7 @@ for higher-level abstractions.
 Utilities and Reachability
 --------------------------
 
-See :doc:`utilities` and :doc:`cfl_reachability` for extended guides.
+See :doc:`../utils/index` and :doc:`../cfl/index` for extended guides.
 
 * **cJSON** – Lightweight JSON parser (``include/Support/cJSON.h``).
 * **Transform** – LLVM bitcode transformation passes housed in ``lib/Transform``.
