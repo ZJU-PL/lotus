@@ -24,7 +24,9 @@ set(LLVM_LINK_COMPONENTS
 
 
 add_executable(seainspect seainspect.cc)
-set_target_properties(seainspect PROPERTIES LINK_FLAGS "${LINK_FLAGS} -Wl,-search_paths_first")
+if(APPLE)
+  set_target_properties(seainspect PROPERTIES LINK_FLAGS "${LINK_FLAGS} -Wl,-search_paths_first")
+endif()
 target_link_libraries (seainspect PRIVATE ${SEAINSPECT_LIBS})
 llvm_config (seainspect ${LLVM_LINK_COMPONENTS})
 install(TARGETS seainspect RUNTIME DESTINATION bin)

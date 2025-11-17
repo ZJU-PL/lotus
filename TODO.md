@@ -2,6 +2,17 @@
 
 For Summer Research, Final Year Project Topics, etc.
 
+## Frontend
+
+- MLIR: https://github.com/seahorn/mlir2crab
+- Btor2
+- SystemVerilog
+- Java
+- Rust
+- Circom: https://github.com/whbjzzwjxq/ZKAP/tree/master/circom2llvm
+- ...?
+
+
 ## 1. Testing Improvements
 
 - Different OS, LLVM, Z3, Boost, etc.

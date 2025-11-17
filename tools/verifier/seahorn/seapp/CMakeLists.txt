@@ -18,7 +18,9 @@ set(LLVM_LINK_COMPONENTS irreader bitwriter ipo scalaropts instrumentation core
   # XXX not clear why these last two are required
   codegen objcarcopts)
 add_executable(seapp seapp.cc)
-set_target_properties(seapp PROPERTIES LINK_FLAGS "${LINK_FLAGS} -Wl,-search_paths_first")
+if(APPLE)
+  set_target_properties(seapp PROPERTIES LINK_FLAGS "${LINK_FLAGS} -Wl,-search_paths_first")
+endif()
 # Link LLVM components first to establish base dependencies
 llvm_config (seapp ${LLVM_LINK_COMPONENTS})
 # Then link our custom libraries

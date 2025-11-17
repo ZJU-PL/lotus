@@ -1,9 +1,11 @@
-Numerical Abstract Interpretation (CLAM)
-========================================
+CLAM – Numerical Abstract Interpretation
+=========================================
 
 CLAM is a static analysis framework based on abstract interpretation over
 numerical abstract domains. It is designed for inferring invariants and
 checking safety properties over LLVM bitcode.
+
+**Location**: ``tools/verifier/clam/``
 
 Overview
 --------

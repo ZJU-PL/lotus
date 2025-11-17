@@ -1,8 +1,7 @@
-Sprattus: Symbolic Abstraction Framework
-========================================
+Sprattus – Symbolic Abstraction Framework
+==========================================
 
-Location
---------
+**Location**: ``tools/verifier/sprattus/``
 
 **Library**: ``lib/Analysis/Sprattus``
 
@@ -43,9 +42,9 @@ Sprattus is integrated into Lotus. After building Lotus:
 
    cd build
    make SprattusAnalysis    # Build the library
-   make sprattus-analyze    # Build the analysis tool
+   make sprattus            # Build the analysis tool
 
-The tool will be located at ``build/bin/sprattus-analyze``.
+The tool will be located at ``build/bin/sprattus``.
 
 Quick Start
 -----------
@@ -90,16 +89,16 @@ Running the Analyzer
 .. code-block:: shell
 
    # Analyze all functions
-   ./bin/sprattus-analyze example.bc
+   ./bin/sprattus example.bc
 
    # Analyze specific function
-   ./bin/sprattus-analyze --function=foo example.bc
+   ./bin/sprattus --function=foo example.bc
 
    # With verbose output
-   ./bin/sprattus-analyze --function=foo --verbose example.bc
+   ./bin/sprattus --function=foo --verbose example.bc
 
    # List available functions
-   ./bin/sprattus-analyze --list-functions example.bc
+   ./bin/sprattus --list-functions example.bc
 
 Command-Line Options
 --------------------
@@ -219,7 +218,7 @@ Advanced Usage
 Customizing Analysis
 ~~~~~~~~~~~~~~~~~~~~
 
-To customize the analysis, modify ``tools/sprattus/spranalyze.cpp``:
+To customize the analysis, modify ``tools/verifier/sprattus/spranalyze.cpp``:
 
 .. code-block:: cpp
 
@@ -297,7 +296,7 @@ Several test cases are available in ``tests/sprattus/``:
    cd tests/sprattus/assertions
    clang -c -emit-llvm simple_assert.c -o simple_assert.bc
    opt -mem2reg -instnamer simple_assert.bc -o simple_assert_ssa.bc
-   ../../build/bin/sprattus-analyze simple_assert_ssa.bc
+   ../../build/bin/sprattus simple_assert_ssa.bc
 
 Limitations
 -----------

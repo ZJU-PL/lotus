@@ -1,62 +1,91 @@
 Fuzzing Support
 ================
 
-Lotus provides directed greybox fuzzing techniques and profiling infrastructure.
+Lotus provides directed greybox fuzzing techniques and profiling infrastructure for test generation.
 
 Overview
 --------
 
-Integrates AFLGo, Hawkeye, DAFL algorithms with Nisse path profiling.
+Integrates AFLGo, Hawkeye, and DAFL algorithms for directed greybox fuzzing. The implementation is based on libaflgo and provides modular distance analysis and instrumentation.
 
 **Location**: ``lib/Apps/Fuzzing/``
 
-**Components**: Directed fuzzing algorithms, distance analysis, target detection, path profiling.
+**Components**: Directed fuzzing algorithms, distance analysis, target detection, compiler/linker plugins, IR mutation utilities.
 
-Directed Greybox Fuzzing
--------------------------
+Directed Greybox Fuzzing Algorithms
+------------------------------------
 
-**AFLGo (CCS 17)**: Distance-based power scheduling, call graph distances.
+**AFLGo (CCS 17)**: Distance-based power scheduling using call graph distances.
 
-**Hawkeye (CCS 18)**: Function-level analysis, rare branch prioritization.
+**Hawkeye (CCS 18)**: Function-level analysis with rare branch prioritization.
 
-**DAFL (USENIX Security 23)**: Data dependency guided, taint integration.
-
-**Usage**:
-.. code-block:: cpp
-
-   #include <Fuzzing/Analysis/AFLGo.hpp>
-   auto aflgo = std::make_unique<AFLGoDistance>(module);
-   auto distances = aflgo->computeDistances(targetFunctions);
+**DAFL (USENIX Security 23)**: Data dependency guided fuzzing with taint integration.
 
 Distance Analysis
 -----------------
 
-**Basic Block Distance**: AFLGo distance computation.
+The ``Analysis/`` directory provides distance computation for directed fuzzing:
 
-**Function Distance**: Hawkeye function-level analysis.
+* **BasicBlockDistance.cpp** – AFLGo basic block distance analysis
+  * Computes distances from basic blocks to target functions
+  * Uses call graph analysis for distance calculation
 
-**Data Flow Distance**: DAFL with memory tracking.
+* **FunctionDistance.cpp** – Hawkeye function distance analysis
+  * Function-level distance computation
+  * Rare branch prioritization support
 
-Target Detection
-----------------
+* **DAFL.cpp** – DAFL data-flow distance analysis
+  * Data dependency guided distance computation
+  * Memory tracking and taint integration
 
-Automatic target identification and instrumentation.
+* **ExtendedCallGraphAnalysis.cpp** – Enhanced call graph with pointer analysis
+  * Extends standard call graph with pointer analysis information
+  * Improves accuracy of distance calculations
+
+* **TargetDetection.cpp** – Target identification for instrumentation
+  * Automatic target detection from program structure
+  * Supports manual target specification
 
 **Usage**:
 .. code-block:: cpp
 
-   #include <Fuzzing/Analysis/TargetDetection.hpp>
-   auto targets = detector->findTargets(module);
+   #include <Fuzzing/Analysis/BasicBlockDistance.h>
+   auto distance = BasicBlockDistance(module);
+   auto distances = distance.computeDistances(targetFunctions);
 
-Nisse Path Profiling
--------------------
+Compiler and Linker Plugins
+----------------------------
 
-Ball-Larus edge profiling with loop optimization.
+**AFLGoCompiler/** – LLVM compiler plugin for compile-time instrumentation:
 
-**Features**: MST-based instrumentation, affine variable optimization, reduced overhead.
+* ``Plugin.cpp`` – LLVM plugin entry point for AFLGo instrumentation
+* ``TargetInjection.cpp`` – Target injection for directed fuzzing
 
-**Workflow**:
-.. code-block:: bash
+**AFLGoLinker/** – LLVM linker plugin for link-time instrumentation:
 
-   bash nisse_profiler.sh program.c
-   ./program.profiled  # Run instrumented program
+* ``Plugin.cpp`` – Link-time instrumentation plugin
+* ``DAFL.cpp`` – DAFL-specific instrumentation
+* ``DistanceInstrumentation.cpp`` – Distance-based instrumentation
+* ``FunctionDistanceInstrumentation.cpp`` – Function-level distance instrumentation
+* ``DuplicateTargetRemoval.cpp`` – Target deduplication
+* ``TargetInjectionFixup.cpp`` – Target injection fixup
+
+IR Mutation
+-----------
+
+**IRMutate/** – LLVM IR mutation utilities:
+
+* ``llvm_mutate.cpp`` – IR mutation passes for fuzzing
+* ``mutate.sh`` – Mutation script utilities
+
+Target Detection
+----------------
+
+Automatic target identification and instrumentation support.
+
+**Usage**:
+.. code-block:: cpp
+
+   #include <Fuzzing/Analysis/TargetDetection.h>
+   auto detector = TargetDetection(module);
+   auto targets = detector.findTargets();

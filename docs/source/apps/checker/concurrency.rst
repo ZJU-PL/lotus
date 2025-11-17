@@ -6,11 +6,19 @@ Static analysis tool for detecting concurrency bugs: data races, deadlocks, and 
 Overview
 --------
 
-Analyzes LLVM IR to detect concurrency issues in multithreaded programs.
+Analyzes LLVM IR to detect concurrency issues in multithreaded programs using MHP (May Happen in Parallel) analysis and lock set analysis.
 
-**Location**: ``tools/checker/lotus_concur.cpp``
+**Library Location**: ``lib/Apps/Checker/concurrency/``
 
-**Features**: Data race detection, deadlock detection, atomicity violations, happens-before analysis.
+**Tool Location**: ``tools/checker/lotus_concur.cpp``
+
+**Components**:
+* ``ConcurrencyChecker.cpp`` – Main concurrency checker coordinator
+* ``DataRaceChecker.cpp`` – Data race detection using MHP analysis
+* ``DeadlockChecker.cpp`` – Deadlock detection using lock set analysis
+* ``AtomicityChecker.cpp`` – Atomicity violation detection
+
+**Features**: Data race detection, deadlock detection, atomicity violations, happens-before analysis, MHP analysis, lock set analysis.
 
 Usage
 -----

@@ -30,7 +30,9 @@ set(LLVM_LINK_COMPONENTS
   Analysis
   Target)
 add_executable(seahorn seahorn.cpp)
-set_target_properties(seahorn PROPERTIES LINK_FLAGS "${LINK_FLAGS} -Wl,-search_paths_first")
+if(APPLE)
+  set_target_properties(seahorn PROPERTIES LINK_FLAGS "${LINK_FLAGS} -Wl,-search_paths_first")
+endif()
 # Link LLVM components first to establish base dependencies
 llvm_config (seahorn ${LLVM_LINK_COMPONENTS})
 # Then link our custom libraries
