@@ -73,9 +73,23 @@ Supported Platforms
 Publications
 ------------
 
-* **ISSTA 2025**: Program Analysis Combining Generalized Bit-Level and Word-Level Abstractions
-  Guangsheng Fan, Liqian Chen, Banghu Yin, Wenyu Zhang, Peisen Yao, and Ji Wang
-  The ACM SIGSOFT International Symposium on Software Testing and Analysis
+* **ISSTA 2025**: *Program Analysis Combining Generalized Bit-Level and Word-Level Abstractions*  
+  Guangsheng Fan, Liqian Chen, Banghu Yin, Wenyu Zhang, Peisen Yao, and Ji Wang.  
+  *The ACM SIGSOFT International Symposium on Software Testing and Analysis*.
+
+* **S&P 2024**: *Titan: Efficient Multi-target Directed Greybox Fuzzing*  
+  Heqing Huang, Peisen Yao, Hung-Chun Chiu, Yiyuan Guo, and Charles Zhang.
+
+* **USENIX Security 2024**: *Unleashing the Power of Type-Based Call Graph Construction by Using Regional Pointer Information*  
+  Yuandao Cai, Yibo Jin, and Charles Zhang.
+
+* **TSE 2024**: *Fast and Precise Static Null Exception Analysis with Synergistic Preprocessing*  
+  Yi Sun, Chengpeng Wang, Gang Fan, Qingkai Shi, and Xiangyu Zhang.
+
+* **OOPSLA 2022**: *Indexing the Extended Dyck-CFL Reachability for Context-Sensitive Program Analysis*  
+  Qingkai Shi, Yongchao Wang, Peisen Yao, and Charles Zhang.
+
+
 
 Indices and tables
 ==================

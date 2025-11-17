@@ -64,38 +64,59 @@ Invoke CLAM on LLVM bitcode:
 
    ./build/bin/clam [options] <input.bc>
 
-Common options:
+Key Options
+-----------
 
-- **Domains**: ``--crab-dom=int|zones|oct|pk``
-- **Checks**: ``--crab-check=null|bounds|uaf|assert|all``
-- **Interprocedural**: ``--crab-inter``
-- **Output**: ``--crab-out=results.json`` (JSON output)
+* ``--crab-dom=<domain>`` – Select abstract domain (int, zones, oct, pk, etc.)
+* ``--crab-inter`` – Enable interprocedural analysis
+* ``--crab-check=<type>`` – Enable property checking (assert, null, bounds, uaf)
+* ``--crab-print-invariants=true`` – Print computed invariants
+* ``-ojson=<file>`` – Output results in JSON format
+
+Examples
+--------
+
+.. code-block:: bash
+
+   # Interval domain analysis with assertion checking
+   ./build/bin/clam --crab-dom=int --crab-check=assert program.bc
+
+   # Interprocedural analysis with zones domain
+   ./build/bin/clam --crab-inter --crab-dom=zones --crab-check=null program.bc
 
 Preprocessing (clam-pp)
 -----------------------
+
+LLVM bitcode preprocessor for CLAM analysis.
 
 Use ``clam-pp`` to normalize and simplify bitcode before analysis:
 
 .. code-block:: bash
 
-   ./build/bin/clam-pp \
-      --crab-lower-unsigned-icmp \
-      --crab-lower-select \
-      input.bc -o output.bc
+   ./build/bin/clam-pp [options] <input.bc> -o <output.bc>
 
-Useful options:
+Key Options
+-----------
 
-- ``--crab-devirt`` – Devirtualize indirect calls when possible
-- ``--crab-externalize-addr-taken-funcs`` – Externalize address-taken functions
+* ``--crab-lower-unsigned-icmp`` – Lower unsigned comparisons
+* ``--crab-lower-select`` – Lower select instructions
+* ``--crab-devirt`` – Perform devirtualization
+* ``-o <file>`` – Output file
 
 Differential Analysis (clam-diff)
 ---------------------------------
 
-Use ``clam-diff`` to compare analysis results across versions:
+Compare JSON outputs from two CLAM analyses for differential verification.
 
 .. code-block:: bash
 
-   ./build/bin/clam-diff baseline.json modified.json
+   ./build/bin/clam-diff [options] <first.json> <second.json>
+
+Key Options
+-----------
+
+* ``--dom=<domain>`` – Domain for semantic comparison
+* ``--semdiff=<bool>`` – Enable semantic differencing (default: true)
 
 Typical Workflow
 ----------------

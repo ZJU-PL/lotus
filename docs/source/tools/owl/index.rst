@@ -22,5 +22,5 @@ CMake configuration.
 
    ./build/bin/owl examples/solver/example.smt2
 
-See :doc:`../../solvers/smt_model_checking` for details about the solver stack.
+See :doc:`../../solvers/smt` for details about the solver stack.
 

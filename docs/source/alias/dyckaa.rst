@@ -57,6 +57,37 @@ DyckAA is typically run via its dedicated tool:
 
    ./build/bin/dyck-aa -print-alias-set-info example.bc
 
+Available Options
+-----------------
+
+* ``-print-alias-set-info``
+  
+  Prints the evaluation of alias sets and outputs all alias sets and their
+  relations (DOT format).
+
+* ``-count-fp``
+  
+  Counts how many functions a function pointer may point to.
+
+* ``-no-function-type-check``
+  
+  If set, disables function type checking when resolving pointer calls.
+  Otherwise, only FuncTy-compatible functions can be aliased with a function
+  pointer. Two functions f1 and f2 are FuncTy-compatible if:
+  
+  - Both or neither are variadic functions
+  - Both or neither have a non-void return value
+  - They have the same number of parameters
+  - Parameters have the same FuncTy store sizes
+  - There is an explicit cast operation between FuncTy(f1) and FuncTy(f2)
+    (works with ``-with-function-cast-comb`` option)
+
+* ``-dot-dyck-callgraph``
+  
+  Prints a call graph based on the alias analysis. Can be used with
+  ``-with-labels`` option to add labels (call instructions) to the edges in
+  call graphs.
+
 Additional flags enable call graph export, function pointer statistics, and
 DOT visualizations of internal graphs.
 

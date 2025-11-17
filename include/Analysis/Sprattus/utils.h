@@ -5,7 +5,7 @@
 
 #ifndef NDEBUG
 #include <csignal>
-#include "repr.h"
+#include "Analysis/Sprattus/repr.h"
 #endif
 
 #define DEBUG_TYPE "sprattus"

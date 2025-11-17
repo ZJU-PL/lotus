@@ -30,18 +30,41 @@ refined through the analysis pipeline.
 Usage
 =====
 
-Typical command-line usage:
+sea-dsa-dg
+----------
+
+A simple tool for generating memory graphs using Sea-DSA analysis.
 
 .. code-block:: bash
 
-   ./build/bin/sea-dsa-dg --sea-dsa-dot example.bc
-   ./build/bin/seadsa-tool --sea-dsa-dot --outdir results/ example.bc
+   ./build/bin/sea-dsa-dg [options] <input LLVM bitcode file>
 
-Key options include:
+Key options:
 
-* ``--sea-dsa-dot`` – emit DOT visualizations of memory graphs.
-* ``--sea-dsa-callgraph-dot`` – emit call-graph DOT files.
-* ``--outdir <DIR>`` – select output directory for generated artifacts.
+* ``--sea-dsa-dot`` – Generate DOT files visualizing the memory graphs
+
+This tool provides a straightforward interface to the Sea-DSA analysis for
+generating memory graphs that can be visualized using Graphviz.
+
+seadsa-tool
+-----------
+
+Advanced Sea-DSA analysis tool with comprehensive memory graph analysis
+capabilities.
+
+.. code-block:: bash
+
+   ./build/bin/seadsa-tool [options] <input LLVM bitcode file>
+
+Key options:
+
+* ``--sea-dsa-dot`` – Generate DOT files visualizing memory graphs
+* ``--sea-dsa-callgraph-dot`` – Generate DOT files of the complete call graph
+  (currently disabled in this version)
+* ``--outdir <DIR>`` – Specify an output directory for generated files
+
+This tool provides advanced analysis capabilities for understanding memory usage
+patterns, pointer relationships, and potential memory-related issues in programs.
 
 Sea-DSA results are consumed by other analyses (e.g., mod/ref, verification
 tools) to obtain a precise view of heap structure and aliasing.

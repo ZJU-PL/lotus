@@ -39,12 +39,27 @@ The analyses are exposed through the ``fpa`` driver:
    ./build/bin/fpa -analysis-type=3 example.bc      # MLTADF
    ./build/bin/fpa -analysis-type=4 example.bc      # KELP
 
-Useful options:
+Key Options
+-----------
 
-* ``-analysis-type=<N>`` – choose algorithm (1–4).
-* ``-max-type-layer=<N>`` – maximum type depth for MLTA/MLTADF.
-* ``-debug`` – enable debugging output.
-* ``-output-file=<path>`` – path for analysis results.
+* ``-analysis-type=<N>`` – Select analysis algorithm (1=FLTA, 2=MLTA, 3=MLTADF, 4=KELP)
+* ``-max-type-layer=<N>`` – Set maximum type layer for MLTA analysis (default: 10)
+* ``-debug`` – Enable debug output
+* ``-output-file=<path>`` – Output file path for results (use "cout" for standard output)
+
+Examples
+--------
+
+.. code-block:: bash
+
+   # Using FLTA analysis
+   ./build/bin/fpa -analysis-type=1 input.bc
+
+   # Using MLTA analysis with output to file
+   ./build/bin/fpa -analysis-type=2 -output-file=results.txt input.bc
+
+   # Using KELP analysis with debug info
+   ./build/bin/fpa -analysis-type=4 -debug input.bc
 
 FPA results can be consumed directly (for security analyses or refactoring)
 or fed into other components that benefit from precise indirect call

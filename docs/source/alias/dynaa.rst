@@ -18,29 +18,41 @@ Workflow
 
 The typical workflow is:
 
-1. **Instrument** the bitcode:
+1. **Compile** the test program to LLVM IR:
+
+   .. code-block:: bash
+
+      clang -emit-llvm -c example.cpp -o example.bc
+
+2. **Instrument** the code for dynamic analysis:
 
    .. code-block:: bash
 
       ./build/bin/dynaa-instrument example.bc -o example.inst.bc
 
-2. **Compile** and link with the runtime:
+3. **Compile** the instrumented IR and link with the runtime library:
 
    .. code-block:: bash
 
       clang example.inst.bc libRuntime.a -o example.inst
 
-3. **Run** the instrumented binary to produce logs:
+4. **Run** the instrumented program to collect runtime pointer information:
 
    .. code-block:: bash
 
-      LOG_DIR=logs/ ./example.inst
+      LOG_DIR=<log-dir> ./example.inst
 
-4. **Check** a static AA against the logs:
+5. **Check** the collected information against a static alias analysis:
 
    .. code-block:: bash
 
-      ./build/bin/dynaa-check example.bc logs/pts.log basic-aa
+      ./build/bin/dynaa-check example.bc <log-dir>/pts.log basic-aa
+
+To dump the binary log files to a readable format:
+
+.. code-block:: bash
+
+   ./build/bin/dynaa-log-dump <log-dir>/pts.log
 
 Features and Use Cases
 ======================

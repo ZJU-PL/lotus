@@ -1,11 +1,6 @@
 # Sprattus: Static Program Analysis Toolkit Using Satisfiability
 # Integrated into Lotus framework
 
-# Configure utils.h from template
-configure_file("utils.h.in" "${CMAKE_BINARY_DIR}/include/Analysis/Sprattus/utils.h")
-install(FILES "${CMAKE_BINARY_DIR}/include/Analysis/Sprattus/utils.h" 
-        DESTINATION include/Analysis/Sprattus)
-
 # Sprattus library sources
 set(SPRATTUS_SOURCES
     utils.cpp

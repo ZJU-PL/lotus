@@ -4,44 +4,76 @@ Checker Tools
 This page summarizes the bug-finding tools under ``tools/checker/``. For a
 feature-oriented overview and examples, see :doc:`../../user_guide/bug_detection`.
 
-lotus_kint – Integer and Array Bug Finder
+lotus-kint – Integer and Array Bug Finder
 -----------------------------------------
 
-Static analyzer focused on integer-related and array bounds bugs.
+A static bug finder for integer-related and taint-style bugs (originally from
+OSDI 12).
 
-**Binary**: ``lotus_kint``  
+**Binary**: ``lotus-kint``  
 **Location**: ``tools/checker/lotus_kint.cpp``
-
-**Detects**:
-
-- Integer overflow
-- Division by zero
-- Bad shifts
-- Array out-of-bounds
-- Dead branches
 
 **Usage**:
 
 .. code-block:: bash
 
-   ./build/bin/lotus_kint [options] input.ll
+   ./build/bin/lotus-kint [options] <input IR file>
 
-Common options (see ``TOOLS.md`` and :doc:`../../user_guide/bug_detection`):
+**Bug Checker Options**:
 
-- ``-check-all`` – Enable all checkers
-- ``-check-int-overflow`` – Integer overflow
-- ``-check-div-by-zero`` – Division by zero
-- ``-check-bad-shift`` – Invalid shifts
-- ``-check-array-oob`` – Array out-of-bounds
-- ``-check-dead-branch`` – Dead branches
+* ``-check-all`` – Enable all checkers (overrides individual settings)
+* ``-check-int-overflow`` – Enable integer overflow checker
+* ``-check-div-by-zero`` – Enable division by zero checker
+* ``-check-bad-shift`` – Enable bad shift checker
+* ``-check-array-oob`` – Enable array index out of bounds checker
+* ``-check-dead-branch`` – Enable dead branch checker
 
-lotus_gvfa – Global Value Flow Analysis
----------------------------------------
+**Performance Options**:
+
+* ``-function-timeout=<seconds>`` – Maximum time to spend analyzing a single
+  function (0 = no limit, default: 10)
+
+**Logging Options**:
+
+* ``-log-level=<level>`` – Set logging level (debug, info, warning, error, none,
+  default: info)
+* ``-quiet`` – Suppress most log output
+* ``-log-to-stderr`` – Redirect logs to stderr instead of stdout
+* ``-log-to-file=<filename>`` – Redirect logs to the specified file
+
+**Detects**:
+
+The tool detects various integer-related bugs:
+
+1. **Integer overflow**: Detects potential integer overflow in arithmetic operations
+2. **Division by zero**: Detects potential division by zero errors
+3. **Bad shift**: Detects invalid shift amounts
+4. **Array out of bounds**: Detects potential array index out of bounds access
+5. **Dead branch**: Detects impossible branches in conditional statements
+
+**Examples**:
+
+.. code-block:: bash
+
+   # Enable all checkers
+   ./build/bin/lotus-kint -check-all input.ll
+
+   # Enable specific checkers
+   ./build/bin/lotus-kint -check-int-overflow -check-div-by-zero input.ll
+
+   # Set function timeout and log level
+   ./build/bin/lotus-kint -function-timeout=30 -log-level=debug input.ll
+
+   # Quiet mode with output to file
+   ./build/bin/lotus-kint -quiet -log-to-file=analysis.log input.ll
+
+lotus-gvfa – Global Value Flow Analysis
+----------------------------------------
 
 Interprocedural value-flow-based bug detector for memory safety and taint-style
 issues.
 
-**Binary**: ``lotus_gvfa``  
+**Binary**: ``lotus-gvfa``  
 **Location**: ``tools/checker/lotus_gvfa.cpp``
 
 **Detects**:
@@ -54,7 +86,7 @@ issues.
 
 .. code-block:: bash
 
-   ./build/bin/lotus_gvfa [options] input.bc
+   ./build/bin/lotus-gvfa [options] input.bc
 
 Key options:
 
@@ -64,14 +96,15 @@ Key options:
 - ``-dump-stats`` – Print analysis statistics
 - ``-verbose`` – Detailed per-bug output
 
-See :doc:`../../user_guide/bug_detection` for complete examples.
+See :doc:`../../user_guide/bug_detection` and :doc:`../../analysis/gvfa` for
+complete examples.
 
-lotus_taint – Taint Analysis
+lotus-taint – Taint Analysis
 ----------------------------
 
 IFDS-based interprocedural taint analysis tool.
 
-**Binary**: ``lotus_taint``  
+**Binary**: ``lotus-taint``  
 **Location**: ``tools/checker/lotus_taint.cpp``
 
 **Detects**:
@@ -83,7 +116,7 @@ IFDS-based interprocedural taint analysis tool.
 
 .. code-block:: bash
 
-   ./build/bin/lotus_taint [options] input.bc
+   ./build/bin/lotus-taint [options] input.bc
 
 Key options:
 
@@ -95,14 +128,14 @@ Key options:
 - ``-verbose`` – Detailed path information
 
 For end-to-end examples (command injection, SQL injection, etc.), see
-:doc:`../../user_guide/bug_detection`.
+:doc:`../../user_guide/bug_detection` and :doc:`../../dataflow/ifds_ide`.
 
-lotus_concur – Concurrency Bug Checker
---------------------------------------
+lotus-concur – Concurrency Bug Checker
+---------------------------------------
 
 Static analysis for data races and other concurrency issues.
 
-**Binary**: ``lotus_concur``  
+**Binary**: ``lotus-concur``  
 **Location**: ``tools/checker/lotus_concur.cpp``
 
 **Detects**:
@@ -115,12 +148,12 @@ Static analysis for data races and other concurrency issues.
 
 .. code-block:: bash
 
-   ./build/bin/lotus_concur [options] input.bc
+   ./build/bin/lotus-concur [options] input.bc
 
 Typical workflow:
 
 1. Compile multi-threaded C/C++ program to LLVM bitcode
-2. Run ``lotus_concur`` on the bitcode
+2. Run ``lotus-concur`` on the bitcode
 3. Inspect reported shared variables and threads involved in races
 
 Detailed concurrency examples and recommended patterns are in

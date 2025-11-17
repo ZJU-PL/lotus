@@ -106,7 +106,45 @@ At a high level, an IFDS/IDE analysis is instantiated and solved as:
    IFDSSolver<Analysis> solver(problem);
    solver.solve();
 
-For command-line tools that build on IFDS/IDE (e.g., taint, GVFA, KINT),
-see :doc:`Data Flow Analysis tools <data_flow_analysis>`.
+Command-Line Tool: lotus-taint
+==============================
+
+The ``lotus-taint`` tool provides an interprocedural taint analysis using the
+IFDS framework.
+
+.. code-block:: bash
+
+   ./build/bin/lotus-taint [options] <input bitcode file>
+
+Key Options
+-----------
+
+* ``-analysis=<N>`` – Select analysis type (0=taint, 1=reaching-defs, default: 0)
+* ``-sources=<functions>`` – Comma-separated list of custom source functions
+* ``-sinks=<functions>`` – Comma-separated list of custom sink functions
+* ``-show-results`` – Show detailed analysis results (default: true)
+* ``-max-results=<N>`` – Maximum number of detailed results to show (default: 10)
+* ``-verbose`` – Enable verbose output
+
+The tool performs interprocedural taint analysis to detect potential security
+vulnerabilities where tainted data (from sources like user input) flows to
+dangerous sink functions (like system calls, memory operations, etc.).
+
+Examples
+--------
+
+.. code-block:: bash
+
+   # Basic taint analysis
+   ./build/bin/lotus-taint input.bc
+
+   # Custom sources and sinks
+   ./build/bin/lotus-taint -sources="read,scanf" -sinks="system,exec" input.bc
+
+   # Reaching definitions analysis
+   ./build/bin/lotus-taint -analysis=1 input.bc
+
+For other command-line tools that build on IFDS/IDE (e.g., GVFA, KINT),
+see :doc:`../analysis/gvfa` and :doc:`../tools/checker/index`.
 
 

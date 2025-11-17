@@ -2,9 +2,9 @@
 
 # -- Project information -----------------------------------------------------
 
-project = "Arlib"
-copyright = "2024-2025, ZJU Automated Reasoning Group"
-author = "ZJU Automated Reasoning Group"
+project = "Lotus"
+copyright = "2024-2025, ZJU Programming Languages and Automated Reasoning Group"
+author = "ZJU Programming Languages and Automated Reasoning Group"
 
 # The full version, including alpha/beta/rc tags
 release = "v0.3"
