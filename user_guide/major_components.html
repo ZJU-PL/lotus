@@ -1,0 +1,211 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Major Components Overview &mdash; Arlib Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Architecture Overview" href="architecture.html" />
+    <link rel="prev" title="Lotus: Program Analysis Framework" href="../index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Major Components Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#alias-analysis">Alias Analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#intermediate-representations">Intermediate Representations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#constraint-solving">Constraint Solving</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#abstract-interpretation">Abstract Interpretation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#utilities-and-reachability">Utilities and Reachability</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pdg_query_language.html">PDG Query Language</a></li>
+<li class="toctree-l1"><a class="reference internal" href="troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Major Components Overview</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/user_guide/major_components.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="major-components-overview">
+<h1>Major Components Overview<a class="headerlink" href="#major-components-overview" title="Link to this heading"></a></h1>
+<p>This page consolidates the high-level component inventory that used to live
+in <code class="docutils literal notranslate"><span class="pre">README.md</span></code>. Each section links to the dedicated documentation page where
+you can find deeper usage guides and configuration details.</p>
+<section id="alias-analysis">
+<h2>Alias Analysis<a class="headerlink" href="#alias-analysis" title="Link to this heading"></a></h2>
+<p>See <a class="reference internal" href="../alias/alias_analysis.html"><span class="doc">Alias Analysis Components</span></a> for detailed instructions and command examples.</p>
+<ul class="simple">
+<li><p><strong>AllocAA</strong> – Lightweight alias analysis built from simple heuristics for
+allocation tracking.</p></li>
+<li><p><strong>DyckAA</strong> – Unification-based exhaustive alias analysis
+(<code class="docutils literal notranslate"><span class="pre">lib/Alias/DyckAA</span></code>).</p></li>
+<li><p><strong>CFLAA</strong> – Context-Free Language alias analysis taken from LLVM 14.0.6 and
+preserved in Lotus for LLVM 15+ users.</p></li>
+<li><p><strong>Sea-DSA</strong> – Context-sensitive and field-sensitive analysis with
+Sea-DSA (<code class="docutils literal notranslate"><span class="pre">lib/Alias/seadsa</span></code>) requiring Boost.</p></li>
+<li><p><strong>Andersen</strong> – Context-insensitive points-to analysis without on-the-fly
+call-graph construction (<code class="docutils literal notranslate"><span class="pre">lib/Alias/Andersen</span></code>).</p></li>
+<li><p><strong>FPA</strong> – Function Pointer Analysis toolbox (FLTA, MLTA, MLTADF, KELP) under
+<code class="docutils literal notranslate"><span class="pre">lib/Alias/FPA</span></code> for resolving indirect calls.</p></li>
+<li><p><strong>DynAA</strong> – Dynamic checker living in <code class="docutils literal notranslate"><span class="pre">tools/dynaa</span></code> that validates static
+alias analyses against runtime traces.</p></li>
+<li><p><strong>OriginAA</strong> – K-callsite-sensitive, origin-sensitive analysis targeting
+thread-creation semantics.</p></li>
+</ul>
+</section>
+<section id="intermediate-representations">
+<h2>Intermediate Representations<a class="headerlink" href="#intermediate-representations" title="Link to this heading"></a></h2>
+<p>See <a class="reference internal" href="../ir/index.html"><span class="doc">Intermediate Representations</span></a> for builder APIs and code snippets.</p>
+<ul class="simple">
+<li><p><strong>Program Dependence Graph (PDG)</strong> – Captures fine-grained data/control
+dependencies.</p></li>
+<li><p><strong>Static Single Information (SSI)</strong> – Planned extension of SSA to encode
+predicate information.</p></li>
+<li><p><strong>DyckVFG</strong> – Value Flow Graph variant designed for Dyck-based alias
+analyses (<code class="docutils literal notranslate"><span class="pre">lib/Alias/DyckAA/DyckVFG.cpp</span></code>).</p></li>
+</ul>
+</section>
+<section id="constraint-solving">
+<h2>Constraint Solving<a class="headerlink" href="#constraint-solving" title="Link to this heading"></a></h2>
+<p>See <a class="reference internal" href="../solvers/index.html"><span class="doc">Solvers</span></a> for solver APIs.</p>
+<ul class="simple">
+<li><p><strong>SMT Solving</strong> – Z3-backed reasoning under <code class="docutils literal notranslate"><span class="pre">lib/Solvers/SMT</span></code>.</p></li>
+<li><p><strong>Binary Decision Diagram (BDD)</strong> – CUDD-based symbolic set operations
+(<code class="docutils literal notranslate"><span class="pre">lib/Solvers/CUDD</span></code>).</p></li>
+<li><p><strong>Weighted Pushdown Systems (WPDS)</strong> – Interprocedural reachability library
+(<code class="docutils literal notranslate"><span class="pre">lib/Solvers/WPDS</span></code>).</p></li>
+</ul>
+</section>
+<section id="abstract-interpretation">
+<h2>Abstract Interpretation<a class="headerlink" href="#abstract-interpretation" title="Link to this heading"></a></h2>
+<p>See <a class="reference internal" href="../tools/verifier/clam/index.html"><span class="doc">CLAM – Numerical Abstract Interpretation</span></a> for CLAM and <a class="reference internal" href="../tools/verifier/sprattus/index.html"><span class="doc">Sprattus – Symbolic Abstraction Framework</span></a>
+for higher-level abstractions.</p>
+<ul class="simple">
+<li><p><strong>CLAM</strong> – Modular AI-driven static analyzer with multiple abstract domains
+(<code class="docutils literal notranslate"><span class="pre">tools/clam</span></code> and <code class="docutils literal notranslate"><span class="pre">lib/Apps/clam</span></code>).</p></li>
+<li><p><strong>Sprattus</strong> – Configurable abstract interpretation framework with domain
+composition (<code class="docutils literal notranslate"><span class="pre">lib/Analysis/Sprattus</span></code> and <code class="docutils literal notranslate"><span class="pre">include/Analysis/Sprattus</span></code>).</p></li>
+</ul>
+</section>
+<section id="utilities-and-reachability">
+<h2>Utilities and Reachability<a class="headerlink" href="#utilities-and-reachability" title="Link to this heading"></a></h2>
+<p>See <a class="reference internal" href="../utils/index.html"><span class="doc">Utilities</span></a> and <a class="reference internal" href="../cfl/index.html"><span class="doc">Context-Free Language Analysis</span></a> for extended guides.</p>
+<ul class="simple">
+<li><p><strong>cJSON</strong> – Lightweight JSON parser (<code class="docutils literal notranslate"><span class="pre">include/Support/cJSON.h</span></code>).</p></li>
+<li><p><strong>Transform</strong> – LLVM bitcode transformation passes housed in <code class="docutils literal notranslate"><span class="pre">lib/Transform</span></code>.</p></li>
+<li><p><strong>CFL Reachability</strong> – General-purpose CFL reachability utilities and
+tooling (<code class="docutils literal notranslate"><span class="pre">tools/cfl</span></code>) including Graspan and CSR-based engines.</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../index.html" class="btn btn-neutral float-left" title="Lotus: Program Analysis Framework" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="architecture.html" class="btn btn-neutral float-right" title="Architecture Overview" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

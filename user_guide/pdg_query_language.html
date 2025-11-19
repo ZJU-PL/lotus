@@ -1,0 +1,908 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDG Query Language &mdash; Arlib Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Troubleshooting and FAQ" href="troubleshooting.html" />
+    <link rel="prev" title="Bug Detection with Lotus" href="bug_detection.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">PDG Query Language</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#getting-started">Getting Started</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#building-the-pdg">Building the PDG</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#interactive-mode">Interactive Mode</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#single-query-mode">Single Query Mode</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#batch-query-mode">Batch Query Mode</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#policy-check-mode">Policy Check Mode</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#language-reference">Language Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#basic-expressions">Basic Expressions</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#pgm"><code class="docutils literal notranslate"><span class="pre">pgm</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#returnsof-functionname"><code class="docutils literal notranslate"><span class="pre">returnsOf(functionName)</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#formalsof-functionname"><code class="docutils literal notranslate"><span class="pre">formalsOf(functionName)</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#entriesof-functionname"><code class="docutils literal notranslate"><span class="pre">entriesOf(functionName)</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#actualsof-callsite"><code class="docutils literal notranslate"><span class="pre">actualsOf(callSite)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#node-selection">Node Selection</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#selectnodes-nodetype"><code class="docutils literal notranslate"><span class="pre">selectNodes(nodeType)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#edge-selection">Edge Selection</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#selectedges-edgetype"><code class="docutils literal notranslate"><span class="pre">selectEdges(edgeType)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#slicing-operations">Slicing Operations</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#forwardslice-expr"><code class="docutils literal notranslate"><span class="pre">forwardSlice(expr)</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#backwardslice-expr"><code class="docutils literal notranslate"><span class="pre">backwardSlice(expr)</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#between-expr1-expr2"><code class="docutils literal notranslate"><span class="pre">between(expr1,</span> <span class="pre">expr2)</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#shortestpath-expr1-expr2"><code class="docutils literal notranslate"><span class="pre">shortestPath(expr1,</span> <span class="pre">expr2)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#set-operations">Set Operations</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#union-u">Union (<code class="docutils literal notranslate"><span class="pre">U</span></code>)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#intersection-or">Intersection (<code class="docutils literal notranslate"><span class="pre">∩</span></code> or <code class="docutils literal notranslate"><span class="pre">^</span></code>)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#difference">Difference (<code class="docutils literal notranslate"><span class="pre">-</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#variable-binding">Variable Binding</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#let-var-expr1-in-expr2"><code class="docutils literal notranslate"><span class="pre">let</span> <span class="pre">var</span> <span class="pre">=</span> <span class="pre">expr1</span> <span class="pre">in</span> <span class="pre">expr2</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#policy-checks">Policy Checks</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#expr-is-empty"><code class="docutils literal notranslate"><span class="pre">expr</span> <span class="pre">is</span> <span class="pre">empty</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#expr-is-not-empty"><code class="docutils literal notranslate"><span class="pre">expr</span> <span class="pre">is</span> <span class="pre">not</span> <span class="pre">empty</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#security-analysis-functions">Security Analysis Functions</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#noexplicitflows-sources-sinks"><code class="docutils literal notranslate"><span class="pre">noExplicitFlows(sources,</span> <span class="pre">sinks)</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#declassifies-sanitizers-sources-sinks"><code class="docutils literal notranslate"><span class="pre">declassifies(sanitizers,</span> <span class="pre">sources,</span> <span class="pre">sinks)</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#accesscontrolled-checks-operations"><code class="docutils literal notranslate"><span class="pre">accessControlled(checks,</span> <span class="pre">operations)</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#examples">Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#example-1-basic-dependency-query">Example 1: Basic Dependency Query</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-2-information-flow-analysis">Example 2: Information Flow Analysis</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-3-sanitization-verification">Example 3: Sanitization Verification</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-4-access-control-policy">Example 4: Access Control Policy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-5-null-pointer-analysis">Example 5: Null Pointer Analysis</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-6-control-flow-analysis">Example 6: Control Flow Analysis</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-7-parameter-dependency">Example 7: Parameter Dependency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-8-taint-analysis">Example 8: Taint Analysis</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-9-multi-hop-flows">Example 9: Multi-hop Flows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-10-complex-policy">Example 10: Complex Policy</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#query-file-format">Query File Format</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#visualization">Visualization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#generate-dot-file">Generate DOT File</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#convert-to-pdf">Convert to PDF</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#visualize-query-results">Visualize Query Results</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#best-practices">Best Practices</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#limitations">Limitations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#advanced-topics">Advanced Topics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#custom-predicates">Custom Predicates</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#extending-the-query-language">Extending the Query Language</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#integration-with-other-tools">Integration with Other Tools</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#performance-tips">Performance Tips</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#query-returns-empty-set">Query Returns Empty Set</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#query-too-slow">Query Too Slow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#syntax-errors">Syntax Errors</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">PDG Query Language</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/user_guide/pdg_query_language.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="pdg-query-language">
+<h1>PDG Query Language<a class="headerlink" href="#pdg-query-language" title="Link to this heading"></a></h1>
+<p>The Program Dependence Graph (PDG) Query Language allows you to query dependencies, perform slicing, and verify security policies on program dependence graphs.</p>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
+<p>The PDG query language provides a declarative way to:</p>
+<ul class="simple">
+<li><p>Query program dependencies (data and control)</p></li>
+<li><p>Perform forward and backward slicing</p></li>
+<li><p>Check information flow properties</p></li>
+<li><p>Verify security policies</p></li>
+<li><p>Find shortest paths between program elements</p></li>
+<li><p>Analyze parameter dependencies</p></li>
+</ul>
+<p>The language supports:</p>
+<ul class="simple">
+<li><p>Set operations (union, intersection, difference)</p></li>
+<li><p>Node and edge selection</p></li>
+<li><p>Path queries</p></li>
+<li><p>Policy constraints</p></li>
+<li><p>Variable binding</p></li>
+</ul>
+</section>
+<section id="getting-started">
+<h2>Getting Started<a class="headerlink" href="#getting-started" title="Link to this heading"></a></h2>
+<section id="building-the-pdg">
+<h3>Building the PDG<a class="headerlink" href="#building-the-pdg" title="Link to this heading"></a></h3>
+<p>First, compile your program and build the PDG:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Compile to LLVM IR</span>
+clang<span class="w"> </span>-emit-llvm<span class="w"> </span>-g<span class="w"> </span>-c<span class="w"> </span>program.c<span class="w"> </span>-o<span class="w"> </span>program.bc
+
+<span class="c1"># Run PDG query tool</span>
+./build/bin/pdg-query<span class="w"> </span>program.bc
+</pre></div>
+</div>
+</section>
+<section id="interactive-mode">
+<h3>Interactive Mode<a class="headerlink" href="#interactive-mode" title="Link to this heading"></a></h3>
+<p>Use <code class="docutils literal notranslate"><span class="pre">-i</span></code> flag for interactive queries:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/pdg-query<span class="w"> </span>-i<span class="w"> </span>program.bc
+
+PDG&gt;<span class="w"> </span>returnsOf<span class="o">(</span><span class="s2">&quot;main&quot;</span><span class="o">)</span>
+<span class="o">[</span>Results<span class="w"> </span>displayed<span class="o">]</span>
+
+PDG&gt;<span class="w"> </span>forwardSlice<span class="o">(</span>returnsOf<span class="o">(</span><span class="s2">&quot;getInput&quot;</span><span class="o">))</span>
+<span class="o">[</span>Slice<span class="w"> </span>displayed<span class="o">]</span>
+
+PDG&gt;<span class="w"> </span><span class="nb">exit</span>
+</pre></div>
+</div>
+</section>
+<section id="single-query-mode">
+<h3>Single Query Mode<a class="headerlink" href="#single-query-mode" title="Link to this heading"></a></h3>
+<p>Use <code class="docutils literal notranslate"><span class="pre">-q</span></code> flag for single query:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/pdg-query<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;returnsOf(\&quot;main\&quot;)&quot;</span><span class="w"> </span>program.bc
+</pre></div>
+</div>
+</section>
+<section id="batch-query-mode">
+<h3>Batch Query Mode<a class="headerlink" href="#batch-query-mode" title="Link to this heading"></a></h3>
+<p>Use <code class="docutils literal notranslate"><span class="pre">-f</span></code> flag to run queries from file:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/pdg-query<span class="w"> </span>-f<span class="w"> </span>queries.txt<span class="w"> </span>program.bc
+</pre></div>
+</div>
+</section>
+<section id="policy-check-mode">
+<h3>Policy Check Mode<a class="headerlink" href="#policy-check-mode" title="Link to this heading"></a></h3>
+<p>Use <code class="docutils literal notranslate"><span class="pre">-p</span></code> flag for policy verification:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/pdg-query<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;noExplicitFlows(sources, sinks) is empty&quot;</span><span class="w"> </span>program.bc
+</pre></div>
+</div>
+</section>
+</section>
+<section id="language-reference">
+<h2>Language Reference<a class="headerlink" href="#language-reference" title="Link to this heading"></a></h2>
+<section id="basic-expressions">
+<h3>Basic Expressions<a class="headerlink" href="#basic-expressions" title="Link to this heading"></a></h3>
+<section id="pgm">
+<h4><code class="docutils literal notranslate"><span class="pre">pgm</span></code><a class="headerlink" href="#pgm" title="Link to this heading"></a></h4>
+<p>Returns the entire program dependence graph.</p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>pgm
+</pre></div>
+</div>
+<p><strong>Returns</strong>: All nodes in the PDG.</p>
+</section>
+<section id="returnsof-functionname">
+<h4><code class="docutils literal notranslate"><span class="pre">returnsOf(functionName)</span></code><a class="headerlink" href="#returnsof-functionname" title="Link to this heading"></a></h4>
+<p>Returns the return values of a function.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">returnsOf(&quot;functionName&quot;)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>returnsOf(&quot;main&quot;)
+returnsOf(&quot;getInput&quot;)
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Nodes representing return values of the specified function.</p>
+</section>
+<section id="formalsof-functionname">
+<h4><code class="docutils literal notranslate"><span class="pre">formalsOf(functionName)</span></code><a class="headerlink" href="#formalsof-functionname" title="Link to this heading"></a></h4>
+<p>Returns the formal parameters of a function.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">formalsOf(&quot;functionName&quot;)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>formalsOf(&quot;process_data&quot;)
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Nodes representing formal input parameters.</p>
+</section>
+<section id="entriesof-functionname">
+<h4><code class="docutils literal notranslate"><span class="pre">entriesOf(functionName)</span></code><a class="headerlink" href="#entriesof-functionname" title="Link to this heading"></a></h4>
+<p>Returns the entry points of a function.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">entriesOf(&quot;functionName&quot;)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>entriesOf(&quot;main&quot;)
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Function entry nodes.</p>
+</section>
+<section id="actualsof-callsite">
+<h4><code class="docutils literal notranslate"><span class="pre">actualsOf(callSite)</span></code><a class="headerlink" href="#actualsof-callsite" title="Link to this heading"></a></h4>
+<p>Returns actual parameters at a call site.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">actualsOf(callSiteExpr)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>actualsOf(selectNodes(INST_FUNCALL))
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Actual parameter nodes at call sites.</p>
+</section>
+</section>
+<section id="node-selection">
+<h3>Node Selection<a class="headerlink" href="#node-selection" title="Link to this heading"></a></h3>
+<section id="selectnodes-nodetype">
+<h4><code class="docutils literal notranslate"><span class="pre">selectNodes(nodeType)</span></code><a class="headerlink" href="#selectnodes-nodetype" title="Link to this heading"></a></h4>
+<p>Select all nodes of a specific type.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">selectNodes(TYPE)</span></code></p>
+<p><strong>Node Types</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">INST_FUNCALL</span></code> - Function call instructions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">INST_RET</span></code> - Return instructions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">INST_BR</span></code> - Branch instructions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">INST_LOAD</span></code> - Load instructions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">INST_STORE</span></code> - Store instructions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">INST_ALLOCA</span></code> - Alloca instructions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">INST_GEP</span></code> - GetElementPtr instructions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">INST_OTHER</span></code> - Other instructions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">FUNC_ENTRY</span></code> - Function entry points</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PARAM_FORMALIN</span></code> - Formal input parameters</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PARAM_FORMALOUT</span></code> - Formal output parameters (return values)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PARAM_ACTUALIN</span></code> - Actual input parameters</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PARAM_ACTUALOUT</span></code> - Actual output parameters</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">GLOBAL</span></code> - Global variables</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">FUNC</span></code> - Function nodes</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CLASS</span></code> - Class nodes</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>selectNodes(INST_FUNCALL)
+selectNodes(INST_BR)
+</pre></div>
+</div>
+</section>
+</section>
+<section id="edge-selection">
+<h3>Edge Selection<a class="headerlink" href="#edge-selection" title="Link to this heading"></a></h3>
+<section id="selectedges-edgetype">
+<h4><code class="docutils literal notranslate"><span class="pre">selectEdges(edgeType)</span></code><a class="headerlink" href="#selectedges-edgetype" title="Link to this heading"></a></h4>
+<p>Select all edges of a specific type.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">selectEdges(TYPE)</span></code></p>
+<p><strong>Edge Types</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">DATA_DEF_USE</span></code> - Data definition-use edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DATA_RAW</span></code> - Read-after-write edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DATA_READ</span></code> - Read edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DATA_WRITE</span></code> - Write edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DATA_ALIAS</span></code> - Alias edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CONTROL_DEP</span></code> - Control dependency edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CONTROLDEP_BR</span></code> - Control dependency from branches</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CONTROLDEP_ENTRY</span></code> - Control dependency from entry</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PARAMETER_IN</span></code> - Parameter input edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PARAMETER_OUT</span></code> - Parameter output edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PARAMETER_FIELD</span></code> - Field parameter edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CALL_DEP</span></code> - Call dependency edges</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">GLOBAL_DEP</span></code> - Global dependency edges</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>selectEdges(DATA_DEF_USE)
+selectEdges(CONTROL_DEP)
+</pre></div>
+</div>
+</section>
+</section>
+<section id="slicing-operations">
+<h3>Slicing Operations<a class="headerlink" href="#slicing-operations" title="Link to this heading"></a></h3>
+<section id="forwardslice-expr">
+<h4><code class="docutils literal notranslate"><span class="pre">forwardSlice(expr)</span></code><a class="headerlink" href="#forwardslice-expr" title="Link to this heading"></a></h4>
+<p>Compute forward slice from given nodes.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">forwardSlice(nodeExpr)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>forwardSlice(returnsOf(&quot;getInput&quot;))
+</pre></div>
+</div>
+<p><strong>Returns</strong>: All nodes reachable from the input nodes.</p>
+<p><strong>Use Case</strong>: Find what program elements are affected by a source.</p>
+</section>
+<section id="backwardslice-expr">
+<h4><code class="docutils literal notranslate"><span class="pre">backwardSlice(expr)</span></code><a class="headerlink" href="#backwardslice-expr" title="Link to this heading"></a></h4>
+<p>Compute backward slice from given nodes.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">backwardSlice(nodeExpr)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>backwardSlice(formalsOf(&quot;printOutput&quot;))
+</pre></div>
+</div>
+<p><strong>Returns</strong>: All nodes that can reach the input nodes.</p>
+<p><strong>Use Case</strong>: Find what program elements influence a sink.</p>
+</section>
+<section id="between-expr1-expr2">
+<h4><code class="docutils literal notranslate"><span class="pre">between(expr1,</span> <span class="pre">expr2)</span></code><a class="headerlink" href="#between-expr1-expr2" title="Link to this heading"></a></h4>
+<p>Find nodes on paths between two sets of nodes.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">between(sourceExpr,</span> <span class="pre">sinkExpr)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>between(returnsOf(&quot;getInput&quot;), formalsOf(&quot;system&quot;))
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Nodes on any path from sources to sinks.</p>
+<p><strong>Use Case</strong>: Information flow analysis.</p>
+</section>
+<section id="shortestpath-expr1-expr2">
+<h4><code class="docutils literal notranslate"><span class="pre">shortestPath(expr1,</span> <span class="pre">expr2)</span></code><a class="headerlink" href="#shortestpath-expr1-expr2" title="Link to this heading"></a></h4>
+<p>Find shortest path between two sets of nodes.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">shortestPath(sourceExpr,</span> <span class="pre">sinkExpr)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>shortestPath(returnsOf(&quot;malloc&quot;), formalsOf(&quot;free&quot;))
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Nodes on shortest path.</p>
+</section>
+</section>
+<section id="set-operations">
+<h3>Set Operations<a class="headerlink" href="#set-operations" title="Link to this heading"></a></h3>
+<section id="union-u">
+<h4>Union (<code class="docutils literal notranslate"><span class="pre">U</span></code>)<a class="headerlink" href="#union-u" title="Link to this heading"></a></h4>
+<p>Union of two sets.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">expr1</span> <span class="pre">U</span> <span class="pre">expr2</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>returnsOf(&quot;func1&quot;) U returnsOf(&quot;func2&quot;)
+selectNodes(INST_LOAD) U selectNodes(INST_STORE)
+</pre></div>
+</div>
+<p><strong>Returns</strong>: All nodes in either set.</p>
+</section>
+<section id="intersection-or">
+<h4>Intersection (<code class="docutils literal notranslate"><span class="pre">∩</span></code> or <code class="docutils literal notranslate"><span class="pre">^</span></code>)<a class="headerlink" href="#intersection-or" title="Link to this heading"></a></h4>
+<p>Intersection of two sets.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">expr1</span> <span class="pre">∩</span> <span class="pre">expr2</span></code> or <code class="docutils literal notranslate"><span class="pre">expr1</span> <span class="pre">^</span> <span class="pre">expr2</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>forwardSlice(sources) ∩ backwardSlice(sinks)
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Nodes in both sets.</p>
+<p><strong>Use Case</strong>: Find nodes that are both sources and sinks.</p>
+</section>
+<section id="difference">
+<h4>Difference (<code class="docutils literal notranslate"><span class="pre">-</span></code>)<a class="headerlink" href="#difference" title="Link to this heading"></a></h4>
+<p>Set difference.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">expr1</span> <span class="pre">-</span> <span class="pre">expr2</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>pgm - returnsOf(&quot;main&quot;)
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Nodes in first set but not in second.</p>
+</section>
+</section>
+<section id="variable-binding">
+<h3>Variable Binding<a class="headerlink" href="#variable-binding" title="Link to this heading"></a></h3>
+<section id="let-var-expr1-in-expr2">
+<h4><code class="docutils literal notranslate"><span class="pre">let</span> <span class="pre">var</span> <span class="pre">=</span> <span class="pre">expr1</span> <span class="pre">in</span> <span class="pre">expr2</span></code><a class="headerlink" href="#let-var-expr1-in-expr2" title="Link to this heading"></a></h4>
+<p>Bind a subexpression to a variable.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">let</span> <span class="pre">varName</span> <span class="pre">=</span> <span class="pre">expr1</span> <span class="pre">in</span> <span class="pre">expr2</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let sources = returnsOf(&quot;getInput&quot;) in
+let sinks = formalsOf(&quot;system&quot;) in
+between(sources, sinks)
+</pre></div>
+</div>
+<p><strong>Use Case</strong>: Improve readability and reuse subexpressions.</p>
+</section>
+</section>
+<section id="policy-checks">
+<h3>Policy Checks<a class="headerlink" href="#policy-checks" title="Link to this heading"></a></h3>
+<section id="expr-is-empty">
+<h4><code class="docutils literal notranslate"><span class="pre">expr</span> <span class="pre">is</span> <span class="pre">empty</span></code><a class="headerlink" href="#expr-is-empty" title="Link to this heading"></a></h4>
+<p>Check if expression evaluates to empty set.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">expr</span> <span class="pre">is</span> <span class="pre">empty</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>between(secret, public) is empty
+</pre></div>
+</div>
+<p><strong>Returns</strong>: True if set is empty, false otherwise.</p>
+<p><strong>Use Case</strong>: Verify that no path exists (security policy).</p>
+</section>
+<section id="expr-is-not-empty">
+<h4><code class="docutils literal notranslate"><span class="pre">expr</span> <span class="pre">is</span> <span class="pre">not</span> <span class="pre">empty</span></code><a class="headerlink" href="#expr-is-not-empty" title="Link to this heading"></a></h4>
+<p>Check if expression evaluates to non-empty set.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">expr</span> <span class="pre">is</span> <span class="pre">not</span> <span class="pre">empty</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>forwardSlice(input) is not empty
+</pre></div>
+</div>
+<p><strong>Returns</strong>: True if set is non-empty, false otherwise.</p>
+</section>
+</section>
+<section id="security-analysis-functions">
+<h3>Security Analysis Functions<a class="headerlink" href="#security-analysis-functions" title="Link to this heading"></a></h3>
+<section id="noexplicitflows-sources-sinks">
+<h4><code class="docutils literal notranslate"><span class="pre">noExplicitFlows(sources,</span> <span class="pre">sinks)</span></code><a class="headerlink" href="#noexplicitflows-sources-sinks" title="Link to this heading"></a></h4>
+<p>Check for explicit information flows from sources to sinks.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">noExplicitFlows(sourceExpr,</span> <span class="pre">sinkExpr)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>noExplicitFlows(returnsOf(&quot;getSecret&quot;), formalsOf(&quot;printf&quot;))
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Paths from sources to sinks (empty if no flows).</p>
+<p><strong>Use Case</strong>: Confidentiality policy - secrets should not flow to public outputs.</p>
+</section>
+<section id="declassifies-sanitizers-sources-sinks">
+<h4><code class="docutils literal notranslate"><span class="pre">declassifies(sanitizers,</span> <span class="pre">sources,</span> <span class="pre">sinks)</span></code><a class="headerlink" href="#declassifies-sanitizers-sources-sinks" title="Link to this heading"></a></h4>
+<p>Check if all flows from sources to sinks go through sanitizers.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">declassifies(sanitizerExpr,</span> <span class="pre">sourceExpr,</span> <span class="pre">sinkExpr)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let input = returnsOf(&quot;scanf&quot;)
+let sanitize = returnsOf(&quot;sanitize_input&quot;)
+let output = formalsOf(&quot;system&quot;)
+declassifies(sanitize, input, output)
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Flows that bypass sanitizers.</p>
+<p><strong>Use Case</strong>: Verify sanitization policies.</p>
+</section>
+<section id="accesscontrolled-checks-operations">
+<h4><code class="docutils literal notranslate"><span class="pre">accessControlled(checks,</span> <span class="pre">operations)</span></code><a class="headerlink" href="#accesscontrolled-checks-operations" title="Link to this heading"></a></h4>
+<p>Check if sensitive operations are guarded by authorization checks.</p>
+<p><strong>Syntax</strong>: <code class="docutils literal notranslate"><span class="pre">accessControlled(checkExpr,</span> <span class="pre">operationExpr)</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let authChecks = returnsOf(&quot;isAuthorized&quot;)
+let sensitiveOps = selectNodes(INST_FUNCALL)
+accessControlled(authChecks, sensitiveOps)
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Unguarded operations.</p>
+<p><strong>Use Case</strong>: Access control policy verification.</p>
+</section>
+</section>
+</section>
+<section id="examples">
+<h2>Examples<a class="headerlink" href="#examples" title="Link to this heading"></a></h2>
+<section id="example-1-basic-dependency-query">
+<h3>Example 1: Basic Dependency Query<a class="headerlink" href="#example-1-basic-dependency-query" title="Link to this heading"></a></h3>
+<p>Find what depends on user input:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let input = returnsOf(&quot;scanf&quot;)
+forwardSlice(input)
+</pre></div>
+</div>
+</section>
+<section id="example-2-information-flow-analysis">
+<h3>Example 2: Information Flow Analysis<a class="headerlink" href="#example-2-information-flow-analysis" title="Link to this heading"></a></h3>
+<p>Check if secret data flows to network:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let secret = returnsOf(&quot;getPassword&quot;)
+let network = formalsOf(&quot;sendToNetwork&quot;)
+between(secret, network)
+</pre></div>
+</div>
+<p>If result is non-empty, there’s a potential information leak.</p>
+</section>
+<section id="example-3-sanitization-verification">
+<h3>Example 3: Sanitization Verification<a class="headerlink" href="#example-3-sanitization-verification" title="Link to this heading"></a></h3>
+<p>Verify all user inputs are sanitized before use in SQL:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let sources = returnsOf(&quot;getUserInput&quot;)
+let sanitizers = returnsOf(&quot;sanitizeSQL&quot;)
+let sinks = formalsOf(&quot;executeSQL&quot;)
+declassifies(sanitizers, sources, sinks) is empty
+</pre></div>
+</div>
+<p>If result is true, all flows are sanitized.</p>
+</section>
+<section id="example-4-access-control-policy">
+<h3>Example 4: Access Control Policy<a class="headerlink" href="#example-4-access-control-policy" title="Link to this heading"></a></h3>
+<p>Verify sensitive file operations require authorization:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let authCheck = returnsOf(&quot;checkPermission&quot;)
+let fileOps = formalsOf(&quot;openFile&quot;) U formalsOf(&quot;writeFile&quot;)
+accessControlled(authCheck, fileOps) is empty
+</pre></div>
+</div>
+</section>
+<section id="example-5-null-pointer-analysis">
+<h3>Example 5: Null Pointer Analysis<a class="headerlink" href="#example-5-null-pointer-analysis" title="Link to this heading"></a></h3>
+<p>Find potential null dereferences:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let nullReturns = returnsOf(&quot;malloc&quot;) U returnsOf(&quot;fopen&quot;)
+let dereferences = selectNodes(INST_LOAD) U selectNodes(INST_STORE)
+forwardSlice(nullReturns) ∩ dereferences
+</pre></div>
+</div>
+</section>
+<section id="example-6-control-flow-analysis">
+<h3>Example 6: Control Flow Analysis<a class="headerlink" href="#example-6-control-flow-analysis" title="Link to this heading"></a></h3>
+<p>Find which conditionals affect a computation:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let branches = selectNodes(INST_BR)
+let computation = formalsOf(&quot;compute&quot;)
+backwardSlice(computation) ∩ branches
+</pre></div>
+</div>
+</section>
+<section id="example-7-parameter-dependency">
+<h3>Example 7: Parameter Dependency<a class="headerlink" href="#example-7-parameter-dependency" title="Link to this heading"></a></h3>
+<p>Find dependencies between function parameters:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let inputs = formalsOf(&quot;processData&quot;)
+let outputs = returnsOf(&quot;processData&quot;)
+between(inputs, outputs)
+</pre></div>
+</div>
+</section>
+<section id="example-8-taint-analysis">
+<h3>Example 8: Taint Analysis<a class="headerlink" href="#example-8-taint-analysis" title="Link to this heading"></a></h3>
+<p>Complete taint analysis from sources to sinks:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let sources = returnsOf(&quot;read&quot;) U returnsOf(&quot;recv&quot;) U returnsOf(&quot;scanf&quot;)
+let sinks = formalsOf(&quot;system&quot;) U formalsOf(&quot;exec&quot;) U formalsOf(&quot;popen&quot;)
+let flows = between(sources, sinks)
+flows is not empty
+</pre></div>
+</div>
+</section>
+<section id="example-9-multi-hop-flows">
+<h3>Example 9: Multi-hop Flows<a class="headerlink" href="#example-9-multi-hop-flows" title="Link to this heading"></a></h3>
+<p>Find flows that go through an intermediate function:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let source = returnsOf(&quot;getInput&quot;)
+let intermediate = formalsOf(&quot;process&quot;)
+let sink = formalsOf(&quot;output&quot;)
+let path1 = between(source, intermediate)
+let path2 = between(intermediate, sink)
+(path1 ∩ path2) is not empty
+</pre></div>
+</div>
+</section>
+<section id="example-10-complex-policy">
+<h3>Example 10: Complex Policy<a class="headerlink" href="#example-10-complex-policy" title="Link to this heading"></a></h3>
+<p>Verify that:
+1. User input is sanitized
+2. Authorization is checked
+3. Then operation is performed</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>let input = returnsOf(&quot;getUserInput&quot;)
+let sanitize = returnsOf(&quot;sanitize&quot;)
+let authCheck = returnsOf(&quot;authorize&quot;)
+let operation = formalsOf(&quot;performOperation&quot;)
+
+let sanitizedInput = between(input, sanitize)
+let authorizedOp = between(authCheck, operation)
+let sanitizedToOp = between(sanitize, operation)
+
+(sanitizedInput is not empty) and
+(authorizedOp is not empty) and
+(sanitizedToOp is not empty)
+</pre></div>
+</div>
+</section>
+</section>
+<section id="query-file-format">
+<h2>Query File Format<a class="headerlink" href="#query-file-format" title="Link to this heading"></a></h2>
+<p>Batch query files support:</p>
+<ul class="simple">
+<li><p>Comments (<code class="docutils literal notranslate"><span class="pre">#</span></code> prefix)</p></li>
+<li><p>Multiple queries (one per line or separated by <code class="docutils literal notranslate"><span class="pre">;</span></code>)</p></li>
+<li><p>Variable definitions</p></li>
+<li><p>Policy checks</p></li>
+</ul>
+<p>Example query file (<code class="docutils literal notranslate"><span class="pre">security_policy.txt</span></code>):</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span># Security Policy Verification
+
+# Define sources
+let sources = returnsOf(&quot;read&quot;) U returnsOf(&quot;recv&quot;)
+
+# Define sinks
+let sinks = formalsOf(&quot;system&quot;) U formalsOf(&quot;exec&quot;)
+
+# Check 1: No direct flows from sources to sinks
+between(sources, sinks) is empty
+
+# Check 2: All sensitive operations are authorized
+let authChecks = returnsOf(&quot;checkAuth&quot;)
+let sensitiveOps = formalsOf(&quot;deleteFile&quot;) U formalsOf(&quot;changePassword&quot;)
+accessControlled(authChecks, sensitiveOps) is empty
+</pre></div>
+</div>
+<p>Run with:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/pdg-query<span class="w"> </span>-f<span class="w"> </span>security_policy.txt<span class="w"> </span>program.bc
+</pre></div>
+</div>
+</section>
+<section id="visualization">
+<h2>Visualization<a class="headerlink" href="#visualization" title="Link to this heading"></a></h2>
+<section id="generate-dot-file">
+<h3>Generate DOT File<a class="headerlink" href="#generate-dot-file" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/pdg-query<span class="w"> </span>-dump-dot<span class="w"> </span>program.bc
+</pre></div>
+</div>
+<p>This creates <code class="docutils literal notranslate"><span class="pre">pdg.dot</span></code> file.</p>
+</section>
+<section id="convert-to-pdf">
+<h3>Convert to PDF<a class="headerlink" href="#convert-to-pdf" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>dot<span class="w"> </span>-Tpdf<span class="w"> </span>pdg.dot<span class="w"> </span>-o<span class="w"> </span>pdg.pdf
+</pre></div>
+</div>
+</section>
+<section id="visualize-query-results">
+<h3>Visualize Query Results<a class="headerlink" href="#visualize-query-results" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/pdg-query<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;forwardSlice(returnsOf(\&quot;main\&quot;))&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">                       </span>-dump-subgraph<span class="o">=</span>result.dot<span class="w"> </span><span class="se">\</span>
+<span class="w">                       </span>program.bc
+dot<span class="w"> </span>-Tpdf<span class="w"> </span>result.dot<span class="w"> </span>-o<span class="w"> </span>result.pdf
+</pre></div>
+</div>
+</section>
+</section>
+<section id="best-practices">
+<h2>Best Practices<a class="headerlink" href="#best-practices" title="Link to this heading"></a></h2>
+<ol class="arabic">
+<li><p><strong>Use Descriptive Variable Names</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span># Good
+let userInputs = returnsOf(&quot;scanf&quot;)
+
+# Bad
+let x = returnsOf(&quot;scanf&quot;)
+</pre></div>
+</div>
+</li>
+<li><p><strong>Break Complex Queries</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span># Good
+let sources = returnsOf(&quot;getInput&quot;)
+let sanitizers = returnsOf(&quot;sanitize&quot;)
+let sinks = formalsOf(&quot;output&quot;)
+declassifies(sanitizers, sources, sinks)
+
+# Bad
+declassifies(returnsOf(&quot;sanitize&quot;), returnsOf(&quot;getInput&quot;), formalsOf(&quot;output&quot;))
+</pre></div>
+</div>
+</li>
+<li><p><strong>Comment Your Policies</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span># Policy: User input must be sanitized before database queries
+let input = returnsOf(&quot;getUserInput&quot;)
+let sanitize = returnsOf(&quot;sanitizeSQL&quot;)
+let dbQuery = formalsOf(&quot;executeQuery&quot;)
+declassifies(sanitize, input, dbQuery) is empty
+</pre></div>
+</div>
+</li>
+<li><p><strong>Test Incrementally</strong>:</p>
+<p>Start with simple queries and build up:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span># Step 1: Verify sources exist
+returnsOf(&quot;getInput&quot;)
+
+# Step 2: Verify sinks exist
+formalsOf(&quot;system&quot;)
+
+# Step 3: Check flows
+between(returnsOf(&quot;getInput&quot;), formalsOf(&quot;system&quot;))
+</pre></div>
+</div>
+</li>
+<li><p><strong>Use Set Operations Efficiently</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span># Efficient: Compute once
+let allCalls = selectNodes(INST_FUNCALL)
+forwardSlice(allCalls)
+
+# Inefficient: Compute multiple times
+forwardSlice(selectNodes(INST_FUNCALL))
+backwardSlice(selectNodes(INST_FUNCALL))
+</pre></div>
+</div>
+</li>
+</ol>
+</section>
+<section id="limitations">
+<h2>Limitations<a class="headerlink" href="#limitations" title="Link to this heading"></a></h2>
+<ol class="arabic simple">
+<li><p><strong>Imprecision</strong>: PDG construction uses alias analysis which may be imprecise, leading to spurious dependencies.</p></li>
+<li><p><strong>Scalability</strong>: Large programs with complex dependencies may result in very large PDGs.</p></li>
+<li><p><strong>Context Sensitivity</strong>: PDG is context-insensitive by default. Multiple calls to the same function are merged.</p></li>
+<li><p><strong>Array Handling</strong>: Array dependencies may be approximated.</p></li>
+<li><p><strong>Pointer Analysis</strong>: Depends on underlying pointer analysis precision.</p></li>
+</ol>
+</section>
+<section id="advanced-topics">
+<h2>Advanced Topics<a class="headerlink" href="#advanced-topics" title="Link to this heading"></a></h2>
+<section id="custom-predicates">
+<h3>Custom Predicates<a class="headerlink" href="#custom-predicates" title="Link to this heading"></a></h3>
+<p>You can define custom node predicates (requires code changes):</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// In PDG query implementation</span>
+<span class="kt">bool</span><span class="w"> </span><span class="nf">customPredicate</span><span class="p">(</span><span class="n">Node</span><span class="o">*</span><span class="w"> </span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Custom logic</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="cm">/* condition */</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Use in queries</span>
+<span class="n">selectNodes</span><span class="p">(</span><span class="n">CUSTOM_PREDICATE</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="extending-the-query-language">
+<h3>Extending the Query Language<a class="headerlink" href="#extending-the-query-language" title="Link to this heading"></a></h3>
+<p>See <a class="reference internal" href="../developer/developer_guide.html"><span class="doc">Developer Guide</span></a> for how to add new query operations.</p>
+</section>
+<section id="integration-with-other-tools">
+<h3>Integration with Other Tools<a class="headerlink" href="#integration-with-other-tools" title="Link to this heading"></a></h3>
+<p>PDG query results can be exported and used in other analyses:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Export to JSON</span>
+./build/bin/pdg-query<span class="w"> </span>-q<span class="w"> </span><span class="s2">&quot;query&quot;</span><span class="w"> </span>-output-json<span class="o">=</span>results.json<span class="w"> </span>program.bc
+
+<span class="c1"># Process with Python</span>
+python<span class="w"> </span>analyze_results.py<span class="w"> </span>results.json
+</pre></div>
+</div>
+</section>
+</section>
+<section id="performance-tips">
+<h2>Performance Tips<a class="headerlink" href="#performance-tips" title="Link to this heading"></a></h2>
+<ol class="arabic">
+<li><p><strong>Precompute Common Subexpressions</strong>:</p>
+<p>Use <code class="docutils literal notranslate"><span class="pre">let</span></code> to avoid recomputation.</p>
+</li>
+<li><p><strong>Limit Scope</strong>:</p>
+<p>Query specific functions rather than entire program:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span># Instead of
+forwardSlice(pgm)
+
+# Do
+forwardSlice(returnsOf(&quot;specificFunction&quot;))
+</pre></div>
+</div>
+</li>
+<li><p><strong>Use Appropriate Edge Types</strong>:</p>
+<p>Select only relevant edge types to reduce graph size:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>selectEdges(DATA_DEF_USE)  # Only data dependencies
+</pre></div>
+</div>
+</li>
+</ol>
+</section>
+<section id="troubleshooting">
+<h2>Troubleshooting<a class="headerlink" href="#troubleshooting" title="Link to this heading"></a></h2>
+<section id="query-returns-empty-set">
+<h3>Query Returns Empty Set<a class="headerlink" href="#query-returns-empty-set" title="Link to this heading"></a></h3>
+<ol class="arabic simple">
+<li><p>Check function names are correct (case-sensitive)</p></li>
+<li><p>Verify PDG was built successfully</p></li>
+<li><p>Try simpler queries first (<code class="docutils literal notranslate"><span class="pre">returnsOf(&quot;main&quot;)</span></code>)</p></li>
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">-v</span></code> verbose flag</p></li>
+</ol>
+</section>
+<section id="query-too-slow">
+<h3>Query Too Slow<a class="headerlink" href="#query-too-slow" title="Link to this heading"></a></h3>
+<ol class="arabic simple">
+<li><p>Reduce scope of query</p></li>
+<li><p>Use more specific node/edge selection</p></li>
+<li><p>Analyze smaller program subset</p></li>
+</ol>
+</section>
+<section id="syntax-errors">
+<h3>Syntax Errors<a class="headerlink" href="#syntax-errors" title="Link to this heading"></a></h3>
+<ol class="arabic simple">
+<li><p>Check quotes around function names: <code class="docutils literal notranslate"><span class="pre">returnsOf(&quot;func&quot;)</span></code></p></li>
+<li><p>Ensure operators are correct: <code class="docutils literal notranslate"><span class="pre">U</span></code> for union, <code class="docutils literal notranslate"><span class="pre">∩</span></code> for intersection</p></li>
+<li><p>Balance parentheses</p></li>
+</ol>
+</section>
+</section>
+<section id="see-also">
+<h2>See Also<a class="headerlink" href="#see-also" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><span class="xref std std-doc">ir/intermediate_representations</span> - PDG construction details</p></li>
+<li><p><a class="reference internal" href="tutorials.html"><span class="doc">Tutorials and Examples</span></a> - PDG usage examples</p></li>
+<li><p><a class="reference internal" href="../developer/api_reference.html"><span class="doc">API Reference</span></a> - Programmatic PDG access</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/pdg-queries/</span></code> - More example queries</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="bug_detection.html" class="btn btn-neutral float-left" title="Bug Detection with Lotus" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="troubleshooting.html" class="btn btn-neutral float-right" title="Troubleshooting and FAQ" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

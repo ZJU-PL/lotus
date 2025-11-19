@@ -1,0 +1,289 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Checker Framework &mdash; Arlib Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="Concurrency Bug Checker" href="concurrency.html" />
+    <link rel="prev" title="Applications" href="../index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Lotus
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/pdg_query_language.html">PDG Query Language</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tools/index.html">Command-Line Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Applications</a><ul class="current">
+<li class="toctree-l2 current"><a class="reference internal" href="../index.html#components">Components</a><ul class="current">
+<li class="toctree-l3 current"><a class="current reference internal" href="#">Checker Framework</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#overview">Overview</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#components">Components</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#build-targets">Build Targets</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#usage">Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#programmatic-usage">Programmatic Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#bug-types">Bug Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#integration-points">Integration Points</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../clam.html">CLAM – Abstract Interpretation Framework</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../fuzzing_support.html">Fuzzing Support</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../mcp.html">MCP (Model Context Protocol) Server</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../seahorn.html">SeaHorn Verification Framework</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../utils/index.html">Utilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Applications</a></li>
+      <li class="breadcrumb-item active">Checker Framework</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/apps/checker/index.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="checker-framework">
+<h1>Checker Framework<a class="headerlink" href="#checker-framework" title="Link to this heading"></a></h1>
+<p>The Checker Framework provides a unified infrastructure for static bug detection across multiple vulnerability categories. It integrates various analysis techniques to detect security vulnerabilities, concurrency bugs, and numerical errors in LLVM bitcode.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Checker/</span></code></p>
+<p><strong>Headers</strong>: <code class="docutils literal notranslate"><span class="pre">include/Checker/</span></code></p>
+<p><strong>Tools</strong>: <code class="docutils literal notranslate"><span class="pre">tools/checker/</span></code> (command-line frontends)</p>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
+<p>The Checker Framework consists of three main checker categories, all unified through a centralized bug reporting system:</p>
+<ul class="simple">
+<li><p><strong>GVFA Checkers</strong> – Memory safety vulnerabilities using Global Value Flow Analysis</p></li>
+<li><p><strong>KINT Checkers</strong> – Numerical bugs (overflow, division by zero, array bounds) using range analysis and SMT solving</p></li>
+<li><p><strong>Concurrency Checkers</strong> – Thread safety issues (data races, deadlocks, atomicity violations) using MHP and lock set analysis</p></li>
+</ul>
+<p>All checkers report bugs through the centralized <code class="docutils literal notranslate"><span class="pre">BugReportMgr</span></code> system, enabling unified output formats (JSON, SARIF) and consistent bug reporting across all analysis tools.</p>
+</section>
+<section id="components">
+<h2>Components<a class="headerlink" href="#components" title="Link to this heading"></a></h2>
+<p><strong>Concurrency Checkers</strong> (<code class="docutils literal notranslate"><span class="pre">lib/Checker/Concurrency/</span></code>):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">ConcurrencyChecker.cpp</span></code> – Main concurrency checker coordinator</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DataRaceChecker.cpp</span></code> – Data race detection using MHP (May Happen in Parallel) analysis</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DeadlockChecker.cpp</span></code> – Deadlock detection using lock set analysis</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">AtomicityChecker.cpp</span></code> – Atomicity violation detection</p></li>
+</ul>
+<p><strong>GVFA Vulnerability Checkers</strong> (<code class="docutils literal notranslate"><span class="pre">lib/Checker/GVFA/</span></code>):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">NullPointerChecker.cpp</span></code> – Null pointer dereference detection (CWE-476, CWE-690)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">UseAfterFreeChecker.cpp</span></code> – Use-after-free detection (CWE-416)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">UseOfUninitializedVariableChecker.cpp</span></code> – Uninitialized variable use detection (CWE-457)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">FreeOfNonHeapMemoryChecker.cpp</span></code> – Invalid free() detection (CWE-590)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">InvalidUseOfStackAddressChecker.cpp</span></code> – Stack address misuse detection (CWE-562)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">GVFAVulnerabilityChecker.h</span></code> – Base interface for all GVFA checkers</p></li>
+</ul>
+<p><strong>KINT Numerical Checkers</strong> (<code class="docutils literal notranslate"><span class="pre">lib/Checker/KINT/</span></code>):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">MKintPass.cpp</span></code> – Main KINT pass for integer overflow, division by zero, array bounds checking</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">MKintPass_bugreport.cpp</span></code> – Bug report generation for KINT</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">RangeAnalysis.cpp</span></code> – Range analysis for variables using abstract interpretation</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">KINTTaintAnalysis.cpp</span></code> – Taint analysis integration for tracking untrusted data</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">BugDetection.cpp</span></code> – Bug detection and reporting logic</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Options.cpp</span></code> – Command-line option parsing</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Log.cpp</span></code> – Logging utilities</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Utils.cpp</span></code> – Utility functions</p></li>
+</ul>
+<p><strong>Report System</strong> (<code class="docutils literal notranslate"><span class="pre">lib/Checker/Report/</span></code>):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">BugReport.cpp</span></code> – Bug report data structures with source location information</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">BugReportMgr.cpp</span></code> – Centralized bug report management (singleton pattern)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">BugTypes.cpp</span></code> – Bug type definitions, classifications, and CWE mappings</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SARIF.cpp</span></code> – SARIF format output support</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DebugInfoAnalysis.cpp</span></code> – Debug information extraction from LLVM metadata</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ReportOptions.cpp</span></code> – Report configuration options (JSON, SARIF output)</p></li>
+</ul>
+</section>
+<section id="build-targets">
+<h2>Build Targets<a class="headerlink" href="#build-targets" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">GVFAChecker</span></code> – GVFA vulnerability checker library</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lotus-gvfa</span></code> – Global value flow analysis tool (<code class="docutils literal notranslate"><span class="pre">tools/checker/lotus_gvfa.cpp</span></code>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lotus-kint</span></code> – KINT numerical bug detection tool (<code class="docutils literal notranslate"><span class="pre">tools/checker/lotus_kint.cpp</span></code>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lotus-concur</span></code> – Concurrency checker tool (<code class="docutils literal notranslate"><span class="pre">tools/checker/lotus_concur.cpp</span></code>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lotus-taint</span></code> – Taint analysis tool (<code class="docutils literal notranslate"><span class="pre">tools/checker/lotus_taint.cpp</span></code>)</p></li>
+</ul>
+</section>
+<section id="usage">
+<h2>Usage<a class="headerlink" href="#usage" title="Link to this heading"></a></h2>
+<p><strong>GVFA Tool</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>nullpointer<span class="w"> </span>input.bc
+./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>useafterfree<span class="w"> </span>--ctx<span class="w"> </span>input.bc
+./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>nullpointer<span class="w"> </span>--use-npa<span class="w"> </span>--json-output<span class="o">=</span>report.json<span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p><strong>KINT Tool</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-kint<span class="w"> </span>--check-all<span class="o">=</span><span class="nb">true</span><span class="w"> </span>input.bc
+./build/bin/lotus-kint<span class="w"> </span>--check-int-overflow<span class="o">=</span><span class="nb">true</span><span class="w"> </span>--check-div-by-zero<span class="o">=</span><span class="nb">true</span><span class="w"> </span>input.bc
+./build/bin/lotus-kint<span class="w"> </span>--report-json<span class="o">=</span>report.json<span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p><strong>Concurrency Tool</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-concur<span class="w"> </span>--check-data-races<span class="w"> </span>input.bc
+./build/bin/lotus-concur<span class="w"> </span>--check-deadlocks<span class="w"> </span>--check-atomicity<span class="w"> </span>input.bc
+./build/bin/lotus-concur<span class="w"> </span>--report-json<span class="o">=</span>report.json<span class="w"> </span>input.bc
+</pre></div>
+</div>
+</section>
+<section id="programmatic-usage">
+<h2>Programmatic Usage<a class="headerlink" href="#programmatic-usage" title="Link to this heading"></a></h2>
+<p>All checkers integrate with the centralized <code class="docutils literal notranslate"><span class="pre">BugReportMgr</span></code>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Checker/Report/BugReportMgr.h&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Checker/GVFA/NullPointerChecker.h&quot;</span>
+
+<span class="c1">// Create checker</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">checker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">make_unique</span><span class="o">&lt;</span><span class="n">NullPointerChecker</span><span class="o">&gt;</span><span class="p">();</span>
+
+<span class="c1">// Run analysis (automatically reports to BugReportMgr)</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">vulnCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">checker</span><span class="o">-&gt;</span><span class="n">detectAndReport</span><span class="p">(</span><span class="n">M</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">GVFA</span><span class="p">,</span><span class="w"> </span><span class="nb">false</span><span class="p">,</span><span class="w"> </span><span class="nb">false</span><span class="p">);</span>
+
+<span class="c1">// Access centralized reports</span>
+<span class="n">BugReportMgr</span><span class="o">&amp;</span><span class="w"> </span><span class="n">mgr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BugReportMgr</span><span class="o">::</span><span class="n">get_instance</span><span class="p">();</span>
+<span class="n">mgr</span><span class="p">.</span><span class="n">print_summary</span><span class="p">(</span><span class="n">outs</span><span class="p">());</span>
+<span class="n">mgr</span><span class="p">.</span><span class="n">generate_json_report</span><span class="p">(</span><span class="n">jsonFile</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<section id="bug-types">
+<h2>Bug Types<a class="headerlink" href="#bug-types" title="Link to this heading"></a></h2>
+<p>The framework detects the following bug categories:</p>
+<ul class="simple">
+<li><p><strong>Memory Safety</strong>: Null pointer dereference, use-after-free, uninitialized variables, invalid free, stack address misuse</p></li>
+<li><p><strong>Numerical Errors</strong>: Integer overflow, division by zero, bad shift, array out-of-bounds, dead branches</p></li>
+<li><p><strong>Concurrency</strong>: Data races, deadlocks, atomicity violations</p></li>
+</ul>
+<p>All bug types are classified by importance (LOW, MEDIUM, HIGH) and category (SECURITY, ERROR, WARNING, PERFORMANCE) with CWE mappings.</p>
+</section>
+<section id="integration-points">
+<h2>Integration Points<a class="headerlink" href="#integration-points" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>Global Value Flow Analysis</strong>: Used by GVFA checkers for source-sink reachability</p></li>
+<li><p><strong>Dyck Alias Analysis</strong>: Pointer analysis for GVFA</p></li>
+<li><p><strong>Null Check Analysis</strong>: Optional precision improvement for null pointer checker</p></li>
+<li><p><strong>Z3 SMT Solver</strong>: Used by KINT for path-sensitive verification</p></li>
+<li><p><strong>LLVM Pass Infrastructure</strong>: Standard pass registration for integration</p></li>
+</ul>
+</section>
+<section id="see-also">
+<h2>See Also<a class="headerlink" href="#see-also" title="Link to this heading"></a></h2>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="concurrency.html">Concurrency Bug Checker</a></li>
+<li class="toctree-l1"><a class="reference internal" href="gvfa.html">GVFA Vulnerability Checkers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="kint.html">KINT Numerical Bug Checker</a></li>
+</ul>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../index.html" class="btn btn-neutral float-left" title="Applications" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="concurrency.html" class="btn btn-neutral float-right" title="Concurrency Bug Checker" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

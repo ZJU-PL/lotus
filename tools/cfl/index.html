@@ -1,0 +1,299 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFL Tools &mdash; Arlib Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="Checker Tools" href="../checker/index.html" />
+    <link rel="prev" title="Alias Analysis Tools" href="../alias/index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Lotus
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/pdg_query_language.html">PDG Query Language</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Command-Line Tools</a><ul class="current">
+<li class="toctree-l2 current"><a class="reference internal" href="../index.html#tools-by-subdirectory">Tools by Subdirectory</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="../alias/index.html">Alias Analysis Tools</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">CFL Tools</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#csr-context-sensitive-reachability">CSR: Context-Sensitive Reachability</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#graspan-disk-based-parallel-graph-system">Graspan: Disk-Based Parallel Graph System</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#pocr-partially-ordered-cfl-reachability">POCR: Partially-Ordered CFL Reachability</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#when-to-use-csr-vs-graspan-vs-pocr"><strong>When to Use CSR vs. Graspan vs. POCR</strong></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../checker/index.html">Checker Tools</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../mcp/index.html">MCP – MCP Server</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../owl/index.html">OWL – SMT/Model Checking Front-End</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../pdg-query/index.html">PDG Query – Program Dependence Graph Queries</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../verifier/index.html">Verifier Tools</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../utils/index.html">Utilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Command-Line Tools</a></li>
+      <li class="breadcrumb-item active">CFL Tools</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/tools/cfl/index.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="cfl-tools">
+<h1>CFL Tools<a class="headerlink" href="#cfl-tools" title="Link to this heading"></a></h1>
+<p>This page documents the CFL-related tools under <code class="docutils literal notranslate"><span class="pre">tools/cfl/</span></code>. For the
+underlying theory and components, see <span class="xref std std-doc">../../analysis/cfl_reachability</span>.</p>
+<section id="csr-context-sensitive-reachability">
+<h2>CSR: Context-Sensitive Reachability<a class="headerlink" href="#csr-context-sensitive-reachability" title="Link to this heading"></a></h2>
+<p>Indexing-based context-sensitive reachability engine for large graphs.</p>
+<p><strong>Binary</strong>: <code class="docutils literal notranslate"><span class="pre">csr</span></code>
+<strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">tools/cfl/csr/csr.cpp</span></code></p>
+<p>CSR operates on graph files (not LLVM bitcode directly) and answers reachability
+queries with different indexing strategies (GRAIL, PathTree, or combined).</p>
+<p><strong>Basic Usage</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/csr<span class="w"> </span><span class="o">[</span>options<span class="o">]</span><span class="w"> </span>graph_file
+</pre></div>
+</div>
+<p><strong>Common Options</strong> (see <code class="docutils literal notranslate"><span class="pre">tools/cfl/csr/README.md</span></code> for full list):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-m</span> <span class="pre">&lt;method&gt;</span></code> – Indexing method:</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">pathtree</span></code> – PathTree indexing</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">grail</span></code> – GRAIL labeling</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pathtree+grail</span></code> – Combined approach</p></li>
+</ul>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-t</span></code> – Evaluate transitive closure</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-r</span></code> – Evaluate tabulation algorithm</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-p</span></code> – Evaluate parallel tabulation algorithm</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-j</span> <span class="pre">&lt;N&gt;</span></code> – Number of threads for parallel tabulation (0 = auto)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-g</span> <span class="pre">&lt;file&gt;</span></code> – Generate queries and save to file</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-q</span> <span class="pre">&lt;file&gt;</span></code> – Load queries from file</p></li>
+</ul>
+<p><strong>Examples</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># GRAIL-based reachability</span>
+./build/bin/csr<span class="w"> </span>input.graph
+
+<span class="c1"># PathTree indexing</span>
+./build/bin/csr<span class="w"> </span>-m<span class="w"> </span>pathtree<span class="w"> </span>input.graph
+
+<span class="c1"># Parallel tabulation with 4 threads</span>
+./build/bin/csr<span class="w"> </span>-p<span class="w"> </span>-j<span class="w"> </span><span class="m">4</span><span class="w"> </span>input.graph
+</pre></div>
+</div>
+</section>
+<section id="graspan-disk-based-parallel-graph-system">
+<h2>Graspan: Disk-Based Parallel Graph System<a class="headerlink" href="#graspan-disk-based-parallel-graph-system" title="Link to this heading"></a></h2>
+<p>Graspan is a disk-based parallel graph engine for computing dynamic transitive
+closure on large program graphs. Lotus bundles the C++ implementation.</p>
+<p><strong>Binary</strong>: <code class="docutils literal notranslate"><span class="pre">graspan</span></code>
+<strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">tools/cfl/graspan/graspan.cpp</span></code></p>
+<p>Graspan operates on edge-list graphs and grammar files describing CFL rules.</p>
+<p><strong>Input Format</strong>:</p>
+<ul>
+<li><p><strong>Graph file</strong> (edge list):</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>&lt;src&gt; &lt;dst&gt; &lt;label&gt;
+</pre></div>
+</div>
+</li>
+<li><p><strong>Grammar file</strong> (CNF rules):</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>A B C   # A → B C
+</pre></div>
+</div>
+</li>
+</ul>
+<p><strong>Basic Usage</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/graspan<span class="w"> </span>&lt;graph_file&gt;<span class="w"> </span>&lt;grammar_file&gt;<span class="w"> </span>&lt;num_partitions&gt;<span class="w"> </span>&lt;mem_gb&gt;<span class="w"> </span>&lt;num_threads&gt;
+</pre></div>
+</div>
+<p>See <code class="docutils literal notranslate"><span class="pre">tools/cfl/graspan/README.md</span></code> and the original Graspan documentation for
+details on configuration and performance tuning.</p>
+</section>
+<section id="pocr-partially-ordered-cfl-reachability">
+<h2>POCR: Partially-Ordered CFL Reachability<a class="headerlink" href="#pocr-partially-ordered-cfl-reachability" title="Link to this heading"></a></h2>
+<p>POCR provides a family of tools for partially-ordered CFL reachability-based
+analyses. The main driver is split into several frontends in <code class="docutils literal notranslate"><span class="pre">tools/cfl/pocr/</span></code>.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">tools/cfl/pocr/</span></code></p>
+<section id="sub-tools">
+<h3>Sub-Tools<a class="headerlink" href="#sub-tools" title="Link to this heading"></a></h3>
+<p>Each sub-tool has its own <code class="docutils literal notranslate"><span class="pre">main</span></code> and focuses on a specific analysis:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">pocr-aa</span></code> (<code class="docutils literal notranslate"><span class="pre">tools/cfl/pocr/AA/aa.cpp</span></code>)</p>
+<ul>
+<li><p>CFL-based alias/points-to analysis on CFL-encoded graphs.</p></li>
+</ul>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pocr-cfl</span></code> (<code class="docutils literal notranslate"><span class="pre">tools/cfl/pocr/CFL/cfl.cpp</span></code>)</p>
+<ul>
+<li><p>Generic CFL reachability solver over graph + grammar inputs.</p></li>
+</ul>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pocr-fp</span></code> (<code class="docutils literal notranslate"><span class="pre">tools/cfl/pocr/FoldablePattern/fp.cpp</span></code>)</p>
+<ul>
+<li><p>Function-pointer-oriented analysis via CFL reachability on call graphs.</p></li>
+</ul>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pocr-vf</span></code> (<code class="docutils literal notranslate"><span class="pre">tools/cfl/pocr/VFA/vf.cpp</span></code>)</p>
+<ul>
+<li><p>Value-flow analysis based on CFL reachability.</p></li>
+</ul>
+</li>
+</ul>
+<p><strong>Typical Usage Pattern</strong>:</p>
+<ol class="arabic">
+<li><p>Build a graph and grammar representing the analysis problem</p></li>
+<li><p>Run the corresponding POCR tool:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Alias analysis variant</span>
+./build/bin/pocr-aa<span class="w"> </span>&lt;graph&gt;<span class="w"> </span>&lt;grammar&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+
+<span class="c1"># Generic CFL queries</span>
+./build/bin/pocr-cfl<span class="w"> </span>&lt;graph&gt;<span class="w"> </span>&lt;grammar&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+
+<span class="c1"># Function pointer analysis</span>
+./build/bin/pocr-fp<span class="w"> </span>&lt;graph&gt;<span class="w"> </span>&lt;grammar&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+
+<span class="c1"># Value flow analysis</span>
+./build/bin/pocr-vf<span class="w"> </span>&lt;graph&gt;<span class="w"> </span>&lt;grammar&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</li>
+</ol>
+</section>
+</section>
+<section id="when-to-use-csr-vs-graspan-vs-pocr">
+<h2><strong>When to Use CSR vs. Graspan vs. POCR</strong><a class="headerlink" href="#when-to-use-csr-vs-graspan-vs-pocr" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>CSR</strong>:</p>
+<ul>
+<li><p>When you already have a graph representation and want fast reachability
+queries with indexing.</p></li>
+<li><p>Good for experimentation with different indexing schemes and parallel
+tabulation.</p></li>
+</ul>
+</li>
+<li><p><strong>Graspan</strong>:</p>
+<ul>
+<li><p>When your graphs and grammars are very large and disk-based processing is
+required.</p></li>
+<li><p>Focused on dynamic transitive closure for program analyses at scale.</p></li>
+</ul>
+</li>
+<li><p><strong>POCR</strong>:</p>
+<ul>
+<li><p>When you want to encode alias, value-flow, or function-pointer problems as
+CFL reachability and experiment with partially-ordered variants.</p></li>
+</ul>
+</li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../alias/index.html" class="btn btn-neutral float-left" title="Alias Analysis Tools" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../checker/index.html" class="btn btn-neutral float-right" title="Checker Tools" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

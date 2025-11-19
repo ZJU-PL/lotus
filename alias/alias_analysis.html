@@ -1,0 +1,573 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Alias Analysis Components &mdash; Arlib Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="AllocAA — Allocation-Based AA" href="allocaa.html" />
+    <link rel="prev" title="Alias Analysis" href="index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/pdg_query_language.html">PDG Query Language</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Alias Analysis</a><ul class="current">
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Alias Analysis Components</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#analysis-selection-guide">Analysis Selection Guide</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#comparison-table">Comparison Table</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#allocaa">AllocAA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#aserpta">AserPTA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#dyckaa">DyckAA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#cflaa">CFLAA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#sea-dsa">Sea-DSA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#andersen">Andersen</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#fpa-function-pointer-analysis">FPA (Function Pointer Analysis)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#sraa">SRAA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#originaa">OriginAA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#dynaa">DynAA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#aliasanalysiswrapper">AliasAnalysisWrapper</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#aserpta-advanced-pointer-analysis">AserPTA (Advanced Pointer Analysis)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lotusaa">LotusAA</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#underapproxaa">UnderApproxAA</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="allocaa.html">AllocAA — Allocation-Based AA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="andersen.html">Andersen — Inclusion AA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="aserpta.html">AserPTA — Pointer Analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cflaa.html">CFLAA — CFL-Based Alias AA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="dyckaa.html">DyckAA — Dyck-CFL Analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="seadsa.html">Sea-DSA — Memory Graph AA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="fpa.html">FPA — Function Pointer Analyses (FLTA/MLTA/MLTADF/KELP)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="lotusaa.html">LotusAA — Lotus AA Engine</a></li>
+<li class="toctree-l2"><a class="reference internal" href="underapproxaa.html">UnderApproxAA — Must-Alias Analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="dynaa.html">DynAA — Dynamic Alias AA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sraa.html">Strict Relations Alias Analysis — Algorithm</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sraa.html#vssa-ssi-transformation">1. vSSA / SSI Transformation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sraa.html#symbolic-range-analysis">2. Symbolic Range Analysis</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sraa.html#strict-inequality-construction">3. Strict-Inequality Construction</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sraa.html#constraint-propagation-solver">4. Constraint Propagation Solver</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sraa.html#alias-disambiguation-final-decision">5. Alias Disambiguation (Final Decision)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sraa.html#pdg-memory-node-reduction-applicability">6. PDG Memory-Node Reduction (Applicability)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sraa.html#summary-of-properties">Summary of Properties</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sraa.html#end-of-document">End of document.</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="index.html">Alias Analysis</a></li>
+      <li class="breadcrumb-item active">Alias Analysis Components</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/alias/alias_analysis.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="alias-analysis-components">
+<h1>Alias Analysis Components<a class="headerlink" href="#alias-analysis-components" title="Link to this heading"></a></h1>
+<p>Lotus provides several alias analysis algorithms with different precision/performance trade-offs. Each analysis makes different trade-offs between precision, scalability, and analysis cost.</p>
+<section id="analysis-selection-guide">
+<h2>Analysis Selection Guide<a class="headerlink" href="#analysis-selection-guide" title="Link to this heading"></a></h2>
+<p>Choose the right analysis for your needs:</p>
+<p><strong>For Large Codebases (Speed Priority)</strong>:</p>
+<ul class="simple">
+<li><p><strong>Andersen</strong>: Fastest, context-insensitive, inclusion-based</p></li>
+<li><p><strong>AserPTA (CI mode)</strong>: Fast with field sensitivity option</p></li>
+<li><p><strong>AllocAA</strong>: Lightweight heuristic-based tracking</p></li>
+</ul>
+<p><strong>For Balanced Precision/Performance</strong>:</p>
+<ul class="simple">
+<li><p><strong>AserPTA (1-CFA)</strong>: Good precision with reasonable cost</p></li>
+<li><p><strong>FPA (KELP)</strong>: Specialized for function pointer resolution</p></li>
+<li><p><strong>SRAA</strong>: Range-based for proving non-aliasing</p></li>
+</ul>
+<p><strong>For Maximum Precision</strong>:</p>
+<ul class="simple">
+<li><p><strong>DyckAA</strong>: Unification-based with Dyck-CFL reachability</p></li>
+<li><p><strong>LotusAA</strong>: Flow-sensitive and field-sensitive</p></li>
+<li><p><strong>Sea-DSA</strong>: Context-sensitive memory graphs</p></li>
+</ul>
+<p><strong>For Specific Scenarios</strong>:</p>
+<ul class="simple">
+<li><p><strong>Concurrent programs</strong>: AserPTA with origin sensitivity</p></li>
+<li><p><strong>Dynamic validation</strong>: DynAA for runtime verification</p></li>
+<li><p><strong>Function pointers only</strong>: FPA (FLTA, MLTA, KELP)</p></li>
+</ul>
+</section>
+<section id="comparison-table">
+<h2>Comparison Table<a class="headerlink" href="#comparison-table" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 20.0%" />
+<col style="width: 15.0%" />
+<col style="width: 15.0%" />
+<col style="width: 15.0%" />
+<col style="width: 15.0%" />
+<col style="width: 20.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Analysis</p></th>
+<th class="head"><p>Context</p></th>
+<th class="head"><p>Flow</p></th>
+<th class="head"><p>Field</p></th>
+<th class="head"><p>Speed</p></th>
+<th class="head"><p>Use Case</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Andersen</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Fast</p></td>
+<td><p>Quick scanning</p></td>
+</tr>
+<tr class="row-odd"><td><p>AserPTA-CI</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Fast</p></td>
+<td><p>Balanced analysis</p></td>
+</tr>
+<tr class="row-even"><td><p>AserPTA-1CFA</p></td>
+<td><p>1-Call-Site</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Moderate</p></td>
+<td><p>Good precision</p></td>
+</tr>
+<tr class="row-odd"><td><p>DyckAA</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Slow</p></td>
+<td><p>High precision</p></td>
+</tr>
+<tr class="row-even"><td><p>LotusAA</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Slowest</p></td>
+<td><p>Maximum precision</p></td>
+</tr>
+<tr class="row-odd"><td><p>Sea-DSA</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Moderate</p></td>
+<td><p>Memory graphs</p></td>
+</tr>
+<tr class="row-even"><td><p>FPA-KELP</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Insensitive</p></td>
+<td><p>Sensitive</p></td>
+<td><p>Moderate</p></td>
+<td><p>Function pointers</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="allocaa">
+<h2>AllocAA<a class="headerlink" href="#allocaa" title="Link to this heading"></a></h2>
+<p>Simple heuristic-based alias analysis for basic allocation tracking.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Alias/AllocAA</span></code></p>
+<p><strong>Algorithm</strong>: Tracks allocation sites and uses simple heuristics to determine aliasing.</p>
+<p><strong>Strengths</strong>:</p>
+<ul class="simple">
+<li><p>Extremely fast</p></li>
+<li><p>Low memory overhead</p></li>
+<li><p>Good for preliminary analysis</p></li>
+</ul>
+<p><strong>Limitations</strong>:</p>
+<ul class="simple">
+<li><p>Imprecise, many false positives</p></li>
+<li><p>No interprocedural analysis</p></li>
+<li><p>Limited to allocation sites</p></li>
+</ul>
+<p><strong>Usage</strong>: Integrated as LLVM ModulePass for basic alias queries.</p>
+</section>
+<section id="aserpta">
+<h2>AserPTA<a class="headerlink" href="#aserpta" title="Link to this heading"></a></h2>
+<p>High-performance pointer analysis with multiple context sensitivities and solver algorithms.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Alias/AserPTA</span></code></p>
+<p><strong>Architecture</strong>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>LLVM IR
+   ↓
+[Preprocessing]
+   ├─ Canonicalize GEP instructions
+   ├─ Lower memcpy operations
+   ├─ Normalize heap APIs
+   └─ Remove exception handlers
+   ↓
+[Constraint Collection]
+   ├─ addr_of: p = &amp;obj
+   ├─ copy: p = q
+   ├─ load: p = *q
+   ├─ store: *p = q
+   └─ offset: p = &amp;obj-&gt;field
+   ↓
+[Constraint Graph Construction]
+   ├─ Pointer nodes (CGPtrNode)
+   ├─ Object nodes (CGObjNode)
+   └─ Constraint edges
+   ↓
+[Solving with Context]
+   ├─ Context evolution (NoCtx/KCallSite/KOrigin)
+   ├─ Propagation strategy
+   └─ SCC detection &amp; collapsing
+   ↓
+Points-to Sets (BitVector representation)
+</pre></div>
+</div>
+<p><strong>Constraint Types</strong>:</p>
+<ol class="arabic simple">
+<li><p><strong>Address-of</strong> (<code class="docutils literal notranslate"><span class="pre">p</span> <span class="pre">=</span> <span class="pre">&amp;obj</span></code>): Pointer directly addresses object</p></li>
+<li><p><strong>Copy</strong> (<code class="docutils literal notranslate"><span class="pre">p</span> <span class="pre">=</span> <span class="pre">q</span></code>): Pointer assignment</p></li>
+<li><p><strong>Load</strong> (<code class="docutils literal notranslate"><span class="pre">p</span> <span class="pre">=</span> <span class="pre">*q</span></code>): Dereference and copy</p></li>
+<li><p><strong>Store</strong> (<code class="docutils literal notranslate"><span class="pre">*p</span> <span class="pre">=</span> <span class="pre">q</span></code>): Store through pointer</p></li>
+<li><p><strong>Offset</strong> (<code class="docutils literal notranslate"><span class="pre">p</span> <span class="pre">=</span> <span class="pre">&amp;obj-&gt;field</span></code>): Field access via GEP</p></li>
+</ol>
+<p><strong>Memory Models</strong>:</p>
+<ul class="simple">
+<li><p><strong>Field-Insensitive</strong>: Treats objects as single entities (faster)</p></li>
+<li><p><strong>Field-Sensitive</strong>: Models individual fields (more precise)</p></li>
+</ul>
+<p><strong>Analysis Modes</strong>:
+* <code class="docutils literal notranslate"><span class="pre">ci</span></code>: Context-insensitive (default)
+* <code class="docutils literal notranslate"><span class="pre">1-cfa</span></code>: 1-call-site sensitive
+* <code class="docutils literal notranslate"><span class="pre">2-cfa</span></code>: 2-call-site sensitive
+* <code class="docutils literal notranslate"><span class="pre">origin</span></code>: Origin-sensitive (tracks thread creation)</p>
+<p><strong>Solver Types</strong>:
+* <code class="docutils literal notranslate"><span class="pre">basic</span></code>: PartialUpdateSolver
+* <code class="docutils literal notranslate"><span class="pre">wave</span></code>: WavePropagation with SCC detection (default)
+* <code class="docutils literal notranslate"><span class="pre">deep</span></code>: DeepPropagation with cycle detection</p>
+<p><strong>Usage</strong>:
+.. code-block:: bash</p>
+<blockquote>
+<div><p>./build/bin/aser-aa -analysis-mode=1-cfa -solver=deep example.bc</p>
+</div></blockquote>
+<p><strong>Key Options</strong>:
+* <code class="docutils literal notranslate"><span class="pre">-analysis-mode=&lt;mode&gt;</span></code>: Analysis mode (ci, 1-cfa, 2-cfa, origin)
+* <code class="docutils literal notranslate"><span class="pre">-solver=&lt;type&gt;</span></code>: Solver algorithm (basic, wave, deep)
+* <code class="docutils literal notranslate"><span class="pre">-field-sensitive</span></code>: Use field-sensitive memory model (default: true)
+* <code class="docutils literal notranslate"><span class="pre">-dump-stats</span></code>: Print analysis statistics
+* <code class="docutils literal notranslate"><span class="pre">-consgraph</span></code>: Dump constraint graph to DOT file</p>
+</section>
+<section id="dyckaa">
+<h2>DyckAA<a class="headerlink" href="#dyckaa" title="Link to this heading"></a></h2>
+<p>Unification-based, exhaustive alias analysis with high precision using Dyck-CFL reachability.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Alias/DyckAA</span></code></p>
+<p><strong>Algorithm</strong>: Uses Dyck Context-Free Language (CFL) reachability to model pointer relationships:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>LLVM IR
+   ↓
+[Build Dyck Graph]
+   ├─ Nodes: Values (pointers, objects)
+   ├─ Edges with labels:
+   │  ├─ *(* : Dereference
+   │  ├─ *)* : Reference
+   │  ├─ *[field]* : Field access
+   │  └─ Assignment edges
+   ↓
+[Dyck-CFL Reachability]
+   ├─ Find balanced paths
+   ├─ Unify equivalent nodes
+   └─ Build alias sets
+   ↓
+[Applications]
+   ├─ Alias queries
+   ├─ Call graph construction
+   ├─ ModRef analysis
+   └─ Value flow analysis
+</pre></div>
+</div>
+<p><strong>Dyck Language</strong>: Balanced parentheses language that captures pointer semantics:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">(</span> <span class="pre">...</span> <span class="pre">)</span></code> : Dereference operations must balance</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">[</span> <span class="pre">...</span> <span class="pre">]</span></code> : Field accesses must match</p></li>
+<li><p>Paths between nodes indicate aliasing</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="n">x</span><span class="p">;</span>
+<span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">x</span><span class="p">;</span><span class="w">    </span><span class="c1">// Edge: p -*)-&gt;* x</span>
+<span class="kt">int</span><span class="w"> </span><span class="o">**</span><span class="n">q</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">p</span><span class="p">;</span><span class="w">   </span><span class="c1">// Edge: q -*)-&gt;* p</span>
+<span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">q</span><span class="p">;</span><span class="w">    </span><span class="c1">// Path: r = *q, q points to p, so r = p</span>
+<span class="w">                </span><span class="c1">// Dyck path: r -*(*-* q -*)-&gt;* p</span>
+</pre></div>
+</div>
+<p><strong>Strengths</strong>:</p>
+<ul class="simple">
+<li><p>Highly precise through CFL reachability</p></li>
+<li><p>Handles complex pointer patterns</p></li>
+<li><p>Good for function pointer resolution</p></li>
+<li><p>Builds precise call graphs</p></li>
+</ul>
+<p><strong>Limitations</strong>:</p>
+<ul class="simple">
+<li><p>Computationally expensive</p></li>
+<li><p>High memory usage for large programs</p></li>
+<li><p>Context-insensitive (single analysis per function)</p></li>
+</ul>
+<p><strong>Usage</strong>:
+.. code-block:: bash</p>
+<blockquote>
+<div><p>./build/bin/dyck-aa -print-alias-set-info example.bc</p>
+</div></blockquote>
+<p><strong>Key Options</strong>:
+* <code class="docutils literal notranslate"><span class="pre">-print-alias-set-info</span></code>: Print alias sets in DOT format
+* <code class="docutils literal notranslate"><span class="pre">-count-fp</span></code>: Count function pointers
+* <code class="docutils literal notranslate"><span class="pre">-dot-dyck-callgraph</span></code>: Generate call graph visualization
+* <code class="docutils literal notranslate"><span class="pre">-no-function-type-check</span></code>: Disable function type checking</p>
+<p><strong>Advanced Features</strong>:</p>
+<ul class="simple">
+<li><p><strong>DyckVFG</strong>: Value Flow Graph construction for tracking value propagation</p></li>
+<li><p><strong>ModRef Analysis</strong>: Modified/Referenced analysis for optimization</p></li>
+<li><p><strong>Call Graph</strong>: Precise indirect call resolution</p></li>
+</ul>
+</section>
+<section id="cflaa">
+<h2>CFLAA<a class="headerlink" href="#cflaa" title="Link to this heading"></a></h2>
+<p>Context-Free Language Alias Analysis from LLVM 14.0.6.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Alias/CFLAA</span></code></p>
+<p><strong>Note</strong>: Copied from LLVM 14.0.6 (removed in LLVM 15).</p>
+</section>
+<section id="sea-dsa">
+<h2>Sea-DSA<a class="headerlink" href="#sea-dsa" title="Link to this heading"></a></h2>
+<p>Context-sensitive, field-sensitive alias analysis based on DSA.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Alias/seadsa</span></code></p>
+<p><strong>Tools</strong>: <code class="docutils literal notranslate"><span class="pre">sea-dsa-dg</span></code>, <code class="docutils literal notranslate"><span class="pre">seadsa-tool</span></code></p>
+<p><strong>Usage</strong>:
+.. code-block:: bash</p>
+<blockquote>
+<div><p>./build/bin/sea-dsa-dg –sea-dsa-dot example.bc
+./build/bin/seadsa-tool –sea-dsa-dot –outdir results/ example.bc</p>
+</div></blockquote>
+<p><strong>Key Options</strong>:
+* <code class="docutils literal notranslate"><span class="pre">--sea-dsa-dot</span></code>: Generate DOT files visualizing memory graphs
+* <code class="docutils literal notranslate"><span class="pre">--sea-dsa-callgraph-dot</span></code>: Generate call graph DOT files
+* <code class="docutils literal notranslate"><span class="pre">--outdir</span> <span class="pre">&lt;DIR&gt;</span></code>: Specify output directory</p>
+</section>
+<section id="andersen">
+<h2>Andersen<a class="headerlink" href="#andersen" title="Link to this heading"></a></h2>
+<p>Context-insensitive points-to analysis for scalability.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Alias/Andersen</span></code></p>
+<p><strong>Usage</strong>:
+.. code-block:: bash</p>
+<blockquote>
+<div><p>./build/bin/ander-aa example.bc</p>
+</div></blockquote>
+<p><strong>Features</strong>:
+* Andersen’s inclusion-based algorithm
+* No on-the-fly callgraph construction
+* Fast analysis for large codebases</p>
+</section>
+<section id="fpa-function-pointer-analysis">
+<h2>FPA (Function Pointer Analysis)<a class="headerlink" href="#fpa-function-pointer-analysis" title="Link to this heading"></a></h2>
+<p>Multiple algorithms for resolving indirect function calls.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Alias/FPA</span></code></p>
+<p><strong>Algorithms</strong>:
+* <code class="docutils literal notranslate"><span class="pre">FLTA</span></code> (1): Flow-insensitive, type-based analysis
+* <code class="docutils literal notranslate"><span class="pre">MLTA</span></code> (2): Multi-layer type analysis
+* <code class="docutils literal notranslate"><span class="pre">MLTADF</span></code> (3): Multi-layer type analysis with data flow
+* <code class="docutils literal notranslate"><span class="pre">KELP</span></code> (4): Context-sensitive analysis (USENIX Security’24)</p>
+<p><strong>Usage</strong>:
+.. code-block:: bash</p>
+<blockquote>
+<div><p>./build/bin/fpa -analysis-type=1 example.bc  # FLTA
+./build/bin/fpa -analysis-type=2 -max-type-layer=10 example.bc  # MLTA</p>
+</div></blockquote>
+<p><strong>Key Options</strong>:
+* <code class="docutils literal notranslate"><span class="pre">-analysis-type=&lt;N&gt;</span></code>: Select algorithm (1-4)
+* <code class="docutils literal notranslate"><span class="pre">-max-type-layer=&lt;N&gt;</span></code>: Maximum type layer for MLTA (default: 10)
+* <code class="docutils literal notranslate"><span class="pre">-debug</span></code>: Enable debug output
+* <code class="docutils literal notranslate"><span class="pre">-output-file=&lt;path&gt;</span></code>: Output file path</p>
+</section>
+<section id="sraa">
+<h2>SRAA<a class="headerlink" href="#sraa" title="Link to this heading"></a></h2>
+<p>Strict Relation Alias Analysis built on interprocedural range analysis.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Alias/SRAA</span></code></p>
+<p><strong>Highlights</strong>:
+* Proves <code class="docutils literal notranslate"><span class="pre">NoAlias</span></code> results by reasoning about strict inequalities on pointer offsets
+* Uses <code class="docutils literal notranslate"><span class="pre">InterProceduralRA</span></code> to infer value ranges and propagate constraints
+* Tracks primitive layouts of aggregate types to compare sub-field accesses</p>
+<p><strong>Usage</strong>: Register the <code class="docutils literal notranslate"><span class="pre">StrictRelations</span></code> pass (<code class="docutils literal notranslate"><span class="pre">-sraa</span></code>) inside an LLVM pass pipeline or via the Lotus AA wrapper.</p>
+</section>
+<section id="originaa">
+<h2>OriginAA<a class="headerlink" href="#originaa" title="Link to this heading"></a></h2>
+<p>K-callsite sensitive and origin-sensitive pointer analysis.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Alias/OriginAA</span></code></p>
+<p><strong>Usage</strong>:
+.. code-block:: bash</p>
+<blockquote>
+<div><p>./build/bin/origin_aa -analysis-mode=kcs -k=2 example.bc</p>
+</div></blockquote>
+<p><strong>Features</strong>:
+* K-callsite sensitivity for precision
+* Origin sensitivity for thread creation tracking
+* Tracks pthread_create and spawn operations</p>
+</section>
+<section id="dynaa">
+<h2>DynAA<a class="headerlink" href="#dynaa" title="Link to this heading"></a></h2>
+<p>Dynamic validation of static alias analysis results.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">tools/dynaa</span></code></p>
+<p><strong>Workflow</strong>:
+1. Instrument: <code class="docutils literal notranslate"><span class="pre">./build/bin/dynaa-instrument</span> <span class="pre">example.bc</span> <span class="pre">-o</span> <span class="pre">example.inst.bc</span></code>
+2. Compile: <code class="docutils literal notranslate"><span class="pre">clang</span> <span class="pre">example.inst.bc</span> <span class="pre">libRuntime.a</span> <span class="pre">-o</span> <span class="pre">example.inst</span></code>
+3. Run: <code class="docutils literal notranslate"><span class="pre">LOG_DIR=logs/</span> <span class="pre">./example.inst</span></code>
+4. Check: <code class="docutils literal notranslate"><span class="pre">./build/bin/dynaa-check</span> <span class="pre">example.bc</span> <span class="pre">logs/pts.log</span> <span class="pre">basic-aa</span></code></p>
+<p><strong>Tools</strong>:
+* <code class="docutils literal notranslate"><span class="pre">dynaa-instrument</span></code>: Instrument code for runtime tracking
+* <code class="docutils literal notranslate"><span class="pre">dynaa-check</span></code>: Validate static analysis against runtime
+* <code class="docutils literal notranslate"><span class="pre">dynaa-log-dump</span></code>: Convert binary logs to readable format</p>
+</section>
+<section id="aliasanalysiswrapper">
+<h2>AliasAnalysisWrapper<a class="headerlink" href="#aliasanalysiswrapper" title="Link to this heading"></a></h2>
+<p>LLVM AliasAnalysis wrapper and integration utilities.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/Alias/AliasAnalysisWrapper/</span></code></p>
+<p><strong>Features</strong>: Provides LLVM AA pass integration and result caching.</p>
+</section>
+<section id="aserpta-advanced-pointer-analysis">
+<h2>AserPTA (Advanced Pointer Analysis)<a class="headerlink" href="#aserpta-advanced-pointer-analysis" title="Link to this heading"></a></h2>
+<p>Comprehensive pointer analysis framework with multiple context sensitivities.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/Alias/AserPTA/</span></code></p>
+<p><strong>Components</strong>:
+* <strong>PointerAnalysis/</strong> – Core analysis engine with context sensitivity
+* <strong>PreProcessing/</strong> – IR preprocessing and normalization passes
+* <strong>Util/</strong> – Analysis utilities and graph writers</p>
+<p><strong>Context Sensitivities</strong>:
+* <code class="docutils literal notranslate"><span class="pre">NoCtx</span></code> – Context-insensitive analysis
+* <code class="docutils literal notranslate"><span class="pre">KCallSite</span></code> – K-callsite sensitivity
+* <code class="docutils literal notranslate"><span class="pre">KOrigin</span></code> – Origin-sensitive analysis</p>
+<p><strong>Solver Types</strong>:
+* <code class="docutils literal notranslate"><span class="pre">PartialUpdateSolver</span></code> – Incremental constraint solving
+* <code class="docutils literal notranslate"><span class="pre">WavePropagation</span></code> – SCC-based propagation
+* <code class="docutils literal notranslate"><span class="pre">DeepPropagation</span></code> – Cycle-aware propagation</p>
+</section>
+<section id="lotusaa">
+<h2>LotusAA<a class="headerlink" href="#lotusaa" title="Link to this heading"></a></h2>
+<p>Lotus-specific alias analysis framework.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/Alias/LotusAA/</span></code></p>
+<p><strong>Components</strong>:
+* <strong>Engine/</strong> – Inter/intra-procedural analysis engines
+* <strong>MemoryModel/</strong> – Points-to graph and memory modeling
+* <strong>Support/</strong> – Configuration and utility functions</p>
+<p><strong>Features</strong>: Modular design for extensible pointer analysis.</p>
+</section>
+<section id="underapproxaa">
+<h2>UnderApproxAA<a class="headerlink" href="#underapproxaa" title="Link to this heading"></a></h2>
+<p>Under-approximate alias analysis for conservative results.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/Alias/UnderApproxAA/</span></code></p>
+<p><strong>Components</strong>:
+* <strong>Canonical</strong> – Canonical form representations
+* <strong>EquivDB</strong> – Equivalence class database
+* <strong>UnderApproxAA</strong> – Core under-approximation algorithm</p>
+<p><strong>Features</strong>: Conservative alias analysis for safety-critical applications.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="index.html" class="btn btn-neutral float-left" title="Alias Analysis" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="allocaa.html" class="btn btn-neutral float-right" title="AllocAA — Allocation-Based AA" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

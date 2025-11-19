@@ -1,0 +1,289 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Checker Tools &mdash; Arlib Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="MCP – MCP Server" href="../mcp/index.html" />
+    <link rel="prev" title="CFL Tools" href="../cfl/index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Lotus
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/pdg_query_language.html">PDG Query Language</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Command-Line Tools</a><ul class="current">
+<li class="toctree-l2 current"><a class="reference internal" href="../index.html#tools-by-subdirectory">Tools by Subdirectory</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="../alias/index.html">Alias Analysis Tools</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cfl/index.html">CFL Tools</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">Checker Tools</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#lotus-kint-integer-and-array-bug-finder">lotus-kint – Integer and Array Bug Finder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lotus-gvfa-global-value-flow-analysis">lotus-gvfa – Global Value Flow Analysis</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lotus-taint-taint-analysis">lotus-taint – Taint Analysis</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lotus-concur-concurrency-bug-checker">lotus-concur – Concurrency Bug Checker</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../mcp/index.html">MCP – MCP Server</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../owl/index.html">OWL – SMT/Model Checking Front-End</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../pdg-query/index.html">PDG Query – Program Dependence Graph Queries</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../verifier/index.html">Verifier Tools</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../utils/index.html">Utilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Command-Line Tools</a></li>
+      <li class="breadcrumb-item active">Checker Tools</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/tools/checker/index.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="checker-tools">
+<h1>Checker Tools<a class="headerlink" href="#checker-tools" title="Link to this heading"></a></h1>
+<p>This page summarizes the bug-finding tools under <code class="docutils literal notranslate"><span class="pre">tools/checker/</span></code>. For a
+feature-oriented overview and examples, see <a class="reference internal" href="../../user_guide/bug_detection.html"><span class="doc">Bug Detection with Lotus</span></a>.</p>
+<section id="lotus-kint-integer-and-array-bug-finder">
+<h2>lotus-kint – Integer and Array Bug Finder<a class="headerlink" href="#lotus-kint-integer-and-array-bug-finder" title="Link to this heading"></a></h2>
+<p>A static bug finder for integer-related and taint-style bugs (originally from
+OSDI 12).</p>
+<p><strong>Binary</strong>: <code class="docutils literal notranslate"><span class="pre">lotus-kint</span></code>
+<strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">tools/checker/lotus_kint.cpp</span></code></p>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-kint<span class="w"> </span><span class="o">[</span>options<span class="o">]</span><span class="w"> </span>&lt;input<span class="w"> </span>IR<span class="w"> </span>file&gt;
+</pre></div>
+</div>
+<p><strong>Bug Checker Options</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-check-all</span></code> – Enable all checkers (overrides individual settings)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-check-int-overflow</span></code> – Enable integer overflow checker</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-check-div-by-zero</span></code> – Enable division by zero checker</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-check-bad-shift</span></code> – Enable bad shift checker</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-check-array-oob</span></code> – Enable array index out of bounds checker</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-check-dead-branch</span></code> – Enable dead branch checker</p></li>
+</ul>
+<p><strong>Performance Options</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-function-timeout=&lt;seconds&gt;</span></code> – Maximum time to spend analyzing a single
+function (0 = no limit, default: 10)</p></li>
+</ul>
+<p><strong>Logging Options</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-log-level=&lt;level&gt;</span></code> – Set logging level (debug, info, warning, error, none,
+default: info)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-quiet</span></code> – Suppress most log output</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-log-to-stderr</span></code> – Redirect logs to stderr instead of stdout</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-log-to-file=&lt;filename&gt;</span></code> – Redirect logs to the specified file</p></li>
+</ul>
+<p><strong>Detects</strong>:</p>
+<p>The tool detects various integer-related bugs:</p>
+<ol class="arabic simple">
+<li><p><strong>Integer overflow</strong>: Detects potential integer overflow in arithmetic operations</p></li>
+<li><p><strong>Division by zero</strong>: Detects potential division by zero errors</p></li>
+<li><p><strong>Bad shift</strong>: Detects invalid shift amounts</p></li>
+<li><p><strong>Array out of bounds</strong>: Detects potential array index out of bounds access</p></li>
+<li><p><strong>Dead branch</strong>: Detects impossible branches in conditional statements</p></li>
+</ol>
+<p><strong>Examples</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Enable all checkers</span>
+./build/bin/lotus-kint<span class="w"> </span>-check-all<span class="w"> </span>input.ll
+
+<span class="c1"># Enable specific checkers</span>
+./build/bin/lotus-kint<span class="w"> </span>-check-int-overflow<span class="w"> </span>-check-div-by-zero<span class="w"> </span>input.ll
+
+<span class="c1"># Set function timeout and log level</span>
+./build/bin/lotus-kint<span class="w"> </span>-function-timeout<span class="o">=</span><span class="m">30</span><span class="w"> </span>-log-level<span class="o">=</span>debug<span class="w"> </span>input.ll
+
+<span class="c1"># Quiet mode with output to file</span>
+./build/bin/lotus-kint<span class="w"> </span>-quiet<span class="w"> </span>-log-to-file<span class="o">=</span>analysis.log<span class="w"> </span>input.ll
+</pre></div>
+</div>
+</section>
+<section id="lotus-gvfa-global-value-flow-analysis">
+<h2>lotus-gvfa – Global Value Flow Analysis<a class="headerlink" href="#lotus-gvfa-global-value-flow-analysis" title="Link to this heading"></a></h2>
+<p>Interprocedural value-flow-based bug detector for memory safety and taint-style
+issues.</p>
+<p><strong>Binary</strong>: <code class="docutils literal notranslate"><span class="pre">lotus-gvfa</span></code>
+<strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">tools/checker/lotus_gvfa.cpp</span></code></p>
+<p><strong>Detects</strong>:</p>
+<ul class="simple">
+<li><p>Null pointer dereferences</p></li>
+<li><p>Use-after-free (via value-flow modeling)</p></li>
+<li><p>Taint-style flows (when configured)</p></li>
+</ul>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-gvfa<span class="w"> </span><span class="o">[</span>options<span class="o">]</span><span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p>Key options:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-vuln-type=nullpointer</span></code> – Null pointer analysis (default)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-vuln-type=taint</span></code> – Taint-style vulnerability detection</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-test-cfl-reachability</span></code> – Use CFL reachability for higher precision</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-dump-stats</span></code> – Print analysis statistics</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-verbose</span></code> – Detailed per-bug output</p></li>
+</ul>
+<p>See <a class="reference internal" href="../../user_guide/bug_detection.html"><span class="doc">Bug Detection with Lotus</span></a> and <a class="reference internal" href="../../analysis/gvfa.html"><span class="doc">GVFA (Global Value Flow Analysis)</span></a> for
+complete examples.</p>
+</section>
+<section id="lotus-taint-taint-analysis">
+<h2>lotus-taint – Taint Analysis<a class="headerlink" href="#lotus-taint-taint-analysis" title="Link to this heading"></a></h2>
+<p>IFDS-based interprocedural taint analysis tool.</p>
+<p><strong>Binary</strong>: <code class="docutils literal notranslate"><span class="pre">lotus-taint</span></code>
+<strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">tools/checker/lotus_taint.cpp</span></code></p>
+<p><strong>Detects</strong>:</p>
+<ul class="simple">
+<li><p>Flows from untrusted sources (e.g., input) to sensitive sinks (e.g., system calls)</p></li>
+<li><p>Optional reaching-definitions analysis mode</p></li>
+</ul>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-taint<span class="w"> </span><span class="o">[</span>options<span class="o">]</span><span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p>Key options:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-analysis=0</span></code> – Taint analysis (default)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-analysis=1</span></code> – Reaching-definitions analysis</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-sources=&lt;f1,f2,...&gt;</span></code> – Custom source functions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-sinks=&lt;f1,f2,...&gt;</span></code> – Custom sink functions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-max-results=&lt;N&gt;</span></code> – Limit number of detailed flows</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-verbose</span></code> – Detailed path information</p></li>
+</ul>
+<p>For end-to-end examples (command injection, SQL injection, etc.), see
+<a class="reference internal" href="../../user_guide/bug_detection.html"><span class="doc">Bug Detection with Lotus</span></a> and <a class="reference internal" href="../../dataflow/ifds_ide.html"><span class="doc">IFDS / IDE Engine</span></a>.</p>
+</section>
+<section id="lotus-concur-concurrency-bug-checker">
+<h2>lotus-concur – Concurrency Bug Checker<a class="headerlink" href="#lotus-concur-concurrency-bug-checker" title="Link to this heading"></a></h2>
+<p>Static analysis for data races and other concurrency issues.</p>
+<p><strong>Binary</strong>: <code class="docutils literal notranslate"><span class="pre">lotus-concur</span></code>
+<strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">tools/checker/lotus_concur.cpp</span></code></p>
+<p><strong>Detects</strong>:</p>
+<ul class="simple">
+<li><p>Data races on shared variables</p></li>
+<li><p>Locking discipline violations</p></li>
+<li><p>Potential deadlocks (lock ordering issues)</p></li>
+</ul>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-concur<span class="w"> </span><span class="o">[</span>options<span class="o">]</span><span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p>Typical workflow:</p>
+<ol class="arabic simple">
+<li><p>Compile multi-threaded C/C++ program to LLVM bitcode</p></li>
+<li><p>Run <code class="docutils literal notranslate"><span class="pre">lotus-concur</span></code> on the bitcode</p></li>
+<li><p>Inspect reported shared variables and threads involved in races</p></li>
+</ol>
+<p>Detailed concurrency examples and recommended patterns are in
+<a class="reference internal" href="../../user_guide/bug_detection.html"><span class="doc">Bug Detection with Lotus</span></a>.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../cfl/index.html" class="btn btn-neutral float-left" title="CFL Tools" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../mcp/index.html" class="btn btn-neutral float-right" title="MCP – MCP Server" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

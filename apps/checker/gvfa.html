@@ -1,0 +1,422 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GVFA Vulnerability Checkers &mdash; Arlib Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="KINT Numerical Bug Checker" href="kint.html" />
+    <link rel="prev" title="Concurrency Bug Checker" href="concurrency.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Lotus
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/pdg_query_language.html">PDG Query Language</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tools/index.html">Command-Line Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Applications</a><ul class="current">
+<li class="toctree-l2 current"><a class="reference internal" href="../index.html#components">Components</a><ul class="current">
+<li class="toctree-l3 current"><a class="reference internal" href="index.html">Checker Framework</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="index.html#overview">Overview</a></li>
+<li class="toctree-l4"><a class="reference internal" href="index.html#components">Components</a></li>
+<li class="toctree-l4"><a class="reference internal" href="index.html#build-targets">Build Targets</a></li>
+<li class="toctree-l4"><a class="reference internal" href="index.html#usage">Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="index.html#programmatic-usage">Programmatic Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="index.html#bug-types">Bug Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="index.html#integration-points">Integration Points</a></li>
+<li class="toctree-l4 current"><a class="reference internal" href="index.html#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../clam.html">CLAM – Abstract Interpretation Framework</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../fuzzing_support.html">Fuzzing Support</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../mcp.html">MCP (Model Context Protocol) Server</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../seahorn.html">SeaHorn Verification Framework</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../utils/index.html">Utilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Applications</a></li>
+          <li class="breadcrumb-item"><a href="index.html">Checker Framework</a></li>
+      <li class="breadcrumb-item active">GVFA Vulnerability Checkers</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/apps/checker/gvfa.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="gvfa-vulnerability-checkers">
+<h1>GVFA Vulnerability Checkers<a class="headerlink" href="#gvfa-vulnerability-checkers" title="Link to this heading"></a></h1>
+<p>Global Value Flow Analysis (GVFA) based checkers for detecting memory safety vulnerabilities in LLVM bitcode.</p>
+<p><strong>Library Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Checker/GVFA/</span></code></p>
+<p><strong>Headers</strong>: <code class="docutils literal notranslate"><span class="pre">include/Checker/GVFA/</span></code></p>
+<p><strong>Tool Location</strong>: <code class="docutils literal notranslate"><span class="pre">tools/checker/lotus_gvfa.cpp</span></code></p>
+<p><strong>Build Target</strong>: <code class="docutils literal notranslate"><span class="pre">lotus-gvfa</span></code></p>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
+<p>GVFA checkers use Global Value Flow Analysis to detect memory safety vulnerabilities by tracking value flows from sources (where vulnerabilities originate) to sinks (where vulnerabilities manifest). The analysis uses Dyck alias analysis to track pointer relationships and value flow through the program.</p>
+<p>All checkers implement the <code class="docutils literal notranslate"><span class="pre">GVFAVulnerabilityChecker</span></code> interface and report bugs through the centralized <code class="docutils literal notranslate"><span class="pre">BugReportMgr</span></code> system.</p>
+</section>
+<section id="components">
+<h2>Components<a class="headerlink" href="#components" title="Link to this heading"></a></h2>
+<p><strong>GVFAVulnerabilityChecker</strong> (<code class="docutils literal notranslate"><span class="pre">GVFAVulnerabilityChecker.h</span></code>):</p>
+<ul class="simple">
+<li><p>Base interface for all GVFA vulnerability checkers</p></li>
+<li><p>Defines source/sink identification and reachability checking</p></li>
+<li><p>Provides unified API: <code class="docutils literal notranslate"><span class="pre">getSources()</span></code>, <code class="docutils literal notranslate"><span class="pre">getSinks()</span></code>, <code class="docutils literal notranslate"><span class="pre">detectAndReport()</span></code></p></li>
+</ul>
+<p><strong>NullPointerChecker</strong> (<code class="docutils literal notranslate"><span class="pre">NullPointerChecker.cpp</span></code>, <code class="docutils literal notranslate"><span class="pre">NullPointerChecker.h</span></code>):</p>
+<ul class="simple">
+<li><p>Detects null pointer dereferences (CWE-476, CWE-690)</p></li>
+<li><p><strong>Sources</strong>: NULL constants, memory allocation functions (can return NULL)</p></li>
+<li><p><strong>Sinks</strong>: Pointer dereferences, library functions that dereference arguments</p></li>
+<li><p><strong>Optional Precision</strong>: Can use <code class="docutils literal notranslate"><span class="pre">NullCheckAnalysis</span></code> or <code class="docutils literal notranslate"><span class="pre">ContextSensitiveNullCheckAnalysis</span></code> for improved precision</p></li>
+</ul>
+<p><strong>UseAfterFreeChecker</strong> (<code class="docutils literal notranslate"><span class="pre">UseAfterFreeChecker.cpp</span></code>, <code class="docutils literal notranslate"><span class="pre">UseAfterFreeChecker.h</span></code>):</p>
+<ul class="simple">
+<li><p>Detects use-after-free vulnerabilities (CWE-416)</p></li>
+<li><p><strong>Sources</strong>: Memory deallocation operations (free, delete, etc.)</p></li>
+<li><p><strong>Sinks</strong>: Memory accesses (loads, stores, function calls with pointer arguments)</p></li>
+</ul>
+<p><strong>UseOfUninitializedVariableChecker</strong> (<code class="docutils literal notranslate"><span class="pre">UseOfUninitializedVariableChecker.cpp</span></code>, <code class="docutils literal notranslate"><span class="pre">UseOfUninitializedVariableChecker.h</span></code>):</p>
+<ul class="simple">
+<li><p>Detects use of uninitialized variables (CWE-457)</p></li>
+<li><p><strong>Sources</strong>: Uninitialized memory locations</p></li>
+<li><p><strong>Sinks</strong>: Uses of variables before initialization</p></li>
+</ul>
+<p><strong>FreeOfNonHeapMemoryChecker</strong> (<code class="docutils literal notranslate"><span class="pre">FreeOfNonHeapMemoryChecker.cpp</span></code>, <code class="docutils literal notranslate"><span class="pre">FreeOfNonHeapMemoryChecker.h</span></code>):</p>
+<ul class="simple">
+<li><p>Detects invalid free() operations on non-heap memory (CWE-590)</p></li>
+<li><p><strong>Sources</strong>: Stack addresses, global variables, string literals</p></li>
+<li><p><strong>Sinks</strong>: Memory deallocation operations (free, delete)</p></li>
+</ul>
+<p><strong>InvalidUseOfStackAddressChecker</strong> (<code class="docutils literal notranslate"><span class="pre">InvalidUseOfStackAddressChecker.cpp</span></code>, <code class="docutils literal notranslate"><span class="pre">InvalidUseOfStackAddressChecker.h</span></code>):</p>
+<ul class="simple">
+<li><p>Detects invalid use of stack addresses (CWE-562)</p></li>
+<li><p><strong>Sources</strong>: Stack-allocated variables</p></li>
+<li><p><strong>Sinks</strong>: Operations that require heap memory (return statements, global storage, etc.)</p></li>
+</ul>
+</section>
+<section id="usage">
+<h2>Usage<a class="headerlink" href="#usage" title="Link to this heading"></a></h2>
+<p><strong>Basic Usage</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>nullpointer<span class="w"> </span>input.bc
+./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>useafterfree<span class="w"> </span>input.bc
+./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>uninitialized<span class="w"> </span>input.bc
+./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>freenonheap<span class="w"> </span>input.bc
+./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>stackaddress<span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p><strong>With Context-Sensitive Analysis</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>nullpointer<span class="w"> </span>--ctx<span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p><strong>With Null Check Analysis (Improved Precision)</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>nullpointer<span class="w"> </span>--use-npa<span class="w"> </span>input.bc
+./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>nullpointer<span class="w"> </span>--use-npa<span class="w"> </span>--ctx<span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p><strong>Generate JSON Report</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>nullpointer<span class="w"> </span>--json-output<span class="o">=</span>report.json<span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p><strong>Verbose Output</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>nullpointer<span class="w"> </span>--verbose<span class="w"> </span>input.bc
+</pre></div>
+</div>
+<p><strong>Dump Statistics</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./build/bin/lotus-gvfa<span class="w"> </span>--vuln-type<span class="o">=</span>nullpointer<span class="w"> </span>--dump-stats<span class="w"> </span>input.bc
+</pre></div>
+</div>
+</section>
+<section id="command-line-options">
+<h2>Command-Line Options<a class="headerlink" href="#command-line-options" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--vuln-type=&lt;type&gt;</span></code> – Vulnerability type to check:</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">nullpointer</span></code> – Null pointer dereference</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">useafterfree</span></code> – Use after free</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">uninitialized</span></code> – Use of uninitialized variable</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">freenonheap</span></code> – Free of non-heap memory</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">stackaddress</span></code> – Invalid use of stack address</p></li>
+</ul>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--ctx</span></code> – Use context-sensitive analysis (default: false)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--use-npa</span></code> – Use NullCheckAnalysis to improve precision (nullpointer only, default: false)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--verbose</span></code> – Print detailed vulnerability information (default: false)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--dump-stats</span></code> – Dump analysis statistics (default: false)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--json-output=&lt;file&gt;</span></code> – Output JSON report to file</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--min-score=&lt;n&gt;</span></code> – Minimum confidence score for reporting (0-100)</p></li>
+</ul>
+</section>
+<section id="bug-types">
+<h2>Bug Types<a class="headerlink" href="#bug-types" title="Link to this heading"></a></h2>
+<p><strong>Null Pointer Dereference</strong> (<code class="docutils literal notranslate"><span class="pre">BUG_NPD</span></code>):</p>
+<ul class="simple">
+<li><p><strong>CWE</strong>: CWE-476, CWE-690</p></li>
+<li><p><strong>Importance</strong>: HIGH</p></li>
+<li><p><strong>Classification</strong>: SECURITY</p></li>
+<li><p><strong>Description</strong>: Dereferencing a pointer that may be NULL</p></li>
+</ul>
+<p><strong>Use After Free</strong> (<code class="docutils literal notranslate"><span class="pre">BUG_UAF</span></code>):</p>
+<ul class="simple">
+<li><p><strong>CWE</strong>: CWE-416</p></li>
+<li><p><strong>Importance</strong>: HIGH</p></li>
+<li><p><strong>Classification</strong>: SECURITY</p></li>
+<li><p><strong>Description</strong>: Using memory after it has been freed</p></li>
+</ul>
+<p><strong>Use of Uninitialized Variable</strong> (<code class="docutils literal notranslate"><span class="pre">BUG_UUV</span></code>):</p>
+<ul class="simple">
+<li><p><strong>CWE</strong>: CWE-457</p></li>
+<li><p><strong>Importance</strong>: HIGH</p></li>
+<li><p><strong>Classification</strong>: SECURITY</p></li>
+<li><p><strong>Description</strong>: Using a variable before it has been initialized</p></li>
+</ul>
+<p><strong>Free of Non-Heap Memory</strong> (<code class="docutils literal notranslate"><span class="pre">BUG_FNHM</span></code>):</p>
+<ul class="simple">
+<li><p><strong>CWE</strong>: CWE-590</p></li>
+<li><p><strong>Importance</strong>: HIGH</p></li>
+<li><p><strong>Classification</strong>: SECURITY</p></li>
+<li><p><strong>Description</strong>: Calling free() on memory that was not allocated on the heap</p></li>
+</ul>
+<p><strong>Invalid Use of Stack Address</strong> (<code class="docutils literal notranslate"><span class="pre">BUG_IUSA</span></code>):</p>
+<ul class="simple">
+<li><p><strong>CWE</strong>: CWE-562</p></li>
+<li><p><strong>Importance</strong>: HIGH</p></li>
+<li><p><strong>Classification</strong>: SECURITY</p></li>
+<li><p><strong>Description</strong>: Using a stack address in a context that requires heap memory</p></li>
+</ul>
+</section>
+<section id="analysis-process">
+<h2>Analysis Process<a class="headerlink" href="#analysis-process" title="Link to this heading"></a></h2>
+<ol class="arabic simple">
+<li><p><strong>Setup GVFA</strong>: Initialize Dyck alias analysis and value flow graph</p></li>
+<li><p><strong>Identify Sources</strong>: Find vulnerability sources (e.g., NULL constants, free operations)</p></li>
+<li><p><strong>Identify Sinks</strong>: Find vulnerability sinks (e.g., pointer dereferences, memory accesses)</p></li>
+<li><p><strong>Check Reachability</strong>: Use GVFA to check if values can flow from sources to sinks</p></li>
+<li><p><strong>Report Vulnerabilities</strong>: Generate bug reports through <code class="docutils literal notranslate"><span class="pre">BugReportMgr</span></code></p></li>
+</ol>
+</section>
+<section id="programmatic-usage">
+<h2>Programmatic Usage<a class="headerlink" href="#programmatic-usage" title="Link to this heading"></a></h2>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Checker/GVFA/NullPointerChecker.h&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Checker/Report/BugReportMgr.h&quot;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Analysis/GVFA/GlobalValueFlowAnalysis.h&quot;</span>
+
+<span class="c1">// Setup GVFA (requires Dyck alias analysis)</span>
+<span class="n">DyckAliasAnalysis</span><span class="w"> </span><span class="o">*</span><span class="n">DyckAA</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">DyckAliasAnalysis</span><span class="p">();</span>
+<span class="n">DyckModRefAnalysis</span><span class="w"> </span><span class="o">*</span><span class="n">DyckMRA</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">DyckModRefAnalysis</span><span class="p">();</span>
+<span class="n">DyckVFG</span><span class="w"> </span><span class="nf">VFG</span><span class="p">(</span><span class="n">DyckAA</span><span class="p">,</span><span class="w"> </span><span class="n">DyckMRA</span><span class="p">,</span><span class="w"> </span><span class="n">M</span><span class="p">);</span>
+<span class="n">DyckGlobalValueFlowAnalysis</span><span class="w"> </span><span class="nf">GVFA</span><span class="p">(</span><span class="n">M</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">VFG</span><span class="p">,</span><span class="w"> </span><span class="n">DyckAA</span><span class="p">,</span><span class="w"> </span><span class="n">DyckMRA</span><span class="p">);</span>
+
+<span class="c1">// Create checker</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">checker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">make_unique</span><span class="o">&lt;</span><span class="n">NullPointerChecker</span><span class="o">&gt;</span><span class="p">();</span>
+
+<span class="c1">// Optional: Improve precision with NullCheckAnalysis</span>
+<span class="n">NullCheckAnalysis</span><span class="w"> </span><span class="o">*</span><span class="n">NCA</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">NullCheckAnalysis</span><span class="p">();</span>
+<span class="n">checker</span><span class="o">-&gt;</span><span class="n">setNullCheckAnalysis</span><span class="p">(</span><span class="n">NCA</span><span class="p">);</span>
+
+<span class="c1">// Run analysis (automatically reports to BugReportMgr)</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">vulnCount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">checker</span><span class="o">-&gt;</span><span class="n">detectAndReport</span><span class="p">(</span><span class="n">M</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">GVFA</span><span class="p">,</span><span class="w"> </span><span class="nb">false</span><span class="p">,</span><span class="w"> </span><span class="nb">false</span><span class="p">);</span>
+
+<span class="c1">// Access centralized reports</span>
+<span class="n">BugReportMgr</span><span class="o">&amp;</span><span class="w"> </span><span class="n">mgr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BugReportMgr</span><span class="o">::</span><span class="n">get_instance</span><span class="p">();</span>
+<span class="n">mgr</span><span class="p">.</span><span class="n">print_summary</span><span class="p">(</span><span class="n">outs</span><span class="p">());</span>
+<span class="n">mgr</span><span class="p">.</span><span class="n">generate_json_report</span><span class="p">(</span><span class="n">jsonFile</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<section id="creating-custom-checkers">
+<h2>Creating Custom Checkers<a class="headerlink" href="#creating-custom-checkers" title="Link to this heading"></a></h2>
+<p>To create a new GVFA checker, inherit from <code class="docutils literal notranslate"><span class="pre">GVFAVulnerabilityChecker</span></code>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Checker/GVFA/GVFAVulnerabilityChecker.h&quot;</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">MyCustomChecker</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">GVFAVulnerabilityChecker</span><span class="w"> </span><span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="n">getSources</span><span class="p">(</span><span class="n">Module</span><span class="w"> </span><span class="o">*</span><span class="n">M</span><span class="p">,</span><span class="w"> </span><span class="n">VulnerabilitySourcesType</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Sources</span><span class="p">)</span><span class="w"> </span><span class="k">override</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Identify vulnerability sources</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="n">getSinks</span><span class="p">(</span><span class="n">Module</span><span class="w"> </span><span class="o">*</span><span class="n">M</span><span class="p">,</span><span class="w"> </span><span class="n">VulnerabilitySinksType</span><span class="w"> </span><span class="o">&amp;</span><span class="n">Sinks</span><span class="p">)</span><span class="w"> </span><span class="k">override</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Identify vulnerability sinks</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">isValidTransfer</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Value</span><span class="w"> </span><span class="o">*</span><span class="n">From</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">Value</span><span class="w"> </span><span class="o">*</span><span class="n">To</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">override</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Check if value transfer is valid for this vulnerability type</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">getCategory</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">override</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;MyCustomVulnerability&quot;</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">registerBugType</span><span class="p">()</span><span class="w"> </span><span class="k">override</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">BugReportMgr</span><span class="o">&amp;</span><span class="w"> </span><span class="n">mgr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BugReportMgr</span><span class="o">::</span><span class="n">get_instance</span><span class="p">();</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">mgr</span><span class="p">.</span><span class="n">register_bug_type</span><span class="p">(</span><span class="s">&quot;My Custom Bug&quot;</span><span class="p">,</span>
+<span class="w">                                     </span><span class="n">BugDescription</span><span class="o">::</span><span class="n">BI_HIGH</span><span class="p">,</span>
+<span class="w">                                     </span><span class="n">BugDescription</span><span class="o">::</span><span class="n">BC_SECURITY</span><span class="p">,</span>
+<span class="w">                                     </span><span class="s">&quot;CWE-XXX&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="kt">void</span><span class="w"> </span><span class="n">reportVulnerability</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">bugTypeId</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">Value</span><span class="w"> </span><span class="o">*</span><span class="n">Source</span><span class="p">,</span>
+<span class="w">                             </span><span class="k">const</span><span class="w"> </span><span class="n">Value</span><span class="w"> </span><span class="o">*</span><span class="n">Sink</span><span class="p">,</span>
+<span class="w">                             </span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">Value</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">SinkInsts</span><span class="p">)</span><span class="w"> </span><span class="k">override</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Create and report bug</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+</pre></div>
+</div>
+</section>
+<section id="statistics">
+<h2>Statistics<a class="headerlink" href="#statistics" title="Link to this heading"></a></h2>
+<p>The GVFA analysis provides statistics:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">AllQueryCounter</span></code> – Total number of reachability queries</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SuccsQueryCounter</span></code> – Number of successful queries (vulnerabilities found)</p></li>
+<li><p>Query success rate and timing information</p></li>
+</ul>
+</section>
+<section id="limitations">
+<h2>Limitations<a class="headerlink" href="#limitations" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>Conservative Analysis</strong>: May report false positives due to over-approximation in alias analysis</p></li>
+<li><p><strong>Context Sensitivity</strong>: Context-sensitive analysis is more precise but slower</p></li>
+<li><p><strong>Limited Library Function Modeling</strong>: Some library functions may not be fully modeled</p></li>
+<li><p><strong>No Runtime Information</strong>: Static analysis only, cannot detect runtime-specific issues</p></li>
+</ul>
+</section>
+<section id="performance">
+<h2>Performance<a class="headerlink" href="#performance" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>GVFA scales with program size and pointer complexity</p></li>
+<li><p>Context-sensitive analysis is more precise but significantly slower</p></li>
+<li><p>NullCheckAnalysis improves precision for null pointer checker with moderate overhead</p></li>
+<li><p>Statistics can help identify performance bottlenecks</p></li>
+</ul>
+</section>
+<section id="integration">
+<h2>Integration<a class="headerlink" href="#integration" title="Link to this heading"></a></h2>
+<p>GVFA checkers integrate with:</p>
+<ul class="simple">
+<li><p><strong>Dyck Alias Analysis</strong>: Pointer analysis for value flow tracking</p></li>
+<li><p><strong>Global Value Flow Analysis</strong>: Core value flow analysis engine</p></li>
+<li><p><strong>Null Check Analysis</strong>: Optional precision improvement for null pointer checker</p></li>
+<li><p><strong>BugReportMgr</strong>: Centralized bug reporting system</p></li>
+</ul>
+</section>
+<section id="see-also">
+<h2>See Also<a class="headerlink" href="#see-also" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="index.html"><span class="doc">Checker Framework</span></a> – Checker Framework overview</p></li>
+<li><p><span class="xref std std-doc">../analysis/gvfa</span> – Global Value Flow Analysis documentation</p></li>
+<li><p><span class="xref std std-doc">../alias/index</span> – Alias analysis for pointer information</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="concurrency.html" class="btn btn-neutral float-left" title="Concurrency Bug Checker" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="kint.html" class="btn btn-neutral float-right" title="KINT Numerical Bug Checker" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

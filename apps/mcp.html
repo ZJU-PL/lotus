@@ -1,0 +1,294 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MCP (Model Context Protocol) Server &mdash; Arlib Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="SeaHorn Verification Framework" href="seahorn.html" />
+    <link rel="prev" title="Fuzzing Support" href="fuzzing_support.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/pdg_query_language.html">PDG Query Language</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Applications</a><ul class="current">
+<li class="toctree-l2 current"><a class="reference internal" href="index.html#components">Components</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="checker/index.html">Checker Framework</a></li>
+<li class="toctree-l3"><a class="reference internal" href="clam.html">CLAM – Abstract Interpretation Framework</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fuzzing_support.html">Fuzzing Support</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">MCP (Model Context Protocol) Server</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#overview">Overview</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#components">Components</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#api">API</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#command-line-tool">Command-Line Tool</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#limitations">Limitations</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#use-cases">Use Cases</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#integration">Integration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="seahorn.html">SeaHorn Verification Framework</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="index.html">Applications</a></li>
+      <li class="breadcrumb-item active">MCP (Model Context Protocol) Server</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/apps/mcp.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="mcp-model-context-protocol-server">
+<h1>MCP (Model Context Protocol) Server<a class="headerlink" href="#mcp-model-context-protocol-server" title="Link to this heading"></a></h1>
+<p>MCP provides call graph analysis and querying capabilities for LLVM bitcode, enabling programmatic access to call graph information.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">lib/Apps/MCP/</span></code></p>
+<p><strong>Build Target</strong>: <code class="docutils literal notranslate"><span class="pre">tools/mcp/mcp</span></code></p>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
+<p>The MCP server extracts and analyzes call graphs from LLVM IR, providing:</p>
+<ul class="simple">
+<li><p>Direct call graph extraction (callers/callees)</p></li>
+<li><p>Transitive closure computation (reachability analysis)</p></li>
+<li><p>Export to JSON and DOT formats</p></li>
+<li><p>Query API for call graph information</p></li>
+</ul>
+</section>
+<section id="components">
+<h2>Components<a class="headerlink" href="#components" title="Link to this heading"></a></h2>
+<p><strong>MCPServer</strong> – Core call graph analysis engine:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">MCPServer.h</span></code> – API for call graph operations</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">MCPServer.cpp</span></code> – Implementation of call graph extraction and analysis</p></li>
+</ul>
+<p><strong>CallGraphData</strong> – Data structure for call graph representation:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">callees</span></code> – Map from function to its direct callees</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">callers</span></code> – Map from function to its direct callers</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">allFunctions</span></code> – Set of all functions in the module</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">indirectCalls</span></code> – List of indirect call sites</p></li>
+</ul>
+</section>
+<section id="api">
+<h2>API<a class="headerlink" href="#api" title="Link to this heading"></a></h2>
+<p><strong>Loading and Building</strong>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Apps/MCP/MCPServer.h&quot;</span>
+
+<span class="n">MCPServer</span><span class="w"> </span><span class="n">server</span><span class="p">;</span>
+<span class="n">server</span><span class="p">.</span><span class="n">loadModule</span><span class="p">(</span><span class="s">&quot;program.bc&quot;</span><span class="p">);</span>
+<span class="n">server</span><span class="p">.</span><span class="n">buildCallGraph</span><span class="p">();</span>
+</pre></div>
+</div>
+<p><strong>Query Operations</strong>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Get direct callees of a function</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">callees</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">getCallees</span><span class="p">(</span><span class="s">&quot;main&quot;</span><span class="p">);</span>
+
+<span class="c1">// Get direct callers of a function</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">callers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">getCallers</span><span class="p">(</span><span class="s">&quot;foo&quot;</span><span class="p">);</span>
+
+<span class="c1">// Get all functions in the module</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">allFuncs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">getAllFunctions</span><span class="p">();</span>
+
+<span class="c1">// Get all reachable functions (transitive closure)</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">reachable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">getReachableFunctions</span><span class="p">(</span><span class="s">&quot;main&quot;</span><span class="p">);</span>
+
+<span class="c1">// Check if one function can reach another</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">canReach</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">canReach</span><span class="p">(</span><span class="s">&quot;main&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;exit&quot;</span><span class="p">);</span>
+</pre></div>
+</div>
+<p><strong>Export Formats</strong>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Export as JSON</span>
+<span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">exportAsJSON</span><span class="p">();</span>
+
+<span class="c1">// Export as DOT (Graphviz)</span>
+<span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">dot</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">server</span><span class="p">.</span><span class="n">exportAsDOT</span><span class="p">();</span>
+</pre></div>
+</div>
+</section>
+<section id="command-line-tool">
+<h2>Command-Line Tool<a class="headerlink" href="#command-line-tool" title="Link to this heading"></a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">mcp</span></code> tool provides a command-line interface for call graph queries:</p>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>mcp<span class="w"> </span>&lt;bitcode&gt;<span class="w"> </span>&lt;command&gt;<span class="w"> </span><span class="o">[</span>args<span class="o">]</span>
+</pre></div>
+</div>
+<p><strong>Commands</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">list</span></code> – List all functions in the module</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">callees</span> <span class="pre">&lt;func&gt;</span></code> – Get direct callees of a function</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">callers</span> <span class="pre">&lt;func&gt;</span></code> – Get direct callers of a function</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">reachable</span> <span class="pre">&lt;func&gt;</span></code> – Get all reachable functions (transitive)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">can-reach</span> <span class="pre">&lt;from&gt;</span> <span class="pre">&lt;to&gt;</span></code> – Check if one function can reach another</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">export-json</span></code> – Export call graph as JSON</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">export-dot</span></code> – Export call graph as DOT format</p></li>
+</ul>
+<p><strong>Examples</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># List all functions</span>
+./build/bin/mcp<span class="w"> </span>program.bc<span class="w"> </span>list
+
+<span class="c1"># Get callees of main</span>
+./build/bin/mcp<span class="w"> </span>program.bc<span class="w"> </span>callees<span class="w"> </span>main
+
+<span class="c1"># Check reachability</span>
+./build/bin/mcp<span class="w"> </span>program.bc<span class="w"> </span>can-reach<span class="w"> </span>main<span class="w"> </span><span class="nb">exit</span>
+
+<span class="c1"># Export as DOT for visualization</span>
+./build/bin/mcp<span class="w"> </span>program.bc<span class="w"> </span>export-dot<span class="w"> </span>&gt;<span class="w"> </span>callgraph.dot
+dot<span class="w"> </span>-Tpdf<span class="w"> </span>callgraph.dot<span class="w"> </span>-o<span class="w"> </span>callgraph.pdf
+</pre></div>
+</div>
+</section>
+<section id="limitations">
+<h2>Limitations<a class="headerlink" href="#limitations" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>Indirect Calls</strong>: Indirect calls are detected but not resolved. The call graph only includes direct function calls.</p></li>
+<li><p><strong>Context-Insensitive</strong>: The call graph is context-insensitive (no call-site distinction).</p></li>
+<li><p><strong>No Pointer Analysis</strong>: Indirect calls through function pointers are not resolved.</p></li>
+</ul>
+</section>
+<section id="use-cases">
+<h2>Use Cases<a class="headerlink" href="#use-cases" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>Impact Analysis</strong>: Determine which functions are affected by changes</p></li>
+<li><p><strong>Dead Code Detection</strong>: Find unreachable functions</p></li>
+<li><p><strong>Dependency Analysis</strong>: Understand function call relationships</p></li>
+<li><p><strong>Visualization</strong>: Generate call graph diagrams for documentation</p></li>
+</ul>
+</section>
+<section id="integration">
+<h2>Integration<a class="headerlink" href="#integration" title="Link to this heading"></a></h2>
+<p>MCP can be integrated into other Lotus analyses that need call graph information:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;Apps/MCP/MCPServer.h&quot;</span>
+
+<span class="n">MCPServer</span><span class="w"> </span><span class="n">server</span><span class="p">;</span>
+<span class="n">server</span><span class="p">.</span><span class="n">loadModule</span><span class="p">(</span><span class="n">bitcodeFile</span><span class="p">);</span>
+<span class="n">server</span><span class="p">.</span><span class="n">buildCallGraph</span><span class="p">();</span>
+
+<span class="c1">// Use in analysis</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">server</span><span class="p">.</span><span class="n">canReach</span><span class="p">(</span><span class="s">&quot;main&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;vulnerable_function&quot;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Analyze vulnerable path</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="see-also">
+<h2>See Also<a class="headerlink" href="#see-also" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="../tools/mcp/index.html"><span class="doc">MCP – MCP Server</span></a> – MCP tool documentation</p></li>
+<li><p><a class="reference internal" href="../ir/index.html"><span class="doc">Intermediate Representations</span></a> – Intermediate representation documentation</p></li>
+<li><p><a class="reference internal" href="../alias/index.html"><span class="doc">Alias Analysis</span></a> – Alias analysis for resolving indirect calls</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="fuzzing_support.html" class="btn btn-neutral float-left" title="Fuzzing Support" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="seahorn.html" class="btn btn-neutral float-right" title="SeaHorn Verification Framework" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
