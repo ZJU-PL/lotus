@@ -3,6 +3,8 @@
 
 #include "Checker/Concurrency/ConcurrencyBugReport.h"
 #include "Analysis/Concurrency/MHPAnalysis.h"
+#include "Analysis/Concurrency/LockSetAnalysis.h"
+#include "Analysis/Concurrency/EscapeAnalysis.h"
 
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instructions.h>
@@ -28,6 +30,8 @@ class DataRaceChecker {
 public:
     explicit DataRaceChecker(llvm::Module& module,
                            mhp::MHPAnalysis* mhpAnalysis,
+                           mhp::LockSetAnalysis* locksetAnalysis = nullptr,
+                           lotus::EscapeAnalysis* escapeAnalysis = nullptr,
                            lotus::AliasAnalysisWrapper* aliasAnalysis = nullptr);
 
     /**
@@ -40,6 +44,8 @@ private:
     // Analysis components
     llvm::Module& m_module;
     mhp::MHPAnalysis* m_mhpAnalysis;
+    mhp::LockSetAnalysis* m_locksetAnalysis;
+    lotus::EscapeAnalysis* m_escapeAnalysis;
     lotus::AliasAnalysisWrapper* m_aliasAnalysis;
 
     // Helper methods for data race detection

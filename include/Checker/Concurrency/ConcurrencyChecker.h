@@ -3,10 +3,13 @@
 
 #include "Analysis/Concurrency/MHPAnalysis.h"
 #include "Analysis/Concurrency/LockSetAnalysis.h"
+#include "Analysis/Concurrency/EscapeAnalysis.h"
 #include "Checker/Concurrency/ConcurrencyBugReport.h"
 #include "Checker/Concurrency/DataRaceChecker.h"
 #include "Checker/Concurrency/DeadlockChecker.h"
 #include "Checker/Concurrency/AtomicityChecker.h"
+#include "Checker/Concurrency/ConditionVariableChecker.h"
+#include "Checker/Concurrency/LockMismatchChecker.h"
 #include "Checker/Report/BugReport.h"
 #include "Checker/Report/BugReportMgr.h"
 
@@ -59,6 +62,16 @@ public:
     void checkAtomicityViolations();
 
     /**
+     * @brief Check for condition variable misuse and report to BugReportMgr
+     */
+    void checkConditionVariables();
+
+    /**
+     * @brief Check for lock mismatches and report to BugReportMgr
+     */
+    void checkLockMismatches();
+
+    /**
      * @brief Set alias analysis wrapper for better precision
      */
     void setAliasAnalysis(lotus::AliasAnalysisWrapper* aa) { m_aliasAnalysis = aa; }
@@ -69,6 +82,8 @@ public:
     void enableDataRaceCheck(bool enable) { m_checkDataRaces = enable; }
     void enableDeadlockCheck(bool enable) { m_checkDeadlocks = enable; }
     void enableAtomicityCheck(bool enable) { m_checkAtomicityViolations = enable; }
+    void enableCondVarCheck(bool enable) { m_checkCondVars = enable; }
+    void enableLockMismatchCheck(bool enable) { m_checkLockMismatches = enable; }
 
     /**
      * @brief Get statistics about the analysis
@@ -80,6 +95,8 @@ public:
         size_t dataRacesFound;
         size_t deadlocksFound;
         size_t atomicityViolationsFound;
+        size_t condVarBugsFound;
+        size_t lockMismatchesFound;
     };
 
     Statistics getStatistics() const { return m_stats; }
@@ -89,6 +106,7 @@ private:
     llvm::Module& m_module;
     std::unique_ptr<mhp::MHPAnalysis> m_mhpAnalysis;
     std::unique_ptr<mhp::LockSetAnalysis> m_locksetAnalysis;
+    std::unique_ptr<lotus::EscapeAnalysis> m_escapeAnalysis;
     lotus::AliasAnalysisWrapper* m_aliasAnalysis;
     ThreadAPI* m_threadAPI;
 
@@ -96,16 +114,22 @@ private:
     std::unique_ptr<DataRaceChecker> m_dataRaceChecker;
     std::unique_ptr<DeadlockChecker> m_deadlockChecker;
     std::unique_ptr<AtomicityChecker> m_atomicityChecker;
+    std::unique_ptr<ConditionVariableChecker> m_condVarChecker;
+    std::unique_ptr<LockMismatchChecker> m_lockMismatchChecker;
 
     // Configuration
     bool m_checkDataRaces = true;
     bool m_checkDeadlocks = true;
     bool m_checkAtomicityViolations = true;
+    bool m_checkCondVars = true;
+    bool m_checkLockMismatches = true;
 
     // Bug type IDs (registered with BugReportMgr)
     int m_dataRaceTypeId;
     int m_deadlockTypeId;
     int m_atomicityViolationTypeId;
+    int m_condVarMisuseTypeId;
+    int m_lockMismatchTypeId;
 
     // Results tracking
     Statistics m_stats;

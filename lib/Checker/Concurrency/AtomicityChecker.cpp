@@ -168,10 +168,14 @@ std::vector<ConcurrencyBugReport> AtomicityChecker::checkAtomicityViolations() {
                 "Potential atomicity violation between accesses at " +
                 formatLoc(*I1) + " and " + formatLoc(*I2);
 
-            Reports.emplace_back(ConcurrencyBugType::ATOMICITY_VIOLATION, I1,
-                                 I2, std::move(Desc),
+            ConcurrencyBugReport report(ConcurrencyBugType::ATOMICITY_VIOLATION,
+                                 std::move(Desc),
                                  BugDescription::BI_MEDIUM,
                                  BugDescription::BC_WARNING);
+            report.addStep(I1, "Access 1 in Critical Section 1");
+            report.addStep(I2, "Access 2 in Critical Section 2");
+            
+            Reports.push_back(report);
           }
         }
       }

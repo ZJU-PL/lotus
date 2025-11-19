@@ -25,30 +25,49 @@ std::vector<ConcurrencyBugReport> DeadlockChecker::checkDeadlocks() {
         mhp::LockID lock1 = violation.first;
         mhp::LockID lock2 = violation.second;
 
+        // Find instructions that acquire these locks
+        auto lockAcquires1 = m_locksetAnalysis->getLockAcquires(lock1);
+        auto lockAcquires2 = m_locksetAnalysis->getLockAcquires(lock2);
+        
+        if (lockAcquires1.empty() || lockAcquires2.empty()) continue;
+
+        // Check if threads using these locks can run in parallel
+        bool canRunInParallel = false;
+        const Instruction* inst1 = nullptr;
+        const Instruction* inst2 = nullptr;
+
+        // Check all pairs of acquires to see if any can happen in parallel
+        for (const auto* a1 : lockAcquires1) {
+            for (const auto* a2 : lockAcquires2) {
+                if (m_mhpAnalysis->mayHappenInParallel(a1, a2)) {
+                    canRunInParallel = true;
+                    inst1 = a1;
+                    inst2 = a2;
+                    break;
+                }
+            }
+            if (canRunInParallel) break;
+        }
+
+        if (!canRunInParallel) continue;
+
         std::string description = "Potential deadlock: inconsistent lock acquisition order between ";
         description += getLockDescription(lock1);
         description += " and ";
         description += getLockDescription(lock2);
+        description += ". Threads acquiring these locks may run in parallel.";
 
-        // Find representative instructions for these locks
-        const Instruction* inst1 = nullptr;
-        const Instruction* inst2 = nullptr;
-
-        // Find instructions that acquire these locks
-        auto lockAcquires1 = m_locksetAnalysis->getLockAcquires(lock1);
-        auto lockAcquires2 = m_locksetAnalysis->getLockAcquires(lock2);
-
-        if (!lockAcquires1.empty() && !lockAcquires2.empty()) {
-            inst1 = lockAcquires1[0];
-            inst2 = lockAcquires2[0];
-        }
-
-        reports.emplace_back(
+        ConcurrencyBugReport report(
             ConcurrencyBugType::DEADLOCK,
-            inst1, inst2, description,
+            description,
             BugDescription::BI_HIGH,
             BugDescription::BC_ERROR
         );
+
+        if (inst1) report.addStep(inst1, "Lock 1 acquisition");
+        if (inst2) report.addStep(inst2, "Lock 2 acquisition");
+        
+        reports.push_back(report);
     }
 
     return reports;
@@ -61,7 +80,10 @@ std::vector<std::pair<mhp::LockID, mhp::LockID>> DeadlockChecker::detectLockOrde
 std::string DeadlockChecker::getLockDescription(mhp::LockID lock) const {
     std::string desc;
     raw_string_ostream os(desc);
-    lock->printAsOperand(os, false);
+    if (lock && lock->hasName())
+        os << lock->getName();
+    else
+        os << *lock;
     return os.str();
 }
 

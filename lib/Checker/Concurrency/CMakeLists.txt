@@ -4,6 +4,8 @@ add_library(ConcurrencyChecker STATIC
     DataRaceChecker.cpp
     DeadlockChecker.cpp
     AtomicityChecker.cpp
+    ConditionVariableChecker.cpp
+    LockMismatchChecker.cpp
 )
 
 target_link_libraries(ConcurrencyChecker

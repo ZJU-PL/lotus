@@ -4,32 +4,42 @@
 #include "Checker/Report/BugTypes.h"
 #include <llvm/IR/Instructions.h>
 #include <string>
+#include <vector>
 
 namespace concurrency {
 
 enum class ConcurrencyBugType {
     DATA_RACE,
     DEADLOCK,
-    ATOMICITY_VIOLATION
+    ATOMICITY_VIOLATION,
+    LOCK_MISMATCH,
+    COND_VAR_MISUSE
+};
+
+struct ConcurrencyBugStep {
+    const llvm::Instruction* instruction;
+    std::string description;
+    
+    ConcurrencyBugStep(const llvm::Instruction* inst, const std::string& desc)
+        : instruction(inst), description(desc) {}
 };
 
 struct ConcurrencyBugReport {
     ConcurrencyBugType bugType;
-    const llvm::Instruction* instruction1;
-    const llvm::Instruction* instruction2;
-    std::string description;
-    std::string location;
+    std::vector<ConcurrencyBugStep> steps;
+    std::string description; // High-level description
     BugDescription::BugImportance importance;
     BugDescription::BugClassification classification;
 
     ConcurrencyBugReport(ConcurrencyBugType type,
-                        const llvm::Instruction* inst1,
-                        const llvm::Instruction* inst2,
                         const std::string& desc,
                         BugDescription::BugImportance imp = BugDescription::BI_HIGH,
                         BugDescription::BugClassification cls = BugDescription::BC_ERROR)
-        : bugType(type), instruction1(inst1), instruction2(inst2),
-          description(desc), importance(imp), classification(cls) {}
+        : bugType(type), description(desc), importance(imp), classification(cls) {}
+        
+    void addStep(const llvm::Instruction* inst, const std::string& desc) {
+        steps.emplace_back(inst, desc);
+    }
 };
 
 } // namespace concurrency

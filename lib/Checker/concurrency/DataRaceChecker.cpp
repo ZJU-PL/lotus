@@ -9,8 +9,12 @@ using namespace lotus;
 namespace concurrency {
 
 DataRaceChecker::DataRaceChecker(Module& module, MHPAnalysis* mhpAnalysis,
+                                 LockSetAnalysis* locksetAnalysis,
+                                 EscapeAnalysis* escapeAnalysis,
                                  AliasAnalysisWrapper* aliasAnalysis)
-    : m_module(module), m_mhpAnalysis(mhpAnalysis), m_aliasAnalysis(aliasAnalysis) {}
+    : m_module(module), m_mhpAnalysis(mhpAnalysis), 
+      m_locksetAnalysis(locksetAnalysis), m_escapeAnalysis(escapeAnalysis),
+      m_aliasAnalysis(aliasAnalysis) {}
 
 // Detects data races by checking all pairs of memory accesses.
 // A data race occurs when:
@@ -18,6 +22,8 @@ DataRaceChecker::DataRaceChecker(Module& module, MHPAnalysis* mhpAnalysis,
 //   2. At least one is a write operation
 //   3. They may access the same memory location (alias analysis)
 //   4. Neither operation is atomic
+//   5. They are not protected by a common lock (LockSet analysis)
+//   6. The memory location is shared/escaped (Escape analysis)
 std::vector<ConcurrencyBugReport> DataRaceChecker::checkDataRaces() {
     std::vector<ConcurrencyBugReport> reports;
     std::unordered_map<const Value*, std::vector<const Instruction*>> variableAccesses;
@@ -36,17 +42,28 @@ std::vector<ConcurrencyBugReport> DataRaceChecker::checkDataRaces() {
                 const Instruction* inst2 = accesses[j];
                 if (isAtomicOperation(inst2)) continue;
 
-                // Report race if: concurrent + conflicting + aliased.
-                if (m_mhpAnalysis->mayHappenInParallel(inst1, inst2) &&
-                    (isWriteAccess(inst1) || isWriteAccess(inst2)) &&
-                    mayAccessSameLocation(inst1, inst2)) {
+                // 1. Check if they are both writes or one is a write
+                if (!isWriteAccess(inst1) && !isWriteAccess(inst2)) continue;
+
+                // 2. Check if they may happen in parallel
+                if (!m_mhpAnalysis->mayHappenInParallel(inst1, inst2)) continue;
+
+                // 3. Check if they are protected by a common lock
+                if (m_locksetAnalysis && m_locksetAnalysis->mayHoldCommonLock(inst1, inst2)) continue;
+
+                // 4. Check if they alias (already grouped by pointer, but double check if wrapper available)
+                if (!mayAccessSameLocation(inst1, inst2)) continue;
                     
-                    reports.emplace_back(
-                        ConcurrencyBugType::DATA_RACE, inst1, inst2,
-                        "Potential data race between " + getInstructionLocation(inst1) +
-                        " and " + getInstructionLocation(inst2),
-                        BugDescription::BI_HIGH, BugDescription::BC_ERROR);
-                }
+                ConcurrencyBugReport report(
+                    ConcurrencyBugType::DATA_RACE,
+                    "Potential data race between " + getInstructionLocation(inst1) +
+                    " and " + getInstructionLocation(inst2),
+                    BugDescription::BI_HIGH, BugDescription::BC_ERROR);
+
+                report.addStep(inst1, "First access (read/write)");
+                report.addStep(inst2, "Second conflicting access (read/write)");
+
+                reports.push_back(report);
             }
         }
     }
@@ -61,8 +78,21 @@ void DataRaceChecker::collectVariableAccesses(
         if (func.isDeclaration()) continue;
         for (inst_iterator I = inst_begin(func), E = inst_end(func); I != E; ++I) {
             if (isMemoryAccess(&*I)) {
-                if (const Value* memLoc = getMemoryLocation(&*I))
+                const Value* memLoc = getMemoryLocation(&*I);
+                if (memLoc) {
+                    // Filter out thread-local accesses if escape analysis is available
+                    if (m_escapeAnalysis && !m_escapeAnalysis->isEscaped(memLoc)) {
+                        // If it's a local variable that hasn't escaped, it can't race
+                        // Check if it's a stack allocation (AllocaInst)
+                        const Value* baseObj = memLoc->stripPointerCasts();
+                        if (isa<AllocaInst>(baseObj)) {
+                             continue;
+                        }
+                        // For other types (globals, etc), isEscaped handles it.
+                         continue;
+                    }
                     variableAccesses[memLoc].push_back(&*I);
+                }
             }
         }
     }
