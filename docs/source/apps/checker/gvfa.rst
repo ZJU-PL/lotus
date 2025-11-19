@@ -3,9 +3,9 @@ GVFA Vulnerability Checkers
 
 Global Value Flow Analysis (GVFA) based checkers for detecting memory safety vulnerabilities in LLVM bitcode.
 
-**Library Location**: ``lib/Checker/gvfa/``
+**Library Location**: ``lib/Checker/GVFA/``
 
-**Headers**: ``include/Checker/gvfa/``
+**Headers**: ``include/Checker/GVFA/``
 
 **Tool Location**: ``tools/checker/lotus_gvfa.cpp``
 
@@ -172,7 +172,7 @@ Programmatic Usage
 
 .. code-block:: cpp
 
-   #include "Checker/gvfa/NullPointerChecker.h"
+   #include "Checker/GVFA/NullPointerChecker.h"
    #include "Checker/Report/BugReportMgr.h"
    #include "Analysis/GVFA/GlobalValueFlowAnalysis.h"
    
@@ -204,7 +204,7 @@ To create a new GVFA checker, inherit from ``GVFAVulnerabilityChecker``:
 
 .. code-block:: cpp
 
-   #include "Checker/gvfa/GVFAVulnerabilityChecker.h"
+   #include "Checker/GVFA/GVFAVulnerabilityChecker.h"
    
    class MyCustomChecker : public GVFAVulnerabilityChecker {
    public:

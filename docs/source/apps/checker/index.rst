@@ -23,14 +23,14 @@ All checkers report bugs through the centralized ``BugReportMgr`` system, enabli
 Components
 ----------
 
-**Concurrency Checkers** (``lib/Checker/concurrency/``):
+**Concurrency Checkers** (``lib/Checker/Concurrency/``):
 
 * ``ConcurrencyChecker.cpp`` – Main concurrency checker coordinator
 * ``DataRaceChecker.cpp`` – Data race detection using MHP (May Happen in Parallel) analysis
 * ``DeadlockChecker.cpp`` – Deadlock detection using lock set analysis
 * ``AtomicityChecker.cpp`` – Atomicity violation detection
 
-**GVFA Vulnerability Checkers** (``lib/Checker/gvfa/``):
+**GVFA Vulnerability Checkers** (``lib/Checker/GVFA/``):
 
 * ``NullPointerChecker.cpp`` – Null pointer dereference detection (CWE-476, CWE-690)
 * ``UseAfterFreeChecker.cpp`` – Use-after-free detection (CWE-416)
@@ -39,7 +39,7 @@ Components
 * ``InvalidUseOfStackAddressChecker.cpp`` – Stack address misuse detection (CWE-562)
 * ``GVFAVulnerabilityChecker.h`` – Base interface for all GVFA checkers
 
-**KINT Numerical Checkers** (``lib/Checker/kint/``):
+**KINT Numerical Checkers** (``lib/Checker/KINT/``):
 
 * ``MKintPass.cpp`` – Main KINT pass for integer overflow, division by zero, array bounds checking
 * ``MKintPass_bugreport.cpp`` – Bug report generation for KINT
@@ -103,7 +103,7 @@ All checkers integrate with the centralized ``BugReportMgr``:
 .. code-block:: cpp
 
    #include "Checker/Report/BugReportMgr.h"
-   #include "Checker/gvfa/NullPointerChecker.h"
+   #include "Checker/GVFA/NullPointerChecker.h"
    
    // Create checker
    auto checker = std::make_unique<NullPointerChecker>();

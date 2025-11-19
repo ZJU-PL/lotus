@@ -1,4 +1,4 @@
-#include "Checker/concurrency/ConcurrencyChecker.h"
+#include "Checker/Concurrency/ConcurrencyChecker.h"
 #include "Checker/Report/BugReport.h"
 #include "Checker/Report/BugReportMgr.h"
 #include "Checker/Report/ReportOptions.h"

@@ -3,11 +3,11 @@
 // Integrates GVFA with optional NullCheckAnalysis for improved precision
 
 
-#include "Checker/gvfa/NullPointerChecker.h"
-#include "Checker/gvfa/UseAfterFreeChecker.h"
-#include "Checker/gvfa/UseOfUninitializedVariableChecker.h"
-#include "Checker/gvfa/FreeOfNonHeapMemoryChecker.h"
-#include "Checker/gvfa/InvalidUseOfStackAddressChecker.h"
+#include "Checker/GVFA/NullPointerChecker.h"
+#include "Checker/GVFA/UseAfterFreeChecker.h"
+#include "Checker/GVFA/UseOfUninitializedVariableChecker.h"
+#include "Checker/GVFA/FreeOfNonHeapMemoryChecker.h"
+#include "Checker/GVFA/InvalidUseOfStackAddressChecker.h"
 #include "Checker/Report/BugReportMgr.h"
 #include "Analysis/GVFA/GlobalValueFlowAnalysis.h"
 #include "Analysis/NullPointer/NullCheckAnalysis.h"

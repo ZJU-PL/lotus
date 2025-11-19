@@ -3,9 +3,9 @@ KINT Numerical Bug Checker
 
 Static analysis tool for detecting numerical bugs: integer overflow, division by zero, array bounds violations, and related issues.
 
-**Library Location**: ``lib/Checker/kint/``
+**Library Location**: ``lib/Checker/KINT/``
 
-**Headers**: ``include/Checker/kint/``
+**Headers**: ``include/Checker/KINT/``
 
 **Tool Location**: ``tools/checker/lotus_kint.cpp``
 
@@ -197,7 +197,7 @@ Programmatic Usage
 
 .. code-block:: cpp
 
-   #include "Checker/kint/MKintPass.h"
+   #include "Checker/KINT/MKintPass.h"
    #include "Checker/Report/BugReportMgr.h"
    
    using namespace kint;

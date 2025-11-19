@@ -1,15 +1,15 @@
 # GVFA Vulnerability Checkers
-set(GVFAChecker_SOURCES
-  gvfa/NullPointerChecker.cpp
-  gvfa/UseAfterFreeChecker.cpp
-  gvfa/UseOfUninitializedVariableChecker.cpp
-  gvfa/FreeOfNonHeapMemoryChecker.cpp
-  gvfa/InvalidUseOfStackAddressChecker.cpp
+set(GVFAChecker_SOURCES  
+  GVFA/NullPointerChecker.cpp
+  GVFA/UseAfterFreeChecker.cpp
+  GVFA/UseOfUninitializedVariableChecker.cpp
+  GVFA/FreeOfNonHeapMemoryChecker.cpp
+  GVFA/InvalidUseOfStackAddressChecker.cpp
 )
 add_library(GVFAChecker STATIC ${GVFAChecker_SOURCES})
 target_link_libraries(GVFAChecker CanaryNullPointer)
 
 # Add subdirectories
 add_subdirectory(Report)
-add_subdirectory(kint)
-add_subdirectory(concurrency)
+add_subdirectory(KINT)
+add_subdirectory(Concurrency)

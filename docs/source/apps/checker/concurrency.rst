@@ -3,9 +3,9 @@ Concurrency Bug Checker
 
 Static analysis tool for detecting concurrency bugs in multithreaded programs: data races, deadlocks, and atomicity violations.
 
-**Library Location**: ``lib/Checker/concurrency/``
+**Library Location**: ``lib/Checker/Concurrency/``
 
-**Headers**: ``include/Checker/concurrency/``
+**Headers**: ``include/Checker/Concurrency/``
 
 **Tool Location**: ``tools/checker/lotus_concur.cpp``
 
@@ -132,7 +132,7 @@ Programmatic Usage
 
 .. code-block:: cpp
 
-   #include "Checker/concurrency/ConcurrencyChecker.h"
+   #include "Checker/Concurrency/ConcurrencyChecker.h"
    #include "Checker/Report/BugReportMgr.h"
    
    using namespace concurrency;
