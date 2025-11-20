@@ -22,18 +22,17 @@
     - use variable-sensitive dirty marking to avoid exponential re-evaluation.
  * MIT licence – use at will, no warranty.
  *********************************************************************/
- #ifndef NPA_HPP
- #define NPA_HPP
- #include <cassert>
- #include <chrono>
- #include <functional>
- #include <iostream>
- #include <map>
- #include <memory>
- #include <optional>
- #include <string>
- #include <utility>
- #include <vector>
+#ifndef NPA_HPP
+#define NPA_HPP
+#include <cassert>
+#include <chrono>
+#include <functional>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
  
  /**********************************************************************
   * 0. helpers
@@ -81,16 +80,41 @@ template <class D> using DomTest = typename D::test_type;
 
 #define NPA_REQUIRE_DOMAIN(D) static_assert(DomainHas<D>::value,"Invalid DOMAIN: missing required methods (zero, combine, extend, extend_lin, ndetCombine, condCombine, subtract, equal) or test_type")
  
- /**********************************************************************
+/**********************************************************************
   * 2. Dirty-flag base
   *********************************************************************/
  struct Dirty{ mutable bool dirty_=true; void mark(bool d=true)const{dirty_=d;}};
+
+// Lightweight optional replacement to keep this header C++14 friendly.
+// Only the small subset of std::optional used below is implemented.
+template <class V>
+struct NPAOptional {
+  bool has{false};
+  V val{};
+
+  NPAOptional() = default;
+  NPAOptional(const NPAOptional&) = default;
+  NPAOptional& operator=(const NPAOptional&) = default;
+
+  // Assign from value – marks the optional as engaged
+  NPAOptional& operator=(const V& v_in) {
+    val = v_in;
+    has = true;
+    return *this;
+  }
+
+  void reset() { has = false; }
+  bool has_value() const { return has; }
+
+  V& operator*() { return val; }
+  const V& operator*() const { return val; }
+};
  
  /**********************************************************************
   * 3. Exp0 – non-linear expressions
   *********************************************************************/
- template <class D> struct Exp0;
- template <class D> using E0 = std::shared_ptr<Exp0<D>>;
+template <class D> struct Exp0;
+template <class D> using E0 = std::shared_ptr<Exp0<D>>;
  
 template <class D>
 struct Exp0 : Dirty, std::enable_shared_from_this<Exp0<D>>{
@@ -104,7 +128,7 @@ struct Exp0 : Dirty, std::enable_shared_from_this<Exp0<D>>{
   Symbol sym;                    // Call / Hole / Concat var / InfClos loop var
   T phi;                         // Cond guard
   E0<D> t1,t2;                   // Cond / Ndet / Concat branches
-  /* cache */ mutable std::optional<V> val;
+  /* cache */ mutable NPAOptional<V> val;
   /* factories */
   static E0<D> term(V v){ auto e=std::make_shared<Exp0>(); e->k=Term; e->c=v; return e;}
   static E0<D> seq(V c,E0<D> t){ auto e=std::make_shared<Exp0>(); e->k=Seq; e->c=c; e->t=t; return e;}
@@ -121,8 +145,8 @@ struct Exp0 : Dirty, std::enable_shared_from_this<Exp0<D>>{
  /**********************************************************************
   * 4. Exp1 – linear expressions
   *********************************************************************/
- template <class D> struct Exp1;
- template <class D> using E1 = std::shared_ptr<Exp1<D>>;
+template <class D> struct Exp1;
+template <class D> using E1 = std::shared_ptr<Exp1<D>>;
  
 template <class D>
 struct Exp1 : Dirty{
@@ -134,7 +158,7 @@ struct Exp1 : Dirty{
   Symbol sym;
   T phi;                          // Cond guard
   E1<D> t,t1,t2;                  // various
-  mutable std::optional<V> val;
+  mutable NPAOptional<V> val;
   /* factories */
   static E1<D> term(V v){ auto e=std::make_shared<Exp1>(); e->k=Term; e->c=v; return e;}
   static E1<D> add(E1<D> a,E1<D> b){ auto e=std::make_shared<Exp1>(); e->k=Add; e->t1=a; e->t2=b; return e;}
@@ -153,8 +177,8 @@ struct Exp1 : Dirty{
  /**********************************************************************
   * 5. Fixed-point helper (scalar / vector)
   *********************************************************************/
- template <class D, class F>
- auto fix(bool verbose, typename DomVal<D> init, F f){
+template <class D, class F>
+auto fix(bool verbose, DomVal<D> init, F f){
    NPA_REQUIRE_DOMAIN(D);
    int cnt=0;
    auto last=init;
@@ -181,8 +205,8 @@ struct Exp1 : Dirty{
  template <class D>
  struct I0{
    using V = DomVal<D>; using Map = std::map<Symbol,V>;
-   static V eval(bool verbose,const Map& nu,const E0<D>& e){
-     mark(e); return rec(nu,{},e);
+  static V eval(bool /*verbose*/,const Map& nu,const E0<D>& e){
+    mark(e); return rec(nu,{},e);
    }
  private:
    using Env = std::map<Symbol,V>;
@@ -244,25 +268,25 @@ struct Exp1 : Dirty{
     if(e->t2) c->t2=clone(e->t2);
     return c;
   }
-   static M1 aux(const Map& nu,const M0& o,const M0& cur){
+  static M1 aux(const Map& nu,const M0& o,const M0& cur){
      using K0 = typename Exp0<D>::K;
      switch(o->k){
-       case K0::Term:   return E1<D>::term(D::zero());
-       case K0::Seq: {
-         auto dTail = aux(nu,o->t,cur->t);
-         return E1<D>::seq(o->c,dTail);
-       }
+      case K0::Term:   return Exp1<D>::term(D::zero());
+      case K0::Seq: {
+        auto dTail = aux(nu,o->t,cur->t);
+        return Exp1<D>::seq(o->c,dTail);
+      }
       case K0::Call:{
         auto dArg = aux(nu,o->t,cur->t);
-        auto left = E1<D>::seq(nu.at(o->sym), dArg);
+        auto left = Exp1<D>::seq(nu.at(o->sym), dArg);
         assert(o->t->val.has_value() && "Call arg must be evaluated before differential");
-        auto right= E1<D>::call(o->sym, *o->t->val);
-        return E1<D>::add(left,right);
+        auto right= Exp1<D>::call(o->sym, *o->t->val);
+        return Exp1<D>::add(left,right);
       }
       case K0::Cond:{
         auto d1=aux(nu,o->t1,cur->t1);
         auto d2=aux(nu,o->t2,cur->t2);
-        return E1<D>::cond(o->phi, d1, d2);
+        return Exp1<D>::cond(o->phi, d1, d2);
       }
       case K0::Ndet:{
         auto a1=aux(nu,o->t1,cur->t1);
@@ -271,22 +295,22 @@ struct Exp1 : Dirty{
         assert(o->t1->val.has_value() && "Ndet branch 1 must be evaluated before differential");
         assert(o->t2->val.has_value() && "Ndet branch 2 must be evaluated before differential");
         assert(o->val.has_value() && "Ndet node must be evaluated before differential");
-        auto aug1 = E1<D>::add(E1<D>::term(*o->t1->val), a1);
-        auto aug2 = E1<D>::add(E1<D>::term(*o->t2->val), a2);
-        auto augmented = E1<D>::ndet(aug1, aug2);
+        auto aug1 = Exp1<D>::add(Exp1<D>::term(*o->t1->val), a1);
+        auto aug2 = Exp1<D>::add(Exp1<D>::term(*o->t2->val), a2);
+        auto augmented = Exp1<D>::ndet(aug1, aug2);
         if(D::idempotent) return augmented;
-        else return E1<D>::sub(augmented, E1<D>::term(*o->val));
+        else return Exp1<D>::sub(augmented, Exp1<D>::term(*o->val));
       }
-       case K0::Hole:   return E1<D>::hole(o->sym);
-       case K0::Concat:{
-         auto p1=aux(nu,o->t1,cur->t1);
-         auto p2=aux(nu,o->t2,cur->t2);
-         return E1<D>::concat(p1,o->sym,p2);
-       }
-       case K0::InfClos:{
-         auto body=aux(nu,o->t,cur->t);
-         return E1<D>::inf(body,o->sym);
-       }
+      case K0::Hole:   return Exp1<D>::hole(o->sym);
+      case K0::Concat:{
+        auto p1=aux(nu,o->t1,cur->t1);
+        auto p2=aux(nu,o->t2,cur->t2);
+        return Exp1<D>::concat(p1,o->sym,p2);
+      }
+      case K0::InfClos:{
+        auto body=aux(nu,o->t,cur->t);
+        return Exp1<D>::inf(body,o->sym);
+      }
      }
      return nullptr; /*unreachable*/
    }
@@ -298,8 +322,8 @@ struct Exp1 : Dirty{
  template <class D>
  struct I1{
    using V = DomVal<D>; using Map = std::map<Symbol,V>;
-   static V eval(bool verbose,const Map& nu,const E1<D>& e){
-     mark(e); return rec(nu,{},e);
+  static V eval(bool /*verbose*/,const Map& nu,const E1<D>& e){
+    mark(e); return rec(nu,{},e);
    }
  private:
    using Env=std::map<Symbol,V>;
@@ -396,12 +420,12 @@ struct Exp1 : Dirty{
      std::map<Symbol,V> nu; for(auto&b:binds) nu[b.first]=b.second;
  
      /* 1. build differential system */
-     std::vector<std::pair<Symbol,E1<D>>> rhs;
+    std::vector<std::pair<Symbol,E1<D>>> rhs;
      for(auto& e:eqns){
        V v=I0<D>::eval(verbose,nu,e.second);
-       auto d=Diff<D>::build(nu,e.second);
-       auto base=D::idempotent? v : D::subtract(v,nu[e.first]);
-       rhs.emplace_back(e.first,E1<D>::add(E1<D>::term(base),d));
+      auto d=Diff<D>::build(nu,e.second);
+      auto base=D::idempotent? v : D::subtract(v,nu[e.first]);
+      rhs.emplace_back(e.first,Exp1<D>::add(Exp1<D>::term(base),d));
      }
  
      /* 2. solve linear system via Kleene star (vector fix) */

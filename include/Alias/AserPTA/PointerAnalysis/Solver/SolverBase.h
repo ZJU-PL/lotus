@@ -239,6 +239,9 @@ protected:
     }
 
     void solve() {
+        // this is the main entrance of the pointer analysis, which performs the pointer analysis with on-the-fly call graph construction
+        // TODO: add a new mode: use a pre-built call graph (e.g., DyckAA or some type-based approach)
+        // A problem is: it might be hard to "hook" resolveFunPtrs to update the call graph.
         bool reanalyze;
         // from here
         do {
