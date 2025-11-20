@@ -20,8 +20,6 @@ add_library(AserPTA STATIC
 )
 
 target_compile_options(AserPTA PRIVATE
-    -fno-rtti
-    -Wno-c++14-extensions
     -DSPDLOG_ACTIVE_LEVEL=2
 )
 

@@ -38,9 +38,6 @@ set(LOTUSAA_SOURCES
 # Build as STATIC library for linking into executables
 add_library(LotusAA STATIC ${LOTUSAA_SOURCES})
 
-target_compile_options(LotusAA PRIVATE
-  -fno-rtti
-)
 
 target_link_libraries(LotusAA PUBLIC
   LLVMAnalysis

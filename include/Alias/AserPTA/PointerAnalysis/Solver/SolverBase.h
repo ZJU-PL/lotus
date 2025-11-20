@@ -17,6 +17,7 @@
 extern llvm::cl::opt<bool> ConfigPrintConstraintGraph;
 extern llvm::cl::opt<bool> ConfigPrintCallGraph;
 extern llvm::cl::opt<bool> ConfigDumpPointsToSet;
+extern llvm::cl::opt<bool> ConfigUseOnTheFlyCallGraph;
 
 namespace aser {
 
@@ -66,9 +67,6 @@ protected:
 
     // TODO: the intersection on pts should be done through PtsTrait for better extensibility
     llvm::DenseMap<PtrNodeTy *, llvm::SparseBitVector<5120>> handledGEPMap;
-
-    // Control whether to use on-the-fly callgraph construction
-    bool useOnTheFlyCallGraph = true;
 
     inline void updateFunPtr(NodeID indirectNode) {
         updatedFunPtrs.set(indirectNode);
@@ -243,17 +241,16 @@ protected:
 
     void solve() {
         // this is the main entrance of the pointer analysis, which performs the pointer analysis with on-the-fly call graph construction
-        if (useOnTheFlyCallGraph) {
+        if (ConfigUseOnTheFlyCallGraph) {
             bool reanalyze;
-            // from here
             do {
                 static_cast<SubClass *>(this)->runSolver(*langModel);
-                // resolve indirect calls in language model
+                // resolve indirect calls using the points-to information.
                 reanalyze = resolveFunPtrs();
             } while (reanalyze);
         } else {
             // Run solver once without on-the-fly callgraph construction
-            // TODO: add a new mode: use a pre-built call graph (e.g., DyckAA or some type-based approach)
+            // FIXME: we need to use a pre-built call graph (e.g., DyckAA or some type-based approach)
             // A problem is: it might be hard to "hook" resolveFunPtrs to update the call graph.
             static_cast<SubClass *>(this)->runSolver(*langModel);
         }
@@ -319,16 +316,6 @@ public:
     virtual ~SolverBase() {
         CT::release();
         PT::clearAll();
-    }
-
-    // Control whether to use on-the-fly callgraph construction
-    void setUseOnTheFlyCallGraph(bool use) {
-        useOnTheFlyCallGraph = use;
-    }
-
-    [[nodiscard]]
-    bool getUseOnTheFlyCallGraph() const {
-        return useOnTheFlyCallGraph;
     }
 
     // analyze the give module with specified entry function
