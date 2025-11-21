@@ -24,7 +24,7 @@ target_link_libraries(seadsa-tool PRIVATE
   SeaDsaAnalysis
 )
 
-# FPA (Flow-sensitive Pointer Analysis) Tool
+# FPA (Function pointer analysis) Tool
 add_executable(fpa fpa.cpp)
 target_link_libraries(fpa PRIVATE
   CanaryFPA
@@ -49,6 +49,16 @@ target_link_libraries(ander-aa PRIVATE
 add_executable(dyck-aa dyck-aa.cpp)
 target_link_libraries(dyck-aa PRIVATE
   CanaryDyckAA
+  ${LLVM_LINK_COMPONENTS}
+)
+
+# Call Graph Construction Tool
+add_executable(call-graph call-graph.cpp)
+target_link_libraries(call-graph PRIVATE
+  CanaryDyckAA
+  LotusAA
+  CanaryFPA
+  AserPTA
   ${LLVM_LINK_COMPONENTS}
 )
 
