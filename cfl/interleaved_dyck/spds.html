@@ -1,0 +1,306 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Synchronized Pushdown Systems &mdash; Lotus Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="Linear Conjunctive Language Reachability" href="lcl.html" />
+    <link rel="prev" title="Multiple Context-Free Language Reachability" href="mcfl.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Lotus
+              <img src="../../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/pdg_query_language.html">PDG Query Language (Cypher)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/property_based_slicing.html">Property-Based Slicing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/verification_backends.html">Verification Driver Abstraction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/instrumentation_passes.html">Instrumentation Passes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tools/index.html">Command-Line Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../apps/index.html">Applications</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Context-Free Language Analysis</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../cfl_components.html">CFL Reachability Components</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../classical/index.html">Classical CFL Engines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../indexing/index.html">CFL Indexing (CSIndex)</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="index.html">Interleaved-Dyck Reachability</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="unary.html">Exact Unary Interleaved Dyck</a></li>
+<li class="toctree-l3"><a class="reference internal" href="staged_bounds.html">Interleaved-Dyck Staged Bounds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="graph_reduction.html">Interleaved-Dyck Graph Reduction</a></li>
+<li class="toctree-l3"><a class="reference internal" href="mcfl.html">Multiple Context-Free Language Reachability</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">Synchronized Pushdown Systems</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#projections-and-result-contract">Projections and result contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#key-api-surface">Key API surface</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#synchronized-data-flow-builder">Synchronized data-flow builder</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#command-line">Command line</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#build-and-test">Build and test</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="lcl.html">Linear Conjunctive Language Reachability</a></li>
+<li class="toctree-l3"><a class="reference internal" href="affine_spds.html">Affine Synchronized Pushdown Systems</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../concurrency/index.html">Concurrency Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ml/index.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ml/index.html#memorymlfeaturespass">MemoryMLFeaturesPass</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ml/index.html#features-extracted">Features Extracted</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ml/index.html#feature-output">Feature Output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ml/index.html#analysis-dependencies">Analysis Dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ml/index.html#integration-notes">Integration Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ml/index.html#related-components">Related Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../optimization/index.html">Optimization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../security/index.html">Security Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../symbolic_execution/index.html">Symbolic Execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../utils/index.html">Utilities</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../verification/index.html">Verification</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../checker/index.html">Checker Framework</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Context-Free Language Analysis</a></li>
+          <li class="breadcrumb-item"><a href="index.html">Interleaved-Dyck Reachability</a></li>
+      <li class="breadcrumb-item active">Synchronized Pushdown Systems</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/cfl/interleaved_dyck/spds.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="synchronized-pushdown-systems">
+<h1>Synchronized Pushdown Systems<a class="headerlink" href="#synchronized-pushdown-systems" title="Link to this heading"></a></h1>
+<p>The <code class="docutils literal notranslate"><span class="pre">SPDS</span></code> module implements the reachability construction of Spath, Ali,
+and Bodden, POPL 2019 (Definition 4). It computes a directed, typed upper
+bound for interleaved-Dyck reachability by running two independent pushdown
+closures: a call projection over parenthesis labels and a field projection
+over bracket labels. Each individual projection is exact relative to its
+rules and seed regular language; their conjunction is a sound upper bound,
+not an exact same-path two-stack reachability procedure.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/CFL/InterleavedDyck/SPDS/</span></code>,
+<code class="docutils literal notranslate"><span class="pre">lib/CFL/InterleavedDyck/SPDS/</span></code></p>
+<p>The module supplies an independently written saturation implementation of
+<code class="docutils literal notranslate"><span class="pre">post*</span></code> and <code class="docutils literal notranslate"><span class="pre">pre*</span></code>; it does not import the authors’ Java implementation
+or reproduce their experimental artifact.</p>
+<section id="projections-and-result-contract">
+<h2>Projections and result contract<a class="headerlink" href="#projections-and-result-contract" title="Link to this heading"></a></h2>
+<p>For the default graph query, both the initial and final stacks are empty:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>R_call  = {(u,v) | some u-&gt;v path has a balanced parenthesis projection}
+R_field = {(u,v) | some u-&gt;v path has a balanced bracket projection}
+upper_bound = R_call intersection R_field
+</pre></div>
+</div>
+<p>A true interleaved-Dyck path witnesses both projections and is never
+discarded. A missing pair certifies absence of such a path. A present pair
+need not have a single balanced witness: two different graph paths may
+witness the two projections (Section 4.1, Figure 7 of the paper).</p>
+<p><code class="docutils literal notranslate"><span class="pre">Result</span></code> exposes <code class="docutils literal notranslate"><span class="pre">upper_bound</span></code>, the two independent projection relations
+<code class="docutils literal notranslate"><span class="pre">parenthesis_pairs</span></code> and <code class="docutils literal notranslate"><span class="pre">bracket_pairs</span></code>, and <code class="docutils literal notranslate"><span class="pre">statistics</span></code>. <code class="docutils literal notranslate"><span class="pre">mayReach</span></code>
+tests membership in the upper bound. <code class="docutils literal notranslate"><span class="pre">Options::parentheses</span></code> and
+<code class="docutils literal notranslate"><span class="pre">Options::brackets</span></code> select <code class="docutils literal notranslate"><span class="pre">StackAcceptance::Empty</span></code> (default) or <code class="docutils literal notranslate"><span class="pre">Any</span></code>
+for the queried vertex. <code class="docutils literal notranslate"><span class="pre">Any</span></code> permits unmatched opens at the endpoint but
+never an underflow or mismatched pop. <code class="docutils literal notranslate"><span class="pre">Options::limits</span></code> bounds each
+individual PDS saturation; exceeding a limit throws <code class="docutils literal notranslate"><span class="pre">ResourceLimit</span></code> and no
+partial result is returned.</p>
+</section>
+<section id="key-api-surface">
+<h2>Key API surface<a class="headerlink" href="#key-api-surface" title="Link to this heading"></a></h2>
+<table class="docutils align-default" id="id1">
+<caption><span class="caption-text">Public SPDS types</span><a class="headerlink" href="#id1" title="Link to this table"></a></caption>
+<colgroup>
+<col style="width: 30.0%" />
+<col style="width: 70.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Type</p></th>
+<th class="head"><p>Purpose</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Solver</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">prepare(graph)</span></code> compiles the two projections once.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">PreparedAnalysis</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">queryFrom</span></code>/<code class="docutils literal notranslate"><span class="pre">queryTo</span></code> retain the two automata for detailed stack
+queries; <code class="docutils literal notranslate"><span class="pre">analyzeFrom</span></code>/<code class="docutils literal notranslate"><span class="pre">analyzeTo</span></code>/<code class="docutils literal notranslate"><span class="pre">analyzeAll</span></code> bulk read out
+endpoint pairs; <code class="docutils literal notranslate"><span class="pre">analyzeDemands</span></code> groups requested pairs by the
+smaller number of distinct sources or targets.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">QueryResult</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">mayReach</span></code>, <code class="docutils literal notranslate"><span class="pre">parenthesisReachable</span></code>, <code class="docutils literal notranslate"><span class="pre">bracketReachable</span></code>,
+<code class="docutils literal notranslate"><span class="pre">mayAccept(vertex,</span> <span class="pre">parentheses,</span> <span class="pre">brackets)</span></code>, and access to the two
+<code class="docutils literal notranslate"><span class="pre">Automaton&lt;BooleanSemiring&gt;</span></code> results.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">PushdownSystem&lt;Domain&gt;</span></code></p></td>
+<td><p>Normal/push/pop PDS rules, wildcard preserve/push rules, and regular
+seed languages.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">Automaton&lt;Domain&gt;</span></code></p></td>
+<td><p>Queryable <code class="docutils literal notranslate"><span class="pre">post*</span></code>/<code class="docutils literal notranslate"><span class="pre">pre*</span></code> result with <code class="docutils literal notranslate"><span class="pre">accepts</span></code>,
+<code class="docutils literal notranslate"><span class="pre">acceptsPrefix</span></code>, <code class="docutils literal notranslate"><span class="pre">weight</span></code>, and <code class="docutils literal notranslate"><span class="pre">weightWithPrefix</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">SaturationSession&lt;Domain&gt;</span></code></p></td>
+<td><p>Incremental weighted saturation; rules can be added monotonically and
+<code class="docutils literal notranslate"><span class="pre">run()</span></code> resumed.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">RegularSet</span></code></p></td>
+<td><p>Explicit state/transition/final construction for regular seeds.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">BooleanSemiring</span></code> / <code class="docutils literal notranslate"><span class="pre">RelationSemiring</span></code></p></td>
+<td><p>Boolean weights and finite binary-relation typestate weights.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SynchronizedSystem&lt;Domain&gt;</span></code></p></td>
+<td><p>Front-end-neutral data-flow builder over variable/statement controls
+with <code class="docutils literal notranslate"><span class="pre">postStar</span></code>/<code class="docutils literal notranslate"><span class="pre">preStar</span></code>.</p></td>
+</tr>
+</tbody>
+</table>
+<p><code class="docutils literal notranslate"><span class="pre">Limits</span></code> bounds automaton states, stored transitions, or successful weight
+updates; zero means unlimited. Counts include seed normalization and initial
+transitions. <code class="docutils literal notranslate"><span class="pre">ResourceLimit</span></code> derives from <code class="docutils literal notranslate"><span class="pre">std::runtime_error</span></code>.</p>
+</section>
+<section id="synchronized-data-flow-builder">
+<h2>Synchronized data-flow builder<a class="headerlink" href="#synchronized-data-flow-builder" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">SynchronizedSystem</span></code> encodes each data-flow transfer as one rule in a
+call-PDS over globally unique variable controls and statement stacks, plus a
+field-PDS over <code class="docutils literal notranslate"><span class="pre">(variable,</span> <span class="pre">statement)</span></code> controls and access-path stacks.
+<code class="docutils literal notranslate"><span class="pre">addNormal</span></code>, <code class="docutils literal notranslate"><span class="pre">addStore</span></code>, <code class="docutils literal notranslate"><span class="pre">addLoad</span></code>, <code class="docutils literal notranslate"><span class="pre">addCall</span></code>, and <code class="docutils literal notranslate"><span class="pre">addReturn</span></code> each
+contribute one transfer. <code class="docutils literal notranslate"><span class="pre">SynchronizedResult</span></code> queries synchronized
+configurations with <code class="docutils literal notranslate"><span class="pre">weight</span></code>, <code class="docutils literal notranslate"><span class="pre">mayAccept</span></code>, <code class="docutils literal notranslate"><span class="pre">weightAt</span></code>, <code class="docutils literal notranslate"><span class="pre">mayAlias</span></code>,
+and <code class="docutils literal notranslate"><span class="pre">mayReachNode</span></code>. Clients supply identity flows, kills, caller edges, and
+alias-induced transfers explicitly; this is not a complete pointer-analysis
+front end.</p>
+</section>
+<section id="command-line">
+<h2>Command line<a class="headerlink" href="#command-line" title="Link to this heading"></a></h2>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">cmake --build build --target lotus-cfl-interleaved-dyck-spds</span>
+<span class="go">build/bin/lotus-cfl-interleaved-dyck-spds --query 0 4 input.dot</span>
+<span class="go">build/bin/lotus-cfl-interleaved-dyck-spds --all-pairs --pairs input.dot</span>
+</pre></div>
+</div>
+<p>The tool requires exactly one query scope: <code class="docutils literal notranslate"><span class="pre">--all-pairs</span></code>,
+<code class="docutils literal notranslate"><span class="pre">--query</span> <span class="pre">SOURCE</span> <span class="pre">TARGET</span></code>, <code class="docutils literal notranslate"><span class="pre">--source</span> <span class="pre">V</span></code>, <code class="docutils literal notranslate"><span class="pre">--target</span> <span class="pre">V</span></code>, or
+<code class="docutils literal notranslate"><span class="pre">--queries</span> <span class="pre">FILE</span></code>. Batch files contain one <code class="docutils literal notranslate"><span class="pre">SOURCE</span> <span class="pre">TARGET</span></code> pair per line
+and may be read from stdin with <code class="docutils literal notranslate"><span class="pre">--queries</span> <span class="pre">-</span></code>. <code class="docutils literal notranslate"><span class="pre">--direction</span> <span class="pre">auto|post|pre</span></code>
+controls pair and batch evaluation. <code class="docutils literal notranslate"><span class="pre">--call-prefix</span></code> and <code class="docutils literal notranslate"><span class="pre">--field-prefix</span></code>
+allow pending calls or stores at a forward endpoint. <code class="docutils literal notranslate"><span class="pre">--vertex</span> <span class="pre">V</span></code> adds a
+vertex, including isolated vertices. <code class="docutils literal notranslate"><span class="pre">--pairs</span></code> prints sorted candidate
+pairs and <code class="docutils literal notranslate"><span class="pre">--timings</span></code> prints instrumented phase times.
+<code class="docutils literal notranslate"><span class="pre">--max-states</span> <span class="pre">N</span></code>, <code class="docutils literal notranslate"><span class="pre">--max-transitions</span> <span class="pre">N</span></code>, and <code class="docutils literal notranslate"><span class="pre">--max-updates</span> <span class="pre">N</span></code> bound
+each projection’s saturation; zero means unlimited.</p>
+<p>Exit codes are 0 for a completed computation (including an unreachable
+answer), 2 for invalid input, and 3 for a resource limit. Failure cases print
+no result relation.</p>
+</section>
+<section id="build-and-test">
+<h2>Build and test<a class="headerlink" href="#build-and-test" title="Link to this heading"></a></h2>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">cmake --build build --target interleaved_dyck_spds_test</span>
+<span class="go">ctest --test-dir build -R interleaved_dyck_spds --output-on-failure</span>
+</pre></div>
+</div>
+<p>See also <a class="reference internal" href="affine_spds.html"><span class="doc">Affine Synchronized Pushdown Systems</span></a> and <a class="reference internal" href="lcl.html"><span class="doc">Linear Conjunctive Language Reachability</span></a>.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="mcfl.html" class="btn btn-neutral float-left" title="Multiple Context-Free Language Reachability" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="lcl.html" class="btn btn-neutral float-right" title="Linear Conjunctive Language Reachability" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
