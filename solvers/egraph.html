@@ -1,0 +1,331 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lotus EGraph: Equality Saturation Engine &mdash; Lotus Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="E-Graph Quantifier Simplification (EGraphsSimp)" href="egraphs_simp.html" />
+    <link rel="prev" title="Stingx — String Constraint Solver" href="stingx.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+              <img src="../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/pdg_query_language.html">PDG Query Language (Cypher)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/property_based_slicing.html">Property-Based Slicing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/verification_backends.html">Verification Driver Abstraction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/instrumentation_passes.html">Instrumentation Passes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../concurrency/index.html">Concurrency Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html#memorymlfeaturespass">MemoryMLFeaturesPass</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html#features-extracted">Features Extracted</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html#feature-output">Feature Output</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html#analysis-dependencies">Analysis Dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html#integration-notes">Integration Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html#related-components">Related Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../optimization/index.html">Optimization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../security/index.html">Security Components</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Solvers</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="cudd.html">CUDD (Binary Decision Diagrams)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="smt.html">SMT (Satisfiability Modulo Theories)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="wpds.html">WPDS (Weighted Pushdown Systems)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="smtsampler.html">SMT Samplers</a></li>
+<li class="toctree-l2"><a class="reference internal" href="smtstabilizer.html">SMTStabilizer: SMT-LIB2 Normalization Library</a></li>
+<li class="toctree-l2"><a class="reference internal" href="symabs.html">SMT Formula Abstraction (SymAbs)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="staub.html">SMT Theory Arbitrage (STAUB)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="tuna.html">TUNA</a></li>
+<li class="toctree-l2"><a class="reference internal" href="stingx.html">Stingx — String Constraint Solver</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Lotus EGraph: Equality Saturation Engine</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#core-components">Core Components</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#egraph">EGraph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#unionfind-and-id">UnionFind and Id</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#recexpr">RecExpr</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#language">Language</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#definelanguage">DefineLanguage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#pattern-and-multipattern">Pattern and MultiPattern</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#rewrite">Rewrite</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#runner">Runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#extractor">Extractor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#explain">Explain</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#dot-export">Dot Export</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#lotus-extensions">Lotus Extensions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#usage">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="egraphs_simp.html">E-Graph Quantifier Simplification (EGraphsSimp)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="fpsolve.html">FPsolve — Fixed-Point Equation Solver</a></li>
+<li class="toctree-l2"><a class="reference internal" href="libsmt.html">LIBSMT — SMT Solver Abstraction Layer</a></li>
+<li class="toctree-l2"><a class="reference internal" href="datalog.html">Native C++ Datalog</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#third-party-libraries">Third-Party Libraries</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../symbolic_execution/index.html">Symbolic Execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../verification/index.html">Verification</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../checker/index.html">Checker Framework</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="index.html">Solvers</a></li>
+      <li class="breadcrumb-item active">Lotus EGraph: Equality Saturation Engine</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/solvers/egraph.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="lotus-egraph-equality-saturation-engine">
+<h1>Lotus EGraph: Equality Saturation Engine<a class="headerlink" href="#lotus-egraph-equality-saturation-engine" title="Link to this heading"></a></h1>
+<p>This section documents the standalone e-graph library used for equality
+saturation and rewrite-driven normalization.</p>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/Solvers/EGraph/</span></code> (headers), <code class="docutils literal notranslate"><span class="pre">lib/Solvers/EGraph/</span></code>
+(implementation)</p>
+<p><strong>Umbrella Header</strong>: <code class="docutils literal notranslate"><span class="pre">Solvers/EGraph.h</span></code></p>
+<p><strong>Build target</strong>: <code class="docutils literal notranslate"><span class="pre">LotusEGraph</span></code></p>
+<p><code class="docutils literal notranslate"><span class="pre">LotusEGraph</span></code> is a solver-agnostic C++17 e-graph library modeled after the
+Rust <code class="docutils literal notranslate"><span class="pre">egg</span></code> library. It preserves <code class="docutils literal notranslate"><span class="pre">egg</span></code> semantics for the supported core
+equality-saturation pipeline while exposing a Lotus-first C++ API. The library
+is reusable outside SMT-specific clients and is covered by unit tests under
+<code class="docutils literal notranslate"><span class="pre">tests/unit/Solvers/</span></code>.</p>
+<p>This library is distinct from the E-graph based quantifier simplification
+utilities documented in <a class="reference internal" href="egraphs_simp.html"><span class="doc">E-Graph Quantifier Simplification (EGraphsSimp)</span></a>, which live under
+<code class="docutils literal notranslate"><span class="pre">lib/Solvers/SMT/QuantSimp/</span></code> and operate on Z3 SMT formulas.</p>
+</section>
+<section id="core-components">
+<h2>Core Components<a class="headerlink" href="#core-components" title="Link to this heading"></a></h2>
+<section id="egraph">
+<h3>EGraph<a class="headerlink" href="#egraph" title="Link to this heading"></a></h3>
+<p>The central <code class="docutils literal notranslate"><span class="pre">EGraph&lt;L,</span> <span class="pre">AnalysisT&gt;</span></code> template maintains a congruence-closed
+union-find over e-classes of language nodes <code class="docutils literal notranslate"><span class="pre">L</span></code>. It supports:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">add</span></code> / <code class="docutils literal notranslate"><span class="pre">addExpr</span></code> — insert nodes or <code class="docutils literal notranslate"><span class="pre">RecExpr</span></code> terms</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">unite</span></code> / <code class="docutils literal notranslate"><span class="pre">unionInstantiations</span></code> — merge e-classes, optionally with a
+rule name for explanations</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rebuild</span></code> — restore the congruence invariant after unions</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">classes</span></code> / <code class="docutils literal notranslate"><span class="pre">classIds</span></code> — enumerate e-classes</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">equivalent</span></code> / <code class="docutils literal notranslate"><span class="pre">equivs</span></code> — query term equivalence</p></li>
+<li><p>analysis hooks (<code class="docutils literal notranslate"><span class="pre">AnalysisT</span></code>) for data attached to each e-class</p></li>
+<li><p>optional JSON import/export (<code class="docutils literal notranslate"><span class="pre">toJson</span></code> / <code class="docutils literal notranslate"><span class="pre">fromJson</span></code> / <code class="docutils literal notranslate"><span class="pre">parseJson</span></code>)</p></li>
+</ul>
+</section>
+<section id="unionfind-and-id">
+<h3>UnionFind and Id<a class="headerlink" href="#unionfind-and-id" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Id</span></code> identifies e-nodes and e-classes; <code class="docutils literal notranslate"><span class="pre">UnionFind</span></code> provides the union-find
+structure behind e-class merging.</p>
+</section>
+<section id="recexpr">
+<h3>RecExpr<a class="headerlink" href="#recexpr" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">RecExpr&lt;L&gt;</span></code> is a compact, shared-subexpression representation of a term as
+a list of language nodes. It supports S-expression parsing and printing.</p>
+</section>
+<section id="language">
+<h3>Language<a class="headerlink" href="#language" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">SymbolLang</span></code> is the default untyped language (operator symbol plus children).
+<code class="docutils literal notranslate"><span class="pre">DynamicLang</span></code> is a runtime-typed variant. <code class="docutils literal notranslate"><span class="pre">LanguageOps</span></code>, <code class="docutils literal notranslate"><span class="pre">LanguageHash</span></code>,
+and <code class="docutils literal notranslate"><span class="pre">LanguageSerializationOps</span></code> provide the customization points used by the
+e-graph.</p>
+</section>
+<section id="definelanguage">
+<h3>DefineLanguage<a class="headerlink" href="#definelanguage" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">LOTUS_EGRAPH_DEFINE_TYPED_LANGUAGE</span></code> and
+<code class="docutils literal notranslate"><span class="pre">LOTUS_EGRAPH_DEFINE_TYPED_LANGUAGE_IN</span></code> generate variant-discriminated typed
+languages from an X-macro variant list. Variants can be constants, fixed-arity
+operators, variadic operators, typed payloads (<code class="docutils literal notranslate"><span class="pre">DATA</span></code>), and payload-bearing
+operators (<code class="docutils literal notranslate"><span class="pre">DATA_FIXED</span></code>, <code class="docutils literal notranslate"><span class="pre">DATA_VARIADIC</span></code>). <code class="docutils literal notranslate"><span class="pre">TypedValueCodec&lt;T&gt;</span></code> can be
+specialized for payloads that do not support stream parsing.</p>
+</section>
+<section id="pattern-and-multipattern">
+<h3>Pattern and MultiPattern<a class="headerlink" href="#pattern-and-multipattern" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Pattern&lt;L&gt;</span></code> compiles an e-matching program from a pattern AST and searches
+the e-graph for matches, returning substitutions. <code class="docutils literal notranslate"><span class="pre">MultiPattern&lt;L&gt;</span></code> matches
+several patterns that share bound variables.</p>
+</section>
+<section id="rewrite">
+<h3>Rewrite<a class="headerlink" href="#rewrite" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Rewrite&lt;L,</span> <span class="pre">A&gt;</span></code> pairs a searcher (pattern) with an applier (pattern or
+conditional applier). Helper constructors <code class="docutils literal notranslate"><span class="pre">makeRewrite</span></code>,
+<code class="docutils literal notranslate"><span class="pre">makeConditionalRewrite</span></code>, <code class="docutils literal notranslate"><span class="pre">makeMultiRewrite</span></code>, and borrowed rewrite builders
+are provided as Lotus conveniences.</p>
+</section>
+<section id="runner">
+<h3>Runner<a class="headerlink" href="#runner" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Runner&lt;L,</span> <span class="pre">A&gt;</span></code> drives the equality-saturation loop: it repeatedly searches
+for rewrite matches, applies them, and rebuilds the e-graph until saturation or
+a limit is reached. Limits cover iterations, node count, and wall-clock time.
+<code class="docutils literal notranslate"><span class="pre">SimpleScheduler</span></code> and <code class="docutils literal notranslate"><span class="pre">BackoffScheduler</span></code> control rewrite scheduling.</p>
+</section>
+<section id="extractor">
+<h3>Extractor<a class="headerlink" href="#extractor" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Extractor&lt;L,</span> <span class="pre">A,</span> <span class="pre">CostFn&gt;</span></code> picks a minimal-cost representative term from each
+e-class using a cost function such as <code class="docutils literal notranslate"><span class="pre">AstSize</span></code> or <code class="docutils literal notranslate"><span class="pre">AstDepth</span></code>.</p>
+</section>
+<section id="explain">
+<h3>Explain<a class="headerlink" href="#explain" title="Link to this heading"></a></h3>
+<p>With explanations enabled, the e-graph records union events and can produce
+<code class="docutils literal notranslate"><span class="pre">Explanation</span></code> objects that justify term equivalence as a sequence of rewrite
+steps. <code class="docutils literal notranslate"><span class="pre">Runner::explainEquivalence</span></code> and <code class="docutils literal notranslate"><span class="pre">Runner::explainMatches</span></code> expose this
+directly.</p>
+</section>
+<section id="dot-export">
+<h3>Dot Export<a class="headerlink" href="#dot-export" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">Dot&lt;L,</span> <span class="pre">A&gt;</span></code> renders the e-graph as a Graphviz <code class="docutils literal notranslate"><span class="pre">dot</span></code> graph. It is compiled
+in when <code class="docutils literal notranslate"><span class="pre">LOTUS_EGRAPH_ENABLE_DOT</span></code> is enabled (default ON) and is included by
+the umbrella header only in that case.</p>
+</section>
+</section>
+<section id="lotus-extensions">
+<h2>Lotus Extensions<a class="headerlink" href="#lotus-extensions" title="Link to this heading"></a></h2>
+<p>Beyond the <code class="docutils literal notranslate"><span class="pre">egg</span></code>-aligned core, the library provides:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">egraphUnion</span></code> / <code class="docutils literal notranslate"><span class="pre">egraphIntersect</span></code> — combine two e-graphs</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">LanguageMapper</span></code> / <code class="docutils literal notranslate"><span class="pre">SimpleLanguageMapper</span></code> — map one language to another</p></li>
+<li><p>JSON import/export helpers for <code class="docutils literal notranslate"><span class="pre">EGraph</span></code></p></li>
+</ul>
+</section>
+<section id="usage">
+<h2>Usage<a class="headerlink" href="#usage" title="Link to this heading"></a></h2>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"Solvers/EGraph.h"</span>
+
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">lotus</span><span class="o">::</span><span class="nn">egraph</span><span class="p">;</span>
+
+<span class="c1">// Typed languages are declared with an X-macro variant list.</span>
+<span class="cp">#define MATH_VARIANTS(V)                                                      \</span>
+<span class="cp">  V(CONSTANT, Pi, "pi", _)                                                    \</span>
+<span class="cp">  V(FIXED, Add, "+", 2)                                                       \</span>
+<span class="cp">  V(DATA, Number, _, int64_t)</span>
+
+<span class="n">LOTUS_EGRAPH_DEFINE_TYPED_LANGUAGE_IN</span><span class="p">(</span><span class="n">math</span><span class="p">,</span><span class="w"> </span><span class="n">MathLang</span><span class="p">,</span><span class="w"> </span><span class="n">MATH_VARIANTS</span><span class="p">);</span>
+
+<span class="c1">// A rewrite pairs a searcher pattern with an applier pattern.</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">add_zero</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">makeRewrite</span><span class="o">&lt;</span><span class="n">MathLang</span><span class="o">&gt;</span><span class="p">(</span><span class="s">"add-zero"</span><span class="p">,</span><span class="w"> </span><span class="s">"(+ ?x 0)"</span><span class="p">,</span><span class="w"> </span><span class="s">"?x"</span><span class="p">);</span>
+
+<span class="c1">// The Runner drives the equality-saturation loop.</span>
+<span class="n">Runner</span><span class="o">&lt;</span><span class="n">MathLang</span><span class="o">&gt;</span><span class="w"> </span><span class="n">runner</span><span class="p">;</span>
+<span class="n">runner</span><span class="p">.</span><span class="n">withExpr</span><span class="p">(</span><span class="n">RecExpr</span><span class="o">&lt;</span><span class="n">MathLang</span><span class="o">&gt;::</span><span class="n">parse</span><span class="p">(</span><span class="s">"(+ 1 0)"</span><span class="p">))</span>
+<span class="w">      </span><span class="p">.</span><span class="n">withIterLimit</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span>
+<span class="w">      </span><span class="p">.</span><span class="n">run</span><span class="p">({</span><span class="n">add_zero</span><span class="p">});</span>
+</pre></div>
+</div>
+</section>
+<section id="see-also">
+<h2>See Also<a class="headerlink" href="#see-also" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="egraphs_simp.html"><span class="doc">E-Graph Quantifier Simplification (EGraphsSimp)</span></a> — E-graph based quantifier simplification for SMT
+formulas (a different component under <code class="docutils literal notranslate"><span class="pre">lib/Solvers/SMT/QuantSimp/</span></code>)</p></li>
+<li><p><a class="reference internal" href="libsmt.html"><span class="doc">LIBSMT — SMT Solver Abstraction Layer</span></a> — SMT solver abstraction layer</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="stingx.html" class="btn btn-neutral float-left" title="Stingx — String Constraint Solver" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="egraphs_simp.html" class="btn btn-neutral float-right" title="E-Graph Quantifier Simplification (EGraphsSimp)" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
