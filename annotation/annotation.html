@@ -1,0 +1,352 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Annotation Framework &mdash; Lotus Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="ModRef Function Effect Specifications" href="modref.html" />
+    <link rel="prev" title="Annotations" href="index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+              <img src="../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/architecture.html">Architecture Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/pdg_query_language.html">PDG Query Language (Cypher)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/property_based_slicing.html">Property-Based Slicing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/verification_backends.html">Verification Driver Abstraction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/instrumentation_passes.html">Instrumentation Passes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Annotations</a><ul class="current">
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Annotation Framework</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#position-tracking">Position Tracking</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#modref-annotations">ModRef Annotations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pointer-annotations">Pointer Annotations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#taint-analysis-annotations">Taint Analysis Annotations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modref.html">ModRef Function Effect Specifications</a></li>
+<li class="toctree-l2"><a class="reference internal" href="pointer_effects.html">Pointer Effect Specifications</a></li>
+<li class="toctree-l2"><a class="reference internal" href="taint_config.html">Taint Configuration Format and API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api_spec.html">API Specification System</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../concurrency/index.html">Concurrency Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html">Machine Learning Features (CanaryML)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../optimization/index.html">Optimization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../security/index.html">Security Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../symbolic_execution/index.html">Symbolic Execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../verification/index.html">Verification</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../checker/index.html">Checker Framework</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="index.html">Annotations</a></li>
+      <li class="breadcrumb-item active">Annotation Framework</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/annotation/annotation.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="annotation-framework">
+<h1>Annotation Framework<a class="headerlink" href="#annotation-framework" title="Link to this heading"></a></h1>
+<p>Lotus provides annotation frameworks for specifying and analyzing program behavior. The annotation system is organized into several components for tracking argument positions, modification/reference effects, pointer effects, and taint analysis.</p>
+<p>Dedicated module pages:</p>
+<ul class="simple">
+<li><p><a class="reference internal" href="modref.html"><span class="doc">ModRef Function Effect Specifications</span></a> for external mod/ref summaries</p></li>
+<li><p><a class="reference internal" href="pointer_effects.html"><span class="doc">Pointer Effect Specifications</span></a> for pointer-side-effect specifications</p></li>
+<li><p><a class="reference internal" href="taint_config.html"><span class="doc">Taint Configuration Format and API</span></a> for taint source, sink, and propagation specs</p></li>
+</ul>
+<section id="position-tracking">
+<h2>Position Tracking<a class="headerlink" href="#position-tracking" title="Link to this heading"></a></h2>
+<p>The position tracking system provides abstractions for identifying function arguments and return values in annotations.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/Annotation/ArgPosition.h</span></code></p>
+<p><strong>Components</strong>:</p>
+<ul class="simple">
+<li><p><strong>ArgPosition</strong> – Represents a specific function argument position</p></li>
+<li><p><strong>RetPosition</strong> – Represents the return value position</p></li>
+<li><p><strong>APosition</strong> – Union type that can represent either an argument or return position</p></li>
+</ul>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;Annotation/ArgPosition.h&gt;</span>
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">annotation</span><span class="p">;</span>
+
+<span class="c1">// Create argument positions</span>
+<span class="n">APosition</span><span class="w"> </span><span class="n">arg0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">APosition</span><span class="o">::</span><span class="n">getArgPosition</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="n">APosition</span><span class="w"> </span><span class="n">arg1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">APosition</span><span class="o">::</span><span class="n">getAfterArgPosition</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w">  </span><span class="c1">// After argument 1</span>
+<span class="n">APosition</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">APosition</span><span class="o">::</span><span class="n">getReturnPosition</span><span class="p">();</span>
+
+<span class="c1">// Query position type</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ret</span><span class="p">.</span><span class="n">isReturnPosition</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Handle return position</span>
+<span class="p">}</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">arg0</span><span class="p">.</span><span class="n">isArgPosition</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">ArgPosition</span><span class="o">&amp;</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">arg0</span><span class="p">.</span><span class="n">getAsArgPosition</span><span class="p">();</span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pos</span><span class="p">.</span><span class="n">getArgIndex</span><span class="p">();</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">after</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pos</span><span class="p">.</span><span class="n">isAfterArgPosition</span><span class="p">();</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="modref-annotations">
+<h2>ModRef Annotations<a class="headerlink" href="#modref-annotations" title="Link to this heading"></a></h2>
+<p>Modification and reference behavior annotations track how functions access memory through their arguments and return values.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/Annotation/ModRef/</span></code></p>
+<p><strong>Components</strong>:</p>
+<ul class="simple">
+<li><p><strong>ModRefType</strong> – Enumeration: <code class="docutils literal notranslate"><span class="pre">Mod</span></code> (modification) or <code class="docutils literal notranslate"><span class="pre">Ref</span></code> (reference/read)</p></li>
+<li><p><strong>ModRefClass</strong> – Enumeration: <code class="docutils literal notranslate"><span class="pre">DirectMemory</span></code> or <code class="docutils literal notranslate"><span class="pre">ReachableMemory</span></code></p></li>
+<li><p><strong>ModRefEffect</strong> – Represents a single mod/ref effect with type, class, and position</p></li>
+<li><p><strong>ModRefEffectSummary</strong> – Collection of mod/ref effects for a function</p></li>
+<li><p><strong>ExternalModRefTable</strong> – Table mapping function names to their mod/ref summaries</p></li>
+<li><p><strong>ExternalModRefTablePrinter</strong> – Utility for printing mod/ref tables</p></li>
+</ul>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;Annotation/ModRef/ExternalModRefTable.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;Annotation/ModRef/ModRefEffect.h&gt;</span>
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">annotation</span><span class="p">;</span>
+
+<span class="c1">// Load mod/ref table from file</span>
+<span class="n">ExternalModRefTable</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ExternalModRefTable</span><span class="o">::</span><span class="n">loadFromFile</span><span class="p">(</span><span class="s">"modref.spec"</span><span class="p">);</span>
+
+<span class="c1">// Lookup function effects</span>
+<span class="n">llvm</span><span class="o">::</span><span class="n">StringRef</span><span class="w"> </span><span class="n">funcName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"strcpy"</span><span class="p">;</span>
+<span class="k">const</span><span class="w"> </span><span class="n">ModRefEffectSummary</span><span class="o">*</span><span class="w"> </span><span class="n">summary</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">table</span><span class="p">.</span><span class="n">lookup</span><span class="p">(</span><span class="n">funcName</span><span class="p">);</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">summary</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">effect</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">summary</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">ModRefType</span><span class="w"> </span><span class="n">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">effect</span><span class="p">.</span><span class="n">getType</span><span class="p">();</span>
+<span class="w">        </span><span class="n">ModRefClass</span><span class="w"> </span><span class="n">mClass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">effect</span><span class="p">.</span><span class="n">getClass</span><span class="p">();</span>
+<span class="w">        </span><span class="n">APosition</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">effect</span><span class="p">.</span><span class="n">getPosition</span><span class="p">();</span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">effect</span><span class="p">.</span><span class="n">isModEffect</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">effect</span><span class="p">.</span><span class="n">onDirectMemory</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="c1">// Function modifies direct memory</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Print table</span>
+<span class="n">ExternalModRefTablePrinter</span><span class="w"> </span><span class="n">printer</span><span class="p">(</span><span class="n">llvm</span><span class="o">::</span><span class="n">errs</span><span class="p">());</span>
+<span class="n">printer</span><span class="p">.</span><span class="n">printTable</span><span class="p">(</span><span class="n">table</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<section id="pointer-annotations">
+<h2>Pointer Annotations<a class="headerlink" href="#pointer-annotations" title="Link to this heading"></a></h2>
+<p>Pointer annotations specify how functions allocate, copy, or exit with pointers.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/Annotation/Pointer/</span></code></p>
+<p><strong>Components</strong>:</p>
+<ul class="simple">
+<li><p><strong>PointerEffectType</strong> – Enumeration: <code class="docutils literal notranslate"><span class="pre">Alloc</span></code>, <code class="docutils literal notranslate"><span class="pre">Copy</span></code>, or <code class="docutils literal notranslate"><span class="pre">Exit</span></code></p></li>
+<li><p><strong>PointerAllocEffect</strong> – Represents pointer allocation with optional size position</p></li>
+<li><p><strong>CopySource</strong> – Source of a copy operation (Value, DirectMemory, ReachableMemory, Null, Universal, Static)</p></li>
+<li><p><strong>CopyDest</strong> – Destination of a copy operation (Value, DirectMemory, ReachableMemory)</p></li>
+<li><p><strong>PointerCopyEffect</strong> – Represents a copy operation from source to destination</p></li>
+<li><p><strong>PointerExitEffect</strong> – Represents program exit</p></li>
+<li><p><strong>PointerEffect</strong> – Union type representing any pointer effect</p></li>
+<li><p><strong>PointerEffectSummary</strong> – Collection of pointer effects for a function</p></li>
+<li><p><strong>ExternalPointerTable</strong> – Table mapping function names to their pointer effect summaries</p></li>
+<li><p><strong>ExternalPointerTablePrinter</strong> – Utility for printing pointer tables</p></li>
+</ul>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;Annotation/Pointer/ExternalPointerTable.h&gt;</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;Annotation/Pointer/PointerEffect.h&gt;</span>
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">annotation</span><span class="p">;</span>
+
+<span class="c1">// Load pointer table from file</span>
+<span class="n">ExternalPointerTable</span><span class="w"> </span><span class="n">table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ExternalPointerTable</span><span class="o">::</span><span class="n">loadFromFile</span><span class="p">(</span><span class="s">"ptr.spec"</span><span class="p">);</span>
+
+<span class="c1">// Lookup function effects</span>
+<span class="n">llvm</span><span class="o">::</span><span class="n">StringRef</span><span class="w"> </span><span class="n">funcName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"malloc"</span><span class="p">;</span>
+<span class="k">const</span><span class="w"> </span><span class="n">PointerEffectSummary</span><span class="o">*</span><span class="w"> </span><span class="n">summary</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">table</span><span class="p">.</span><span class="n">lookup</span><span class="p">(</span><span class="n">funcName</span><span class="p">);</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">summary</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">effect</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">summary</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">effect</span><span class="p">.</span><span class="n">getType</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">PointerEffectType</span><span class="o">::</span><span class="no">Alloc</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="k">const</span><span class="w"> </span><span class="n">PointerAllocEffect</span><span class="o">&amp;</span><span class="w"> </span><span class="n">alloc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">effect</span><span class="p">.</span><span class="n">getAsAllocEffect</span><span class="p">();</span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">alloc</span><span class="p">.</span><span class="n">hasSizePosition</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                    </span><span class="n">APosition</span><span class="w"> </span><span class="n">sizePos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">alloc</span><span class="p">.</span><span class="n">getSizePosition</span><span class="p">();</span>
+<span class="w">                </span><span class="p">}</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">PointerEffectType</span><span class="o">::</span><span class="no">Copy</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">                </span><span class="k">const</span><span class="w"> </span><span class="n">PointerCopyEffect</span><span class="o">&amp;</span><span class="w"> </span><span class="n">copy</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">effect</span><span class="p">.</span><span class="n">getAsCopyEffect</span><span class="p">();</span>
+<span class="w">                </span><span class="k">const</span><span class="w"> </span><span class="n">CopyDest</span><span class="o">&amp;</span><span class="w"> </span><span class="n">dest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">copy</span><span class="p">.</span><span class="n">getDest</span><span class="p">();</span>
+<span class="w">                </span><span class="k">const</span><span class="w"> </span><span class="n">CopySource</span><span class="o">&amp;</span><span class="w"> </span><span class="n">src</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">copy</span><span class="p">.</span><span class="n">getSource</span><span class="p">();</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">case</span><span class="w"> </span><span class="no">PointerEffectType</span><span class="o">::</span><span class="no">Exit</span><span class="p">:</span>
+<span class="w">                </span><span class="c1">// Function exits program</span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+
+<span class="c1">// Print table</span>
+<span class="n">ExternalPointerTablePrinter</span><span class="w"> </span><span class="n">printer</span><span class="p">(</span><span class="n">llvm</span><span class="o">::</span><span class="n">errs</span><span class="p">());</span>
+<span class="n">printer</span><span class="p">.</span><span class="n">printTable</span><span class="p">(</span><span class="n">table</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<section id="taint-analysis-annotations">
+<h2>Taint Analysis Annotations<a class="headerlink" href="#taint-analysis-annotations" title="Link to this heading"></a></h2>
+<p>Taint analysis annotations specify information flow and taint propagation through functions.</p>
+<p><strong>Location</strong>: <code class="docutils literal notranslate"><span class="pre">include/Annotation/Taint/</span></code></p>
+<p><strong>Components</strong>:</p>
+<ul class="simple">
+<li><p><strong>TaintSpec</strong> – Specification for taint location (ARG, AFTER_ARG, RET), access mode (VALUE, DEREF), and taint type (TAINTED, UNINITIALIZED)</p></li>
+<li><p><strong>PipeSpec</strong> – Specification for taint propagation from source to destination</p></li>
+<li><p><strong>FunctionTaintConfig</strong> – Complete taint configuration for a single function (sources, sinks, pipes)</p></li>
+<li><p><strong>TaintConfig</strong> – Complete taint configuration containing all function specs</p></li>
+<li><p><strong>TaintConfigParser</strong> – Parser for taint specification files (.spec format)</p></li>
+<li><p><strong>TaintConfigManager</strong> – Singleton manager for taint configurations with function name normalization</p></li>
+</ul>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;Annotation/Taint/TaintConfigManager.h&gt;</span>
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">taint_config</span><span class="p">;</span>
+
+<span class="c1">// Load configuration (singleton pattern)</span>
+<span class="n">TaintConfigManager</span><span class="o">&amp;</span><span class="w"> </span><span class="n">manager</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TaintConfigManager</span><span class="o">::</span><span class="n">getInstance</span><span class="p">();</span>
+<span class="n">manager</span><span class="p">.</span><span class="n">load_config</span><span class="p">(</span><span class="s">"config/taint.spec"</span><span class="p">);</span>
+<span class="c1">// Or use convenience namespace functions</span>
+<span class="n">load_config</span><span class="p">(</span><span class="s">"config/taint.spec"</span><span class="p">);</span>
+<span class="n">load_default_config</span><span class="p">();</span><span class="w">  </span><span class="c1">// Tries multiple standard paths</span>
+
+<span class="c1">// Check if function is a source or sink</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">isSrc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">is_source</span><span class="p">(</span><span class="s">"read"</span><span class="p">);</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">isSink</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">is_sink</span><span class="p">(</span><span class="s">"printf"</span><span class="p">);</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">isIgnored</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">is_ignored</span><span class="p">(</span><span class="s">"memcpy"</span><span class="p">);</span>
+
+<span class="c1">// Check LLVM call instructions</span>
+<span class="n">llvm</span><span class="o">::</span><span class="n">CallInst</span><span class="o">*</span><span class="w"> </span><span class="n">call</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">...;</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_source</span><span class="p">(</span><span class="n">call</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Function call is a taint source</span>
+<span class="p">}</span>
+
+<span class="c1">// Get detailed function configuration</span>
+<span class="k">const</span><span class="w"> </span><span class="n">FunctionTaintConfig</span><span class="o">*</span><span class="w"> </span><span class="n">funcConfig</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_function_config</span><span class="p">(</span><span class="s">"strcpy"</span><span class="p">);</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">funcConfig</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Access source_specs, sink_specs, pipe_specs</span>
+<span class="p">}</span>
+
+<span class="c1">// Normalize function names (handles platform prefixes)</span>
+<span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">normalized</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">normalize_name</span><span class="p">(</span><span class="s">"__strcpy_chk"</span><span class="p">);</span><span class="w">  </span><span class="c1">// Returns "strcpy"</span>
+
+<span class="c1">// Dump configuration</span>
+<span class="n">dump_config</span><span class="p">(</span><span class="n">llvm</span><span class="o">::</span><span class="n">errs</span><span class="p">());</span>
+
+<span class="c1">// Get statistics</span>
+<span class="kt">size_t</span><span class="w"> </span><span class="n">numSources</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_source_count</span><span class="p">();</span>
+<span class="kt">size_t</span><span class="w"> </span><span class="n">numSinks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_sink_count</span><span class="p">();</span>
+</pre></div>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="index.html" class="btn btn-neutral float-left" title="Annotations" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modref.html" class="btn btn-neutral float-right" title="ModRef Function Effect Specifications" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2025, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
