@@ -1,0 +1,21 @@
+# Figure 4 of Zhang et al., Efficient Subcubic Alias Analysis for C (2014).
+# a = assignment; d = dereference; reverse edges are explicit.
+# b = a; c = &b; *d = *c; *c = e;
+&b b d
+b &b dbar
+&c c d
+c &c dbar
+&d d d
+d &d dbar
+c *c d
+*c c dbar
+d *d d
+*d d dbar
+a b a
+b a abar
+&b c a
+c &b abar
+*c *d a
+*d *c abar
+e *c a
+*c e abar
