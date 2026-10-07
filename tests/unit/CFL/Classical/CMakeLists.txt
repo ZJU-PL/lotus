@@ -9,7 +9,8 @@ lotus_collect_test_sources(cfl_tests
   EndpointQuotientAdvancedTest.cpp
   EndpointQuotientEngineTest.cpp
   EndpointQuotientStagingTest.cpp
-  SkewedTabulationEngineTest.cpp)
+  SkewedTabulationEngineTest.cpp
+  SubcubicAATest.cpp)
 
 # CLI/regression coverage for the lotus-cfl-solve, lotus-cfl-alias, and
 # lotus-cfl-vf drivers built from this subsystem.

@@ -25,6 +25,8 @@ layout:
    ``Engines/CAT/``, and ``Engines/IEOCE/`` contain the paper algorithms;
    ``Engines/CERT/`` is the Lotus-native cardinality-certified engine.
    ``Engines/POCR/`` also contains the client grammars.
+   ``Engines/SubcubicAA/`` provides the specialized OOPSLA 2014 PEG
+   memory/value alias algorithms through a separate graph-analysis API.
 
 ``Solvers/Preprocessing/``
    Graph simplification and RSM-guided foldability analysis.
@@ -253,6 +255,8 @@ See :doc:`/cfl/classical/pearl`, :doc:`/cfl/classical/stg`, and
 :doc:`/cfl/classical/sqid` for the papers, key ideas,
 published algorithms, Lotus adaptations, and validation boundaries.
 See :doc:`/cfl/classical/cat_ieoce` for the CAT and IEOCE engines.
+See :doc:`/cfl/classical/subcubic_aa` for the specialized PEG memory/value
+alias engine and its ``lotus-cfl-subcubic-aa`` driver.
 
 Adapters
 --------

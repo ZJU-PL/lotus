@@ -47,3 +47,14 @@ endpoint-quotient, CAT/IEOCE, Skewed, or the classical worklist backends.
 
 See also `docs/source/cfl/classical/` for detailed per-engine documentation
 and the shared `SolverSession` backend list.
+
+## Specialized PEG alias analysis
+
+[`Engines/SubcubicAA`](Engines/SubcubicAA/README.md) implements Qirun Zhang
+et al., "Efficient Subcubic Alias Analysis for C", OOPSLA 2014,
+DOI [10.1145/2660193.2660213](https://doi.org/10.1145/2660193.2660213).
+It computes the paper's memory/value relations with two-phase propagation,
+the value-alias seed join, fast-set differences, and component decomposition.
+It accepts a validated assignment/dereference PEG through its own API and
+`lotus-cfl-subcubic-aa` driver; it is separate from the general grammar
+engines listed above.

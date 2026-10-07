@@ -229,6 +229,18 @@ if(TARGET lotus-cfl-vf)
         PASS_REGULAR_EXPRESSION "\"relation_edges\":29")
 endif()
 
+if(TARGET lotus-cfl-subcubic-aa)
+    foreach(subcubic_case figure4 modes input_validation options json_names)
+        add_test(NAME classical_cfl_cli_subcubic_${subcubic_case}
+            COMMAND ${CMAKE_COMMAND}
+                -DBINARY=$<TARGET_FILE:lotus-cfl-subcubic-aa>
+                -DCASE=${subcubic_case}
+                -DFIGURE4=${CMAKE_SOURCE_DIR}/tests/regress/CFL/Classical/subcubic-aa-figure4.graph
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/subcubic-cli/${subcubic_case}
+                -P ${CMAKE_SOURCE_DIR}/tests/regress/CFL/Classical/RunSubcubicAA.cmake)
+    endforeach()
+endif()
+
 get_property(cfl_registered_tests DIRECTORY PROPERTY TESTS)
 foreach(cfl_registered_test IN LISTS cfl_registered_tests)
     if(cfl_registered_test MATCHES

@@ -24,6 +24,8 @@ add_library(CanaryClassicalCFL STATIC
     Solvers/Engines/Skewed/SkewedTabulation.cpp
     Solvers/Engines/Skewed/SkewedTabulationEngine.cpp
     Solvers/Engines/STG/StagedSolver.cpp
+    Solvers/Engines/SubcubicAA/SubcubicAA.cpp
+    Solvers/Engines/SubcubicAA/SubcubicAAAdapter.cpp
     Solvers/Preprocessing/GraphSimplification.cpp
     Solvers/Preprocessing/RSMFoldability.cpp
 )
