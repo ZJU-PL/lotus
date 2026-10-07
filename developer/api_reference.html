@@ -1,0 +1,502 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>API Reference &mdash; Lotus Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Developer Guide" href="developer_guide.html" />
+    <link rel="prev" title="TypeQualifier" href="../checker/typequalifier.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+              <img src="../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/architecture.html">Architecture &amp; Major Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/quickstart.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/pdg_query_language.html">PDG Query Language (Cypher)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/property_based_slicing.html">Property-Based Slicing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/verification_backends.html">Verification Driver Abstraction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/instrumentation_passes.html">Instrumentation Passes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../concurrency/index.html">Concurrency Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis Frameworks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html">Machine Learning Features (CanaryML)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../optimization/index.html">Optimization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../security/index.html">Security Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../symbolic_execution/index.html">Symbolic Execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../verification/index.html">Verification</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../checker/index.html">Checker Framework</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">API Reference</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#alias-analysis-apis">Alias Analysis APIs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#dyckaa-api">DyckAA API</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#aserpta-api">AserPTA API</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lotusaa-api">LotusAA API</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#intermediate-representation-apis">Intermediate Representation APIs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#program-dependence-graph-api">Program Dependence Graph API</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pdg-cypher-query-api">PDG Cypher Query API</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#call-graph-api">Call Graph API</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#data-flow-analysis-apis">Data Flow Analysis APIs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#ifds-taint-analysis-api">IFDS Taint Analysis API</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#bug-reporting-apis">Bug Reporting APIs</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#bugreport-and-bugreportmgr-api">BugReport and BugReportMgr API</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#example-complete-analysis-tool">Example: Complete Analysis Tool</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#see-also">See Also</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">API Reference</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/developer/api_reference.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="api-reference">
+<h1>API Reference<a class="headerlink" href="#api-reference" title="Link to this heading"></a></h1>
+<p>This document provides API references and usage examples for Lotus components.</p>
+<section id="alias-analysis-apis">
+<h2>Alias Analysis APIs<a class="headerlink" href="#alias-analysis-apis" title="Link to this heading"></a></h2>
+<section id="dyckaa-api">
+<h3>DyckAA API<a class="headerlink" href="#dyckaa-api" title="Link to this heading"></a></h3>
+<p>Include headers:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/UnificationBased/DyckAA/DyckAliasAnalysis.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/UnificationBased/DyckAA/DyckGraph.h"</span>
+</pre></div>
+</div>
+<p>Basic usage:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"llvm/IR/LLVMContext.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"llvm/IR/Module.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"llvm/IRReader/IRReader.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"llvm/Support/SourceMgr.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/UnificationBased/DyckAA/DyckAliasAnalysis.h"</span>
+
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">llvm</span><span class="p">;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">LLVMContext</span><span class="w"> </span><span class="n">context</span><span class="p">;</span>
+<span class="w">    </span><span class="n">SMDiagnostic</span><span class="w"> </span><span class="n">error</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">Module</span><span class="o">&gt;</span><span class="w"> </span><span class="k">module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">parseIRFile</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="n">error</span><span class="p">,</span><span class="w"> </span><span class="n">context</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">module</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">error</span><span class="p">.</span><span class="n">print</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="w"> </span><span class="n">errs</span><span class="p">());</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">DyckAliasAnalysis</span><span class="w"> </span><span class="n">DAA</span><span class="p">;</span>
+<span class="w">    </span><span class="n">DAA</span><span class="p">.</span><span class="n">runOnModule</span><span class="p">(</span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Query alias information:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="c1">// Query if two values may alias</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">mayAlias</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DAA</span><span class="p">.</span><span class="n">mayAlias</span><span class="p">(</span><span class="n">val1</span><span class="p">,</span><span class="w"> </span><span class="n">val2</span><span class="p">);</span>
+
+<span class="c1">// Check if a pointer may be null</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">mayNull</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DAA</span><span class="p">.</span><span class="n">mayNull</span><span class="p">(</span><span class="n">val1</span><span class="p">);</span>
+
+<span class="c1">// Retrieve the alias set for a pointer</span>
+<span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">Value</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">aliasSet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DAA</span><span class="p">.</span><span class="n">getAliasSet</span><span class="p">(</span><span class="n">val1</span><span class="p">);</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">aliasSet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">Value</span><span class="w"> </span><span class="o">*</span><span class="n">aliased</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">aliasSet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">errs</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"Aliased: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="o">*</span><span class="n">aliased</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Access Dyck graph:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/UnificationBased/DyckAA/DyckGraph.h"</span>
+
+<span class="n">DyckGraph</span><span class="w"> </span><span class="o">*</span><span class="n">graph</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DAA</span><span class="p">.</span><span class="n">getDyckGraph</span><span class="p">();</span>
+
+<span class="c1">// Retrieve vertex for a value</span>
+<span class="n">DyckGraphNode</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">graph</span><span class="o">-&gt;</span><span class="n">retrieveDyckVertex</span><span class="p">(</span><span class="n">val1</span><span class="p">);</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">node</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="kt">void</span><span class="w"> </span><span class="o">*&gt;</span><span class="w"> </span><span class="o">*</span><span class="n">equivSet</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">node</span><span class="o">-&gt;</span><span class="n">getEquivalentSet</span><span class="p">();</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">equivSet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">errs</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"Equivalence set size: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">equivSet</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="aserpta-api">
+<h3>AserPTA API<a class="headerlink" href="#aserpta-api" title="Link to this heading"></a></h3>
+<p>Include headers:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/InclusionBased/AserPTA/PTADriver.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/InclusionBased/AserPTA/PointerAnalysis/Context/KCallSite.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/InclusionBased/AserPTA/PointerAnalysis/Context/NoCtx.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/InclusionBased/AserPTA/PointerAnalysis/Models/LanguageModel/DefaultLangModel/DefaultLangModel.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/InclusionBased/AserPTA/PointerAnalysis/Models/MemoryModel/FieldSensitive/FSMemModel.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/InclusionBased/AserPTA/PointerAnalysis/Solver/WavePropagation.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/InclusionBased/AserPTA/PointerAnalysis/Solver/PointsTo/BitVectorPTS.h"</span>
+</pre></div>
+</div>
+<p>Configure and run analysis:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">aser</span><span class="p">;</span>
+
+<span class="c1">// Configure language model, memory model, and points-to representation</span>
+<span class="k">using</span><span class="w"> </span><span class="n">Model</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DefaultLangModel</span><span class="o">&lt;</span><span class="n">KCallSite</span><span class="o">&lt;</span><span class="mi">1</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">FSMemModel</span><span class="o">&lt;</span><span class="n">KCallSite</span><span class="o">&lt;</span><span class="mi">1</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">BitVectorPTS</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="k">using</span><span class="w"> </span><span class="n">Solver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WavePropagation</span><span class="o">&lt;</span><span class="n">Model</span><span class="o">&gt;</span><span class="p">;</span>
+
+<span class="c1">// Run analysis with preprocessing passes</span>
+<span class="n">runAnalysis</span><span class="o">&lt;</span><span class="n">Solver</span><span class="o">&gt;</span><span class="p">(</span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<section id="lotusaa-api">
+<h3>LotusAA API<a class="headerlink" href="#lotusaa-api" title="Link to this heading"></a></h3>
+<p>Include headers:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/InclusionBased/LotusAA/Engine/InterProceduralPass.h"</span>
+</pre></div>
+</div>
+<p>Use as LLVM pass:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">legacy</span><span class="o">::</span><span class="n">PassManager</span><span class="w"> </span><span class="n">PM</span><span class="p">;</span>
+<span class="n">PM</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">LotusAA</span><span class="p">());</span>
+<span class="n">PM</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+</pre></div>
+</div>
+<p>Query results:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">LotusAA</span><span class="w"> </span><span class="o">*</span><span class="n">lotus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/* get pass */</span><span class="p">;</span>
+<span class="n">IntraLotusAA</span><span class="w"> </span><span class="o">*</span><span class="n">intraPTG</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lotus</span><span class="o">-&gt;</span><span class="n">getPtGraph</span><span class="p">(</span><span class="n">F</span><span class="p">);</span>
+<span class="n">CallTargetSet</span><span class="w"> </span><span class="o">*</span><span class="n">callees</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">lotus</span><span class="o">-&gt;</span><span class="n">getCallees</span><span class="p">(</span><span class="n">F</span><span class="p">,</span><span class="w"> </span><span class="n">callSite</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="intermediate-representation-apis">
+<h2>Intermediate Representation APIs<a class="headerlink" href="#intermediate-representation-apis" title="Link to this heading"></a></h2>
+<section id="program-dependence-graph-api">
+<h3>Program Dependence Graph API<a class="headerlink" href="#program-dependence-graph-api" title="Link to this heading"></a></h3>
+<p>Include headers:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"IR/PDG/Core/ProgramDependencyGraph.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"IR/PDG/Core/Graph.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"IR/PDG/Core/PDGNode.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"IR/PDG/Core/PDGEdge.h"</span>
+</pre></div>
+</div>
+<p>Build PDG:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">pdg</span><span class="p">;</span>
+
+<span class="n">legacy</span><span class="o">::</span><span class="n">PassManager</span><span class="w"> </span><span class="n">PM</span><span class="p">;</span>
+<span class="n">PM</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">DataDependencyGraph</span><span class="p">());</span>
+<span class="n">PM</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">ControlDependencyGraph</span><span class="p">());</span>
+<span class="n">PM</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">ProgramDependencyGraph</span><span class="p">());</span>
+<span class="n">PM</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+
+<span class="n">ProgramGraph</span><span class="w"> </span><span class="o">*</span><span class="n">pdg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ProgramGraph</span><span class="o">::</span><span class="n">getInstance</span><span class="p">();</span>
+</pre></div>
+</div>
+<p>Traverse PDG:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">pdg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="o">*</span><span class="n">edge</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">node</span><span class="o">-&gt;</span><span class="n">getOutEdgeSet</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">Node</span><span class="w"> </span><span class="o">*</span><span class="n">target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">edge</span><span class="o">-&gt;</span><span class="n">getDstNode</span><span class="p">();</span>
+<span class="w">        </span><span class="n">EdgeType</span><span class="w"> </span><span class="n">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">edge</span><span class="o">-&gt;</span><span class="n">getEdgeType</span><span class="p">();</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Query function nodes:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">Function</span><span class="w"> </span><span class="o">*</span><span class="n">F</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/* ... */</span><span class="p">;</span>
+<span class="n">FunctionWrapper</span><span class="w"> </span><span class="o">*</span><span class="n">fw</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pdg</span><span class="o">-&gt;</span><span class="n">getFuncWrapper</span><span class="p">(</span><span class="o">*</span><span class="n">F</span><span class="p">);</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">fw</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">Node</span><span class="w"> </span><span class="o">*</span><span class="n">entryNode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fw</span><span class="o">-&gt;</span><span class="n">getEntryNode</span><span class="p">();</span>
+<span class="w">    </span><span class="n">Tree</span><span class="w"> </span><span class="o">*</span><span class="n">formalInTree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fw</span><span class="o">-&gt;</span><span class="n">getFormalInTree</span><span class="p">();</span>
+<span class="w">    </span><span class="n">Tree</span><span class="w"> </span><span class="o">*</span><span class="n">formalOutTree</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fw</span><span class="o">-&gt;</span><span class="n">getFormalOutTree</span><span class="p">();</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Check reachability:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="kt">bool</span><span class="w"> </span><span class="n">hasPath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pdg</span><span class="o">-&gt;</span><span class="n">canReach</span><span class="p">(</span><span class="o">*</span><span class="n">srcNode</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">dstNode</span><span class="p">);</span>
+
+<span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">EdgeType</span><span class="o">&gt;</span><span class="w"> </span><span class="n">exclude</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="n">EdgeType</span><span class="o">::</span><span class="n">CONTROLDEP_OTHER</span><span class="p">};</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">hasDataPath</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pdg</span><span class="o">-&gt;</span><span class="n">canReach</span><span class="p">(</span><span class="o">*</span><span class="n">srcNode</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">dstNode</span><span class="p">,</span><span class="w"> </span><span class="n">exclude</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<section id="pdg-cypher-query-api">
+<h3>PDG Cypher Query API<a class="headerlink" href="#pdg-cypher-query-api" title="Link to this heading"></a></h3>
+<p>Include headers:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"IR/PDG/QueryLanguage/Cypher.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"IR/PDG/Core/ProgramDependencyGraph.h"</span>
+</pre></div>
+</div>
+<p>Parse and execute Cypher queries:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">pdg</span><span class="p">;</span>
+
+<span class="n">ProgramGraph</span><span class="w"> </span><span class="o">*</span><span class="n">pdg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ProgramGraph</span><span class="o">::</span><span class="n">getInstance</span><span class="p">();</span>
+<span class="n">CypherQueryExecutor</span><span class="w"> </span><span class="nf">executor</span><span class="p">(</span><span class="o">*</span><span class="n">pdg</span><span class="p">);</span>
+
+<span class="n">CypherParser</span><span class="w"> </span><span class="n">parser</span><span class="p">;</span>
+<span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">queryStr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"MATCH (n:FUNC_ENTRY) WHERE n.name = 'main' RETURN n"</span><span class="p">;</span>
+<span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">CypherQuery</span><span class="o">&gt;</span><span class="w"> </span><span class="n">query</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">parser</span><span class="p">.</span><span class="n">parse</span><span class="p">(</span><span class="n">queryStr</span><span class="p">);</span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">parser</span><span class="p">.</span><span class="n">hasError</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">CypherResult</span><span class="o">&gt;</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">executor</span><span class="p">.</span><span class="n">execute</span><span class="p">(</span><span class="o">*</span><span class="n">query</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">result</span><span class="o">-&gt;</span><span class="n">getType</span><span class="p">()</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">CypherResult</span><span class="o">::</span><span class="n">ResultType</span><span class="o">::</span><span class="n">NODES</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="o">*</span><span class="n">node</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">result</span><span class="o">-&gt;</span><span class="n">getNodes</span><span class="p">())</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">errs</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"Result node: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">node</span><span class="o">-&gt;</span><span class="n">getNodeType</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="call-graph-api">
+<h3>Call Graph API<a class="headerlink" href="#call-graph-api" title="Link to this heading"></a></h3>
+<p>Include headers:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"IR/PDG/Core/PDGCallGraph.h"</span>
+</pre></div>
+</div>
+<p>Build and query call graph:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">pdg</span><span class="p">;</span>
+
+<span class="n">PDGCallGraph</span><span class="w"> </span><span class="o">&amp;</span><span class="n">cg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">PDGCallGraph</span><span class="o">::</span><span class="n">getInstance</span><span class="p">();</span>
+<span class="n">cg</span><span class="p">.</span><span class="n">build</span><span class="p">(</span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+
+<span class="c1">// Check reachability between call-graph nodes</span>
+<span class="kt">bool</span><span class="w"> </span><span class="n">reachable</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cg</span><span class="p">.</span><span class="n">canReach</span><span class="p">(</span><span class="o">*</span><span class="n">srcNode</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">sinkNode</span><span class="p">);</span>
+
+<span class="c1">// Compute paths between functions</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">paths</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cg</span><span class="p">.</span><span class="n">computePaths</span><span class="p">(</span><span class="o">*</span><span class="n">srcNode</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">sinkNode</span><span class="p">);</span>
+
+<span class="c1">// Identify indirect call targets</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cg</span><span class="p">.</span><span class="n">getIndirectCallCandidates</span><span class="p">(</span><span class="o">*</span><span class="n">callInst</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="data-flow-analysis-apis">
+<h2>Data Flow Analysis APIs<a class="headerlink" href="#data-flow-analysis-apis" title="Link to this heading"></a></h2>
+<section id="ifds-taint-analysis-api">
+<h3>IFDS Taint Analysis API<a class="headerlink" href="#ifds-taint-analysis-api" title="Link to this heading"></a></h3>
+<p>Include headers:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"Dataflow/IFDS/Analyses/IFDSTaintAnalysis.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Dataflow/IFDS/Solver/IFDSSolver.h"</span>
+</pre></div>
+</div>
+<p>Configure and run:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">ifds</span><span class="p">;</span>
+
+<span class="n">TaintAnalysis</span><span class="w"> </span><span class="n">analysis</span><span class="p">;</span>
+<span class="n">analysis</span><span class="p">.</span><span class="n">add_source_function</span><span class="p">(</span><span class="s">"scanf"</span><span class="p">);</span>
+<span class="n">analysis</span><span class="p">.</span><span class="n">add_sink_function</span><span class="p">(</span><span class="s">"system"</span><span class="p">);</span>
+
+<span class="n">IFDSSolver</span><span class="o">&lt;</span><span class="n">TaintAnalysis</span><span class="o">&gt;</span><span class="w"> </span><span class="n">solver</span><span class="p">(</span><span class="n">analysis</span><span class="p">);</span>
+<span class="n">solver</span><span class="p">.</span><span class="n">solve</span><span class="p">(</span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+
+<span class="k">auto</span><span class="w"> </span><span class="n">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">solver</span><span class="p">.</span><span class="n">get_all_results</span><span class="p">();</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="bug-reporting-apis">
+<h2>Bug Reporting APIs<a class="headerlink" href="#bug-reporting-apis" title="Link to this heading"></a></h2>
+<section id="bugreport-and-bugreportmgr-api">
+<h3>BugReport and BugReportMgr API<a class="headerlink" href="#bugreport-and-bugreportmgr-api" title="Link to this heading"></a></h3>
+<p>Include headers:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"Checker/Framework/BugReport.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Checker/Framework/BugReportMgr.h"</span>
+</pre></div>
+</div>
+<p>Report bugs:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="n">BugReportMgr</span><span class="w"> </span><span class="o">&amp;</span><span class="n">mgr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BugReportMgr</span><span class="o">::</span><span class="n">get_instance</span><span class="p">();</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">typeId</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mgr</span><span class="p">.</span><span class="n">register_bug_type</span><span class="p">(</span>
+<span class="w">    </span><span class="s">"NullDeref"</span><span class="p">,</span><span class="w"> </span><span class="n">BugDescription</span><span class="o">::</span><span class="n">BI_HIGH</span><span class="p">,</span><span class="w"> </span><span class="n">BugDescription</span><span class="o">::</span><span class="n">BC_SECURITY</span><span class="p">,</span>
+<span class="w">    </span><span class="s">"Null pointer dereference"</span><span class="p">);</span>
+
+<span class="k">auto</span><span class="w"> </span><span class="o">*</span><span class="n">report</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">BugReport</span><span class="p">(</span><span class="n">typeId</span><span class="p">);</span>
+<span class="n">report</span><span class="o">-&gt;</span><span class="n">append_step</span><span class="p">(</span><span class="n">inst</span><span class="p">,</span><span class="w"> </span><span class="s">"Dereference of null pointer"</span><span class="p">);</span>
+<span class="n">mgr</span><span class="p">.</span><span class="n">insert_report</span><span class="p">(</span><span class="n">typeId</span><span class="p">,</span><span class="w"> </span><span class="n">report</span><span class="p">,</span><span class="w"> </span><span class="cm">/*deduplicate_by_trace=*/</span><span class="nb">true</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+</section>
+<section id="example-complete-analysis-tool">
+<h2>Example: Complete Analysis Tool<a class="headerlink" href="#example-complete-analysis-tool" title="Link to this heading"></a></h2>
+<p>Here is an example building an analysis tool that integrates alias analysis, the PDG, and IFDS taint analysis:</p>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"llvm/IR/LLVMContext.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"llvm/IR/Module.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"llvm/IRReader/IRReader.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"llvm/Support/SourceMgr.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"llvm/IR/LegacyPassManager.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Alias/UnificationBased/DyckAA/DyckAliasAnalysis.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"IR/PDG/Core/ProgramDependencyGraph.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Dataflow/IFDS/Analyses/IFDSTaintAnalysis.h"</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">"Dataflow/IFDS/Solver/IFDSSolver.h"</span>
+
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">llvm</span><span class="p">;</span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">argc</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">errs</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"Usage: "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">" &lt;input.bc&gt;</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="n">LLVMContext</span><span class="w"> </span><span class="n">context</span><span class="p">;</span>
+<span class="w">    </span><span class="n">SMDiagnostic</span><span class="w"> </span><span class="n">error</span><span class="p">;</span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">Module</span><span class="o">&gt;</span><span class="w"> </span><span class="k">module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">parseIRFile</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="n">error</span><span class="p">,</span><span class="w"> </span><span class="n">context</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="k">module</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">error</span><span class="p">.</span><span class="n">print</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="w"> </span><span class="n">errs</span><span class="p">());</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="c1">// 1. Alias analysis</span>
+<span class="w">    </span><span class="n">DyckAliasAnalysis</span><span class="w"> </span><span class="n">DAA</span><span class="p">;</span>
+<span class="w">    </span><span class="n">DAA</span><span class="p">.</span><span class="n">runOnModule</span><span class="p">(</span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 2. Build PDG</span>
+<span class="w">    </span><span class="n">legacy</span><span class="o">::</span><span class="n">PassManager</span><span class="w"> </span><span class="n">PM</span><span class="p">;</span>
+<span class="w">    </span><span class="n">PM</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">pdg</span><span class="o">::</span><span class="n">DataDependencyGraph</span><span class="p">());</span>
+<span class="w">    </span><span class="n">PM</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">pdg</span><span class="o">::</span><span class="n">ControlDependencyGraph</span><span class="p">());</span>
+<span class="w">    </span><span class="n">PM</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">pdg</span><span class="o">::</span><span class="n">ProgramDependencyGraph</span><span class="p">());</span>
+<span class="w">    </span><span class="n">PM</span><span class="p">.</span><span class="n">run</span><span class="p">(</span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+
+<span class="w">    </span><span class="c1">// 3. IFDS taint analysis</span>
+<span class="w">    </span><span class="n">ifds</span><span class="o">::</span><span class="n">TaintAnalysis</span><span class="w"> </span><span class="n">taint</span><span class="p">;</span>
+<span class="w">    </span><span class="n">taint</span><span class="p">.</span><span class="n">add_source_function</span><span class="p">(</span><span class="s">"scanf"</span><span class="p">);</span>
+<span class="w">    </span><span class="n">taint</span><span class="p">.</span><span class="n">add_sink_function</span><span class="p">(</span><span class="s">"system"</span><span class="p">);</span>
+
+<span class="w">    </span><span class="n">ifds</span><span class="o">::</span><span class="n">IFDSSolver</span><span class="o">&lt;</span><span class="n">ifds</span><span class="o">::</span><span class="n">TaintAnalysis</span><span class="o">&gt;</span><span class="w"> </span><span class="n">solver</span><span class="p">(</span><span class="n">taint</span><span class="p">);</span>
+<span class="w">    </span><span class="n">solver</span><span class="p">.</span><span class="n">solve</span><span class="p">(</span><span class="o">*</span><span class="k">module</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">auto</span><span class="w"> </span><span class="n">results</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">solver</span><span class="p">.</span><span class="n">get_all_results</span><span class="p">();</span>
+<span class="w">    </span><span class="n">errs</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">"Analysis completed with "</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">results</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">" result entries</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>Compile and link:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>clang++<span class="w"> </span>-o<span class="w"> </span>my_analyzer<span class="w"> </span>my_analyzer.cpp<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="k">$(</span>llvm-config<span class="w"> </span>--cxxflags<span class="w"> </span>--ldflags<span class="w"> </span>--libs<span class="k">)</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-L/path/to/lotus/build/lib<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-lCanaryDyckAA<span class="w"> </span>-lCanaryPDG<span class="w"> </span>-lIFDS
+</pre></div>
+</div>
+</section>
+<section id="see-also">
+<h2>See Also<a class="headerlink" href="#see-also" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="../user_guide/architecture.html"><span class="doc">Architecture &amp; Major Components</span></a> - Understanding the framework architecture</p></li>
+<li><p><a class="reference internal" href="../user_guide/tutorials.html"><span class="doc">Tutorials and Examples</span></a> - Practical usage examples</p></li>
+<li><p><a class="reference internal" href="developer_guide.html"><span class="doc">Developer Guide</span></a> - Extending Lotus</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../checker/typequalifier.html" class="btn btn-neutral float-left" title="TypeQualifier" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="developer_guide.html" class="btn btn-neutral float-right" title="Developer Guide" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

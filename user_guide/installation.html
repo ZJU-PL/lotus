@@ -1,0 +1,437 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Installation Guide &mdash; Lotus Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Tutorials and Examples" href="tutorials.html" />
+    <link rel="prev" title="Major Components Overview" href="major_components.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+              <img src="../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture &amp; Major Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#building-lotus">Building Lotus</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#configuration-options">Configuration Options</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#faster-development-builds">Faster development builds</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#profiling-and-optional-compilation-acceleration">Profiling and optional compilation acceleration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#reducing-link-time">Reducing link time</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#z3-installation">Z3 Installation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="pdg_query_language.html">PDG Query Language (Cypher)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="property_based_slicing.html">Property-Based Slicing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="verification_backends.html">Verification Driver Abstraction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="instrumentation_passes.html">Instrumentation Passes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../concurrency/index.html">Concurrency Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis Frameworks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html">Machine Learning Features (CanaryML)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../optimization/index.html">Optimization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../security/index.html">Security Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../symbolic_execution/index.html">Symbolic Execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../verification/index.html">Verification</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../checker/index.html">Checker Framework</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Installation Guide</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/user_guide/installation.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="installation-guide">
+<h1>Installation Guide<a class="headerlink" href="#installation-guide" title="Link to this heading"></a></h1>
+<p>Installation guide for Lotus and its dependencies.</p>
+<section id="prerequisites">
+<h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>LLVM 14.0.0</p></li>
+<li><p>Z3 4.11</p></li>
+<li><p>CMake 3.18+</p></li>
+<li><p>C++17 compatible compiler</p></li>
+<li><p>Boost 1.65+ (optional — only needed when CLAM, SeaHorn, Cclyzer++, or FPsolve are enabled;
+auto-downloaded if not found)</p></li>
+</ul>
+</section>
+<section id="building-lotus">
+<h2>Building Lotus<a class="headerlink" href="#building-lotus" title="Link to this heading"></a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/ZJU-PL/lotus
+<span class="nb">cd</span><span class="w"> </span>lotus
+cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Debug
+cmake<span class="w"> </span>--build<span class="w"> </span>build<span class="w"> </span>-j
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>After configuration, CMake prints a <strong>build summary</strong> showing all enabled
+features. Run <code class="docutils literal notranslate"><span class="pre">cmake</span> <span class="pre">-S</span> <span class="pre">.</span> <span class="pre">-B</span> <span class="pre">build</span></code> (no flags) for a quick overview.</p>
+</div>
+</section>
+<section id="configuration-options">
+<h2>Configuration Options<a class="headerlink" href="#configuration-options" title="Link to this heading"></a></h2>
+<p>Lotus exposes its project-owned CMake toggles through <code class="docutils literal notranslate"><span class="pre">cmake/LotusOptions.cmake</span></code>.
+Options use a consistent <code class="docutils literal notranslate"><span class="pre">LOTUS_*</span></code> naming scheme.</p>
+<p><strong>Core toggles:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLLVM_BUILD_PATH=/path/to/llvm/lib/cmake/llvm</span></code>: Only needed if CMake cannot
+find a supported LLVM automatically.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_BUILD_TESTS=ON</span></code>: Build unit tests (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_BUILD_EXAMPLES=ON</span></code>: Build examples (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_COVERAGE=ON</span></code>: Instrument Lotus and its tests for LLVM source
+coverage (requires <code class="docutils literal notranslate"><span class="pre">LOTUS_BUILD_TESTS=ON</span></code> and Clang/AppleClang; default: OFF)</p></li>
+</ul>
+<p><strong>Optional verifier integrations</strong> (all OFF by default — opt-in due to heavyweight dependencies):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_CLAM=ON</span></code>: Enable CLAM abstract interpretation framework</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_SEAHORN=ON</span></code>: Enable SeaHorn</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_SMACK=ON</span></code>: Enable SMACK LLVM-to-Boogie verifier frontend</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_SVF=ON</span></code>: Enable SVF</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_HORN_ICE=ON</span></code>: Build ICE learning tools for CHC</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_SEAL=ON</span></code>: Build the Seal symbolic automata lifter (CAV 2026)</p></li>
+</ul>
+<p><strong>Optional in-tree tool families and components:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_CFL=OFF</span></code>: Disable CFL reachability solvers (default: ON)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_CSR=ON</span></code>: Build the indexing context-sensitive reachability solver (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_OWL=ON</span></code>: Build the Owl SMT solver (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_SMT_STABILIZER=ON</span></code>: Build the SMTStabilizer SMT-LIB
+normalization library and tool (needs GMP, GMPXX, and MPFR; default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_DYNAA=ON</span></code>: Build dynamic alias-analysis tools (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_CCLYZER=ON</span></code>: Enable optional cclyzer++ alias analysis backend (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_TYPE_QUALIFIER=ON</span></code>: Enable the TypeQualifier uninitialized-data checker (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_FPSOLVE=ON</span></code>: Build vendored FPsolve fixed-point solver (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_WALI_OPENNWA=ON</span></code>: Build the vendored WALi/OpenNWA library
+and enable the runtime <code class="docutils literal notranslate"><span class="pre">wali-fwpds</span></code> and <code class="docutils literal notranslate"><span class="pre">wali-swpds</span></code> WPDS backends (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_ENABLE_PDAAAL=ON</span></code>: Build the vendored PDAAAL weighted PDS reachability library
+under third-party/PDAAAL (default: OFF)</p></li>
+</ul>
+<p><strong>Advanced toggles:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_DOWNLOAD_BOOST=OFF</span></code>: Disable Boost auto-download (default: ON)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_DOWNLOAD_CRAB=ON</span></code>: Allow CRAB auto-download (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_CUSTOM_BOOST_ROOT=/path/to/boost</span></code>: Path to a custom Boost installation</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_CUSTOM_CRAB_ROOT=/path/to/crab</span></code>: Path to a custom CRAB checkout</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_SEADSA_ENABLE_SANITY_CHECKS=ON</span></code>: Enable Sea-DSA sanity checks (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_WPDS_WITNESS_TRACE=ON</span></code>: Enable WPDS witness tracing (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_SEAHORN_BUILD_32_BIT_RT=ON</span></code>: Build 32-bit SeaHorn runtime libraries (default: OFF)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_EGRAPH_ENABLE_DOT=ON</span></code>: Enable DOT/Graphviz helpers in the EGraph library (default: ON)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">-DLOTUS_EGRAPH_ENABLE_JSON=ON</span></code>: Enable JSON serialization helpers in the EGraph library (default: ON)</p></li>
+</ul>
+<p>Typical configurations:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Lean local build (the defaults exclude tests and CLAM)</span>
+cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Debug
+
+<span class="c1"># Full build, including tests and CLAM</span>
+cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build-full<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_BUILD_TESTS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_ENABLE_CLAM<span class="o">=</span>ON
+
+<span class="c1"># Enable optional tool families</span>
+cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_ENABLE_DYNAA<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_ENABLE_HORN_ICE<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_ENABLE_CFL<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_ENABLE_CSR<span class="o">=</span>ON
+
+<span class="c1"># Enable Seal symbolic automata lifter</span>
+cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build<span class="w"> </span>-DLOTUS_ENABLE_SEAL<span class="o">=</span>ON
+</pre></div>
+</div>
+</section>
+<section id="faster-development-builds">
+<h2>Faster development builds<a class="headerlink" href="#faster-development-builds" title="Link to this heading"></a></h2>
+<p>By default, Lotus builds every configured library and tool family. For focused
+development, keep all library targets available but build only those needed by
+the selected tools and tests:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build-concurrency<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Debug<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_BUILD_ALL_LIBRARIES<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_TOOL_FAMILIES<span class="o">=</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_BUILD_TESTS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_TEST_SUBSYSTEMS<span class="o">=</span>concurrency<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_ENABLE_CFL<span class="o">=</span>OFF
+cmake<span class="w"> </span>--build<span class="w"> </span>build-concurrency<span class="w"> </span>--parallel<span class="w"> </span><span class="m">8</span>
+ctest<span class="w"> </span>--test-dir<span class="w"> </span>build-concurrency<span class="w"> </span>--output-on-failure
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">LOTUS_TOOL_FAMILIES</span></code> is a semicolon-separated list of <code class="docutils literal notranslate"><span class="pre">alias</span></code>, <code class="docutils literal notranslate"><span class="pre">checker</span></code>,
+<code class="docutils literal notranslate"><span class="pre">dataflow</span></code>, <code class="docutils literal notranslate"><span class="pre">optimization</span></code>, <code class="docutils literal notranslate"><span class="pre">solver</span></code>, <code class="docutils literal notranslate"><span class="pre">verifier</span></code>, <code class="docutils literal notranslate"><span class="pre">ir</span></code>, and <code class="docutils literal notranslate"><span class="pre">cfl</span></code>.
+Its default is <code class="docutils literal notranslate"><span class="pre">all</span></code>; an empty value builds no tools. Existing feature switches
+still control optional tools within a selected family.</p>
+<p><code class="docutils literal notranslate"><span class="pre">LOTUS_TEST_SUBSYSTEMS</span></code> selects <code class="docutils literal notranslate"><span class="pre">alias</span></code>, <code class="docutils literal notranslate"><span class="pre">alias-wrapper</span></code>, <code class="docutils literal notranslate"><span class="pre">analysis</span></code>,
+<code class="docutils literal notranslate"><span class="pre">checker</span></code>, <code class="docutils literal notranslate"><span class="pre">cfl</span></code>, <code class="docutils literal notranslate"><span class="pre">concurrency</span></code>, <code class="docutils literal notranslate"><span class="pre">dataflow</span></code>, <code class="docutils literal notranslate"><span class="pre">fuzzing</span></code>, <code class="docutils literal notranslate"><span class="pre">ir</span></code>,
+<code class="docutils literal notranslate"><span class="pre">solvers</span></code>, <code class="docutils literal notranslate"><span class="pre">symbolicexecution</span></code>, <code class="docutils literal notranslate"><span class="pre">utils</span></code>, and <code class="docutils literal notranslate"><span class="pre">verification</span></code>. Its default
+is <code class="docutils literal notranslate"><span class="pre">all</span></code>. Quote multiple selections, for example
+<code class="docutils literal notranslate"><span class="pre">-DLOTUS_TEST_SUBSYSTEMS=&quot;concurrency;alias-wrapper&quot;</span></code>. The <code class="docutils literal notranslate"><span class="pre">alias-wrapper</span></code>
+suite checks wrapper availability without compiling all alias-analysis tests.
+CLI regression tests are registered only when their tools are configured.</p>
+<p>For finer selection, use <code class="docutils literal notranslate"><span class="pre">subsystem/group</span></code> in the same option. A bare subsystem
+includes all of its groups; each selected subsystem still produces one test
+binary, so full builds do not acquire a separate link step for every group.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build-focused<span class="w"> </span>-G<span class="w"> </span>Ninja<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_BUILD_ALL_LIBRARIES<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_TOOL_FAMILIES<span class="o">=</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_BUILD_TESTS<span class="o">=</span>ON<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'-DLOTUS_TEST_SUBSYSTEMS=concurrency/cuda;dataflow/vasco;analysis/cfg'</span>
+cmake<span class="w"> </span>--build<span class="w"> </span>build-focused<span class="w"> </span>--target<span class="w"> </span>lotus_unit_tests<span class="w"> </span>--parallel<span class="w"> </span><span class="m">8</span>
+ctest<span class="w"> </span>--test-dir<span class="w"> </span>build-focused<span class="w"> </span>--output-on-failure
+</pre></div>
+</div>
+<p>Supported groups:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">alias</span></code>: <code class="docutils literal notranslate"><span class="pre">gpg</span></code>, <code class="docutils literal notranslate"><span class="pre">dda</span></code>, <code class="docutils literal notranslate"><span class="pre">aserpta</span></code>, <code class="docutils literal notranslate"><span class="pre">bootstrapaa</span></code>, <code class="docutils literal notranslate"><span class="pre">flowsensitive</span></code>,
+<code class="docutils literal notranslate"><span class="pre">lotusaa</span></code>, <code class="docutils literal notranslate"><span class="pre">sparrowaa</span></code>, <code class="docutils literal notranslate"><span class="pre">tpa</span></code>, <code class="docutils literal notranslate"><span class="pre">cclyzeraa</span></code>, <code class="docutils literal notranslate"><span class="pre">dyckaa</span></code>, <code class="docutils literal notranslate"><span class="pre">seadsa</span></code>,
+<code class="docutils literal notranslate"><span class="pre">allocaa</span></code>, <code class="docutils literal notranslate"><span class="pre">typequalifier</span></code>, <code class="docutils literal notranslate"><span class="pre">underapproxaa</span></code>, <code class="docutils literal notranslate"><span class="pre">ptsset</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">analysis</span></code>: <code class="docutils literal notranslate"><span class="pre">cfg</span></code>, <code class="docutils literal notranslate"><span class="pre">controldependence</span></code>, <code class="docutils literal notranslate"><span class="pre">debuginfo</span></code>, <code class="docutils literal notranslate"><span class="pre">general</span></code>,
+<code class="docutils literal notranslate"><span class="pre">multiplicity</span></code>, <code class="docutils literal notranslate"><span class="pre">nullpointer</span></code>, <code class="docutils literal notranslate"><span class="pre">parametersummary</span></code>, <code class="docutils literal notranslate"><span class="pre">profile</span></code>,
+<code class="docutils literal notranslate"><span class="pre">purity</span></code>, <code class="docutils literal notranslate"><span class="pre">sccp</span></code>, <code class="docutils literal notranslate"><span class="pre">typehierarchy</span></code>, <code class="docutils literal notranslate"><span class="pre">loop</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">checker</span></code>: <code class="docutils literal notranslate"><span class="pre">ae</span></code>, <code class="docutils literal notranslate"><span class="pre">concurrency</span></code>, <code class="docutils literal notranslate"><span class="pre">framework</span></code>, <code class="docutils literal notranslate"><span class="pre">kint</span></code>, <code class="docutils literal notranslate"><span class="pre">pulse</span></code>,
+<code class="docutils literal notranslate"><span class="pre">saber</span></code>, <code class="docutils literal notranslate"><span class="pre">reports</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">concurrency</span></code>: <code class="docutils literal notranslate"><span class="pre">mhp</span></code>, <code class="docutils literal notranslate"><span class="pre">lockset</span></code>, <code class="docutils literal notranslate"><span class="pre">valueflow</span></code>, <code class="docutils literal notranslate"><span class="pre">thread</span></code>, <code class="docutils literal notranslate"><span class="pre">clocks</span></code>,
+<code class="docutils literal notranslate"><span class="pre">threadapi</span></code>, <code class="docutils literal notranslate"><span class="pre">threadlocal</span></code>, <code class="docutils literal notranslate"><span class="pre">openmp</span></code>, <code class="docutils literal notranslate"><span class="pre">mpi</span></code>, <code class="docutils literal notranslate"><span class="pre">cuda</span></code>, <code class="docutils literal notranslate"><span class="pre">linuxkernel</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">dataflow</span></code>: <code class="docutils literal notranslate"><span class="pre">ifdside</span></code>, <code class="docutils literal notranslate"><span class="pre">mono</span></code>, <code class="docutils literal notranslate"><span class="pre">wpds</span></code>, <code class="docutils literal notranslate"><span class="pre">apa</span></code>, <code class="docutils literal notranslate"><span class="pre">npa</span></code>, <code class="docutils literal notranslate"><span class="pre">vasco</span></code>.</p></li>
+</ul>
+<p>Source manifests and link dependencies are restricted to the selected groups.
+TypeHierarchy and Loop IR fixtures are configured and generated only when those
+analysis groups are selected. Production libraries retain their own dependencies;
+for example CUDA tests still need the aggregate Concurrency library.</p>
+<p>Non-template functions in <code class="docutils literal notranslate"><span class="pre">TestUtils/LLVMHelpers.h</span></code> are implemented in a shared
+test support library, so each test source does not compile their bodies again.
+Templates remain in the header. KINT’s shared fixture similarly compiles its
+PassBuilder initialization once rather than exposing it through every test
+source. The common test targets no longer link LLVMPasses; groups that use
+PassBuilder request that library explicitly. Suites with a custom entry point
+use <code class="docutils literal notranslate"><span class="pre">CUSTOM_MAIN</span></code> to omit <code class="docutils literal notranslate"><span class="pre">GTest::gtest_main</span></code>.</p>
+<p>With <code class="docutils literal notranslate"><span class="pre">LOTUS_BUILD_ALL_LIBRARIES=OFF</span></code>, CMake follows target dependencies rather
+than compiling every library. You can still request any configured library with
+<code class="docutils literal notranslate"><span class="pre">cmake</span> <span class="pre">--build</span> <span class="pre">build-concurrency</span> <span class="pre">--target</span> <span class="pre">SVFG</span></code>. Use the default full-library
+configuration for packaging/installing the complete project. Disabling
+<code class="docutils literal notranslate"><span class="pre">LOTUS_ENABLE_CFL</span></code> removes CFL libraries, tools, and their tests; the wrapper’s
+LLVM-provided CFL alias analyses remain available.</p>
+<p>The unified alias wrapper can omit heavier backends independently:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build-concurrency<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_AA_WRAPPER_ENABLE_DDA<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_AA_WRAPPER_ENABLE_TPA<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_AA_WRAPPER_ENABLE_GPG<span class="o">=</span>OFF<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_AA_WRAPPER_ENABLE_CCLYZER<span class="o">=</span>OFF
+</pre></div>
+</div>
+<p>These switches default to ON and affect only the wrapper. Standalone backend
+libraries and tools remain available. SparrowAA, DyckAA, UnderApprox, Combined,
+and LLVM CFL backends keep their existing behavior. Requesting an omitted
+backend produces a diagnostic, leaves <code class="docutils literal notranslate"><span class="pre">isInitialized()</span></code> false, and returns
+conservative query results. Enable the backends your chosen analysis needs;
+these switches do not remove an independent dependency on a backend elsewhere.
+Consumers of the wrapper header must include the generated build include
+directory as well as the source include directory; linking its CMake target
+supplies that directory automatically.</p>
+<section id="profiling-and-optional-compilation-acceleration">
+<h3>Profiling and optional compilation acceleration<a class="headerlink" href="#profiling-and-optional-compilation-acceleration" title="Link to this heading"></a></h3>
+<p>Enable compiler profiling before choosing precompiled headers (PCH) or unity
+builds:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build-concurrency<span class="w"> </span>-DLOTUS_ENABLE_TIME_TRACE<span class="o">=</span>ON
+cmake<span class="w"> </span>--build<span class="w"> </span>build-concurrency<span class="w"> </span>--parallel<span class="w"> </span><span class="m">8</span>
+</pre></div>
+</div>
+<p>Clang/AppleClang write <code class="docutils literal notranslate"><span class="pre">*.cpp.json</span></code> files beside their object files. Inspect
+them in a trace viewer to distinguish header parsing and template instantiation
+from code generation. This option applies to Lotus C++ targets, not vendored
+libraries, and rejects unsupported compilers.</p>
+<p>If repeated header parsing dominates, select individual targets for private
+PCHs of stable LLVM/STL headers:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build-concurrency<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'-DLOTUS_PCH_TARGETS=Concurrency;SVFG'</span>
+</pre></div>
+</div>
+<p>Each target builds its own PCH with its own flags and definitions. Measure the
+PCH creation cost as well as subsequent source compilation; small targets may
+not benefit. PCH is disabled by default.</p>
+<p>Unity builds are an opt-in experiment for compatible targets:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build-concurrency<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_UNITY_TARGETS<span class="o">=</span>CanaryAliasPtsSet<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-DLOTUS_UNITY_BATCH_SIZE<span class="o">=</span><span class="m">4</span>
+</pre></div>
+</div>
+<p>Combining source files can expose local-name collisions or increase the cost
+of rebuilding one edited file. Select targets explicitly, verify their tests,
+and compare clean and incremental builds before adopting unity builds. Both
+target lists reject unknown or non-compilable targets and exclude vendored
+targets. Reset a list with <code class="docutils literal notranslate"><span class="pre">-DLOTUS_PCH_TARGETS=</span></code> or
+<code class="docutils literal notranslate"><span class="pre">-DLOTUS_UNITY_TARGETS=</span></code> to disable it. Reconfigure into a new build directory
+when switching CMake generators.</p>
+</section>
+<section id="reducing-link-time">
+<h3>Reducing link time<a class="headerlink" href="#reducing-link-time" title="Link to this heading"></a></h3>
+<p>Measure link steps separately from compilation before changing the linker.
+Ninja records start/end times and outputs in <code class="docutils literal notranslate"><span class="pre">.ninja_log</span></code>; executable outputs
+under <code class="docutils literal notranslate"><span class="pre">bin/tests/</span></code> identify the test link steps. Sum-of-job durations are not
+the same as the elapsed time of a parallel build.</p>
+<p>Focused test selections reduce both the libraries linked into each executable
+and the number of unrelated executables rebuilt after editing a dependency.
+The default configuration keeps one executable per subsystem to avoid repeatedly
+linking its shared dependency set. Shared test helpers compile once, and
+LLVMPasses is linked only by suites that need it.</p>
+<p>If LLVM itself does not need to be debugged, a Release LLVM 14 installation can
+reduce the debug information embedded from static LLVM archives. Lotus can still
+be built in Debug mode. Keep LLVM’s RTTI configuration compatible with Lotus.</p>
+<p>An alternative linker is another opt-in experiment. With LLD installed, Clang
+on Linux can use:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build-focused<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld'</span>
+</pre></div>
+</div>
+<p>On macOS, select the Mach-O linker executable explicitly:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>-S<span class="w"> </span>.<span class="w"> </span>-B<span class="w"> </span>build-focused<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s1">'-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=/path/to/ld64.lld'</span>
+</pre></div>
+</div>
+<p>Retain any existing linker flags when adding these options and verify the
+resulting executables. See <a class="reference external" href="https://lld.llvm.org/">LLD documentation</a> and
+<a class="reference external" href="https://lld.llvm.org/MachO/index.html">the Mach-O port</a>. Linking against a
+shared LLVM library may reduce repeated static linking, but requires an LLVM
+installation providing that library and corresponding changes to Lotus’s
+component-library links; simply appending <code class="docutils literal notranslate"><span class="pre">LLVM</span></code> to the current static link
+list does not implement that change.</p>
+</section>
+</section>
+<section id="z3-installation">
+<h2>Z3 Installation<a class="headerlink" href="#z3-installation" title="Link to this heading"></a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Ubuntu/Debian</span>
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>libz3-dev
+
+<span class="c1"># macOS with Homebrew</span>
+brew<span class="w"> </span>install<span class="w"> </span>z3
+
+<span class="c1"># Or build from source</span>
+git<span class="w"> </span>clone<span class="w"> </span>https://github.com/Z3Prover/z3.git
+<span class="nb">cd</span><span class="w"> </span>z3<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>python<span class="w"> </span>scripts/mk_make.py
+<span class="nb">cd</span><span class="w"> </span>build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>sudo<span class="w"> </span>make<span class="w"> </span>install
+</pre></div>
+</div>
+</section>
+<section id="troubleshooting">
+<h2>Troubleshooting<a class="headerlink" href="#troubleshooting" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>LLVM not found</strong>: Install LLVM 14.x via your package manager (or from source).
+If you use a non-standard installation location, set <code class="docutils literal notranslate"><span class="pre">LLVM_BUILD_PATH</span></code> to the directory
+that contains <code class="docutils literal notranslate"><span class="pre">LLVMConfig.cmake</span></code> and re-run CMake.</p></li>
+<li><p><strong>Z3 not found</strong>: Install Z3 or set <code class="docutils literal notranslate"><span class="pre">Z3_DIR</span></code></p></li>
+<li><p><strong>Boost issues</strong>: Use <code class="docutils literal notranslate"><span class="pre">LOTUS_CUSTOM_BOOST_ROOT</span></code> or let Lotus auto-download Boost</p></li>
+<li><p><strong>Build errors</strong>: Use supported LLVM version (14.x)</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="major_components.html" class="btn btn-neutral float-left" title="Major Components Overview" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="tutorials.html" class="btn btn-neutral float-right" title="Tutorials and Examples" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
