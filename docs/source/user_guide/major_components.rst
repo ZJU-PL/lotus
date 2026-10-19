@@ -20,7 +20,7 @@ See :doc:`../alias/alias_analysis` for detailed instructions and command example
 * **SparrowAA** – Inclusion-based pointer analysis without on-the-fly
   call-graph construction (``lib/Alias/InclusionBased/SparrowAA``).
 * **FPA** – Function Pointer Analysis toolbox (FLTA, MLTA, MLTADF, KELP) under
-  ``lib/Alias/Specialized/FPA`` for resolving indirect calls.
+  ``lib/Analysis/CallGraph/FPA`` for resolving indirect calls.
 * **DynAA** – Dynamic checker living in ``tools/alias/dynaa`` that validates static
   alias analyses against runtime traces.
 * **AserPTA** – Constraint-based pointer analysis with multiple context

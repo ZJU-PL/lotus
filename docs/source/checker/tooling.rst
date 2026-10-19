@@ -90,8 +90,8 @@ options. Parameters whose semantics belong to an engine use the qualified form
 ``--kint.summary-mode``, while Pulse path solving is configured by
 ``--pulse.smt``. No unqualified compatibility aliases are provided.
 
-Use ``lotus-check --list-parameters`` to print all global and engine groups,
-or ``lotus-check --engine=<name> --help`` for one engine.
+Use ``lotus-check --list-checkers`` to print available checker ids, or
+``lotus-check --engine=<name> --help`` for one engine.
 
 See Also
 --------

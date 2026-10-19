@@ -28,8 +28,9 @@ Lotus has been tested on **x86/ARM Linux** and **ARM macOS**. The following depe
      - C++17 compatible
      - GCC or Clang with ``-fexceptions -frtti``.
    * - Boost
-     - 1.80+ (optional)
+     - 1.65+ (optional)
      - Only required when ``LOTUS_ENABLE_SEAHORN``, ``LOTUS_ENABLE_CLAM``, or ``LOTUS_ENABLE_CCLYZER`` are enabled.
+       CLAM additionally requires Boost.JSON 1.80+.
 
 Build Instructions
 ------------------
@@ -75,7 +76,7 @@ The standard workflow for running a Lotus checker on C/C++ code is:
    ./build/bin/lotus-alias-sparrow-aa example.bc
 
    # 3. Run a bug-finding checker (e.g., Use-After-Free & Leak checking)
-   ./build/bin/lotus-saber example.bc
+   ./build/bin/lotus-check --engine=saber example.bc
 
 Command-Line Tools Reference
 ----------------------------
@@ -89,9 +90,9 @@ Lotus exposes its internal libraries through standalone executable drivers in ``
    * - Tool Binary
      - Source Directory
      - Typical Invocation
-   * - ``lotus-check --engine=gvfa``
+   * - ``lotus-check --engine=gsaf``
      - ``tools/checker/``
-     - ``lotus-check --engine=gvfa target.bc``
+     - ``lotus-check --engine=gsaf target.bc``
    * - ``lotus-check --engine=pulse``
      - ``tools/checker/``
      - ``lotus-check --engine=pulse target.bc``

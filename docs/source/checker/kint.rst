@@ -62,7 +62,7 @@ Components
   * Array out-of-bounds access
   * Dead branches (unreachable code)
 
-**MKintSummary** (``MKintSummary.cpp``, ``MKintSummary.h``):
+**Function summaries** (``MKintSummary.cpp``; ``FunctionSummary`` in ``SummaryEncoding.h``):
 
 * Builds and applies inter-procedural function summaries as Z3 contracts
 * Captures integer/pointer parameters, return values, memory side effects, and path constraints

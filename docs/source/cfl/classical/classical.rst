@@ -408,7 +408,7 @@ When a target-projected backend consumes a transformed grammar, its ``Follow``
 set supplies the exact propagating nonterminals. Default solver sessions remain
 all-symbol and therefore preserve the complete ``Relation`` contract used by
 the LLVM clients. Dataset-specific batch policy is kept outside the binary in
-``scripts/cfl/run_cfl_dataset.py``.
+``scripts/cfl/run_cfl_classical.py``.
 
 Use ``--graph-mode plain|matrix|pag-matrix`` and
 ``--direction plain|reverse|bidirectional`` to state input semantics.

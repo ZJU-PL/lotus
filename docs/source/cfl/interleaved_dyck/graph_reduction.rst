@@ -44,7 +44,7 @@ Implementation boundary
 -----------------------
 
 Artifact-era ``CFLGraph``, ``CFLReach``, ``SummaryGraph``, and merge-list types
-live under ``lib/CFL/InterleavedDyck/GraphReduction/Legacy`` as private implementation
+live under ``lib/CFL/InterleavedDyck/GraphReduction`` as private implementation
 details. They model intermediate color summaries and merge bookkeeping and
 therefore should not be unified with the immutable input representation in
 ``interleaved_dyck::Graph``.

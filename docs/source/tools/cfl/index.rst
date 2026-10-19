@@ -79,7 +79,7 @@ The general solver accepts the vendored datasets under
 ``benchmarks/real-world/CFL/Classical``, POCR grammar/graph files, and exposes
 unidirectional summarization, SCC elimination, graph folding, and inter-Dyck
 pruning. Foldability utilities are available through their C++ APIs.
-Run ``python3 scripts/cfl/run_cfl_dataset.py --all-solvers --case lbm`` for a
+Run ``python3 scripts/cfl/run_cfl_classical.py --all-solvers --case lbm`` for a
 small cross-backend check over the vendored alias, value-flow, and taint
 instances. This includes ``cert``; STG is separate because it requires an
 explicit decomposition specification.

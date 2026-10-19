@@ -42,15 +42,17 @@ endfunction()
 
 check_selection(all all ON
   "alias;checker;dataflow;optimization;solver;verifier;ir;cfl"
-  "alias;alias-wrapper;analysis;checker;cfl;concurrency;dataflow;fuzzing;ir;solvers;symbolicexecution;utils;verification")
+  "alias;analysis;checker;cfl;concurrency;dataflow;fuzzing;ir;security;solvers;symbolicexecution;transform;utils;verification")
 check_selection(all all OFF
   "alias;checker;dataflow;optimization;solver;verifier;ir"
-  "alias;alias-wrapper;analysis;checker;concurrency;dataflow;fuzzing;ir;solvers;symbolicexecution;utils;verification")
+  "alias;analysis;checker;concurrency;dataflow;fuzzing;ir;security;solvers;symbolicexecution;transform;utils;verification")
 check_selection("" "" ON "" "")
-check_selection("Alias;IR;Alias" "Concurrency;alias-wrapper;Concurrency" OFF
-  "alias;ir" "concurrency;alias-wrapper")
+check_selection("Alias;IR;Alias" "Concurrency;alias/aliaswrapper;Concurrency" OFF
+  "alias;ir" "concurrency;alias/aliaswrapper")
 check_selection("" "Concurrency/CUDA;dataflow/vasco;analysis/cfg;alias/ptsset" OFF
   "" "concurrency/cuda;dataflow/vasco;analysis/cfg;alias/ptsset")
+check_selection("" "alias/aliaswrapper" OFF
+  "" "alias/aliaswrapper")
 
 set(LOTUS_TEST_SUBSYSTEMS "concurrency/cuda;dataflow/vasco")
 set(LOTUS_TOOL_FAMILIES "")
@@ -62,6 +64,18 @@ lotus_test_group_enabled(concurrency cuda selected)
 lotus_test_group_enabled(concurrency mpi omitted)
 if(NOT selected OR omitted)
   message(FATAL_ERROR "Group selection did not restrict sibling groups")
+endif()
+
+set(LOTUS_TEST_SUBSYSTEMS "alias/aliaswrapper")
+set(LOTUS_TOOL_FAMILIES "")
+include("${selection_module}")
+if(NOT "${LOTUS_SELECTED_TEST_ROOTS}" STREQUAL "alias")
+  message(FATAL_ERROR "alias/aliaswrapper did not select the alias subsystem")
+endif()
+lotus_test_group_enabled(alias aliaswrapper wrapper_selected)
+lotus_test_group_enabled(alias dda dda_omitted)
+if(NOT wrapper_selected OR dda_omitted)
+  message(FATAL_ERROR "alias/aliaswrapper did not restrict sibling groups")
 endif()
 
 foreach(failure unknown-tool unknown-test unknown-group mixed-all disabled-cfl-tool disabled-cfl-test)

@@ -1,12 +1,12 @@
 Data Flow Analysis Frameworks
 =============================
 
-Lotus implements four distinct dataflow analysis frameworks, each optimized for different problem classes and precision/performance trade-offs. This page provides an architectural overview of the frameworks, explains when to use each, and documents their core abstractions.
+Lotus implements several distinct dataflow analysis frameworks, each optimized for different problem classes and precision/performance trade-offs. This page provides an architectural overview of the frameworks, explains when to use each, and documents their core abstractions.
 
 Framework Overview
 ------------------
 
-Lotus provides four compiled libraries under ``lib/Dataflow/``, each implementing a distinct algorithmic approach:
+Lotus provides several compiled libraries under ``lib/Dataflow/``, each implementing a distinct algorithmic approach:
 
 .. list-table:: Dataflow Engines
    :widths: 15 15 25 25 20
@@ -27,16 +27,26 @@ Lotus provides four compiled libraries under ``lib/Dataflow/``, each implementin
      - ``IntraMonoSolver``, ``InterMonoSolver``
      - ``IntraSolver.h``, ``InterSolver.h``
      - Intra/Interprocedural
-   * - ``WPDS``
+   * - ``WPDSDataFlow``
      - ``wpds::``
      - ``InterProceduralDataFlowEngine``
      - ``InterProceduralDataFlow.h``
      - Interprocedural
    * - ``APADataFlow``
      - ``elimination::``
-     - ``IntraEliminationSolver``
-     - ``IntraEliminationSolver.h``
-     - Intraprocedural
+     - ``IntraEliminationSolver``, ``InterEliminationSolver``
+     - ``IntraSolver.h``
+     - Intra/Interprocedural
+   * - ``NPADataFlow``
+     - ``npa::``
+     - ``BitVectorSolver``, ``ForwardInterEngine``, ``BackwardInterEngine``
+     - ``NPALLVMDriver.h``, ``IntraEngine.h``
+     - Intra/Interprocedural
+   * - ``VASCODataFlow``
+     - ``vasco::``
+     - ``ForwardInterProceduralAnalysis``, ``BackwardInterProceduralAnalysis``
+     - ``ForwardInterProceduralAnalysis.h``
+     - Interprocedural
 
 When to Use Each Framework
 --------------------------

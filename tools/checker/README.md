@@ -34,9 +34,7 @@ build/bin/lotus-check --engine=ae test.bc
 
 Use `build/bin/lotus-check --help` or
 `build/bin/lotus-check --engine=<name> --help` to inspect the full option set.
-`build/bin/lotus-check --list-parameters` prints the global parameter set and
-all engine-qualified parameter groups, similar to Z3's parameter-description
-view.
+`build/bin/lotus-check --list-checkers` prints every checker id and native engine.
 
 ## Engines
 

@@ -83,7 +83,7 @@ promoting must-alias loop memory to SSA values when safe.
 - **New PM entries**: ``llvm::LICMPass`` and ``llvm::LNICMPass``
 - **Relevant options**: ``-disable-licm-promotion``,
   ``-licm-control-flow-hoisting``, ``-licm-mssa-optimization-cap``,
-  ``-licm-mssa-no-acc-for-promotion-cap``
+  ``-licm-mssa-max-acc-promotion``
 
 LICM is especially useful when evaluating alias-analysis precision because its
 ability to hoist and promote memory operations depends directly on alias and

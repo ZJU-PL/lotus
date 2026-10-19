@@ -1,5 +1,5 @@
 IKOS Analyzer and API Specification Tools
-========================================
+=========================================
 
 Lotus bundles the full IKOS analyzer and API-spec pipeline from the IKOS
 API-spec fork. The pipeline discovers

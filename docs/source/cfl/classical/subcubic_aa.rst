@@ -1,5 +1,5 @@
 Subcubic PEG Alias Analysis
-==========================
+===========================
 
 Paper and scope
 ---------------

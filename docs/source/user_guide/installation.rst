@@ -11,7 +11,7 @@ Prerequisites
 * CMake 3.18+
 * C++17 compatible compiler
 * Boost 1.65+ (optional — only needed when CLAM, SeaHorn, Cclyzer++, or FPsolve are enabled;
-  auto-downloaded if not found)
+  CLAM additionally requires Boost.JSON ≥ 1.80; auto-downloaded if not found)
 
 Building Lotus
 --------------
@@ -126,13 +126,14 @@ the selected tools and tests:
 Its default is ``all``; an empty value builds no tools. Existing feature switches
 still control optional tools within a selected family.
 
-``LOTUS_TEST_SUBSYSTEMS`` selects ``alias``, ``alias-wrapper``, ``analysis``,
-``checker``, ``cfl``, ``concurrency``, ``dataflow``, ``fuzzing``, ``ir``,
-``solvers``, ``symbolicexecution``, ``utils``, and ``verification``. Its default
-is ``all``. Quote multiple selections, for example
-``-DLOTUS_TEST_SUBSYSTEMS="concurrency;alias-wrapper"``. The ``alias-wrapper``
-suite checks wrapper availability without compiling all alias-analysis tests.
-CLI regression tests are registered only when their tools are configured.
+``LOTUS_TEST_SUBSYSTEMS`` selects ``alias``, ``analysis``, ``checker``, ``cfl``,
+``concurrency``, ``dataflow``, ``fuzzing``, ``ir``, ``security``, ``solvers``,
+``symbolicexecution``, ``transform``, ``utils``, and ``verification``. Its
+default is ``all``. Quote multiple selections, for example
+``-DLOTUS_TEST_SUBSYSTEMS="concurrency;alias/aliaswrapper"``. The
+``alias/aliaswrapper`` group checks wrapper availability without compiling all
+alias-analysis tests. CLI regression tests are registered only when their tools
+are configured.
 
 For finer selection, use ``subsystem/group`` in the same option. A bare subsystem
 includes all of its groups; each selected subsystem still produces one test
@@ -152,15 +153,18 @@ Supported groups:
 
 * ``alias``: ``gpg``, ``dda``, ``aserpta``, ``bootstrapaa``, ``flowsensitive``,
   ``lotusaa``, ``sparrowaa``, ``tpa``, ``cclyzeraa``, ``dyckaa``, ``seadsa``,
-  ``allocaa``, ``typequalifier``, ``underapproxaa``, ``ptsset``.
+  ``allocaa``, ``typequalifier``, ``underapproxaa``, ``ptsset``, ``aliaswrapper``.
 * ``analysis``: ``cfg``, ``controldependence``, ``debuginfo``, ``general``,
   ``multiplicity``, ``nullpointer``, ``parametersummary``, ``profile``,
   ``purity``, ``sccp``, ``typehierarchy``, ``loop``.
-* ``checker``: ``ae``, ``concurrency``, ``framework``, ``kint``, ``pulse``,
-  ``saber``, ``reports``.
+* ``checker``: ``ae``, ``concurrency``, ``framework``, ``gsaf``, ``kint``,
+  ``pulse``, ``saber``, ``reports``.
 * ``concurrency``: ``mhp``, ``lockset``, ``valueflow``, ``thread``, ``clocks``,
   ``threadapi``, ``threadlocal``, ``openmp``, ``mpi``, ``cuda``, ``linuxkernel``.
-* ``dataflow``: ``ifdside``, ``mono``, ``wpds``, ``apa``, ``npa``, ``vasco``.
+* ``dataflow``: ``ifdside``, ``mono``, ``wpds``, ``apa``, ``demandapa``, ``npa``,
+  ``vasco``.
+* ``security``: ``constanttime``, ``spectre``.
+* ``transform``: ``nisse``.
 
 Source manifests and link dependencies are restricted to the selected groups.
 TypeHierarchy and Loop IR fixtures are configured and generated only when those

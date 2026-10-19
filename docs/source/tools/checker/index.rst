@@ -13,7 +13,7 @@ Lotus provides a single checker binary:
 * **Directory**: ``tools/checker/``
 * **Dispatch model**: one binary with explicit engine values such as ``generic``,
   ``kint``, ``ae``, ``taint``, ``concur``, ``pulse``, ``fitx``, ``saber``,
-  and ``symex``
+  ``gsaf``, and ``symex``
 
 The engine runners live in:
 
@@ -25,6 +25,7 @@ The engine runners live in:
 * ``tools/checker/lotus-check-pulse.cpp``
 * ``tools/checker/lotus-check-fitx.cpp``
 * ``tools/checker/lotus-check-saber.cpp``
+* ``tools/checker/lotus-check-gsaf.cpp``
 * ``tools/checker/lotus-check-symex.cpp``
 
 Basic Usage
@@ -34,7 +35,6 @@ Basic Usage
 
    ./build/bin/lotus-check --help
    ./build/bin/lotus-check --list-checkers
-   ./build/bin/lotus-check --list-parameters
    ./build/bin/lotus-check --engine=generic input.bc --checks=forbidden.system
 
 ``--list-checkers`` lists both generic checker ids and native engines, with a

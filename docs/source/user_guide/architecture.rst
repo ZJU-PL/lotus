@@ -38,7 +38,7 @@ The repository is organized into a small number of top-level directories. Every 
 Library Subdirectories (``lib/``)
 ---------------------------------
 
-The ``lib/`` directory is divided into 14 CMake subdirectories, each of which compiles to one or more static libraries that are linked into the tool binaries.
+The ``lib/`` directory is divided into 16 CMake subdirectories, each of which compiles to one or more static libraries that are linked into the tool binaries.
 
 .. list-table:: Library Components
    :widths: 20 50 30
@@ -48,7 +48,7 @@ The ``lib/`` directory is divided into 14 CMake subdirectories, each of which co
      - Key Libraries / Modules
      - Purpose
    * - ``lib/Alias/``
-     - ``DyckAA``, ``AserPTA``, ``SparrowAA``, ``SeaDsaAnalysis``, ``LotusAA``, ``FPA``, ``AllocAA``, ``UnderApproxAA``, ``TPA``
+     - ``DyckAA``, ``AserPTA``, ``SparrowAA``, ``SeaDsaAnalysis``, ``LotusAA``, ``AllocAA``, ``UnderApproxAA``, ``TPA``, ``DemandDriven``, ``InclusionBased``
      - Pointer and alias analysis engines
    * - ``lib/IR/``
      - ``ICFG``, ``PDG``, ``SVFG``, ``MemorySSA``, ``DyckVFG``, ``GSA``
@@ -57,10 +57,10 @@ The ``lib/`` directory is divided into 14 CMake subdirectories, each of which co
      - ``IFDSSolver``, ``IDESolver``, ``IntraMonoSolver``, ``InterMonoSolver``, ``WPDS engine``, ``NPA``
      - Interprocedural dataflow solvers
    * - ``lib/Analysis/``
-     - CFG utils, concurrency (MHP, lock sets), range, null pointer, DDA
+     - Call graph construction (CHA, RTA, VTA, FPA, OTF), CFG, control dependence, memory, null pointer, purity, SCCP, type hierarchy, feature extraction (``CanaryML``)
      - Foundational analysis utilities
    * - ``lib/Checker/``
-     - ``GVFAChecker``, ``PulseChecker``, ``AEChecker``, ``SaberChecker``, ``ConcurrencyChecker``, ``Kint``
+     - ``Framework``, ``AE``, ``KINT``, ``Pulse``, ``Saber``, ``Concurrency``, ``GSAF``, ``FiTx``, ``TypeQualifier``, ``Tooling``
      - Bug detection engines and linters
    * - ``lib/Solvers/``
      - Z3 SMT wrapper, CUDD BDD wrapper, WPDS weights
@@ -77,18 +77,24 @@ The ``lib/`` directory is divided into 14 CMake subdirectories, each of which co
    * - ``lib/Optimization/``
      - ``IPDeadStoreElimination``, SW prefetching
      - Optimization implementations
-   * - ``lib/ML/``
-     - ``MemoryMLFeaturesPass`` (CanaryML)
-     - Machine learning models and features
+   * - ``lib/Concurrency/``
+     - ``MHP``, ``LockSet``, ``ValueFlow``, ``Thread``, ``OpenMP``, ``MPI``, ``CUDA``, ``LinuxKernel``
+     - Concurrency and parallelism analyses
+   * - ``lib/Security/``
+     - ``ConstantTime``, ``Spectre``, ``LIF``
+     - Security-oriented static analyses
+   * - ``lib/Fuzzing/``
+     - ``CanaryFuzzing``
+     - Fuzzing support on top of ``CheckerFramework``
+   * - ``lib/SymbolicExecution/``
+     - ``CanarySymbolicExecution``
+     - Symbolic execution engine
    * - ``lib/Utils/``
      - Shared helper utilities
      - Graph traits, logging, utilities
    * - ``lib/Annotation/``
      - Source-level annotation support
      - Parsers for API specs, taint rules
-   * - ``lib/Apps/``
-     - High-level application glue code
-     - High-level integration tests
 
 Tools Directory (``tools/``)
 ----------------------------
@@ -102,21 +108,21 @@ Each subdirectory under ``tools/`` contains the ``main()`` entry points that lin
    * - Subdirectory
      - Executables produced
    * - ``tools/alias/``
-     - ``lotus-alias-sparrow-aa``, ``lotus-alias-aser-aa``, ``lotus-alias-dyck-aa``, ``lotus-alias-lotus-aa``, ``lotus-alias-tpa``, ``lotus-alias-fpa``, ``lotus-alias-sea-dsa-dg``, ``lotus-alias-seadsa-tool``, ``lotus-alias-call-graph``, ``lotus-alias-cclyzer-aa``
+     - ``lotus-alias-sparrow-aa``, ``lotus-alias-aser-aa``, ``lotus-alias-dyck-aa``, ``lotus-alias-lotus-aa``, ``lotus-alias-tpa``, ``lotus-alias-gpg``, ``lotus-alias-bootstrap``, ``lotus-alias-fspta``, ``lotus-alias-sea-dsa-dg``, ``lotus-alias-seadsa-tool``, ``lotus-alias-call-graph``, ``lotus-alias-cclyzer-aa``
    * - ``tools/checker/``
-     - ``lotus-check`` (unified binary with ``--engine=kint|ae|taint|pulse|concur|saber|symex``)
+     - ``lotus-check`` (unified binary with ``--engine=generic|kint|ae|taint|pulse|concur|saber|fitx|gsaf|symex``)
    * - ``tools/dataflow/``
      - ``lotus-dfa``, ``lotus-dfa-apa``, ``lotus-dfa-mono``, ``lotus-dfa-ifds``, ``lotus-dfa-npa``, ``lotus-dfa-wpds``
    * - ``tools/optimization/``
      - ``lotus-opt-ipo``, ``lotus-opt-prefetch``, ``lotus-opt-purity``
    * - ``tools/verifier/``
-     - ``lotus-verify-symabs-ai``, ``lotus-verify-sifa``, ``clam``, ``seahorn``, ``smack``
+     - ``lotus-verify-symabs-ai``, ``lotus-verify-sifa``, ``lotus-verify-mosaic``, ``clam``, ``seahorn``, ``smack``
    * - ``tools/ir/``
-     - ``lotus-ir-pdg-query``, ``lotus-ir-usetracessa``
+     - ``lotus-ir-pdg-query``, ``lotus-ir-control-dependence``, ``lotus-ir-usetracessa``, ``lotus-ir-ufg``
    * - ``tools/solver/``
-     - ``slot`` (SMT-LIB ↔ LLVM IR)
+     - ``lotus-solver-datalog``, optional ``lotus-solver-owl`` and ``lotus-solver-smt-stabilizer``
    * - ``tools/cfl/``
-     - CFL-reachability drivers
+     - ``lotus-cfl-solve``, ``lotus-cfl-alias``, ``lotus-cfl-vf``, ``lotus-cfl-subcubic-aa``, ``lotus-cfl-interleaved-dyck``, ``lotus-cfl-dynamic-dyck``, optional ``csr``
 
 Intermediate Representations (``lib/IR/``)
 ------------------------------------------
@@ -134,7 +140,7 @@ Lotus constructs several graph-based IRs on top of LLVM IR. These IRs are typica
      - ``ICFG``, ``ICFGBuilder``, ``ICFGNode``, ``ICFGEdge``
      - Interprocedural control flow; backbone for IFDS/IDE/WPDS
    * - PDG
-     - ``PDGBuilder``, PDG node/edge types
+     - ``ProgramDependencyGraph``, ``ProgramGraph``, ``Node``, ``Edge``
      - Data + control dependence graph
    * - SVFG
      - ``SVFGBuilder``, ``SVFGOPT``, SVFG node types
@@ -149,7 +155,7 @@ Lotus constructs several graph-based IRs on top of LLVM IR. These IRs are typica
 Optional Modules and CMake Flags
 --------------------------------
 
-Three optional external frameworks can be compiled into Lotus, each gated by a CMake option:
+The main optional integrations and build surfaces are controlled by these CMake options:
 
 .. list-table:: CMake Configuration Options
    :widths: 25 15 35 25
@@ -160,11 +166,11 @@ Three optional external frameworks can be compiled into Lotus, each gated by a C
      - Enables
      - Requires
    * - ``LOTUS_ENABLE_CLAM``
-     - ``ON``
+     - ``OFF``
      - CLAM abstract interpreter
      - Boost, CRAB
    * - ``LOTUS_ENABLE_SEAHORN``
-     - ``ON``
+     - ``OFF``
      - SeaHorn Horn-clause engine
      - Boost
    * - ``LOTUS_ENABLE_SVF``
@@ -176,7 +182,7 @@ Three optional external frameworks can be compiled into Lotus, each gated by a C
      - CclyzerAA Datalog alias analysis
      - Boost
    * - ``LOTUS_BUILD_TESTS``
-     - ``ON``
+     - ``OFF``
      - Unit tests under ``tests/``
      - GTest
    * - ``LOTUS_BUILD_EXAMPLES``
@@ -184,7 +190,7 @@ Three optional external frameworks can be compiled into Lotus, each gated by a C
      - Example programs under ``examples/``
      - None
    * - ``LOTUS_ENABLE_CFL``
-     - ``OFF``
+     - ``ON``
      - CFL reachability tools
      - None
 

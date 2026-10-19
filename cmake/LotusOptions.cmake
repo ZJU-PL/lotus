@@ -120,7 +120,8 @@ set(_lotus_test_roots
   security solvers symbolicexecution transform utils verification)
 set(_lotus_test_choices ${_lotus_test_roots})
 foreach(group gpg dda aserpta bootstrapaa flowsensitive lotusaa sparrowaa tpa
-              cclyzeraa dyckaa seadsa allocaa typequalifier underapproxaa ptsset)
+              cclyzeraa dyckaa seadsa allocaa typequalifier underapproxaa ptsset
+              aliaswrapper)
   list(APPEND _lotus_test_choices "alias/${group}")
 endforeach()
 foreach(group cfg controldependence debuginfo general multiplicity nullpointer

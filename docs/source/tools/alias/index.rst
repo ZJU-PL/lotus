@@ -320,36 +320,40 @@ FPA (Function Pointer Analysis)
 -------------------------------
 
 Function pointer analysis toolbox (FLTA, MLTA, MLTADF, KELP) for resolving
-indirect calls.
+indirect calls. It is exposed through the unified call-graph driver
+``lotus-alias-call-graph`` (the former standalone ``lotus-alias-fpa`` binary
+was merged into it).
 
-**Binary**: ``lotus-alias-fpa``  
-**Location**: ``tools/alias/lotus-alias-fpa.cpp``
+**Binary**: ``lotus-alias-call-graph``  
+**Location**: ``tools/alias/lotus-alias-call-graph.cpp``
 
 **Usage**:
 
 .. code-block:: bash
 
-   ./build/bin/lotus-alias-fpa [options] input.bc
+   ./build/bin/lotus-alias-call-graph -cg-type=<type> [options] input.bc
 
 **Key Options**:
 
-- ``-analysis-type=<N>``:
+- ``-cg-type=<type>``:
 
-  - ``1`` – FLTA
-  - ``2`` – MLTA
-  - ``3`` – MLTADF
-  - ``4`` – KELP (USENIX Security'24)
+  - ``fpa-flta`` – FLTA
+  - ``fpa-mlta`` – MLTA
+  - ``fpa-mltadf`` – MLTADF
+  - ``fpa-kelp`` – KELP (USENIX Security'24)
 
-- ``-max-type-layer=<N>`` – Maximum type layer for MLTA (default: 10)
-- ``-debug`` – Enable debug output
-- ``-output-file=<path>`` – Output file (\"cout\" for stdout)
+- ``-fpa-max-type-layer=<N>`` – Maximum type layer for MLTA (default: 10)
+- ``-fpa-debug`` – Enable debug output
+- ``-fpa-dump-targets=<path>`` – Dump resolved targets (use "cout" for stdout)
 
 **Example**:
 
 .. code-block:: bash
 
    # KELP-based function pointer analysis
-   ./build/bin/lotus-alias-fpa -analysis-type=4 -debug input.bc
+   ./build/bin/lotus-alias-call-graph -cg-type=fpa-kelp -fpa-debug input.bc
+
+See :doc:`../../analysis/fpa` for the algorithm-level description.
 
 Sea-DSA Tools
 -------------

@@ -144,7 +144,7 @@ Analysis Crashes
 
    cmake ../ -DCMAKE_BUILD_TYPE=Debug
    make
-   gdb --args ./bin/tool input.bc
+   gdb --args ./build/bin/tool input.bc
    (gdb) run
    (gdb) backtrace
 
@@ -172,16 +172,16 @@ Analysis Takes Too Long
 .. code-block:: bash
 
    # For alias analysis, use context-insensitive
-   ./bin/lotus-alias-aser-aa -analysis-mode=ci input.bc
+   ./build/bin/lotus-alias-aser-aa -analysis-mode=ci input.bc
    
    # For CLAM, use interval domain
-   ./bin/clam --crab-dom=int input.bc
+   ./build/bin/clam --crab-dom=int input.bc
 
 2. Set timeout:
 
 .. code-block:: bash
 
-   timeout 300 ./bin/tool input.bc  # 5 minutes
+   timeout 300 ./build/bin/tool input.bc  # 5 minutes
 
 3. For Kint, set function timeout:
 
@@ -194,10 +194,10 @@ Analysis Takes Too Long
 .. code-block:: bash
 
    # Disable field sensitivity
-   ./bin/lotus-alias-aser-aa -field-sensitive=false input.bc
+   ./build/bin/lotus-alias-aser-aa -field-sensitive=false input.bc
    
    # Limit context depth
-   ./bin/lotus-alias-aser-aa -analysis-mode=1-cfa input.bc
+   ./build/bin/lotus-alias-aser-aa -analysis-mode=1-cfa input.bc
 
 Out of Memory
 ~~~~~~~~~~~~~
@@ -217,7 +217,7 @@ Out of Memory
 
 .. code-block:: bash
 
-   ./bin/lotus-alias-dyck-aa input.bc
+   ./build/bin/lotus-alias-dyck-aa input.bc
 
 3. Analyze incrementally:
 
@@ -225,14 +225,14 @@ Out of Memory
 
    # Split module into parts
    llvm-extract -func=main input.bc -o main.bc
-   ./bin/tool main.bc
+   ./build/bin/tool main.bc
 
 4. Limit analysis scope:
 
 .. code-block:: bash
 
    # Intraprocedural only
-   ./bin/clam --crab-inter=false input.bc
+   ./build/bin/clam --crab-inter=false input.bc
 
 False Positives
 ~~~~~~~~~~~~~~~
@@ -246,19 +246,19 @@ False Positives
 .. code-block:: bash
 
    # 1-CFA instead of CI
-   ./bin/lotus-alias-aser-aa -analysis-mode=1-cfa input.bc
+   ./build/bin/lotus-alias-aser-aa -analysis-mode=1-cfa input.bc
    
    # Zones domain instead of intervals
-   ./bin/clam --crab-dom=zones input.bc
+   ./build/bin/clam --crab-dom=zones input.bc
 
 2. Validate with dynamic analysis:
 
 .. code-block:: bash
 
-   ./bin/dynaa-instrument input.bc -o inst.bc
+   ./build/bin/dynaa-instrument input.bc -o inst.bc
    clang inst.bc libRuntime.a -o inst
    LOG_DIR=logs ./inst
-   ./bin/dynaa-check input.bc logs/pts.log basic-aa
+   ./build/bin/dynaa-check input.bc logs/pts.log basic-aa
 
 3. Add annotations to code:
 
@@ -287,7 +287,7 @@ Missing Bugs (False Negatives)
 .. code-block:: bash
 
    # Interprocedural
-   ./bin/clam --crab-inter --crab-check=all input.bc
+   ./build/bin/clam --crab-inter --crab-check=all input.bc
    
    # Context-sensitive taint
    ./build/bin/lotus-check --engine=taint input.bc --verbose
@@ -316,17 +316,17 @@ CLAM Issues
 
 .. code-block:: bash
 
-   ./bin/clam-pp --crab-lower-unsigned-icmp \
+   ./build/bin/clam-pp --crab-lower-unsigned-icmp \
                   --crab-lower-select \
                   input.bc -o prep.bc
-   ./bin/clam prep.bc
+   ./build/bin/clam prep.bc
 
 2. Use suitable domain:
 
 .. code-block:: bash
 
    # Some domains don't support all operations
-   ./bin/clam --crab-dom=int input.bc  # Basic support
+   ./build/bin/clam --crab-dom=int input.bc  # Basic support
 
 **Problem**: CLAM reports "Could not allocate memory".
 
@@ -337,13 +337,13 @@ CLAM Issues
 .. code-block:: bash
 
    # Polyhedra is expensive
-   ./bin/clam --crab-dom=zones input.bc  # Use zones instead
+   ./build/bin/clam --crab-dom=zones input.bc  # Use zones instead
 
 2. Disable tracking:
 
 .. code-block:: bash
 
-   ./bin/clam --crab-track=num input.bc  # Track only numbers
+   ./build/bin/clam --crab-track=num input.bc  # Track only numbers
 
 DyckAA Issues
 ~~~~~~~~~~~~~
@@ -367,7 +367,7 @@ DyckAA Issues
 .. code-block:: bash
 
    # Ensure indirect calls are analyzed
-   ./bin/lotus-alias-dyck-aa -dot-dyck-callgraph input.bc
+   ./build/bin/lotus-alias-dyck-aa -dot-dyck-callgraph input.bc
 
 PDG Query Issues
 ~~~~~~~~~~~~~~~~
@@ -388,13 +388,13 @@ PDG Query Issues
 
 .. code-block:: bash
 
-   ./bin/lotus-ir-pdg-query -q "MATCH (n) RETURN n" input.bc  # Should show nodes
+   ./build/bin/lotus-ir-pdg-query -q "MATCH (n) RETURN n" input.bc  # Should show nodes
 
 3. Use verbose mode:
 
 .. code-block:: bash
 
-   ./bin/lotus-ir-pdg-query -v -q "MATCH (n) RETURN n" input.bc
+   ./build/bin/lotus-ir-pdg-query -v -q "MATCH (n) RETURN n" input.bc
 
 **Problem**: Query parser error.
 
@@ -414,7 +414,7 @@ PDG Query Issues
 
 .. code-block:: bash
 
-   ./bin/lotus-ir-pdg-query -i input.bc
+   ./build/bin/lotus-ir-pdg-query -i input.bc
    > MATCH (n:FUNC_ENTRY) WHERE n.name = 'main' RETURN n
 
 Taint Analysis Issues
@@ -455,7 +455,7 @@ Speeding Up Analysis
 
    # Analyze specific function
    llvm-extract -func=main input.bc -o main.bc
-   ./bin/tool main.bc
+   ./build/bin/tool main.bc
 
 3. **Use preprocessing**:
 
@@ -463,7 +463,7 @@ Speeding Up Analysis
 
    # Simplify IR first
    opt -mem2reg -simplifycfg input.bc -o simplified.bc
-   ./bin/tool simplified.bc
+   ./build/bin/tool simplified.bc
 
 
 Reducing Memory Usage
@@ -474,13 +474,13 @@ Reducing Memory Usage
 .. code-block:: bash
 
    # Field-insensitive uses less memory
-   ./bin/lotus-alias-aser-aa -field-sensitive=false input.bc
+   ./build/bin/lotus-alias-aser-aa -field-sensitive=false input.bc
 
 2. **Limit analysis depth**:
 
 .. code-block:: bash
 
-   ./bin/lotus-alias-aser-aa -analysis-mode=1-cfa input.bc  # Not 2-cfa
+   ./build/bin/lotus-alias-aser-aa -analysis-mode=1-cfa input.bc  # Not 2-cfa
 
 3. **Process in batches**:
 
@@ -488,7 +488,7 @@ Reducing Memory Usage
 
    # Analyze files separately
    for f in *.bc; do
-       ./bin/tool "$f"
+       ./build/bin/tool "$f"
    done
 
 Frequently Asked Questions
@@ -510,7 +510,7 @@ A: Yes! Compile to LLVM IR:
 .. code-block:: bash
 
    clang++ -emit-llvm -c code.cpp -o code.bc
-   ./bin/tool code.bc
+   ./build/bin/tool code.bc
 
 **Q: Does Lotus support multi-threaded programs?**
 
@@ -527,13 +527,13 @@ A: Generate DOT files:
 .. code-block:: bash
 
    # Call graph
-   ./bin/lotus-alias-dyck-aa -dot-dyck-callgraph input.bc
+   ./build/bin/lotus-alias-dyck-aa -dot-dyck-callgraph input.bc
    
    # PDG
-   ./bin/lotus-ir-pdg-query --format=dot input.bc
+   ./build/bin/lotus-ir-pdg-query --format=dot input.bc
    
    # Sea-DSA memory graph
-   ./bin/lotus-alias-seadsa-tool --sea-dsa-dot --outdir=output/ input.bc
+   ./build/bin/lotus-alias-seadsa-tool --sea-dsa-dot --outdir=output/ input.bc
    
    # Convert to PDF
    dot -Tpdf output.dot -o output.pdf
@@ -617,10 +617,10 @@ A: Analyzes across function boundaries:
 .. code-block:: bash
 
    # Intraprocedural: each function separately
-   ./bin/clam input.bc
+   ./build/bin/clam input.bc
    
    # Interprocedural: considers call context
-   ./bin/clam --crab-inter input.bc
+   ./build/bin/clam --crab-inter input.bc
 
 Interprocedural is more precise but slower.
 
@@ -638,7 +638,7 @@ A: Yes:
 
 .. code-block:: bash
 
-   ./bin/clam --crab-check=assert input.bc
+   ./build/bin/clam --crab-check=assert input.bc
 
 Bug Detection Questions
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -665,7 +665,7 @@ A:
 
 .. code-block:: bash
 
-   ./bin/clam-pp --crab-lower-unsigned-icmp input.bc -o prep.bc
+   ./build/bin/clam-pp --crab-lower-unsigned-icmp input.bc -o prep.bc
 
 2. Use more precise analysis
 3. Add annotations/assertions
@@ -678,7 +678,7 @@ A: Yes:
 .. code-block:: bash
 
    # CLAM JSON output
-   ./bin/clam -ojson=results.json input.bc
+   ./build/bin/clam -ojson=results.json input.bc
    
    # Kint with SARIF (via BugReportMgr)
    ./build/bin/lotus-check --engine=kint input.ll --checks=all --report-sarif=results.sarif
@@ -700,7 +700,7 @@ A:
    llvm-link file1.bc file2.bc -o program.bc
    
    # Analyze
-   ./bin/tool program.bc
+   ./build/bin/tool program.bc
 
 **Q: Should I use .bc or .ll files?**
 
@@ -782,7 +782,7 @@ Fix the IR or recompile from source.
 
    # Minimal reproducible example
    clang -emit-llvm -c minimal.c -o minimal.bc
-   ./bin/tool minimal.bc
+   ./build/bin/tool minimal.bc
 
 Getting Help
 ------------
@@ -840,7 +840,7 @@ Example bug report:
    
    **To Reproduce**:
    1. Compile: clang -emit-llvm -c test.c -o test.bc
-   2. Run: ./bin/lotus-alias-dyck-aa test.bc
+   2. Run: ./build/bin/lotus-alias-dyck-aa test.bc
    
    **Error**:
    Segmentation fault (core dumped)

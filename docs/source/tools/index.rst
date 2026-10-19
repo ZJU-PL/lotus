@@ -3,7 +3,7 @@ Command-Line Tools Reference
 
 This document provides a comprehensive reference for all command-line tools distributed with the Lotus framework. It covers tool invocation syntax, command-line options, input/output formats, and organization.
 
-Lotus tools are organized into directories under ``tools/``, with corresponding library implementations in ``lib/``. All tools operate on LLVM bitcode (``.bc``) or LLVM IR (``.ll``) files as input and are built via CMake subdirectories.
+Lotus tools are organized into directories under ``tools/``, with corresponding library implementations in ``lib/``. Most tools operate on LLVM bitcode (``.bc``) or LLVM IR (``.ll``) files, while the CFL ``csr`` driver works on graph files and ``lotus-solver-datalog`` consumes JSON/Datalog/Z3 input. All tools are built via CMake subdirectories.
 
 For a feature-oriented walk-through, see :doc:`../user_guide/tutorials` and :doc:`../user_guide/bug_detection`.
 
@@ -19,21 +19,21 @@ The table below summarizes the major tool subdirectories and the binaries they p
    * - Subdirectory
      - Executables produced
    * - ``tools/alias/``
-     - ``lotus-alias-sparrow-aa``, ``lotus-alias-aser-aa``, ``lotus-alias-dyck-aa``, ``lotus-alias-lotus-aa``, ``lotus-alias-tpa``, ``lotus-alias-fpa``, ``lotus-alias-sea-dsa-dg``, ``lotus-alias-seadsa-tool``, ``lotus-alias-call-graph``, ``lotus-alias-cclyzer-aa``
+     - ``lotus-alias-sparrow-aa``, ``lotus-alias-aser-aa``, ``lotus-alias-dyck-aa``, ``lotus-alias-lotus-aa``, ``lotus-alias-tpa``, ``lotus-alias-gpg``, ``lotus-alias-bootstrap``, ``lotus-alias-fspta``, ``lotus-alias-sea-dsa-dg``, ``lotus-alias-seadsa-tool``, ``lotus-alias-call-graph``, ``lotus-alias-cclyzer-aa``
    * - ``tools/checker/``
-     - ``lotus-check`` (unified binary with ``--engine=kint|taint|ae|saber|pulse|concur|fitx|symex``)
+     - ``lotus-check`` (unified binary with ``--engine=generic|kint|taint|ae|saber|pulse|concur|fitx|gsaf|symex``)
    * - ``tools/dataflow/``
      - ``lotus-dfa``, ``lotus-dfa-apa``, ``lotus-dfa-mono``, ``lotus-dfa-ifds``, ``lotus-dfa-npa``, ``lotus-dfa-wpds``
    * - ``tools/optimization/``
      - ``lotus-opt-ipo``, ``lotus-opt-prefetch``, ``lotus-opt-purity``
    * - ``tools/verifier/``
-     - ``lotus-verify-symabs-ai``, ``lotus-verify-sifa``, ``clam``, ``seahorn``, ``smack``
+     - ``lotus-verify-symabs-ai``, ``lotus-verify-sifa``, ``lotus-verify-mosaic``, ``clam``, ``seahorn``, ``smack``
    * - ``tools/ir/``
-     - ``lotus-ir-pdg-query``, ``lotus-ir-usetracessa``
+     - ``lotus-ir-pdg-query``, ``lotus-ir-control-dependence``, ``lotus-ir-usetracessa``, ``lotus-ir-ufg``
    * - ``tools/solver/``
-     - ``slot`` (SMT-LIB ↔ LLVM IR)
+     - ``lotus-solver-datalog``; optional ``lotus-solver-owl`` (``LOTUS_ENABLE_OWL``) and ``lotus-solver-smt-stabilizer`` (``LOTUS_ENABLE_SMT_STABILIZER``)
    * - ``tools/cfl/``
-     - CFL-reachability drivers
+     - ``lotus-cfl-solve``, ``lotus-cfl-alias``, ``lotus-cfl-vf``, ``lotus-cfl-subcubic-aa``, ``lotus-cfl-interleaved-dyck``, ``lotus-cfl-dynamic-dyck``, optional ``csr`` (``LOTUS_ENABLE_CSR``)
 
 Common Configuration Options
 ----------------------------
@@ -47,18 +47,21 @@ Many tools share common output formatting options, selected via configuration fi
    * - Tool
      - Mode
      - Common Arguments
-   * - ``lotus-aa``
-     - CSV/Stats
-     - ``-analysis-stats``
-   * - ``aser-aa``
+   * - ``lotus-alias-aser-aa``
      - Stats
-     - ``-pta-stats``
-   * - ``lotus-gvfa``
-     - JSON/Text
-     - ``-checker-report-format=json``
-   * - ``lotus-kint``
-     - Text
-     - ``-kint-checks=all``
+     - ``-analysis-mode=ci -dump-stats``
+   * - ``lotus-check --engine=kint``
+     - Text/JSON/SARIF
+     - ``--checks=all --report-json=report.json --report-sarif=report.sarif``
+   * - ``lotus-check --engine=gsaf``
+     - Text/JSON
+     - ``--checks=taint,use-after-free --report-json=report.json``
+   * - ``lotus-ir-pdg-query``
+     - Text/JSON/DOT
+     - ``--format=json``
+   * - ``lotus-opt-purity``
+     - Bitcode/JSON
+     - ``-o out.bc --apply-attrs --report-json=purity.json``
 
 Detailed Tool Subsections
 -------------------------

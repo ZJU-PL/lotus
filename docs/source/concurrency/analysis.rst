@@ -483,7 +483,7 @@ Usage
    }
 
 CUDA Concurrency Analysis
-~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Files**: ``CUDA/CUDAAnalysis.cpp``, ``CUDA/CUDAAnalysisLaunch.cpp``,
 ``CUDA/CUDASemantics.cpp``, ``CUDA/CUDAStreamAutomaton.cpp``,

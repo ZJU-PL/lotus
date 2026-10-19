@@ -98,7 +98,7 @@ Transformations that restructure and clean up control flow.
 - Improve the stability of analysis results and debug dumps.
 
 Vector and Floating-Point Transforms
------------------------------------
+------------------------------------
 
 Transformations for vector operations and software floating-point emulation.
 For general module optimization pipelines, see

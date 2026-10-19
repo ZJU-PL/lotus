@@ -1,5 +1,5 @@
 UseTraceSSA — Ordered Use-History Overlay
-=======================================
+=========================================
 
 Overview
 ========
@@ -64,7 +64,7 @@ Bug Detection
 
 The ``DefectDetector`` provides the C++ interface for standard checkers. It supplies rules for double-free, use-after-free, memory-leak, file-leak, taint, and unchecked-use.
 
-.. table:: Recorded resource events for Bug Detection
+.. list-table:: Recorded resource events for Bug Detection
    :widths: 25 35 40
    :header-rows: 1
 
