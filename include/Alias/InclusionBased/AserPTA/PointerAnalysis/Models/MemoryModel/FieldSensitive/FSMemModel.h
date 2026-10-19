@@ -13,8 +13,8 @@
 #include "Alias/InclusionBased/AserPTA/Util/ConstExprVisitor.h"
 #include "Alias/InclusionBased/AserPTA/Util/Log.h"
 
-#include <glob.h>
 #include <llvm/Support/Allocator.h>
+#include <glob.h>
 
 namespace aser {
 
@@ -95,7 +95,7 @@ template <typename ctx> class FSMemModel {
     switch (type->getTypeID()) {
     case llvm::Type::StructTyID:
     case llvm::Type::ArrayTyID: {
-      if (auto ST = llvm::dyn_cast<llvm::StructType>(type)) {
+      if (auto *ST = llvm::dyn_cast<llvm::StructType>(type)) {
         if (ST->isOpaque()) {
           // do not know the type layout for a opaque type,
           // simply treat it as field-insensitive object
@@ -136,7 +136,7 @@ private:
   inline ObjNode *allocNullObj(const llvm::Module *module) {
     assert(!nullObjNode && "recreating a null object!");
 
-    auto v = llvm::ConstantPointerNull::get(
+    auto *v = llvm::ConstantPointerNull::get(
         llvm::Type::getInt8PtrTy(module->getContext()));
     auto *block = this->allocMemBlock<FIMemBlock<ctx>>(CT::getGlobalCtx(), v,
                                                        AllocType::Null);
@@ -147,7 +147,7 @@ private:
   inline ObjNode *allocUniObj(const llvm::Module *module) {
     assert(!uniObjNode && "recreating a universal object!");
 
-    auto v =
+    auto *v =
         llvm::UndefValue::get(llvm::Type::getInt8PtrTy(module->getContext()));
     auto *block = this->allocMemBlock<FIMemBlock<ctx>>(CT::getGlobalCtx(), v,
                                                        AllocType::Universal);
@@ -159,7 +159,7 @@ private:
                                       const llvm::DataLayout &DL) {
     LOG_TRACE("allocating global. global={}", *g);
 
-    auto pointedType = g->getType()->getPointerElementType();
+    auto *pointedType = g->getType()->getPointerElementType();
     return this->allocValueWithType<PT>(CT::getGlobalCtx(), g,
                                         AllocType::Globals, pointedType, DL);
   }
@@ -180,10 +180,10 @@ private:
     LOG_TRACE("allocating Stack Object. inst={}", *I);
 
     const llvm::Value *arraySize = I->getArraySize();
-    auto elementType = I->getType()->getPointerElementType();
+    auto *elementType = I->getType()->getPointerElementType();
 
     llvm::Type *type;
-    if (auto constSize = llvm::dyn_cast<llvm::ConstantInt>(arraySize)) {
+    if (const auto *constSize = llvm::dyn_cast<llvm::ConstantInt>(arraySize)) {
       size_t elementNum = constSize->getSExtValue();
       if (elementNum == 1) {
         type = elementType;
@@ -228,11 +228,11 @@ private:
       size_t &globOffset) { // the offset of the field currently being accessed
 
     // flatten the array/structure type
-    auto structTy = llvm::cast<llvm::StructType>(T);
-    auto layout = DL.getStructLayout(structTy);
+    auto *structTy = llvm::cast<llvm::StructType>(T);
+    const auto *layout = DL.getStructLayout(structTy);
 
     for (int i = 0; i < structTy->getNumElements(); i++) {
-      auto elemTy = structTy->getElementType(i);
+      auto *elemTy = structTy->getElementType(i);
 
       if (llvm::isa<llvm::ArrayType>(elemTy)) {
         // strip all the array to get the inner most type
@@ -242,11 +242,11 @@ private:
       }
 
       size_t offset = globOffset + layout->getElementOffset(i);
-      if (auto structElem = llvm::dyn_cast<llvm::StructType>(elemTy)) {
+      if (auto *structElem = llvm::dyn_cast<llvm::StructType>(elemTy)) {
         // recursive into the type tree.
         // since the type tree is normally not so deep, probably okay
         initAnonAggregateObj<PT>(C, DL, elemTy, block, typeTree, tag, offset);
-      } else if (auto ptrElem = llvm::dyn_cast<llvm::PointerType>(elemTy)) {
+      } else if (auto *ptrElem = llvm::dyn_cast<llvm::PointerType>(elemTy)) {
         // skipping the element type if the type is not valid for array
         // e.g., function, void type
         ObjNode *child = allocAnonObjRec<PT>(
@@ -307,11 +307,11 @@ private:
       } while (llvm::isa<llvm::ArrayType>(elemTy));
       assert(!llvm::isa<llvm::ArrayType>(elemTy));
 
-      if (auto structElem = llvm::dyn_cast<llvm::StructType>(elemTy)) {
+      if (auto *structElem = llvm::dyn_cast<llvm::StructType>(elemTy)) {
         size_t offset = 0;
         // the element is a structure, try to initialize it recursively
         initAnonAggregateObj<PT>(C, DL, elemTy, block, typeTree, tag, offset);
-      } else if (auto ptrElem = llvm::dyn_cast<llvm::PointerType>(elemTy)) {
+      } else if (auto *ptrElem = llvm::dyn_cast<llvm::PointerType>(elemTy)) {
         // treat ptr as array to allow indexing, that is int * -> int []
         ObjNode *child = allocAnonObjRec<PT>(
             C, DL, getUnboundedArrayTy(elemTy->getPointerElementType()), tag,
@@ -389,9 +389,9 @@ private:
 
       auto *ptrNode = ptr->getObjNode();
       ObjNode *objNode = nullptr;
-      if (auto GEP = llvm::dyn_cast<llvm::GEPOperator>(C)) {
+      if (const auto *GEP = llvm::dyn_cast<llvm::GEPOperator>(C)) {
         auto off = llvm::APInt(DL.getIndexTypeSizeInBits(GEP->getType()), 0);
-        auto baseValue = GEP->stripAndAccumulateConstantOffsets(DL, off, true);
+        const auto *baseValue = GEP->stripAndAccumulateConstantOffsets(DL, off, true);
         // objNode can be none, when it is a external symbol, which does not
         // have initializers.
         if (baseValue != nullptr) {
@@ -439,8 +439,8 @@ private:
         llvm::isa<llvm::ConstantStruct>(C)) {
       for (unsigned i = 0, e = C->getNumOperands(); i != e; ++i) {
         // make up the padding if it is a structure type.
-        if (auto structType = llvm::dyn_cast<llvm::StructType>(C->getType())) {
-          auto structLayout = DL.getStructLayout(structType);
+        if (auto *structType = llvm::dyn_cast<llvm::StructType>(C->getType())) {
+          const auto *structLayout = DL.getStructLayout(structType);
           if (structLayout->hasPadding()) {
             assert(offset >= initOffset);
             size_t padding =
@@ -454,7 +454,7 @@ private:
             memBlock, llvm::cast<llvm::Constant>(C->getOperand(i)), offset, DL);
       }
       // make up the padding if it is a struct type
-      if (auto structType = llvm::dyn_cast<llvm::StructType>(C->getType())) {
+      if (auto *structType = llvm::dyn_cast<llvm::StructType>(C->getType())) {
         // if (initOffset + DL.getTypeAllocSize(C->getType()) - offset != 0) {
         offset = initOffset + DL.getTypeAllocSize(C->getType());
         //}
