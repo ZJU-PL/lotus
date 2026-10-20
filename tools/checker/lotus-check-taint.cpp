@@ -254,7 +254,7 @@ static int emitTaintReports(const TaintAnalysis &analysis,
 
     auto *report = new BugReport(bugTypeId);
     SmallPtrSet<const Instruction *, 8> seenSources;
-    unsigned traceLevel = 0;
+    int traceLevel = 0;
     for (const TaintFact &fact : entry.second) {
       bool reachesArgument = false;
       for (const Use &argument : sinkCall->args()) {
@@ -312,10 +312,12 @@ static void evaluateMicroBenchmark(const std::set<TaintFlow> &expected,
   const size_t falseNegatives = expected.size() - truePositives;
   const double precision =
       detected.empty() ? (expected.empty() ? 1.0 : 0.0)
-                       : static_cast<double>(truePositives) / detected.size();
+                       : static_cast<double>(truePositives) /
+                             static_cast<double>(detected.size());
   const double recall =
       expected.empty() ? 1.0
-                       : static_cast<double>(truePositives) / expected.size();
+                       : static_cast<double>(truePositives) /
+                             static_cast<double>(expected.size());
   const double f1 = precision + recall == 0.0
                         ? 0.0
                         : 2.0 * precision * recall / (precision + recall);

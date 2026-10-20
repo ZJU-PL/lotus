@@ -45,8 +45,12 @@ Standalone front-end for the elimination-based APA engine.
 
 **Source**: ``tools/dataflow/lotus-dfa-apa.cpp``
 
-Supports the same ``--analysis`` space as ``lotus-dfa`` plus
-``--elim-method`` for choosing the elimination solver variant.
+Supports the APA analysis space: the intraprocedural ``reachable``,
+``reaching_defs``, ``uninitialized``, ``constant_prop``, ``available_exprs``,
+``affine``, ``lockset``, ``nonnull``, and ``sign`` analyses, plus their
+``inter_*`` interprocedural variants. ``--elim-method`` selects the elimination
+solver variant, and ``--entry-function`` sets the entry point for
+interprocedural runs.
 
 Profiling-oriented dumps are available with:
 

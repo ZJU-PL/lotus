@@ -214,7 +214,7 @@ read_or_generate_queries(int orig_vfg_size, int *sccmap,
           reachable_count++;
           bar.showProgress(static_cast<float>(reachable_count +
                                               unreachable_count) /
-                           (query_num * 2));
+                           static_cast<float>(query_num * 2));
         }
       } else {
         if (unreachable_count < query_num) {
@@ -222,7 +222,7 @@ read_or_generate_queries(int orig_vfg_size, int *sccmap,
           unreachable_count++;
           bar.showProgress(static_cast<float>(reachable_count +
                                               unreachable_count) /
-                           (query_num * 2));
+                           static_cast<float>(query_num * 2));
         }
       }
     }

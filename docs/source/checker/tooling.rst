@@ -45,6 +45,7 @@ Declares accessor functions for each subcommand (defined in
    auto &sub = lotus::checker::tooling::saberSubCommand();
    auto &sub = lotus::checker::tooling::aeSubCommand();
    auto &sub = lotus::checker::tooling::symexSubCommand();
+   auto &sub = lotus::checker::tooling::gsafSubCommand();
 
 Registered Subcommands
 ----------------------
@@ -70,6 +71,8 @@ Registered Subcommands
 | ``ae``            | Run the abstract-execution checker        |
 +-------------------+-------------------------------------------+
 | ``symex``         | Run the symbolic-execution checker        |
++-------------------+-------------------------------------------+
+| ``gsaf``          | Run the guarded value-flow checker        |
 +-------------------+-------------------------------------------+
 
 Usage

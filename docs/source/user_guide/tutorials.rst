@@ -377,7 +377,7 @@ Compile and Preprocess
 .. code-block:: bash
 
    clang -emit-llvm -c -g verify.c -o verify.bc
-   ./build/bin/clam-pp --crab-lower-unsigned-icmp --crab-lower-select \
+   ./build/bin/clam-pp --clam-lower-unsigned-icmp --clam-lower-select \
        verify.bc -o verify.prep.bc
 
 Run Analysis with Different Domains
@@ -387,21 +387,21 @@ Run Analysis with Different Domains
 
 .. code-block:: bash
 
-   ./build/bin/clam --crab-dom=int --crab-check=assert \
+   ./build/bin/clam --crab-dom=int --crab-check \
        --crab-print-invariants=true verify.prep.bc
 
 **2. Zones Domain (Relational)**:
 
 .. code-block:: bash
 
-   ./build/bin/clam --crab-dom=zones --crab-check=assert \
+   ./build/bin/clam --crab-dom=zones --crab-check \
        --crab-print-invariants=true verify.prep.bc
 
 **3. Polyhedra (Most Precise)**:
 
 .. code-block:: bash
 
-   ./build/bin/clam --crab-dom=pk --crab-check=assert \
+   ./build/bin/clam --crab-dom=pk --crab-check \
        --crab-print-invariants=true verify.prep.bc
 
 Expected Output
@@ -429,7 +429,7 @@ Export to JSON
 
 .. code-block:: bash
 
-   ./build/bin/clam --crab-dom=zones --crab-check=assert \
+   ./build/bin/clam --crab-dom=zones --crab-check \
        -ojson=verify_results.json verify.prep.bc
 
 Tutorial 6: Program Dependence Graph Queries
@@ -492,79 +492,63 @@ Build PDG and Query
 Interactive Queries
 ~~~~~~~~~~~~~~~~~~~
 
-In the interactive mode, try these Cypher queries:
+Interactive mode executes each line as a complete query, so enter each query on
+one line. The ``>`` prompt is shown for clarity and is not part of the query.
 
 **1. View entire PDG**:
 
-.. code-block:: cypher
+.. code-block:: text
 
    > MATCH (n) RETURN n
 
 **2. Find returns of get_secret_data**:
 
-.. code-block:: cypher
+.. code-block:: text
 
-   > MATCH (func:FUNC_ENTRY)-[:PARAMETER_OUT]->(ret:INST_RET)
-   > WHERE func.name = 'get_secret_data'
-   > RETURN ret
+   > MATCH (func:FUNC_ENTRY)-[:PARAMETER_OUT]->(ret:INST_RET) WHERE func.name = 'get_secret_data' RETURN ret
 
 **3. Find parameters of send_to_network**:
 
-.. code-block:: cypher
+.. code-block:: text
 
-   > MATCH (func:FUNC_ENTRY)-[:PARAMETER_IN]->(param:PARAM_FORMALIN)
-   > WHERE func.name = 'send_to_network'
-   > RETURN param
+   > MATCH (func:FUNC_ENTRY)-[:PARAMETER_IN]->(param:PARAM_FORMALIN) WHERE func.name = 'send_to_network' RETURN param
 
 **4. Check information flow**:
 
-.. code-block:: cypher
+.. code-block:: text
 
-   > MATCH (secret:FUNC_ENTRY)-[:PARAMETER_OUT]->(secretRet:INST_RET)
-   > WHERE secret.name = 'get_secret_data'
-   > MATCH (network:FUNC_ENTRY)-[:PARAMETER_IN]->(networkParam:PARAM_FORMALIN)
-   > WHERE network.name = 'send_to_network'
-   > MATCH path = (secretRet)-[*]->(networkParam)
-   > RETURN path
+   > MATCH (secret:FUNC_ENTRY)-[:PARAMETER_OUT]->(secretRet:INST_RET) WHERE secret.name = 'get_secret_data' MATCH (network:FUNC_ENTRY)-[:PARAMETER_IN]->(networkParam:PARAM_FORMALIN) WHERE network.name = 'send_to_network' MATCH (secretRet)-[*]->(networkParam) RETURN DISTINCT networkParam
 
-**5. Security Policy Check**:
+**5. Check that authentication guards a sensitive operation**:
 
-.. code-block:: cypher
+.. code-block:: text
 
-   > MATCH (secret:FUNC_ENTRY)-[:PARAMETER_OUT]->(secretRet:INST_RET)
-   > WHERE secret.name = 'get_secret_data'
-   > MATCH (network:FUNC_ENTRY)-[:PARAMETER_IN]->(networkParam:PARAM_FORMALIN)
-   > WHERE network.name = 'send_to_network'
-   > MATCH path = (secretRet)-[*]->(networkParam)
-   > RETURN path
+   > MATCH (auth:FUNC_ENTRY)-[:PARAMETER_OUT]->(authRet:INST_RET) WHERE auth.name = 'authenticate' MATCH (authRet)-[:CONTROLDEP_BR]->(check)-[:CONTROLDEP_BR]->(opParam) MATCH (sensitiveOps:FUNC_ENTRY)-[:PARAMETER_IN]->(opParam:PARAM_FORMALIN) WHERE sensitiveOps.name = 'send_to_network' RETURN DISTINCT opParam
 
 Batch Query File
 ~~~~~~~~~~~~~~~~
 
 Create ``security_policy.txt``:
 
-.. code-block:: cypher
+.. code-block:: text
 
-   // Check if secret data flows to network
+   # Check if secret data flows to network
    MATCH (secret:FUNC_ENTRY)-[:PARAMETER_OUT]->(secretRet:INST_RET)
    WHERE secret.name = 'get_secret_data'
    MATCH (network:FUNC_ENTRY)-[:PARAMETER_IN]->(networkParam:PARAM_FORMALIN)
    WHERE network.name = 'send_to_network'
-   MATCH path = (secretRet)-[*]->(networkParam)
-   RETURN path
-   
-   // Check if authentication guards sensitive operations
+   MATCH (secretRet)-[*]->(networkParam)
+   RETURN DISTINCT networkParam
+
+   # Check if authentication guards sensitive operations
    MATCH (auth:FUNC_ENTRY)-[:PARAMETER_OUT]->(authRet:INST_RET)
    WHERE auth.name = 'authenticate'
-   MATCH (authRet)-[:CONTROLDEP_BR]->(check)
+   MATCH (authRet)-[:CONTROLDEP_BR]->(check)-[:CONTROLDEP_BR]->(opParam)
    MATCH (sensitiveOps:FUNC_ENTRY)-[:PARAMETER_IN]->(opParam:PARAM_FORMALIN)
    WHERE sensitiveOps.name = 'send_to_network'
-   WHERE EXISTS {
-     MATCH (check)-[:CONTROLDEP_BR]->(opParam)
-   }
-   RETURN opParam
+   RETURN DISTINCT opParam
 
-Run batch queries:
+Batch files may contain multi-line queries separated by blank lines; ``#`` starts a comment line. Run them with:
 
 .. code-block:: bash
 
@@ -749,7 +733,7 @@ Run Interprocedural Analysis
    
    # Interprocedural abstract interpretation
    ./build/bin/clam --crab-inter --crab-dom=zones \
-       --crab-check=null --crab-check=bounds program.bc
+       --crab-check --crab-null-check --crab-bounds-check program.bc
 
 The interprocedural analysis will track the buffer through function calls and verify that:
 

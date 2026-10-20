@@ -1,8 +1,12 @@
 # Lotus Unit Tests
 
-`tests/unit` contains subsystem-level gtests for Lotus. Its structure follows
+`tests/unit` contains subsystem-level GTests for Lotus. Its structure follows
 the production taxonomy so contributors can move between `include/`, `lib/`,
 and `tests/unit/` without translating historical names.
+
+See [the test guide](../README.md) for placement rules, execution labels, CLI
+regressions, and workflow tests. The `unit/` path identifies GTest sources;
+individual cases may carry `unit`, `component`, or `integration` labels.
 
 ## Layout
 
@@ -54,13 +58,19 @@ Examples:
 Every gtest case is discovered individually. Tests also carry a cost/dependency
 label:
 
-- `unit` for fast, hermetic tests
+- `unit` for in-process tests with self-contained inputs
 - `component` for multi-component or real-concurrency harnesses
-- `integration` for tests that invoke external tools or generated fixtures
+- `integration` for process workflows or compiler-generated fixtures
 
 Run a layer with `ctest --test-dir build -L unit`, `-L component`, or
 `-L integration`. New suites default to `unit`; pass `TEST_KIND COMPONENT` or
 `TEST_KIND INTEGRATION` to `add_lotus_test_suite` when appropriate.
+For a mixed executable, `COMPONENT_TEST_REGEX` and `INTEGRATION_TEST_REGEX`
+classify individual discovered CTest names. For example, `analysis_tests`
+labels its generated TypeHierarchy and NOELLE parity fixture cases as
+integration while retaining its other cases as unit tests.
+Use a whole-suite `TEST_KIND` for pretty test names containing square brackets:
+CMake omits those names from the discovered list used for per-case classification.
 
 CTest case granularity does not require one executable per source file. Keep
 related test sources in one suite so LLVM and Lotus libraries are linked only

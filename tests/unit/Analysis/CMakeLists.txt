@@ -226,5 +226,7 @@ get_property(analysis_test_libs GLOBAL PROPERTY LOTUS_TEST_SUITE_analysis_tests_
 list(REMOVE_DUPLICATES analysis_test_libs)
 add_lotus_collected_test_suite(analysis_tests
   LINK_LIBS ${analysis_test_libs}
+  INTEGRATION_TEST_REGEX
+    "^analysis_tests\\.(DIBasedTypeHierarchyTest|CallGraphAlgorithmsTest|LoopParity[^.]+)\\."
   COMPILE_DEFINITIONS ${analysis_test_definitions}
   DEPENDS ${analysis_test_dependencies})

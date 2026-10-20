@@ -57,8 +57,8 @@ Examples
    # Using MLTA analysis with output to file
    ./build/bin/lotus-alias-call-graph -cg-type=fpa-mlta -fpa-dump-targets=results.txt input.bc
 
-   # Using KELP analysis with debug info and stats
-   ./build/bin/lotus-alias-call-graph -cg-type=fpa-kelp -fpa-debug -S input.bc
+   # Using KELP analysis with debug output
+   ./build/bin/lotus-alias-call-graph -cg-type=fpa-kelp -fpa-debug input.bc
 
 FPA results can be consumed directly (for security analyses or refactoring)
 or fed into other components that benefit from precise indirect call

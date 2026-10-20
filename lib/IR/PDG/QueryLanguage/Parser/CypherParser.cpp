@@ -219,7 +219,7 @@ CypherParser::parseQuery(std::vector<std::string> &tokens, size_t &pos,
       };
       while (hasMore(tokens, pos) && peekUpper() != "WHERE" &&
              peekUpper() != "RETURN" && peekUpper() != "WITH" &&
-             peekUpper() != ";") {
+             peekUpper() != "MATCH" && peekUpper() != ";") {
         // Optional path binding syntax: MATCH p = (a)-[*]->(b) ...
         if (pos + 1 < tokens.size() && tokens[pos + 1] == "=") {
           consume(tokens, pos); // path variable (currently ignored)
@@ -241,7 +241,7 @@ CypherParser::parseQuery(std::vector<std::string> &tokens, size_t &pos,
       if (!whereClause) {
         return nullptr;
       }
-      query->setWhereClause(std::move(whereClause));
+      query->andWhereClause(std::move(whereClause));
     } else if (upperToken == "RETURN") {
       consume(tokens, pos);
       // Helper lambda to get uppercased peek

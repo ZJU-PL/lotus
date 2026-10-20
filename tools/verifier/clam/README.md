@@ -22,7 +22,8 @@ clam [options] <input.bc>
 **Common Options:**
 - `--crab-dom=<domain>` - Select abstract domain (int, zones, oct, pk, etc.)
 - `--crab-inter` - Enable interprocedural analysis
-- `--crab-check=<type>` - Enable property checking (assert, null, bounds, uaf)
+- `--crab-check` - Run the assertion checker
+- `--crab-null-check` / `--crab-uaf-check` / `--crab-bounds-check` - Insert null-dereference, use-after-free, or bounds checks (use together with `--crab-check`)
 - `--crab-print-invariants=true` - Print computed invariants
 - `-ojson=<file>` - Output results in JSON format
 - `--help` - Display all available options
@@ -30,10 +31,10 @@ clam [options] <input.bc>
 **Example:**
 ```bash
 # Analyze with interval domain and check assertions
-clam --crab-dom=int --crab-check=assert program.bc
+clam --crab-dom=int --crab-check program.bc
 
 # Interprocedural analysis with zones domain
-clam --crab-inter --crab-dom=zones --crab-check=null program.bc
+clam --crab-inter --crab-dom=zones --crab-check --crab-null-check program.bc
 
 # Export invariants to JSON
 clam --crab-print-invariants=true -ojson=results.json program.bc
@@ -95,12 +96,13 @@ clam-pp [options] <input.bc> -o <output.bc>
 - Property instrumentation
 
 **Common Options:**
-- `--crab-lower-unsigned-icmp` - Lower unsigned comparisons
-- `--crab-lower-select` - Lower select instructions
-- `--crab-devirt` - Perform devirtualization
-- `--crab-externalize-addr-taken-funcs` - Externalize address-taken functions
-- `--crab-promote-assume` - Promote verifier.assume calls
-- `--crab-add-invariants` - Add invariant checks to bitcode
+- `--clam-lower-unsigned-icmp` - Lower unsigned comparisons
+- `--clam-lower-select` - Lower select instructions
+- `--clam-devirt` - Perform devirtualization
+- `--clam-externalize-addr-taken-funcs` - Externalize address-taken functions
+- `--clam-promote-malloc` - Promote malloc calls
+- `--clam-inline-all` - Inline all function calls
+- `--clam-scalarize` - Scalarize vector operations
 - `-o <file>` - Output file
 
 **Example:**
@@ -109,11 +111,12 @@ clam-pp [options] <input.bc> -o <output.bc>
 clam-pp program.bc -o program.prep.bc
 
 # Full preprocessing with devirtualization
-clam-pp --crab-lower-unsigned-icmp --crab-lower-select \
-  --crab-devirt program.bc -o program.prep.bc
+clam-pp --clam-lower-unsigned-icmp --clam-lower-select \
+  --clam-devirt program.bc -o program.prep.bc
 
-# Add invariant instrumentation
-clam-pp --crab-add-invariants=all program.bc -o program.inst.bc
+# Add invariant instrumentation with the analyzer
+clam --crab-opt --crab-opt-add-invariants=all \
+  program.bc -o program.inst.bc
 ```
 
 ## Typical Workflow
@@ -121,22 +124,22 @@ clam-pp --crab-add-invariants=all program.bc -o program.inst.bc
 ### Basic Analysis
 ```bash
 # 1. Preprocess (optional but recommended)
-clam-pp --crab-lower-unsigned-icmp --crab-lower-select input.bc -o prep.bc
+clam-pp --clam-lower-unsigned-icmp --clam-lower-select input.bc -o prep.bc
 
 # 2. Analyze
-clam --crab-dom=zones --crab-check=assert prep.bc
+clam --crab-dom=zones --crab-check prep.bc
 
 # 3. Export results
-clam --crab-dom=zones --crab-check=assert -ojson=results.json prep.bc
+clam --crab-dom=zones --crab-check -ojson=results.json prep.bc
 ```
 
 ### Differential Analysis
 ```bash
 # Analyze baseline version
-clam baseline.bc --crab-check=assert -ojson=baseline.json
+clam baseline.bc --crab-check -ojson=baseline.json
 
 # Analyze modified version
-clam modified.bc --crab-check=assert -ojson=modified.json
+clam modified.bc --crab-check -ojson=modified.json
 
 # Compare results
 clam-diff baseline.json modified.json
@@ -145,11 +148,11 @@ clam-diff baseline.json modified.json
 ### Interprocedural Analysis with Memory Checking
 ```bash
 # Preprocess
-clam-pp --crab-devirt --crab-lower-select input.bc -o prep.bc
+clam-pp --clam-devirt --clam-lower-select input.bc -o prep.bc
 
 # Analyze with Sea-DSA heap abstraction
 clam --crab-inter --crab-dom=zones \
-  --crab-check=null --crab-check=bounds \
+  --crab-check --crab-null-check --crab-bounds-check \
   --crab-track=mem prep.bc
 ```
 

@@ -21,6 +21,7 @@ The Checker Framework consists of several checker categories, all unified throug
 * **Concurrency Checkers** – Thread safety and parallel-runtime issues (data races, deadlocks, atomicity violations, OpenMP bugs, MPI bugs) using MHP, lock set, OpenMP, and MPI analyses
 * **Pulse Checker** – Memory safety and other bugs using biabductive analysis with path-sensitive interprocedural reasoning
 * **Saber Checkers** – Source-sink bug detection over sparse value-flow graphs
+* **GSAF Checkers** – Path-sensitive checks over the guarded value-flow graph (use-after-free and taint)
 * **SymEx Checker** – Symbolic-execution bug checks backed by the top-level ``SymbolicExecution`` engine
 
 All checkers report bugs through the centralized ``BugReportMgr`` system, enabling unified output formats (JSON, SARIF) and consistent bug reporting across all analysis tools. The repository builds a single checker binary, ``lotus-check``; each invocation selects one engine with ``--engine=<name>``.
@@ -50,7 +51,7 @@ enables that engine's own checks.
      - Typical use
    * - Use-after-free
      - ``pulse``
-     - ``ae``, ``fitx``, ``symex``
+     - ``ae``, ``fitx``, ``symex``, ``gsaf``
      - Witness-oriented investigation
    * - Null-pointer dereference
      - ``pulse`` or ``ae``
@@ -78,7 +79,7 @@ enables that engine's own checks.
      - Initialization-state checking
    * - Tainted data reaches a sink
      - ``taint``
-     - ``pulse``, ``symex``
+     - ``pulse``, ``symex``, ``gsaf``
      - Configurable source-to-sink analysis
    * - Data race, deadlock, or parallel-runtime error
      - ``concur``

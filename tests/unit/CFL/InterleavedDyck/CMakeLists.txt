@@ -10,6 +10,3 @@ lotus_collect_test_sources(cfl_tests
   StagedBoundsTest.cpp
   UnaryAdaptiveTest.cpp
   UnaryFixedCounterTest.cpp)
-
-# CLI/regression coverage for the lotus-cfl-interleaved-dyck driver.
-include(${CMAKE_CURRENT_LIST_DIR}/CLI.cmake)

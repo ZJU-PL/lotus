@@ -19,7 +19,7 @@ checking safety properties over LLVM bitcode.
 .. code-block:: bash
 
    # Analyze with interval domain
-   ./build/bin/clam --crab-dom=int --crab-check=assert program.bc
+   ./build/bin/clam --crab-dom=int --crab-check program.bc
 
    # Preprocess bitcode
    ./build/bin/clam-pp program.bc -o prep.bc

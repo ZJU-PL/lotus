@@ -120,6 +120,26 @@ TEST_F(CypherQueryTest, ParseMatchWithRelationship) {
   EXPECT_EQ(pattern->getRelationship()->getType(), "EDGE_TYPE");
 }
 
+TEST_F(CypherQueryTest, ParseMultipleMatchClauses) {
+  CypherParser parser;
+  std::unique_ptr<CypherQuery> query =
+      parser.parse("MATCH (a) MATCH (b) RETURN a, b");
+
+  ASSERT_NE(query, nullptr);
+  EXPECT_EQ(query->getPatterns().size(), 2u);
+}
+
+TEST_F(CypherQueryTest, ParseMultipleWhereClauses) {
+  CypherParser parser;
+  std::unique_ptr<CypherQuery> query = parser.parse(
+      "MATCH (a) WHERE a.name = 'x' MATCH (b) WHERE b.name = 'y' RETURN b");
+
+  ASSERT_NE(query, nullptr);
+  EXPECT_EQ(query->getPatterns().size(), 2u);
+  ASSERT_NE(query->getWhereClause(), nullptr);
+  EXPECT_TRUE(query->getWhereClause()->isBooleanOp());
+}
+
 TEST_F(CypherQueryTest, ParseMatchWithWhere) {
   CypherParser parser;
   std::unique_ptr<CypherQuery> query =

@@ -29,7 +29,8 @@ Lotus has been tested on **x86/ARM Linux** and **ARM macOS**. The following depe
      - GCC or Clang with ``-fexceptions -frtti``.
    * - Boost
      - 1.65+ (optional)
-     - Only required when ``LOTUS_ENABLE_SEAHORN``, ``LOTUS_ENABLE_CLAM``, or ``LOTUS_ENABLE_CCLYZER`` are enabled.
+     - Only required when ``LOTUS_ENABLE_SEAHORN``, ``LOTUS_ENABLE_CLAM``,
+       ``LOTUS_ENABLE_CCLYZER``, or ``LOTUS_ENABLE_FPSOLVE`` are enabled.
        CLAM additionally requires Boost.JSON 1.80+.
 
 Build Instructions
@@ -51,10 +52,13 @@ If your LLVM installation is not in a standard system path, provide it to CMake:
 
    cmake .. -DLLVM_BUILD_PATH=/path/to/llvm/lib/cmake/llvm
 
-To run the unit test suite (recommended after building):
+To run the unit test suite (recommended after building), configure with
+``-DLOTUS_BUILD_TESTS=ON`` first; tests are off by default:
 
 .. code-block:: bash
 
+   cmake .. -DLOTUS_BUILD_TESTS=ON
+   make -j$(nproc)
    make test
    # Or using ctest:
    ctest --output-on-failure

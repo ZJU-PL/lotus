@@ -7,7 +7,7 @@ This directory now builds a single checker frontend, `lotus-check`, on top of
 
 - registry-backed generic/declarative checking
 - native in-process checker engines such as `ae`, `kint`, `pulse`,
-  `saber`, `fitx`, `concur`, `symex`, and `taint`
+  `saber`, `fitx`, `concur`, `gsaf`, `symex`, and `taint`
 
 Each invocation selects exactly one engine with `--engine=<name>`. A native
 engine may run several of its own checker kinds, while generic mode may run
@@ -48,6 +48,7 @@ Use `build/bin/lotus-check --help` or
 | `fitx` | FiTx multi-checker driver | Runs typestate checks such as `double-free`, `double-lock`, `memory-leak`, `null-deref`, and `use-after-free`. |
 | `saber` | Source-sink bug checker | Runs memory leak, double-free, file-descriptor leak, and use-after-free candidate checks. Implemented by `tools/checker/lotus-check-saber.cpp`. |
 | `ae` | Abstract-execution checker | Covers overflow, null dereference, use-after-free, invalid free, and memory leak detection. Implemented by `tools/checker/lotus-check-ae.cpp`. |
+| `gsaf` | Guarded value-flow checker | Runs the `taint` and `use-after-free` checks over the guarded value-flow graph. Implemented by `tools/checker/lotus-check-gsaf.cpp`. |
 | `symex` | Symbolic-execution checker | Runs the `lib/SymbolicExecution` engine on GVFG/LotusAA and emits path-sensitive bug reports. Implemented by `tools/checker/lotus-check-symex.cpp`. |
 
 ## Common workflows

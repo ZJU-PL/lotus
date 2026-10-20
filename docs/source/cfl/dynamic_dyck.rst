@@ -171,7 +171,8 @@ repository, with ``DYCK_REACH_BINARY`` and ``DYCK_BENCHMARK_ROOT`` overrides:
 The C++ benchmark inputs live in
 ``benchmarks/real-world/CFL/DynamicDyck`` and the scripts in
 ``scripts/cfl/dynamic-dyck``.
-The optional ``run_benchmarks.py`` runner
-supports case selection, dry-run input validation, and partition comparison
+The optional ``run_benchmarks.py`` runner in
+``benchmarks/real-world/CFL/DynamicDyck/`` supports case selection, dry-run
+input validation, and partition comparison
 without changing the table ordering; ``--binary`` selects another
 build. The DDlog encoding is not accepted by this CLI.

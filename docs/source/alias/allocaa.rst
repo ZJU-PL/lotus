@@ -48,7 +48,7 @@ Usage
 
 AllocAA is exposed through the generic AA wrapper (``AliasAnalysisWrapper``)
 and can be selected from drivers that take an AA configuration, such as
-``lotus-check --taint.aa=alloc-aa``.
+``lotus-check --taint.alias-analysis=alloc-aa``.
 In most cases you do not run it directly; instead you enable it in the
 pass pipeline (e.g., through the Lotus AA driver or Clam configuration).
 

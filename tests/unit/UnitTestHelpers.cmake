@@ -1,6 +1,5 @@
 set(LOTUS_UNIT_TEST_ROOT ${CMAKE_CURRENT_LIST_DIR})
 set(LOTUS_UNIT_TEST_COMMON_INCLUDES
-    ${CMAKE_CURRENT_LIST_DIR}/../utils
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/../../include
     ${LLVM_INCLUDE_DIRS})
@@ -63,7 +62,8 @@ function(add_lotus_collected_test_suite suite_name)
 endfunction()
 
 function(add_lotus_test_suite test_name)
-    cmake_parse_arguments(LOTUS_SUITE "CUSTOM_MAIN" "TIMEOUT;TEST_KIND"
+    cmake_parse_arguments(LOTUS_SUITE "CUSTOM_MAIN"
+        "TIMEOUT;TEST_KIND;COMPONENT_TEST_REGEX;INTEGRATION_TEST_REGEX"
         "SOURCES;LINK_LIBS;INCLUDE_DIRS;COMPILE_DEFINITIONS;DEPENDS;LABELS"
         ${ARGN})
     if(NOT LOTUS_SUITE_SOURCES)
@@ -122,7 +122,13 @@ function(add_lotus_test_suite test_name)
         string(TOLOWER "${subsystem}" subsystem)
     endif()
 
-    set(labels lotus ${test_kind} ${subsystem} ${LOTUS_SUITE_LABELS})
+    set(labels lotus ${subsystem} ${LOTUS_SUITE_LABELS})
+    # CTest accumulates LABELS assignments. For mixed suites the post-discovery
+    # script must be the sole owner of the execution-kind label.
+    if(NOT LOTUS_SUITE_COMPONENT_TEST_REGEX AND
+       NOT LOTUS_SUITE_INTEGRATION_TEST_REGEX)
+        list(APPEND labels ${test_kind})
+    endif()
     list(REMOVE_DUPLICATES labels)
     string(REPLACE ";" "\\;" labels_property "${labels}")
     # DISCOVERY_MODE PRE_TEST defers enumeration until ctest time instead of
@@ -142,6 +148,18 @@ function(add_lotus_test_suite test_name)
             TIMEOUT ${test_timeout}
             LABELS "${labels_property}")
     unset(_lotus_gtest_discovery_args)
+
+    # CTest includes this after GTest discovery, so individual cases can carry
+    # their actual dependency kind while sharing one linked subsystem binary.
+    if(LOTUS_SUITE_COMPONENT_TEST_REGEX OR LOTUS_SUITE_INTEGRATION_TEST_REGEX)
+        set(classification_script
+            ${CMAKE_CURRENT_BINARY_DIR}/${test_name}_kinds.cmake)
+        configure_file(
+            ${LOTUS_UNIT_TEST_ROOT}/../cmake/ClassifyGTests.cmake.in
+            ${classification_script} @ONLY)
+        set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+            ${classification_script})
+    endif()
 endfunction()
 
 function(add_lotus_targeted_test test_name source_file)

@@ -86,7 +86,9 @@ Selecting the right framework depends heavily on the properties of the dataflow 
      - None (Intraprocedural)
      - Meet-over-all-paths, path expressions, elimination benchmarks.
 
-The ``lotus-dfa-diff`` tool (located in ``tools/dataflow/``) can be used to perform differential testing across these different engines for a given problem class.
+The ``lotus-dfa`` tool (located in ``tools/dataflow/`` and built from
+``lotus-dfa-diff.cpp``) can be used to perform differential testing across these
+different engines for a given problem class.
 
 .. toctree::
    :maxdepth: 2

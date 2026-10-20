@@ -45,8 +45,7 @@ Use `build/bin/<tool> --help` to see the full option set for a specific tool.
 | `lotus-alias-lotus-aa` | Run LotusAA | Implemented by `tools/alias/lotus-alias-lotus-aa.cpp`; native Lotus interprocedural pointer analysis, with LotusAA-specific output flags such as `-lotus-print-pts` and `-lotus-print-cg`. |
 | `lotus-alias-dyck-aa` | Run DyckAA | Implemented by `tools/alias/lotus-alias-dyck-aa.cpp`; unification-based analysis that can print call-graph statistics with `--print-cg`. |
 | `lotus-alias-tpa` | Run TPA | Implemented by `tools/alias/lotus-alias-tpa.cpp`; semi-sparse, flow- and context-sensitive pointer analysis with optional prepass dumping and CFG `.dot` output. |
-| `lotus-alias-fpa` | Run function-pointer analysis | Implemented by `tools/alias/lotus-alias-fpa.cpp`; indirect-call target analysis with FLTA, MLTA, MLTA+DF, and KELP modes. |
-| `lotus-alias-call-graph` | Build a call graph with a selected backend | Implemented by `tools/alias/lotus-alias-call-graph.cpp`; supports `gpg`, `dyck`, `lotus`, several `fpa-*` modes, and `aserpta-*` modes. |
+| `lotus-alias-call-graph` | Build a call graph with a selected backend | Implemented by `tools/alias/lotus-alias-call-graph.cpp`; supports `gpg`, `dyck`, `lotus`, several `fpa-*` modes (FLTA, MLTA, MLTA+DF, KELP), and `aserpta-*` modes. |
 | `lotus-alias-sea-dsa-dg` | Dump Sea-DSA memory graphs | Implemented by `tools/alias/lotus-alias-sea-dsa-dg.cpp`; useful for inspecting per-function memory graphs and enabling graph emission with `--sea-dsa-dot`. |
 | `lotus-alias-seadsa-tool` | Run extended Sea-DSA utilities | Implemented by `tools/alias/lotus-alias-seadsa-tool.cpp`; includes memory-graph dumping and other Sea-DSA related driver options. |
 | `dynaa-instrument` | Instrument a program for dynamic alias logging | Built only with `LOTUS_ENABLE_DYNAA=ON`. |
@@ -73,7 +72,7 @@ build/bin/lotus-alias-gpg test.bc --mode=fscs --print-pts --print-call-graph
 ### Inspect indirect-call targets
 
 ```bash
-build/bin/lotus-alias-fpa test.bc --analysis-type=2
+build/bin/lotus-alias-call-graph test.bc -cg-type=fpa-mlta -fpa-dump-targets=targets.txt
 build/bin/lotus-alias-call-graph test.bc --cg-type=lotus --emit-cg-as-json
 build/bin/lotus-alias-call-graph test.bc --cg-type=gpg --emit-cg-as-json
 ```

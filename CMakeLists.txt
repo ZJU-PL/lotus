@@ -105,14 +105,14 @@ if(LOTUS_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+# Configure script launchers before tests register their workflow coverage.
+add_subdirectory(scripts)
+
 # Add tests if enabled
 if(LOTUS_BUILD_TESTS)
     include(cmake/FindGTest.cmake)
     add_subdirectory(tests)
 endif()
-
-# Add Python scripts and utilities
-add_subdirectory(scripts)
 
 install(FILES
   config/thread.spec

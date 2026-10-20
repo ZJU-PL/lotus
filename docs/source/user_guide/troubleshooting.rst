@@ -287,7 +287,7 @@ Missing Bugs (False Negatives)
 .. code-block:: bash
 
    # Interprocedural
-   ./build/bin/clam --crab-inter --crab-check=all input.bc
+   ./build/bin/clam --crab-inter --crab-check --crab-null-check --crab-uaf-check --crab-bounds-check input.bc
    
    # Context-sensitive taint
    ./build/bin/lotus-check --engine=taint input.bc --verbose
@@ -316,8 +316,8 @@ CLAM Issues
 
 .. code-block:: bash
 
-   ./build/bin/clam-pp --crab-lower-unsigned-icmp \
-                  --crab-lower-select \
+   ./build/bin/clam-pp --clam-lower-unsigned-icmp \
+                  --clam-lower-select \
                   input.bc -o prep.bc
    ./build/bin/clam prep.bc
 
@@ -376,13 +376,18 @@ PDG Query Issues
 
 **Solution**:
 
-1. Check node names:
+1. Check node names. Function names are case-sensitive, so this query does not
+   match ``main``:
 
-.. code-block:: cypher
+   .. code-block:: cypher
 
-   // Function names are case-sensitive
-   MATCH (n:FUNC_ENTRY) WHERE n.name = 'Main' RETURN n  // Wrong
-   MATCH (n:FUNC_ENTRY) WHERE n.name = 'main' RETURN n  // Correct
+      MATCH (n:FUNC_ENTRY) WHERE n.name = 'Main' RETURN n
+
+   Use the exact spelling:
+
+   .. code-block:: cypher
+
+      MATCH (n:FUNC_ENTRY) WHERE n.name = 'main' RETURN n
 
 2. Verify PDG was built:
 
@@ -400,15 +405,17 @@ PDG Query Issues
 
 **Solution**:
 
-1. Check query syntax:
+1. Check query syntax. String values must be quoted, so this query is invalid:
 
-.. code-block:: cypher
+   .. code-block:: cypher
 
-   // Wrong
-   MATCH (n:FUNC_ENTRY) WHERE n.name = main RETURN n
-   
-   // Correct
-   MATCH (n:FUNC_ENTRY) WHERE n.name = 'main' RETURN n
+      MATCH (n:FUNC_ENTRY) WHERE n.name = main RETURN n
+
+   Use quotes around the value:
+
+   .. code-block:: cypher
+
+      MATCH (n:FUNC_ENTRY) WHERE n.name = 'main' RETURN n
 
 2. Use interactive mode to test:
 
@@ -638,7 +645,7 @@ A: Yes:
 
 .. code-block:: bash
 
-   ./build/bin/clam --crab-check=assert input.bc
+   ./build/bin/clam --crab-check input.bc
 
 Bug Detection Questions
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -665,7 +672,7 @@ A:
 
 .. code-block:: bash
 
-   ./build/bin/clam-pp --crab-lower-unsigned-icmp input.bc -o prep.bc
+   ./build/bin/clam-pp --clam-lower-unsigned-icmp input.bc -o prep.bc
 
 2. Use more precise analysis
 3. Add annotations/assertions

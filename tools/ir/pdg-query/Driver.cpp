@@ -9,6 +9,7 @@
 #include "Output.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -165,6 +166,41 @@ static void runInteractiveMode(CypherQueryExecutor &executor,
   }
 }
 
+static std::string trim(const std::string &text) {
+  const auto first = text.find_first_not_of(" \t\r");
+  if (first == std::string::npos)
+    return "";
+  const auto last = text.find_last_not_of(" \t\r");
+  return text.substr(first, last - first + 1);
+}
+
+static std::string toUpper(std::string text) {
+  std::transform(text.begin(), text.end(), text.begin(),
+                 [](unsigned char c) { return std::toupper(c); });
+  return text;
+}
+
+static bool startsWithClause(const std::string &text, const char *clause) {
+  const std::string upper = toUpper(text);
+  const std::string keyword = toUpper(clause);
+  if (upper.rfind(keyword, 0) != 0)
+    return false;
+  return upper.size() == keyword.size() ||
+         std::isspace(static_cast<unsigned char>(upper[keyword.size()])) ||
+         upper[keyword.size()] == '(';
+}
+
+static bool endsWithUnion(const std::string &text) {
+  const std::string upper = toUpper(trim(text));
+  return upper.size() >= 5 && upper.compare(upper.size() - 5, 5, "UNION") == 0;
+}
+
+static bool queryIsComplete(const std::string &text) {
+  const std::string upper = toUpper(text);
+  return upper.find("RETURN") != std::string::npos ||
+         upper.find("LIMIT") != std::string::npos;
+}
+
 static void runBatchMode(CypherQueryExecutor &executor,
                          const std::string &filename, const Options &config,
                          const Output &output) {
@@ -174,12 +210,33 @@ static void runBatchMode(CypherQueryExecutor &executor,
     return;
   }
 
+  std::string pending;
+  auto flush = [&]() {
+    if (!pending.empty()) {
+      executeQuery(executor, pending, config, output);
+      pending.clear();
+    }
+  };
+
   std::string line;
   while (std::getline(file, line)) {
-    if (line.empty() || line[0] == '#')
+    const std::string trimmed = trim(line);
+    if (trimmed.empty() || trimmed[0] == '#') {
+      flush();
       continue;
-    executeQuery(executor, line, config, output);
+    }
+    // A new MATCH after a completed query starts a new statement. UNION keeps
+    // the current statement open for the following MATCH.
+    if (!pending.empty() && startsWithClause(trimmed, "MATCH") &&
+        queryIsComplete(pending) && !endsWithUnion(pending))
+      flush();
+    if (!pending.empty())
+      pending += ' ';
+    pending += trimmed;
+    if (trimmed.back() == ';')
+      flush();
   }
+  flush();
 }
 
 static bool selectNodesWithCypher(CypherQueryExecutor &executor,

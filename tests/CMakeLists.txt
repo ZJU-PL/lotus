@@ -1,5 +1,3 @@
-# TODO: Following the code of clam to add the tests in tests/clam
-
 cmake_minimum_required(VERSION 3.18)
 find_package(LLVM REQUIRED CONFIG)
 # GTest should already be found or downloaded by FindGTest.cmake in parent CMakeLists.txt
@@ -16,7 +14,7 @@ add_definitions(-DCMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 set(LOTUS_UNIT_TEST_TIMEOUT 60 CACHE STRING
     "Default timeout in seconds for Lotus unit tests registered with CTest")
 set(LOTUS_TEST_DISCOVERY_TIMEOUT 60 CACHE STRING
-    "Default timeout in seconds for the gtest_discover_tests POST_BUILD discovery step")
+    "Default timeout in seconds for gtest_discover_tests enumeration")
 
 # Analyses load default specs relative to the test working directory. Keep
 # out-of-tree test builds independent of the source directory's parent layout.
@@ -25,15 +23,19 @@ foreach(spec ptr modref taint)
         ${CMAKE_BINARY_DIR}/config/${spec}.spec COPYONLY)
 endforeach()
 
-# Add unit test subdirectory
+# Test sources, CLI regressions, and workflow tests have separate entry points.
+include(cmake/RegressionTestHelpers.cmake)
 add_subdirectory(unit)
+add_subdirectory(regress)
+add_subdirectory(integration)
 add_test(NAME build_selection
     COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildSelectionTest.cmake)
-set_tests_properties(build_selection PROPERTIES LABELS "lotus;unit;build")
-
-# Note: Individual unit tests are registered in their respective subdirectories under unit/
-
-enable_testing()
+add_test(NAME test_labels
+    COMMAND ${CMAKE_COMMAND}
+        -DCTEST_COMMAND=${CMAKE_CTEST_COMMAND}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLabelsTest.cmake)
+set_tests_properties(build_selection test_labels PROPERTIES
+    LABELS "lotus;unit;build" TIMEOUT ${LOTUS_UNIT_TEST_TIMEOUT})
 
 # Custom target to run all tests
 add_custom_target(run_all_tests 

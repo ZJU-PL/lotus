@@ -67,6 +67,12 @@ Options use a consistent ``LOTUS_*`` naming scheme.
   and enable the runtime ``wali-fwpds`` and ``wali-swpds`` WPDS backends (default: OFF)
 * ``-DLOTUS_ENABLE_PDAAAL=ON``: Build the vendored PDAAAL weighted PDS reachability library
   under third-party/PDAAAL (default: OFF)
+* ``-DLOTUS_ENABLE_BOOLEAN_PROGRAM_TOOLS=ON``: Build the Boolean-program
+  parser and normalizer tools (default: OFF)
+* ``-DLOTUS_ENABLE_DEMAND_APA=ON``: Build the independent demand-driven APA
+  executable (default: OFF)
+* ``-DLOTUS_ENABLE_FLOW_CUTTER=ON``: Build the vendored PACE treewidth and
+  treedepth tools used for tree-decomposition ordering (default: OFF)
 
 **Advanced toggles:**
 

@@ -90,3 +90,5 @@ if(TARGET lotus-cfl-interleaved-dyck)
             PASS_REGULAR_EXPRESSION "upper bound: 1")
     endforeach()
 endif()
+
+lotus_label_regression_tests(cfl)
