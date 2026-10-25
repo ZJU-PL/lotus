@@ -140,7 +140,6 @@ We need to extarct some common facilites, e.g., the abstract domains, instead of
 - [SVF] https://github.com/SVF-tools/SVF
 - https://github.com/harp-lab/yapall
 - https://github.com/GaloisInc/cclyzerpp
-- [GPG](https://github.com/PritamMG/GPG-based-Points-to-Analysis) - A flow- and context-sensisitve pointer analysis
 - [SUTURE](https://github.com/seclab-ucr/SUTURE) - Static analysis for security
 - [Phasar](https://github.com/secure-software-engineering/phasar):  a LLVM-based static analysis framework
 - [yapall]https://github.com/GaloisInc/yapall

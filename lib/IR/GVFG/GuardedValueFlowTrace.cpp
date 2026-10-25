@@ -56,7 +56,7 @@ static void pushValuePair(GuardedValueFlowTrace *Trace, Value *Oprd, Value *UseS
       Function *Func = UseInst->getParent()->getParent();
       GuardedValueFlowGraph *GVFG = graphFor(GVFGs, Func);
       if (GVFG) {
-        if (Oprd && isa<BasicBlock>(Oprd)) {
+        if (isa_and_nonnull<BasicBlock>(Oprd)) {
           // Branch Choice
 
           // First, we add the control dep for the branch inst itself
@@ -351,7 +351,7 @@ int GuardedValueFlowTrace::guessLEVFSrcIdx(bool IsConsiderLoad) const {
     }
 
     Value *ResultVal = ResultNode->getDebugValue();
-    if (ResultVal && isa<Argument>(ResultVal)) {
+    if (isa_and_nonnull<Argument>(ResultVal)) {
       break;
     }
 

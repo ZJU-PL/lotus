@@ -19,7 +19,7 @@ The table below summarizes the major tool subdirectories and the binaries they p
    * - Subdirectory
      - Executables produced
    * - ``tools/alias/``
-     - ``lotus-alias-sparrow-aa``, ``lotus-alias-aser-aa``, ``lotus-alias-dyck-aa``, ``lotus-alias-lotus-aa``, ``lotus-alias-tpa``, ``lotus-alias-gpg``, ``lotus-alias-bootstrap``, ``lotus-alias-fspta``, ``lotus-alias-sea-dsa-dg``, ``lotus-alias-seadsa-tool``, ``lotus-alias-call-graph``, ``lotus-alias-cclyzer-aa``; optional ``dynaa``, ``dynaa-instrument``, ``dynaa-check``, ``dynaa-log-dump`` (``LOTUS_ENABLE_DYNAA``)
+     - ``lotus-alias-sparrow-aa``, ``lotus-alias-aser-aa``, ``lotus-alias-dyck-aa``, ``lotus-alias-lotus-aa``, ``lotus-alias-tpa``, ``lotus-alias-bootstrap``, ``lotus-alias-fspta``, ``lotus-alias-sea-dsa-dg``, ``lotus-alias-seadsa-tool``, ``lotus-alias-call-graph``, ``lotus-alias-cclyzer-aa``; optional ``dynaa``, ``dynaa-instrument``, ``dynaa-check``, ``dynaa-log-dump`` (``LOTUS_ENABLE_DYNAA``)
    * - ``tools/checker/``
      - ``lotus-check`` (unified binary with ``--engine=generic|kint|taint|ae|saber|pulse|concur|fitx|gsaf|symex``)
    * - ``tools/dataflow/``

@@ -34,9 +34,6 @@ class SemiSparseProgram;
 } // namespace tpa
 
 namespace lotus {
-namespace gpg {
-class GPGAnalysisEngine;
-} // namespace gpg
 namespace analysis {
 class FlowDDA;
 using DemandDrivenAA = FlowDDA;
@@ -68,9 +65,6 @@ struct AAConfig {
 
     // TPA: Flow- and context-sensitive semi-sparse pointer analysis
     TPA,
-
-    // GPG: fully flow-, field-, and context-sensitive bottom-up analysis
-    GPG,
 
     // DDA: Demand-driven pointer analysis on SVFG
     DDA,
@@ -115,7 +109,6 @@ struct AAConfig {
     KCallSite, // k-call-site sensitive (k-CFA)
     KOrigin,   // k-origin sensitive (AserPTA only)
     Adaptive,  // Adaptive context sensitivity (TPA only)
-    Full,      // Fully context-sensitive summaries (GPG only)
   };
 
   ContextSensitivity ctxSens;
@@ -235,11 +228,6 @@ struct AAConfig {
   /// Selective: 0-CFA at direct calls, k-CFA at indirect calls.
   static AAConfig TPA_Selective(unsigned k = 1) {
     return {Implementation::TPA, ContextSensitivity::Adaptive, k, true,
-            Solver::Default};
-  }
-
-  static AAConfig GPG() {
-    return {Implementation::GPG, ContextSensitivity::Full, 0, true,
             Solver::Default};
   }
 
@@ -374,10 +362,10 @@ public:
   bool getPointsToSet(const llvm::Value *ptr,
                       std::vector<const llvm::Value *> &ptsSet);
   /// Get points-to set size only (for metrics). Supported by SparrowAA, TPA,
-  /// DDA, and GPG.
+  /// and DDA.
   bool getPointsToSetSize(const llvm::Value *ptr, size_t &outSize);
   /// Get possible callees for a call (direct or indirect). Supported by
-  /// SparrowAA, DyckAA, TPA, and GPG.
+  /// SparrowAA, DyckAA, and TPA.
   void getIndirectCallTargets(llvm::CallBase *call,
                               std::vector<const llvm::Function *> &targets);
   bool getAliasSet(const llvm::Value *v,
@@ -430,9 +418,6 @@ private:
   std::unique_ptr<tpa::SemiSparsePointerAnalysis> _tpa_aa;
   std::unique_ptr<tpa::SemiSparseProgram> _tpa_program;
 #endif
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-  std::unique_ptr<lotus::gpg::GPGAnalysisEngine> _gpg_aa;
-#endif
 #if LOTUS_AA_WRAPPER_ENABLE_CCLYZER
   std::unique_ptr<lotus::cclyzer::CclyzerAA> _cclyzer_aa;
 #endif
@@ -454,7 +439,6 @@ public:
                                                              unsigned kCFA = 0);
   static std::unique_ptr<AliasAnalysisWrapper> createTPA(llvm::Module &M,
                                                          unsigned kCFA = 0);
-  static std::unique_ptr<AliasAnalysisWrapper> createGPG(llvm::Module &M);
 };
 
 // ===== Utility Functions =====
@@ -472,7 +456,6 @@ public:
  * - "tpa", "tpa-0cfa" -> TPA_NoCtx
  * - "tpa-1cfa" -> TPA_1CFA
  * - "tpa-2cfa" -> TPA_2CFA
- * - "gpg", "gpg-aa", "gpg-fscs" -> GPG
  * - "dyck", "dyckaa" -> DyckAA
  * - "cfl-anders", "cflanders" -> CFLAnders
  * - "cfl-steens", "cflsteens" -> CFLSteens

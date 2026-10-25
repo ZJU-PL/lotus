@@ -52,9 +52,6 @@ TEST_F(AliasWrapperBuildTest, DisabledBackendsFailConservatively) {
 #if !LOTUS_AA_WRAPPER_ENABLE_TPA
   disabled.push_back(lotus::AAConfig::Implementation::TPA);
 #endif
-#if !LOTUS_AA_WRAPPER_ENABLE_GPG
-  disabled.push_back(lotus::AAConfig::Implementation::GPG);
-#endif
 #if !LOTUS_AA_WRAPPER_ENABLE_CCLYZER
   disabled.push_back(lotus::AAConfig::Implementation::CclyzerAA);
 #endif
@@ -81,9 +78,6 @@ TEST_F(AliasWrapperBuildTest, EnabledOptionalBackendsInitialize) {
 #endif
 #if LOTUS_AA_WRAPPER_ENABLE_TPA
   enabled.push_back(lotus::AAConfig::Implementation::TPA);
-#endif
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-  enabled.push_back(lotus::AAConfig::Implementation::GPG);
 #endif
   if (enabled.empty())
     GTEST_SKIP() << "All optional in-process wrapper backends are disabled";

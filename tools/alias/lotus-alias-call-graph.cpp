@@ -27,7 +27,6 @@
 #include "Alias/InclusionBased/AserPTA/PreProcessing/Passes/RemoveExceptionHandlerPass.h"
 #include "Alias/InclusionBased/AserPTA/PreProcessing/Passes/StandardHeapAPIRewritePass.h"
 #include "Alias/InclusionBased/AserPTA/Util/Log.h"
-#include "Alias/InclusionBased/GPG/Analysis.h"
 #include "Alias/InclusionBased/LotusAA/Engine/InterProceduralPass.h"
 #include "Alias/InclusionBased/LotusAA/Support/FunctionPointerResults.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/CLIUtils.h"
@@ -56,7 +55,6 @@ static cl::OptionCategory CGCat("CallGraph");
 
 enum class CGType {
   DyckAA,
-  GPG,
   LotusAA,
   FPA_FLTA,
   FPA_MLTA,
@@ -71,7 +69,6 @@ static cl::opt<CGType> AnalysisType(
     "cg-type", cl::desc("Call-graph analysis type"),
     cl::values(
         clEnumValN(CGType::DyckAA, "dyck", "DyckAA"),
-        clEnumValN(CGType::GPG, "gpg", "GPG FSCS pointer analysis"),
         clEnumValN(CGType::LotusAA, "lotus", "LotusAA"),
         clEnumValN(CGType::FPA_FLTA, "fpa-flta", "FPA FLTA"),
         clEnumValN(CGType::FPA_MLTA, "fpa-mlta", "FPA MLTA"),
@@ -162,24 +159,6 @@ static void processDirectCalls(llvm::Module &M, llvm::CallGraph &CG) {
   }
 }
 
-// LLVM's initial CallGraph represents an unresolved indirect call with an
-// edge to the external-calls node. Remove that placeholder before installing
-// precise GPG targets; otherwise statistics count one spurious callee for
-// every resolved indirect call.
-static void removeCallSiteEdges(llvm::CallGraph &CG, llvm::Function *Caller,
-                                llvm::CallBase *CS) {
-  auto *Node = Caller ? CG[Caller] : nullptr;
-  if (!Node || !CS)
-    return;
-
-  for (auto It = Node->begin(); It != Node->end();) {
-    if (It->first.hasValue() && It->first.getValue() == CS)
-      Node->removeCallEdge(It);
-    else
-      ++It;
-  }
-}
-
 // Build call graph using DyckAA
 static void buildCGWithDyckAA(llvm::Module &M, llvm::CallGraph &CG) {
   llvm::legacy::PassManager PM;
@@ -267,39 +246,6 @@ static void buildCGWithLotusAA(llvm::Module &M, llvm::CallGraph &CG) {
           addCallEdge(CG, Caller, CB, TargetItem.first);
         }
       }
-    }
-  }
-}
-
-static void buildCGWithGPG(llvm::Module &M, llvm::CallGraph &CG) {
-  lotus::gpg::GPGAnalysisEngine analysis(M);
-  analysis.run();
-  processDirectCalls(M, CG);
-
-  // Strip LLVM's conservative external-node edge from every indirect call,
-  // including unresolved calls. GPG targets are added back below; calls with
-  // no target then correctly contribute zero resolved edges to statistics.
-  for (llvm::Function &function : M) {
-    if (function.isDeclaration())
-      continue;
-    for (llvm::BasicBlock &block : function) {
-      for (llvm::Instruction &instruction : block) {
-        auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-        if (!call ||
-            llvm::isa<llvm::Function>(
-                call->getCalledOperand()->stripPointerCastsAndAliases()))
-          continue;
-        removeCallSiteEdges(CG, &function, call);
-      }
-    }
-  }
-
-  for (const auto &[call, targets] : analysis.result().indirectCallTargets()) {
-    auto *non_const_call = const_cast<llvm::CallBase *>(call);
-    auto *caller = const_cast<llvm::Function *>(call->getFunction());
-    for (const llvm::Function *target : targets) {
-      addCallEdge(CG, caller, non_const_call,
-                  const_cast<llvm::Function *>(target));
     }
   }
 }
@@ -483,9 +429,6 @@ int main(int Argc, char *Argv[]) {
     switch (AnalysisType) {
     case CGType::DyckAA:
       buildCGWithDyckAA(*M, CG);
-      break;
-    case CGType::GPG:
-      buildCGWithGPG(*M, CG);
       break;
     case CGType::LotusAA:
       buildCGWithLotusAA(*M, CG);

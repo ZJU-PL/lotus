@@ -157,7 +157,7 @@ binary, so full builds do not acquire a separate link step for every group.
 
 Supported groups:
 
-* ``alias``: ``gpg``, ``dda``, ``aserpta``, ``bootstrapaa``, ``flowsensitive``,
+* ``alias``: ``dda``, ``aserpta``, ``bootstrapaa``, ``flowsensitive``,
   ``lotusaa``, ``sparrowaa``, ``tpa``, ``cclyzeraa``, ``dyckaa``, ``seadsa``,
   ``allocaa``, ``typequalifier``, ``underapproxaa``, ``ptsset``, ``aliaswrapper``.
 * ``analysis``: ``cfg``, ``controldependence``, ``debuginfo``, ``general``,
@@ -199,7 +199,6 @@ The unified alias wrapper can omit heavier backends independently:
    cmake -S . -B build-concurrency \
      -DLOTUS_AA_WRAPPER_ENABLE_DDA=OFF \
      -DLOTUS_AA_WRAPPER_ENABLE_TPA=OFF \
-     -DLOTUS_AA_WRAPPER_ENABLE_GPG=OFF \
      -DLOTUS_AA_WRAPPER_ENABLE_CCLYZER=OFF
 
 These switches default to ON and affect only the wrapper. Standalone backend

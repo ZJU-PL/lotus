@@ -17,7 +17,7 @@ set(LOTUS_UNITY_BATCH_SIZE 4 CACHE STRING "Maximum sources per selected unity ba
 # SparrowAA, DyckAA, UnderApprox and LLVM's CFL analyses remain available.
 # These switches affect the wrapper only; standalone backend libraries/tools
 # are still available and can be built explicitly.
-foreach(backend DDA TPA GPG CCLYZER)
+foreach(backend DDA TPA CCLYZER)
   option(LOTUS_AA_WRAPPER_ENABLE_${backend}
          "Include ${backend} in the unified alias-analysis wrapper" ON)
 endforeach()
@@ -119,7 +119,7 @@ set(_lotus_test_roots
   alias analysis checker cfl concurrency dataflow fuzzing ir
   security solvers symbolicexecution transform utils verification)
 set(_lotus_test_choices ${_lotus_test_roots})
-foreach(group gpg dda aserpta bootstrapaa flowsensitive lotusaa sparrowaa tpa
+foreach(group dda aserpta bootstrapaa flowsensitive lotusaa sparrowaa tpa
               cclyzeraa dyckaa seadsa allocaa typequalifier underapproxaa ptsset
               aliaswrapper)
   list(APPEND _lotus_test_choices "alias/${group}")
@@ -211,7 +211,7 @@ function(lotus_print_build_summary)
   _lotus_summary_bool("Compilation time traces" LOTUS_ENABLE_TIME_TRACE)
   message(STATUS "  PCH targets: ${LOTUS_PCH_TARGETS}")
   message(STATUS "  Unity targets: ${LOTUS_UNITY_TARGETS}")
-  foreach(backend DDA TPA GPG CCLYZER)
+  foreach(backend DDA TPA CCLYZER)
     _lotus_summary_bool("Alias wrapper ${backend}" LOTUS_AA_WRAPPER_ENABLE_${backend})
   endforeach()
   message(STATUS "  Optional tool families:")

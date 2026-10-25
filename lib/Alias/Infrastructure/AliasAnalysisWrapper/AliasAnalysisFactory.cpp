@@ -181,8 +181,3 @@ AliasAnalysisFactory::createTPA(Module &M, unsigned kCFA) {
     return create(M, AAConfig::TPA_KCFA(kCFA));
   }
 }
-
-std::unique_ptr<AliasAnalysisWrapper>
-AliasAnalysisFactory::createGPG(Module &M) {
-  return create(M, AAConfig::GPG());
-}

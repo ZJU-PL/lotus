@@ -64,9 +64,6 @@ std::string toLower(const std::string &str) {
  * - "tpa-3cfa" -> TPA_3CFA()
  * - "tpa-k" or "tpa-kcfa" (where k is a number) -> TPA_KCFA(k)
  *
- * **GPG:**
- * - "gpg", "gpg-aa", "gpg-fscs" -> GPG()
- *
  * **Other analyses:**
  * - "dyck", "dyckaa" -> DyckAA()
  * - "cfl-anders", "cflanders" -> CFLAnders()
@@ -156,9 +153,6 @@ AAConfig lotus::parseAAConfigFromString(const std::string &str,
     return AAConfig::TPA_NoCtx();
   }
 
-  if (lower == "gpg" || lower == "gpg-aa" || lower == "gpg-fscs") {
-    return AAConfig::GPG();
-  }
   if (lower == "tpa-1cfa") {
     return AAConfig::TPA_1CFA();
   }

@@ -50,14 +50,6 @@ target_link_libraries(lotus-alias-lotus-aa PRIVATE
   ${LLVM_LINK_COMPONENTS}
 )
 
-# GPG flow- and context-sensitive points-to analysis tool
-add_executable(lotus-alias-gpg lotus-alias-gpg.cpp)
-target_link_libraries(lotus-alias-gpg PRIVATE
-  CanaryGPG
-  CanaryAliasCLIUtils
-  ${LLVM_LINK_COMPONENTS}
-)
-
 # Andersen's Pointer Analysis Tool
 add_executable(lotus-alias-sparrow-aa lotus-alias-sparrow-aa.cpp)
 target_link_libraries(lotus-alias-sparrow-aa PRIVATE
@@ -88,7 +80,6 @@ target_link_libraries(lotus-alias-tpa PRIVATE
 add_executable(lotus-alias-call-graph lotus-alias-call-graph.cpp)
 target_link_libraries(lotus-alias-call-graph PRIVATE
   CanaryDyckAA
-  CanaryGPG
   LotusAA
   CanaryFPA
   AserPTA

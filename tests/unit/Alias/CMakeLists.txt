@@ -1,6 +1,4 @@
 # Preserve one alias_tests binary, with sources/dependencies from selected groups.
-lotus_add_test_group(alias gpg InclusionBased/GPG alias_tests
-  LINK_LIBS CanaryGPG CanaryAliasAnalysisWrapper)
 lotus_add_test_group(alias dda DemandDriven/DDA alias_tests LINK_LIBS DDA)
 lotus_add_test_group(alias aserpta InclusionBased/AserPTA alias_tests LINK_LIBS AserPTA)
 lotus_add_test_group(alias bootstrapaa InclusionBased/BootstrapAA alias_tests

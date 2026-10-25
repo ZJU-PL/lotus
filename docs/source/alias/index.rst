@@ -22,7 +22,6 @@ pages alongside an algorithm page when comparing analyses.
    dda
    dyckaa
    seadsa
-   gpg
    flowsensitive
    valueflowpta
    lotusaa

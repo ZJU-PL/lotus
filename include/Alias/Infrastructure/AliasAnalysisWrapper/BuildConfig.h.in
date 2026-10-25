@@ -3,5 +3,4 @@
 // Configured by CMake for this build; consumers must see the same wrapper layout.
 #cmakedefine01 LOTUS_AA_WRAPPER_ENABLE_DDA
 #cmakedefine01 LOTUS_AA_WRAPPER_ENABLE_TPA
-#cmakedefine01 LOTUS_AA_WRAPPER_ENABLE_GPG
 #cmakedefine01 LOTUS_AA_WRAPPER_ENABLE_CCLYZER

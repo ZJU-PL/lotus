@@ -4,20 +4,6 @@ Alias Analysis Tools
 This page documents the command-line tools under ``tools/alias/``. For the
 underlying algorithms and architecture, see :doc:`../../alias/alias_analysis`.
 
-GPG (lotus-alias-gpg)
----------------------
-
-Bottom-up generalized-points-to-graph analysis. The default ``fscs`` mode is
-flow-, field-, and fully context-sensitive; ``fics`` and ``fici`` reproduce
-the reference implementation's comparison variants.
-
-.. code-block:: bash
-
-   ./build/bin/lotus-alias-gpg --mode=fscs --print-pts \
-     --print-call-graph --print-modref input.bc
-
-See :doc:`../../alias/gpg` for architecture and options.
-
 SparrowAA (lotus-alias-sparrow-aa)
 ----------------------------------
 
@@ -255,11 +241,10 @@ or call-graph analyses.
 
    ./build/bin/lotus-alias-call-graph -cg-type=dyck input.bc
    ./build/bin/lotus-alias-call-graph -cg-type=lotus -emit-cg-as-json input.bc
-   ./build/bin/lotus-alias-call-graph -cg-type=gpg -emit-cg-as-json input.bc
 
 Key options:
 
-- ``-cg-type=gpg|dyck|lotus|fpa-flta|fpa-mlta|fpa-mltadf|fpa-kelp|aserpta-ci|aserpta-1cfa|aserpta-2cfa``
+- ``-cg-type=dyck|lotus|fpa-flta|fpa-mlta|fpa-mltadf|fpa-kelp|aserpta-ci|aserpta-1cfa|aserpta-2cfa``
 - ``-emit-cg-as-dot`` or ``-emit-cg-as-json``
 - ``-o <file>`` – output destination
 - ``-S`` – compute graph statistics and write them to standard error
