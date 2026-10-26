@@ -239,6 +239,13 @@ these through ``--scc-elimination``, ``--graph-folding``,
 Direct foldable pairs are collected once after SCC elimination; alias
 common-dereference merging and FastDyck then use their own worklists, preserving
 the original phase boundaries.
+Merging turns direct edges inside a class into self-loops. The self-loop of a
+direct edge ``x -> y`` and of its explicit reverse is kept only when ``y`` has
+an incoming dereference edge, where the alias grammar still uses it
+(``A ::= a M`` and ``Abar ::= M abar``); all other such loops are dropped. On
+the unit tests and on the SVF-exported PEGs of eleven C programs, the reduced
+``V`` relation then equals the original one mapped onto the representatives,
+for SCC elimination, folding and both.
 
 ``RecursiveStateMachine`` and ``FoldabilityChecker`` implement POCR's RSM
 transition semantics and node-pair foldability proof. These utilities remain
