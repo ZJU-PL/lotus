@@ -1,8 +1,7 @@
 # Context-Sensitive Reachability (CSR) Tool
 
-The tool uses the FLARE APIs under ``include/CFL/CSIndex/FLARE``. The separate
-sanitizer-aware extension lives under ``include/CFL/CSIndex/SCS`` and is not
-selected by this command-line driver.
+The tool uses the FLARE APIs under ``include/CFL/CSIndex/FLARE`` and the sanitizer-aware
+extension under ``include/CFL/CSIndex/SCS``.
 
 The CSR tool provides indexing-based context-sensitive reachability analysis for large-scale program analysis.
 
@@ -12,10 +11,12 @@ The CSR tool provides indexing-based context-sensitive reachability analysis for
   - GRAIL (Graph Random Labeling)
   - PathTree (Path Tree Indexing)
   - Combined PathTree+GRAIL
+  - SCS (Sanitizer-aware Context-Sensitive Reachability Indexing)
 
 - **Query Types**:
   - Reachability queries
   - Transitive closure computation
+  - SCS security policy reachability queries and witness generation
 
 - **Parallel Processing**:
   - Parallel Tabulation algorithm for improved performance on large graphs
@@ -40,6 +41,15 @@ The CSR tool provides indexing-based context-sensitive reachability analysis for
 | `-j N` | Number of threads for parallel tabulation (0 = auto-detect) |
 | `-m method` | Indexing approach: pathtree, grail, or pathtree+grail |
 | `-d N` | Dimension for GRAIL labeling (default: 2) |
+| `-s`, `--scs` | Evaluate SCS (Sanitizer-aware CS reachability) indexing |
+| `-E`, `--events file` | Path to event labels file (`<src> <dst> <event>`) |
+| `-P`, `--policy file` | Path to policy automaton file |
+| `--policy-taint` | Use built-in 3-state taint policy (1=source, 2=sanitize, 3=sink) |
+| `--scs-explicit` | Use explicit product construction (default: lazy) |
+| `--scs-lazy` | Use lazy product construction |
+| `--scs-witness` | Retain and test witness paths |
+| `--scs-all` | Index all vertices as sources and sinks (default: query endpoints) |
+| `--scs-csv file` | Save SCS index statistics to CSV file |
 
 ## Examples
 
@@ -52,6 +62,12 @@ The CSR tool provides indexing-based context-sensitive reachability analysis for
 
 # Evaluate parallel tabulation with 4 threads
 ./csr -p -j 4 input.graph
+
+# Evaluate SCS indexing with lazy product
+./csr -s input.graph
+
+# Evaluate SCS indexing with taint policy and edge events
+./csr -s --policy-taint -E events.txt --scs-witness input.graph
 
 # Generate and save queries for later use
 ./csr -g queries.txt -n 1000 input.graph

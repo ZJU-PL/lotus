@@ -11,6 +11,10 @@
 #include "CFL/CSIndex/FLARE/ReachBackbone.h"
 #include "CFL/CSIndex/FLARE/Tabulation/Parallel.h"
 #include "CFL/CSIndex/FLARE/Tabulation/Sequential.h"
+#include "CFL/CSIndex/SCS/FactorizedIndex.h"
+#include "CFL/CSIndex/SCS/Graph.h"
+#include "CFL/CSIndex/SCS/Index.h"
+#include "CFL/CSIndex/SCS/PolicyAutomaton.h"
 #include "Utils/Platform/ProgressBar.h"
 
 #include <chrono>
@@ -18,16 +22,22 @@
 #include <cstddef>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <ratio>
+#include <set>
+#include <sstream>
 #include <thread>
+#include <vector>
 
 #include <unistd.h>
 
 using namespace std;
 
 namespace flare = lotus::cfl::cs_index::flare;
+namespace scs = lotus::cfl::cs_index::scs;
+
 using Graph = flare::Graph;
 using GraphAlgorithms = flare::GraphAlgorithms;
 using EdgeList = flare::EdgeList;
@@ -39,6 +49,14 @@ using PathTreeIndex = flare::path_tree::Index;
 using PathTreeQuery = flare::path_tree::Query;
 using SequentialTabulation = flare::tabulation::Sequential;
 using ParallelTabulation = flare::tabulation::Parallel;
+
+using SCSGraph = scs::Graph;
+using SCSPolicyAutomaton = scs::PolicyAutomaton;
+using SCSIndex = scs::Index;
+using SCSIndexOptions = scs::IndexOptions;
+using SCSProductConstruction = scs::ProductConstruction;
+using SCSWitness = scs::Witness;
+using SCSIndexStats = scs::IndexStats;
 
 static int query_num = 100;
 static int grail_dim = 2;
@@ -53,6 +71,15 @@ static bool parallel_tab_alg = false;
 static int parallel_threads = 0; // 0 means auto-detect
 static string indexing;
 
+static bool scs_eval = false;
+static string events_file;
+static string policy_file;
+static bool policy_taint = false;
+static bool scs_explicit = false;
+static bool scs_witness = false;
+static bool scs_all_endpoints = false;
+static string scs_csv_file;
+
 static volatile sig_atomic_t timeout = 0;
 
 extern "C" {
@@ -62,7 +89,7 @@ void alarm_handler(int param) { timeout = 1; }
 static void usage() {
   cout << "\nUsage:\n"
           "	csr [-h] [-t] [-m pathtree_or_grail] [-n num_query] [-q "
-          "query_file] [-g query_file] graph_file\n"
+          "query_file] [-g query_file] [-s] graph_file\n"
           "Description:\n"
           "	-h\tPrint the help message.\n"
           "	-n\t# reachable queries and # unreachable queries to be "
@@ -77,6 +104,15 @@ static void usage() {
           "	-m\tEvaluate what indexing approach, pathtree, grail, or "
           "pathtree+grail.\n"
           "	-d\tSet the dim of GrailIndex, 2 by default.\n"
+          "	-s, --scs\tEvaluate SCS (Sanitizer-aware CS reachability indexing).\n"
+          "	-E, --events\tPath to event labels file (<src> <dst> <event>).\n"
+          "	-P, --policy\tPath to policy automaton file.\n"
+          "	--policy-taint\tUse built-in 3-state taint policy (1=src, 2=sanitize, 3=sink).\n"
+          "	--scs-explicit\tUse explicit product construction (default: lazy).\n"
+          "	--scs-lazy\tUse lazy product construction.\n"
+          "	--scs-witness\tRetain and test witness paths.\n"
+          "	--scs-all\tIndex all vertices as sources and sinks (default: query endpoints).\n"
+          "	--scs-csv\tSave SCS index stats to CSV file.\n"
        << "\n";
 }
 
@@ -123,9 +159,41 @@ static void parse_arg(int argc, char *argv[]) {
     } else if (strcmp("-m", argv[i]) == 0) {
       i++;
       indexing = argv[i++];
-    } else if (strcmp("-d", argv[i]) == 0) {
+    } else if (strcmp("-s", argv[i]) == 0 || strcmp("--scs", argv[i]) == 0) {
       i++;
-      grail_dim = atoi(argv[i++]);
+      scs_eval = true;
+    } else if (strcmp("-E", argv[i]) == 0 || strcmp("--events", argv[i]) == 0) {
+      i++;
+      events_file = argv[i++];
+      scs_eval = true;
+    } else if (strcmp("-P", argv[i]) == 0 || strcmp("--policy", argv[i]) == 0) {
+      i++;
+      policy_file = argv[i++];
+      scs_eval = true;
+    } else if (strcmp("--policy-taint", argv[i]) == 0) {
+      i++;
+      policy_taint = true;
+      scs_eval = true;
+    } else if (strcmp("--scs-explicit", argv[i]) == 0) {
+      i++;
+      scs_explicit = true;
+      scs_eval = true;
+    } else if (strcmp("--scs-lazy", argv[i]) == 0) {
+      i++;
+      scs_explicit = false;
+      scs_eval = true;
+    } else if (strcmp("--scs-witness", argv[i]) == 0) {
+      i++;
+      scs_witness = true;
+      scs_eval = true;
+    } else if (strcmp("--scs-all", argv[i]) == 0) {
+      i++;
+      scs_all_endpoints = true;
+      scs_eval = true;
+    } else if (strcmp("--scs-csv", argv[i]) == 0) {
+      i++;
+      scs_csv_file = argv[i++];
+      scs_eval = true;
     } else {
       graph_file = argv[i++];
     }
@@ -137,6 +205,157 @@ static void parse_arg(int argc, char *argv[]) {
   if (indexing.empty())
     indexing = "grail";
 }
+
+static SCSGraph::EventLabelMap parse_events_file(const string &filename) {
+  SCSGraph::EventLabelMap event_map;
+  ifstream f(filename);
+  if (!f.is_open()) {
+    cerr << "Error: Cannot open event file " << filename << "\n";
+    exit(1);
+  }
+  string line;
+  while (getline(f, line)) {
+    size_t first = line.find_first_not_of(" \t\r\n");
+    if (first == string::npos || line[first] == '#')
+      continue;
+    istringstream ss(line);
+    int u, v, ev;
+    if (ss >> u >> v >> ev) {
+      event_map[{u, v}] = ev;
+    }
+  }
+  return event_map;
+}
+
+static SCSPolicyAutomaton parse_policy_file(const string &filename) {
+  ifstream f(filename);
+  if (!f.is_open()) {
+    cerr << "Error: Cannot open policy file: " << filename << "\n";
+    exit(1);
+  }
+  auto next_clean_line = [&]() -> string {
+    string l;
+    while (getline(f, l)) {
+      size_t first = l.find_first_not_of(" \t\r\n");
+      if (first == string::npos)
+        continue;
+      if (l[first] == '#')
+        continue;
+      size_t comment_pos = l.find('#', first);
+      if (comment_pos != string::npos)
+        l = l.substr(first, comment_pos - first);
+      else
+        l = l.substr(first);
+      size_t last = l.find_last_not_of(" \t\r\n");
+      if (last != string::npos)
+        return l.substr(0, last + 1);
+    }
+    return "";
+  };
+
+  string kind_str = next_clean_line();
+  if (kind_str.empty()) {
+    cerr << "Error: Empty policy file: " << filename << "\n";
+    exit(1);
+  }
+  SCSPolicyAutomaton::Kind kind = SCSPolicyAutomaton::Kind::DFA;
+  if (kind_str == "nfa" || kind_str == "NFA")
+    kind = SCSPolicyAutomaton::Kind::NFA;
+
+  string counts_line = next_clean_line();
+  istringstream count_ss(counts_line);
+  int num_states = 0, initial_state = 0;
+  if (!(count_ss >> num_states >> initial_state)) {
+    cerr << "Error: Policy file missing state count and initial state\n";
+    exit(1);
+  }
+
+  SCSPolicyAutomaton policy(num_states, initial_state, kind);
+
+  string accept_line = next_clean_line();
+  istringstream accept_ss(accept_line);
+  int acc_state;
+  bool has_acc = false;
+  while (accept_ss >> acc_state) {
+    policy.addAcceptingState(acc_state);
+    has_acc = true;
+  }
+  if (!has_acc) {
+    cerr << "Error: Policy file must specify at least one accepting state\n";
+    exit(1);
+  }
+
+  while (true) {
+    string trans_line = next_clean_line();
+    if (trans_line.empty())
+      break;
+    istringstream trans_ss(trans_line);
+    int src, event, dst;
+    if (trans_ss >> src >> event >> dst) {
+      policy.addTransition(src, event, dst);
+    }
+  }
+  return policy;
+}
+
+static SCSPolicyAutomaton build_default_policy(const std::set<int> &events) {
+  SCSPolicyAutomaton policy(1, 0, SCSPolicyAutomaton::Kind::DFA);
+  policy.addAcceptingState(0);
+  for (int ev : events) {
+    policy.addTransition(0, ev, 0);
+  }
+  return policy;
+}
+
+static SCSPolicyAutomaton
+build_taint_policy(const std::set<int> &observed_events) {
+  constexpr int SOURCE_EVENT = 1;
+  constexpr int SANITIZE_EVENT = 2;
+  constexpr int SINK_EVENT = 3;
+
+  SCSPolicyAutomaton policy(3, 0, SCSPolicyAutomaton::Kind::DFA);
+  policy.addAcceptingState(2);
+
+  policy.addTransition(0, SOURCE_EVENT, 1);
+  policy.addTransition(1, SOURCE_EVENT, 1);
+  policy.addTransition(2, SOURCE_EVENT, 2);
+
+  policy.addTransition(0, SANITIZE_EVENT, 0);
+  policy.addTransition(1, SANITIZE_EVENT, 0);
+  policy.addTransition(2, SANITIZE_EVENT, 2);
+
+  policy.addTransition(0, SINK_EVENT, 0);
+  policy.addTransition(1, SINK_EVENT, 2);
+  policy.addTransition(2, SINK_EVENT, 2);
+
+  for (int ev : observed_events) {
+    if (ev != SOURCE_EVENT && ev != SANITIZE_EVENT && ev != SINK_EVENT) {
+      policy.addIdentityTransitions(ev);
+    }
+  }
+  return policy;
+}
+
+class SCSReachabilityQueryAdapter : public ReachabilityQuery {
+public:
+  explicit SCSReachabilityQueryAdapter(SCSIndex &index, string name = "SCS")
+      : index_(index), name_(std::move(name)) {}
+
+  bool reach(int src, int dst) override {
+    try {
+      return index_.reachable(src, dst);
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+
+  const char *method() const override { return name_.c_str(); }
+  void reset() override {}
+
+private:
+  SCSIndex &index_;
+  string name_;
+};
 
 template <typename Src, typename Target>
 static double test_query(ReachabilityQuery *aq,
@@ -299,6 +518,23 @@ int main(int argc, char *argv[]) {
   auto orig_vfg_size = vfg.num_vertices();
   auto orig_vfg_edges = vfg.num_edges();
   vfg.check(); // check the correctness
+
+  SCSGraph scs_graph;
+  SCSPolicyAutomaton policy(1, 0);
+  if (scs_eval) {
+    SCSGraph::EventLabelMap event_map;
+    if (!events_file.empty()) {
+      event_map = parse_events_file(events_file);
+    }
+    scs_graph = SCSGraph::fromGraph(vfg, event_map);
+    if (!policy_file.empty()) {
+      policy = parse_policy_file(policy_file);
+    } else if (policy_taint) {
+      policy = build_taint_policy(scs_graph.observedEvents());
+    } else {
+      policy = build_default_policy(scs_graph.observedEvents());
+    }
+  }
 
   auto start = std::chrono::high_resolution_clock::now();
   vfg.build_summary_edges();
@@ -539,6 +775,104 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  double scs_r_time = 0;
+  double scs_nr_time = 0;
+  double scs_construction_time = 0;
+  if (scs_eval) {
+    cout << "--------- SCS Indexing Construction ---------" << "\n";
+    vector<int> scs_sources;
+    vector<int> scs_sinks;
+    if (scs_all_endpoints) {
+      for (int i = 0; i < orig_vfg_size; ++i) {
+        scs_sources.push_back(i);
+        scs_sinks.push_back(i);
+      }
+    } else {
+      set<int> src_set, dst_set;
+      for (const auto &p : reachable_pairs) {
+        src_set.insert(p.first);
+        dst_set.insert(p.second);
+      }
+      for (const auto &p : unreachable_pairs) {
+        src_set.insert(p.first);
+        dst_set.insert(p.second);
+      }
+      scs_sources.assign(src_set.begin(), src_set.end());
+      scs_sinks.assign(dst_set.begin(), dst_set.end());
+      if (scs_sources.empty()) {
+        for (int i = 0; i < orig_vfg_size; ++i)
+          scs_sources.push_back(i);
+      }
+      if (scs_sinks.empty()) {
+        for (int i = 0; i < orig_vfg_size; ++i)
+          scs_sinks.push_back(i);
+      }
+    }
+
+    SCSIndexOptions scs_options;
+    scs_options.product_construction = scs_explicit
+                                           ? SCSProductConstruction::Explicit
+                                           : SCSProductConstruction::Lazy;
+    scs_options.retain_witnesses = scs_witness;
+    scs_options.grail_dimensions = grail_dim;
+
+    start = std::chrono::high_resolution_clock::now();
+    SCSIndex scs_index(scs_graph, policy, scs_sources, scs_sinks, scs_options);
+    end = std::chrono::high_resolution_clock::now();
+    diff = end - start;
+    scs_construction_time = diff.count();
+
+    const auto &stats = scs_index.stats();
+    cout << "SCS Construction Duration: " << std::setprecision(2) << fixed
+         << scs_construction_time << " ms" << "\n";
+    cout << "#Product Vertices: " << stats.product_vertices
+         << " #Product Edges: " << stats.product_edges << "\n";
+    cout << "Materialized Product States: " << stats.materialized_product_states
+         << " / " << stats.explicit_product_states << " ("
+         << std::setprecision(2) << fixed
+         << stats.materializedProductFraction() * 100.0 << "%)\n";
+
+    cout << "--------- SCS Queries Test ------------" << "\n";
+    SCSReachabilityQueryAdapter scs_query_adapter(
+        scs_index, scs_explicit ? "SCS (Explicit)" : "SCS (Lazy)");
+    auto vertex_map = [](int v) { return v; };
+    scs_r_time = test_query(&scs_query_adapter, reachable_pairs, true,
+                            vertex_map, vertex_map);
+    scs_nr_time = test_query(&scs_query_adapter, unreachable_pairs, false,
+                             vertex_map, vertex_map);
+
+    if (scs_witness) {
+      cout << "--------- SCS Witness Test ------------" << "\n";
+      int reachable_witnesses = 0;
+      auto wit_start = std::chrono::high_resolution_clock::now();
+      for (const auto &rs : reachable_pairs) {
+        auto wit = scs_index.witness(rs.first, rs.second);
+        if (wit.has_value() && wit->context_valid && wit->policy_accepting) {
+          reachable_witnesses++;
+        }
+      }
+      auto wit_end = std::chrono::high_resolution_clock::now();
+      chrono::duration<double, std::milli> wit_diff = wit_end - wit_start;
+      cout << "Witness queries for " << reachable_pairs.size()
+           << " reachable pairs: " << (int)wit_diff.count() << " ms. "
+           << "Valid witnesses found: " << reachable_witnesses << "\n";
+    }
+
+    if (!scs_csv_file.empty()) {
+      ofstream csv_out(scs_csv_file);
+      if (csv_out.is_open()) {
+        SCSIndexStats::writeCsvHeader(csv_out);
+        csv_out << "\n";
+        stats.writeCsvRow(csv_out);
+        csv_out << "\n";
+        csv_out.close();
+        cout << "SCS metrics saved to " << scs_csv_file << "\n";
+      } else {
+        cerr << "Warning: Could not open " << scs_csv_file << " for writing\n";
+      }
+    }
+  }
+
   cout << "--------- Indexing Construction Summary ---------" << "\n";
   cout << "# Vertices: " << orig_vfg_size << "\n";
   cout << "# Edges: " << orig_vfg_edges << "\n";
@@ -560,6 +894,10 @@ int main(int argc, char *argv[]) {
     cout << "Pathtree indices size: " << std::setprecision(2) << fixed
          << pt_total_size << " mb. " << "\n";
     delete pathtree;
+  }
+  if (scs_eval) {
+    cout << "SCS      indices time: " << std::setprecision(2) << fixed
+         << scs_construction_time << " ms. " << "\n";
   }
 
   // final output
@@ -588,6 +926,13 @@ int main(int argc, char *argv[]) {
   cerr << ", ";
   cerr << std::setprecision(2) << fixed << parallel_tc_time / 1000.0 << ", ";
   cerr << std::setprecision(2) << fixed << parallel_tc_size << ", ";
+  if (scs_eval) {
+    cerr << ", ";
+    cerr << std::setprecision(2) << fixed << scs_construction_time / 1000.0
+         << ", ";
+    cerr << std::setprecision(2) << fixed << scs_r_time << ", ";
+    cerr << std::setprecision(2) << fixed << scs_nr_time << ", ";
+  }
   cerr << "\n";
 
   return 0;
