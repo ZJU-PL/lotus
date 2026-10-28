@@ -79,7 +79,7 @@ enables that engine's own checks.
      - Initialization-state checking
    * - Tainted data reaches a sink
      - ``taint``
-     - ``pulse``, ``symex``, ``gsaf``
+     - ``pulse``, ``gsaf``
      - Configurable source-to-sink analysis
    * - Data race, deadlock, or parallel-runtime error
      - ``concur``
@@ -232,16 +232,16 @@ Components
 
 **Pulse Checker** (``lib/Checker/Pulse/``):
 
-* ``PulseChecker.cpp`` – Main bug finder using biabductive analysis
-* ``PulseDomain.cpp`` – Execution domain abstraction
-* ``PulseAbductiveDomain.h`` – Core abstract domain with biabduction
-* ``PulseOperations.cpp`` – Core memory operations (readDeref, writeDeref, etc.)
-* ``PulseDisjunctiveDomain.cpp`` – Disjunctive analysis for path-sensitive reasoning
-* ``PulseLoopAbstraction.cpp`` – Loop abstraction with widening
-* ``PulseSummary.cpp`` – Function summary representation and application
-* ``PulseTaint.cpp`` – Taint analysis for security vulnerabilities
-* ``PulseModels.cpp`` – Library function models
-* ``PulseDiagnostic.cpp`` – Rich diagnostic reporting with traces
+* ``Checker/PulseChecker.cpp`` – Main bug finder using biabductive analysis
+* ``Domain/PulseDomain.cpp`` – Execution domain abstraction
+* ``include/Checker/Pulse/Domain/PulseAbductiveDomain.h`` – Core abstract domain with biabduction
+* ``Domain/PulseOperations.cpp`` – Core memory operations (readDeref, writeDeref, etc.)
+* ``Domain/PulseDisjunctiveDomain.cpp`` – Disjunctive analysis for path-sensitive reasoning
+* ``Domain/PulseLoopAbstraction.cpp`` – Loop abstraction with widening
+* ``Domain/PulseSummary.cpp`` – Function summary representation and application
+* ``Domain/PulseTaint.cpp`` – Taint analysis for security vulnerabilities
+* ``Models/PulseModels.cpp`` – Library function models
+* ``Report/PulseDiagnostic.cpp`` – Rich diagnostic reporting with traces
 
 **Saber Checker** (``lib/Checker/Saber/``):
 
@@ -252,10 +252,10 @@ Components
 
 **Symbolic Execution Checker** (``lib/SymbolicExecution/``):
 
-* ``AnalysisDriver.cpp`` – Whole-module symbolic execution driver
-* ``AnalysisState*.cpp`` – Symbolic state, summaries, taint updates, and bug queries
-* ``PathCondSolver.cpp`` – SMT-backed feasibility checking for path conditions
-* ``SymbolicExecutionWrapper.cpp`` – LLVM pass wrapper used by ``lotus-check --engine=symex``
+* ``Core/AnalysisDriver.cpp`` – Whole-module symbolic execution driver
+* ``Core/AnalysisState*.cpp`` – Symbolic state, summaries, taint updates, and bug queries
+* ``Solver/PathCondSolver.cpp`` – SMT-backed feasibility checking for path conditions
+* ``Integration/SymbolicExecutionWrapper.cpp`` – LLVM pass wrapper used by ``lotus-check --engine=symex``
 
 **Debug Info Analysis** (``lib/Analysis/DebugInfo/``):
 
@@ -329,7 +329,7 @@ The framework detects the following bug categories:
 * **Reachability**: Unreachable (dead) branches, reported alongside the numerical checks
 * **Concurrency**: Data races, deadlocks, atomicity violations, lock mismatches, condition-variable misuse, OpenMP runtime misuse, MPI protocol/RMA bugs
 * **Security**: Taint errors (untrusted data flows), use-after-free, null dereferences
-* **Performance**: Unnecessary copies, const-refable parameters
+* **Performance**: Unnecessary copies, const-refable parameters (planned)
 
 All bug types are classified by importance (LOW, MEDIUM, HIGH) and category (SECURITY, ERROR, WARNING, PERFORMANCE) with CWE mappings.
 

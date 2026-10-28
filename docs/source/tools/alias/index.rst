@@ -378,6 +378,7 @@ Dynamic checker that validates static alias analyses against runtime behavior.
 
 **Binaries**:
 
+- ``dynaa`` – Driver for running dynamic alias checking workflows
 - ``dynaa-instrument`` – Instrument program to log pointer behavior
 - ``dynaa-check`` – Compare runtime logs against static AA
 - ``dynaa-log-dump`` – Dump binary logs to readable format

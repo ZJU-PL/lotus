@@ -9,6 +9,10 @@ Overview
 
 **Location**: ``lib/Solvers/SMT/STAUB/``
 
+**Build status**: Source retained under ``lib/Solvers/SMT/STAUB/`` and
+``tools/solver/lotus-solver-staub.cpp``; currently not enabled as an active
+CMake target.
+
 **Origin**: https://github.com/mikekben/STAUB
 
 STAUB speeds up SMT solving of unbounded constraints by converting them to bounded

@@ -43,11 +43,6 @@ Universal interface for the analyses in lib/Alias:
 We have AliasWrapper.cpp that wraps various alias analyses (to be tested),
 
 
-### Third-Party
-
-* Integrate the pointer analyses in SVF and DG
-
-
 ## 3. Intermediate Representations (IR) 
 
 
@@ -66,13 +61,6 @@ Implement other algorithms
 
 ### Bug Detection
 
-- Buffer overflow detection?
-- Memory leak detection?
-- Race condition analysis?
-
-Some related publications
-- S&P 19:  RAZZER: Finding Kernel Race Bugs through Fuzzing,
-- CCS 18:  Hawkeye: Towards a Desired Directed Grey-box Fuzzer
 
 ### Software Protection
 
@@ -87,29 +75,7 @@ Some related publications
 - USENIX Security 19:  Origin-Sensitive Control Flow Integrity
 - ISSTA 17:  Boosting the Precision of Virtual Call Integrity Protection with Partial Pointer Analysis for C++ 
 
-
-## 5. Numeric
-al Analysis
-
-+ Crab/Lotus concurrent fixpoint performance:
-  - Study speculative concurrency for Crab's `concurrenty_fwd_fixpoint_iterator`: allow bounded stale reads inside a WPO SCC, then repair deterministically at loop heads.
-  - Use delta-based propagation for abstract states so workers transfer only changed facts, not full domains, across edges.
-  - Add instability-aware scheduling for concurrent fixpoint: prioritize hot loop heads, high-fanout nodes, and large abstract-state deltas.
-  - Explore a dual-lane design: conservative committed invariants plus speculative worker invariants, with commit only when speculation is safe.
-  - Compare against Crab's sequential/interleaved fixpoint and measure speedup, extra rework, convergence iterations, and precision loss (if any).
-+ Data structure optimization for abstract domains
-  - Better environment maps for abstract interpretation.
-    Crab still reflects the classic “Patricia tree as efficient mergeable map” design. A
-    serious study comparing Patricia trees, flat_map, B-tree variants, HAMTs, and chunked
-    persistent vectors under real analyzer workloads would be valuable. The key metric is
-    not only asymptotic merge cost but allocator pressure and cache locality during
-    fixpoint iteration.
-  - Graph representations for DBM domains.
-    Crab already exposes multiple graph backends, which is a sign the choice matters. A
-    good research problem is adaptive switching between graph representations based on
-    density, update pattern, or SCC phase. Another is incremental closure algorithms that
-    exploit workload structure instead of rerunning generic sparse shortest-path
-    machinery.
+## 5. Numerical Analysis
 
 ## 6. Dataflow Analysis
 

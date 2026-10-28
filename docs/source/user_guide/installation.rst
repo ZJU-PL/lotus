@@ -10,7 +10,7 @@ Prerequisites
 * Z3 4.11
 * CMake 3.18+
 * C++17 compatible compiler
-* Boost 1.65+ (optional — only needed when CLAM, SeaHorn, Cclyzer++, or FPsolve are enabled;
+* Boost 1.65+ (optional — needed when CLAM, SeaHorn, Cclyzer++, SMACK, or PDAAAL are enabled;
   CLAM additionally requires Boost.JSON ≥ 1.80; auto-downloaded if not found)
 
 Building Lotus
@@ -73,6 +73,9 @@ Options use a consistent ``LOTUS_*`` naming scheme.
   executable (default: OFF)
 * ``-DLOTUS_ENABLE_FLOW_CUTTER=ON``: Build the vendored PACE treewidth and
   treedepth tools used for tree-decomposition ordering (default: OFF)
+* ``-DLOTUS_ENABLE_IKOS=ON``: Build the IKOS analyzer and API-spec pipeline (default: OFF)
+* ``-DLOTUS_ENABLE_IKOS_API_SPEC=ON``: Install the IKOS API-spec stub generation tools (default: OFF)
+* ``-DLOTUS_IKOS_ENABLE_APRON=ON``: Enable optional APRON domains in IKOS (default: OFF)
 
 **Advanced toggles:**
 

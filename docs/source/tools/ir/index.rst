@@ -112,6 +112,40 @@ Relevant options:
 - ``--timing`` – Print analysis phase timings to standard error
 - ``--quiet`` – Suppress issue and witness details
 
+UFG (lotus-ir-ufg)
+------------------
+
+Object-expanded Use-Flow Graph (UFG) baseline for defect detection and flow
+queries over Lotus SVFG.
+
+**Binary**: ``lotus-ir-ufg``  
+**Location**: ``tools/ir/lotus-ir-ufg.cpp``
+
+**Usage**:
+
+.. code-block:: bash
+
+   # Check for defects using object-expanded lanes
+   ./build/bin/lotus-ir-ufg --check=use-after-free program.bc
+   ./build/bin/lotus-ir-ufg --check=double-free program.bc
+   ./build/bin/lotus-ir-ufg --check=memory-leak program.bc
+   ./build/bin/lotus-ir-ufg --check=file-leak program.bc
+
+   # Query flow path between SVFG nodes
+   ./build/bin/lotus-ir-ufg --source-node=1 --sink-node=5 program.bc
+
+Relevant options:
+
+- ``--check=double-free|use-after-free|memory-leak|file-leak`` – Run detection
+- ``--context-limit=k`` – Bounded call-string depth (default 3; ``unlimited`` for Dyck summaries)
+- ``--source-node=<ID>`` and ``--sink-node=<ID>`` – Query flow reachability
+- ``--format=text|json|dot`` – Select output format (default: ``text``)
+- ``--dump-svfg=<file>`` – Write the source SVFG to a DOT file
+- ``--timing`` – Print analysis phase timings to standard error
+- ``--quiet`` – Suppress issue and witness details
+
+See :doc:`../../ir/ufg` for architecture details.
+
 .. toctree::
    :maxdepth: 1
 

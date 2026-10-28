@@ -30,7 +30,9 @@ Highlights
 Usage
 =====
 
-Register the ``StrictRelations`` pass (``-sraa``) inside an LLVM pass pipeline or via the Lotus AA wrapper.
+Register the ``StrictRelations`` pass (``-sraa``) inside an LLVM pass pipeline.
+(Note: SRAA operates as a standalone specialized pass and is currently marked as
+not yet fully supported in the unified ``AliasAnalysisWrapper``).
 
 This document describes the algorithmic workflow of SRAA as implemented in
 ``lib/Alias/Specialized/SRAA/``.

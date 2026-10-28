@@ -64,8 +64,9 @@ See :doc:`../ir/index` for builder APIs and code snippets.
 
 * **Program Dependence Graph (PDG)** – Captures fine-grained data/control
   dependencies.
-* **Static Single Information (SSI)** – Planned extension of SSA to encode
-  predicate information.
+* **Static Single Information (SSI)** – Extension of SSA with sigma (σ) functions
+  at control splits to encode predicate information (``lib/IR/SSI``).
+  See :doc:`../ir/ssi`.
 * **DyckVFG** – Value Flow Graph variant designed for Dyck-based alias
   analyses (``lib/Alias/UnificationBased/DyckAA/DyckVFG.cpp``).
 * **SVFG** – Sparse Value-Flow Graph combining SSA with MemorySSA for
@@ -83,6 +84,8 @@ See :doc:`../ir/index` for builder APIs and code snippets.
   values at join points (``lib/IR/GSA``). See :doc:`../ir/gsa`.
 * **vSSA** – Variable Static Single Assignment, an SSI variant designed for
   precise symbolic range analysis (``lib/IR/vSSA``). See :doc:`../ir/vssa`.
+* **UFG** – Universal Flow Graph, an object-expanded use-flow graph baseline for
+  resource defect detection (``lib/IR/UFG``). See :doc:`../ir/ufg`.
 
 Machine Learning Features
 -------------------------

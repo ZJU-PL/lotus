@@ -6,6 +6,9 @@ link-time instrumentation passes for AFLGo-style directed fuzzing.
 
 **Location**: ``include/Fuzzing/AFLGoLinker/``, ``lib/Fuzzing/AFLGoLinker/``
 
+**Build Status**: Source retained; the subdirectory is commented out as TBD in
+``lib/Fuzzing/CMakeLists.txt`` and not included in default builds.
+
 **Main passes**:
 
 - ``AFLGoDistanceInstrumentationPass`` instruments distance feedback.

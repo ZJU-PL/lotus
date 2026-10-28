@@ -30,7 +30,8 @@ Lotus has been tested on **x86/ARM Linux** and **ARM macOS**. The following depe
    * - Boost
      - 1.65+ (optional)
      - Only required when ``LOTUS_ENABLE_SEAHORN``, ``LOTUS_ENABLE_CLAM``,
-       ``LOTUS_ENABLE_CCLYZER``, or ``LOTUS_ENABLE_FPSOLVE`` are enabled.
+       ``LOTUS_ENABLE_SMACK``, ``LOTUS_ENABLE_CCLYZER``, or
+       ``LOTUS_ENABLE_PDAAAL`` are enabled.
        CLAM additionally requires Boost.JSON 1.80+.
 
 Build Instructions

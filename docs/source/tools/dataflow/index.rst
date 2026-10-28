@@ -86,6 +86,7 @@ Supported analyses:
 
 - ``reaching_defs``
 - ``uninitialized``
+- ``taint``
 
 lotus-dfa-npa
 --------------
@@ -159,9 +160,27 @@ printing a successful result. ``--wpds-query-count`` measures deterministic,
 distinct boundary seeds on one prepared liveness model; one-time preparation
 and cumulative query timings are reported separately.
 
+lotus-demand-apa
+----------------
+
+Batch front-end for the demand-driven APA (Algebraic Program Analysis) engine
+over Boolean programs.
+
+**Binary**: ``lotus-demand-apa`` (requires ``-DLOTUS_ENABLE_DEMAND_APA=ON``)
+
+**Source**: ``tools/dataflow/DemandAPA/``
+
+**Usage**:
+
+.. code-block:: bash
+
+   ./build/bin/lotus-demand-apa TIMEOUT COUNT RESET dataset-root/
+
+See :doc:`../../dataflow/demand_apa` for algorithm and option details.
+
 See also
 --------
 
-- See :doc:`../../dataflow/apa`, :doc:`../../dataflow/mono`,
-  :doc:`../../dataflow/ifds_ide`, and :doc:`../../dataflow/npa` for the
-  underlying engines.
+- See :doc:`../../dataflow/apa`, :doc:`../../dataflow/demand_apa`,
+  :doc:`../../dataflow/mono`, :doc:`../../dataflow/ifds_ide`,
+  and :doc:`../../dataflow/npa` for the underlying engines.

@@ -9,7 +9,7 @@ DynAA provides **dynamic validation** for static alias analyses. It
 instruments programs to record runtime points-to information, then compares
 these logs against the results of a chosen static AA.
 
-* **Static side**: e.g., SparrowAA, AserPTA, LotusAA.
+* **Static side**: e.g., LLVM BasicAA (``basic-aa``).
 * **Dynamic side**: runtime traces collected by DynAA
 * **Location**: ``tools/alias/dynaa``
 

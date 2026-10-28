@@ -197,8 +197,12 @@ The main optional integrations and build surfaces are controlled by these CMake 
 Third-Party Libraries
 ---------------------
 
-Three libraries are bundled under ``third-party/`` and built unconditionally:
+Core libraries under ``third-party/`` added in standard builds include:
 
 * **CUDD**: BDD-based symbolic computations used heavily in ``lib/Solvers/``.
 * **WPDS**: Weighted pushdown systems; used by the ``lib/Dataflow/`` WPDS engine.
 * **spdlog**: A fast C++ logging library used for framework diagnostics.
+
+Additional vendored packages (such as Seal, CLAM, SeaHorn, SMACK, FPsolve, WALi/OpenNWA,
+PDAAAL, Horn-ICE, and FlowCutter) are managed as opt-in components gated by their respective
+``LOTUS_ENABLE_*`` configuration toggles.

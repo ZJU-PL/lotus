@@ -92,12 +92,7 @@ The samplers are invoked through functions declared in ``Solvers/SMT/SMTSampler/
 
    // Run region-based random-walk sampling on an SMT-LIB file;
    // writes samples to <input>.abs.samples
-   lotus::SMTSampler::runRegionSampler(
-       "problem.smt2",
-       500,
-       30000.0,
-       lotus::SMTSampler::Domain::OCTAGON,
-       lotus::SMTSampler::Walk::HIT_AND_RUN);
+   lotus::SMTSampler::runRegionSampler("problem.smt2", 500, 30000.0);
 
 **QuickSampler Output Format** (in ``<input>.samples``)::
 

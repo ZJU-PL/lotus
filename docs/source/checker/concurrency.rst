@@ -69,6 +69,22 @@ Components
 * Reports collective mismatches and conditional collectives
 * Reports unsynchronized RMA operations, RMA races, and leaked windows
 
+**ConditionVariableChecker** (``ConditionVariableChecker.cpp``):
+
+* Detects condition variable misuse, such as missing associated locks or lost signals
+
+**LockMismatchChecker** (``LockMismatchChecker.cpp``):
+
+* Detects mismatched lock/unlock operations and conflicting lock types
+
+**CUDAChecker** (``CUDAChecker.cpp``):
+
+* Analyzes CUDA kernel launches, shared memory synchronization, and host-device race conditions
+
+**StarvationChecker** (``StarvationChecker.cpp``):
+
+* Flags potential thread starvation patterns and asymmetric lock acquisition biases
+
 Usage
 -----
 
@@ -305,7 +321,7 @@ The concurrency checker integrates with:
 
 * **BugReportMgr**: Centralized bug reporting system
 * **LLVM IR**: Standard LLVM intermediate representation
-* **Dyck Alias Analysis**: Pointer analysis for memory access tracking
+* **Sparrow / Dyck Alias Analysis**: Pointer analysis for memory access tracking (defaults to context-insensitive SparrowAA)
 
 See Also
 --------

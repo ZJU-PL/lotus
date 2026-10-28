@@ -65,8 +65,8 @@ LLVM (Module, Function, BasicBlock, Instruction) | Solvers
 
 ## Testing
 
-- Tests live under `tests/unit/` and are grouped by subsystem (`Analysis`, `Checker`, `Concurrency`, `ControlFlow`, `DataFlow`, `Fuzzing`, `IR`, `Pointer`, `Solvers`, `TypeHierarchy`, `Utils`, `Verification`).
+- Tests live under `tests/unit/` and are grouped by subsystem (`Alias`, `Analysis`, `CFL`, `Checker`, `Concurrency`, `Dataflow`, `Fuzzing`, `IR`, `Security`, `Solvers`, `SymbolicExecution`, `Transform`, `Utils`, `Verification`).
 - Shared unit-test build helpers are defined in `tests/unit/UnitTestHelpers.cmake`, which is included by `tests/unit/CMakeLists.txt`.
-- Add new tests with the subsystem-specific helpers from `tests/unit/UnitTestHelpers.cmake`, e.g. `add_lotus_analysis_test`, `add_lotus_concurrency_test`, `add_lotus_ir_test`, `add_lotus_pointer_test`, `add_lotus_verification_test`.
+- Add new tests using `lotus_add_test_group` or `add_lotus_test_suite` from `tests/unit/UnitTestHelpers.cmake`.
 - Shared test support targets include `lotus_test_utils` and `lotus_test_harness_utils`; prefer them over reintroducing large catch-all link bundles.
 - Run all tests with `cd build && ctest --output-on-failure`, or build specific test targets with `cmake --build build --target <test_name>`.

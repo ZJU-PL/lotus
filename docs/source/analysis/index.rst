@@ -28,6 +28,8 @@ At a glance:
   transformation-oriented loop analyses. See :doc:`loop`.
 - **NullPointer** (``lib/Analysis/NullPointer``): A family of nullness and
   null-flow analyses. See :doc:`null_pointer`.
+- **Memory** (``lib/Analysis/Memory``): Heap pointer and memory-allocation
+  analysis (``HeapPointerAnalysis``).
 - **TypeHierarchy** (``lib/Analysis/TypeHierarchy``): Type-hierarchy and vtable
   recovery for object-oriented code. See :doc:`type_hierarchy`.
 - **CallGraph** (``lib/Analysis/CallGraph``): Call graph construction resolving

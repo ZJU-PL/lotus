@@ -66,14 +66,15 @@ traversal participate in a must-kill forest.
 Usage
 =====
 
-LotusAA is typically not run as a standalone tool. Instead, it is selected
-via configuration:
+LotusAA is exposed through the ``lotus-alias-lotus-aa`` command-line tool, and
+provides a modular alias analysis backend for clients such as GVFG and Clam:
 
-* Clam / Lotus front-ends can choose LotusAA as the primary AA engine.
-* YAML configurations under ``yaml-configurations/`` and command-line flags
-  control whether LotusAA is enabled and how aggressively it runs.
-
-When enabled, LotusAA registers itself with the AA wrapper so that all AA
-queries issued by other passes go through its results.
+* Invoke the standalone driver ``lotus-alias-lotus-aa input.bc``.
+* Front-ends can instantiate LotusAA directly or configure its options via flags
+  such as ``-lotus-enable-must-kill``.
+* Configuration files under ``config/clam/`` control pipeline options when driven
+  from Clam.
+* Note that LotusAA has its own analysis driver and GVFG integration, rather than
+  being selected through the generic ``AliasAnalysisWrapper``.
 
 

@@ -47,7 +47,7 @@ The source tree is grouped by subdirectory under ``include/Concurrency/`` and
 
 - ``Runtime/``: ``APIRegistry``, ``RuntimeKind``, and language runtime abstractions
 - ``Thread/``: Core thread model and reasoning:
-  - ``Model/``: ``ThreadModel``, ``ThreadModelBuilder``, and ``ThreadCreationTree``
+  - ``ThreadModel``, ``ThreadModelBuilder``, and ``ThreadCreationTree``
   - ``Join/``: ``JoinTargetAnalysis``
   - ``Sharing/``: ``EscapeAnalysis`` and ``StaticThreadSharingAnalysis``
 - ``Utils/``: ``ThreadAPI``, ``ThreadFlowGraph``, vector-clock utilities,

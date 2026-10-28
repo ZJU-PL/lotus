@@ -73,7 +73,7 @@ Key Options
 * ``--crab-null-check`` / ``--crab-uaf-check`` / ``--crab-bounds-check`` –
   Insert null-dereference, use-after-free, or bounds checks (use together with
   ``--crab-check``).
-* ``--crab-print-invariants=true`` – Print computed invariants
+* ``--crab-print-invariants=<none|blocks|loops>`` – Print computed invariants (default: ``none``)
 * ``-ojson=<file>`` – Output results in JSON format
 
 Examples

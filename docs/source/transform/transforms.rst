@@ -33,7 +33,7 @@ Normalization passes that rewrite IR into a simpler, analysis-friendly form.
 
 - **ElimPhi** – Convert PHI nodes to explicit select or copy operations when possible.
 - **ExpandAssume** – Expand ``llvm.assume`` intrinsics into explicit branches and checks.
-- **FlattenInit** – Normalize complex global initializers into flat, explicit forms.
+- **FlattenInit** – Normalize complex global initializers into flat, explicit forms (source retained; disabled in default build).
 - **LowerConstantExpr** – Lower ``ConstantExpr`` nodes into instructions so analyses
   can work over a uniform instruction set.
 - **LowerSelect** – Lower ``select`` instructions into equivalent branch-based control flow.
@@ -50,10 +50,12 @@ Normalization passes that rewrite IR into a simpler, analysis-friendly form.
 .. code-block:: cpp
 
    #include <Transform/LowerConstantExpr.h>
+   #include <llvm/IR/PassManager.h>
 
    llvm::Module &M = ...;
-   LowerConstantExpr Pass;
-   bool Changed = Pass.runOnModule(M);
+   llvm::ModuleAnalysisManager MAM;
+   LowerConstantExprPass Pass;
+   llvm::PreservedAnalyses PA = Pass.run(M, MAM);
 
 Memory and Data Transforms
 --------------------------
@@ -108,7 +110,9 @@ For general module optimization pipelines, see
 
 **Main passes**:
 
-- **SoftFloat** – Replace hardware floating-point operations with software implementations.
+- **SoftFloat** – Header interface for replacing hardware floating-point operations
+  with software implementations (defined in ``include/Transform/SoftFloat.h``;
+  currently not built into ``CanaryTransform``).
 - **UnrollVectors** – Unroll short vector operations when profitable.
 
 **Typical use cases**:
@@ -123,14 +127,15 @@ For general module optimization pipelines, see
    #include <Transform/LowerSelect.h>
    #include <Transform/MergeReturn.h>
    #include <Transform/MergeGEP.h>
+   #include <llvm/IR/PassManager.h>
 
    llvm::Module &M = ...;
+   llvm::ModuleAnalysisManager MAM;
 
-   LowerSelect SelectLowerer;
-   MergeReturn ReturnMerger;
-   MergeGEP GEPMerger;
+   LowerSelectPass SelectLowerer;
+   MergeReturnPass ReturnMerger;
+   llvm::MergeArrayGEP GEPMerger;
 
-   bool Changed =
-       SelectLowerer.runOnModule(M) ||
-       ReturnMerger.runOnModule(M) ||
-       GEPMerger.runOnModule(M);
+   SelectLowerer.run(M, MAM);
+   ReturnMerger.run(M, MAM);
+   GEPMerger.run(M, MAM);
