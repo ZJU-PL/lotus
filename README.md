@@ -80,6 +80,7 @@ If you use Lotus in your research or work, please cite the following:
 ```
 
 **Papers utilizing Lotus frameworks:**
+- **PPoPP 2027**: Cactus: GPU-Accelerated Alias Query Processing over Persistent Points-to Information. Zinan Gu, Zhaoyang Tan, Peisen Yao, and Kui Ren.
 - **SPLASH/ISSTA 2026 Demo**: Phoenix: A Modular and Versatile Framework for C/C++ Pointer Analysis. Peisen Yao, Zinan Gu, and Qingkai Shi.
 - **ASE 2026**: SIMD-Accelerated Sparse Bit-Vectors for Pointer Analysis. Zhaoyang Tan, Peisen Yao, and Kui Ren.
 - **FM 2026**: EUF-based Solving Dyck-Reachability with Applications to Static Analysis. Yide Du, Zhenbang Chen, Kunlin Liu, Guofeng Zhang, Xudong Wang, Ke Ma, Wei Dong, and Ji Wang.

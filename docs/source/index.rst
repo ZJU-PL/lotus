@@ -83,24 +83,42 @@ Supported Platforms
 Publications
 ------------
 
+Papers utilizing the Lotus framework (kept in sync with the repository
+``README.md``):
+
+* **PPoPP 2027**: *Cactus: GPU-Accelerated Alias Query Processing over Persistent Points-to Information*.  
+  Zinan Gu, Zhaoyang Tan, Peisen Yao, and Kui Ren.
+
+* **SPLASH/ISSTA 2026 Demo**: *Phoenix: A Modular and Versatile Framework for C/C++ Pointer Analysis*.  
+  Peisen Yao, Zinan Gu, and Qingkai Shi.
+
+* **ASE 2026**: *SIMD-Accelerated Sparse Bit-Vectors for Pointer Analysis*.  
+  Zhaoyang Tan, Peisen Yao, and Kui Ren.
+
+* **FM 2026**: *EUF-based Solving Dyck-Reachability with Applications to Static Analysis*.  
+  Yide Du, Zhenbang Chen, Kunlin Liu, Guofeng Zhang, Xudong Wang, Ke Ma, Wei Dong, and Ji Wang.
+
 * **CAV 2026**: *Sound and Precise Symbolic Automata Model for Stateful Software Systems*.  
   Xinlong Wu, Ruiyu Zhou, Peisen Yao, and Qingkai Shi.  
   *International Conference on Computer Aided Verification*.
 
-* **ISSTA 2025**: *Program Analysis Combining Generalized Bit-Level and Word-Level Abstractions*  
+* **TOSEM 2026**: *Compiler Optimizations-Based SMT Simplifications: An In-Depth Study*.  
+  Hanyun Jiang, Peisen Yao, Jiachen Lu, Yongwang Zhao, and Kui Ren.
+
+* **ISSTA 2025**: *Program Analysis Combining Generalized Bit-Level and Word-Level Abstractions*.  
   Guangsheng Fan, Liqian Chen, Banghu Yin, Wenyu Zhang, Peisen Yao, and Ji Wang.  
   *The ACM SIGSOFT International Symposium on Software Testing and Analysis*.
 
-* **S&P 2024**: *Titan: Efficient Multi-target Directed Greybox Fuzzing*  
+* **S&P 2024**: *Titan: Efficient Multi-target Directed Greybox Fuzzing*.  
   Heqing Huang, Peisen Yao, Hung-Chun Chiu, Yiyuan Guo, and Charles Zhang.
 
-* **USENIX Security 2024**: *Unleashing the Power of Type-Based Call Graph Construction by Using Regional Pointer Information*  
+* **USENIX Security 2024**: *Unleashing the Power of Type-Based Call Graph Construction by Using Regional Pointer Information*.  
   Yuandao Cai, Yibo Jin, and Charles Zhang.
 
-* **TSE 2024**: *Fast and Precise Static Null Exception Analysis with Synergistic Preprocessing*  
+* **TSE 2024**: *Fast and Precise Static Null Exception Analysis with Synergistic Preprocessing*.  
   Yi Sun, Chengpeng Wang, Gang Fan, Qingkai Shi, and Xiangyu Zhang.
 
-* **OOPSLA 2022**: *Indexing the Extended Dyck-CFL Reachability for Context-Sensitive Program Analysis*  
+* **OOPSLA 2022**: *Indexing the Extended Dyck-CFL Reachability for Context-Sensitive Program Analysis*.  
   Qingkai Shi, Yongchao Wang, Peisen Yao, and Charles Zhang.
 
 
