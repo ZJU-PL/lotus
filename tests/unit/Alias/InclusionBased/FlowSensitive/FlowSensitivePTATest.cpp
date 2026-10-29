@@ -981,3 +981,54 @@ TEST_F(FlowSensitivePTATest, HeapTargetsRemainWeakUpdates) {
             PointsToSet({xObject, yObject}));
   EXPECT_GT(solver.statistics().weakUpdates, 0u);
 }
+
+TEST_F(FlowSensitivePTATest, DeadStoreThroughBottomPointerDoesNotClobberMemory) {
+  auto module = parseModule(R"(
+    @x = global i8 0
+    @y = global i8 0
+    define i8* @main(i1 %condition) {
+    entry:
+      %p = alloca i8**
+      %cell = alloca i8*
+      store i8* @y, i8** %cell
+      br i1 %condition, label %init, label %dead
+    init:
+      store i8** %cell, i8*** %p
+      br label %end
+    dead:
+      %q = load i8**, i8*** %p
+      store i8* @x, i8** %q
+      br label %end
+    end:
+      %result = load i8*, i8** %cell
+      ret i8* %result
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig config;
+  config.usePointerAnalysis = true;
+  config.buildMSSA = true;
+  config.memoryPartition = MemoryRegionPartitionStrategy::InterDisjoint;
+  SVFGBuilder builder(config);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *result = nullptr;
+  for (const Instruction &instruction :
+       instructions(module->getFunction("main")))
+    if (const auto *candidate = dyn_cast<LoadInst>(&instruction))
+      result = candidate;
+  ASSERT_NE(result, nullptr);
+
+  FlowSensitivePTA solver(*graph);
+  solver.solve();
+  const auto pointsTo = solver.pointsTo(result);
+  ASSERT_TRUE(pointsTo.has_value());
+  ASSERT_EQ(pointsTo->size(), 1u);
+  EXPECT_EQ(graph->getObjectValue(*pointsTo->begin()),
+            module->getGlobalVariable("y"));
+}

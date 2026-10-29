@@ -159,8 +159,8 @@ private:
   bool transfer(const lotus::analysis::SVFGNode &node);
   StoredSet directInput(const lotus::analysis::SVFGNode &node);
   StoredSet pointerTargets(const llvm::Value *pointer);
-  PointsToSet selectAccessTargets(const StoredSet &flowSensitiveTargets,
-                                  const PointsToSet &preAnalysisTargets) const;
+  PointsToSet accessTargets(const llvm::Value *pointer,
+                            const PointsToSet &memoryPointsTo);
   bool isStrongUpdate(const PointsToSet &targets) const;
   bool resolveIndirectCalls(const lotus::analysis::SVFGNode &node,
                             const StoredSet &pointsTo);

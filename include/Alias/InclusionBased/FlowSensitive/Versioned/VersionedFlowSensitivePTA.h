@@ -6,6 +6,13 @@
  * Memory facts are keyed by (abstract object, meld version), rather than by
  * (SVFG location, abstract object) as in the conventional flow-sensitive
  * solver.
+ *
+ * The solver uses SVF's delta-version architecture: version labels are
+ * computed once over the pre-analysis SVFG, and every node which may gain
+ * indirect edges during on-the-fly call-graph construction (a "delta" node)
+ * is prelabelled with a dedicated version whose consume and yield are the
+ * same.  Materialising a new edge therefore only appends to the reliance maps
+ * and propagates the affected version; it never requires relabelling.
  */
 #pragma once
 
@@ -15,6 +22,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -51,7 +59,11 @@ public:
     std::size_t strongUpdates = 0;
     std::size_t weakUpdates = 0;
     std::size_t indirectCallEdges = 0;
+    std::size_t deltaNodes = 0;
+    std::size_t deltaSourceNodes = 0;
     std::size_t deltaVersionUpdates = 0;
+    std::size_t deltaRelabelings = 0;
+    std::size_t statementWorklistPushes = 0;
     std::size_t relabelings = 0;
   };
 
@@ -128,8 +140,10 @@ private:
   bool inScope(const lotus::analysis::SVFGNode *node) const;
   void initializeRecursiveFunctions();
   bool functionHasKnownCaller(const llvm::Function *function) const;
+  void buildDeltaMaps();
   void buildVersionLabels();
   void labelObject(ObjectID object);
+  bool labelObjectIncremental(ObjectID object);
   std::vector<FootprintEntry> versionFootprint(ObjectID object) const;
   void copyVersionLabels(ObjectID canonical, ObjectID object);
   PointsToSet relevantObjects() const;
@@ -142,8 +156,14 @@ private:
                           ObjectID object) const;
   bool memoryPhiNeedsInitial(const lotus::analysis::MSSAPhiSVFGNode &phi,
                              ObjectID object) const;
-  bool isDeltaNode(const lotus::analysis::SVFGNode &node,
-                   ObjectID object) const;
+  /// True if \p node is a delta node: it may acquire new incoming indirect
+  /// edges through on-the-fly call-graph construction.
+  bool isDeltaNode(NodeID node) const;
+  /// True if \p node may be the source of an indirect edge to a delta node.
+  bool isDeltaSource(NodeID node) const;
+  /// True if the memory region of delta \p node carries \p object.
+  bool deltaCarriesObject(const lotus::analysis::SVFGNode &node,
+                          ObjectID object) const;
   PointsToSet objectsWithFields(const llvm::Value *pointer) const;
   Version internVersion(ObjectID object, const MeldSet &meld);
   bool addReliance(ObjectID object, Version source, Version destination);
@@ -152,14 +172,26 @@ private:
       const std::vector<const lotus::analysis::SVFGEdge *> &newEdges);
 
   bool solveCurrentTopology();
-  bool propagateVersions();
+  /// Propagate o:v into every version which relies on it.
+  void propagateVersion(ObjectID object, Version version);
+  /// Propagate o:source into o:destination.  Queues a follow-up propagation
+  /// when o:destination changes.
+  void propagateVersion(ObjectID object, Version source, Version destination);
+  /// Drain the version-propagation queue.  Returns true if anything changed.
+  bool drainVersionPropagation();
+  /// Enqueue the direct successors of \p node (SVF's propagate()).
+  void propagate(const lotus::analysis::SVFGNode &node);
+  /// Enqueue \p node onto the statement worklist.
+  void enqueueStatement(NodeID node);
+  /// Enqueue every statement which consumes o:version.
+  void enqueueDependentStatements(ObjectID object, Version version);
   bool processNode(const lotus::analysis::SVFGNode &node);
   bool processIntrinsicActualOut(
       const lotus::analysis::ActualOutSVFGNode &actualOut);
   PointsToSet directInput(const lotus::analysis::SVFGNode &node) const;
   PointsToSet pointerTargets(const llvm::Value *pointer) const;
-  PointsToSet selectAccessTargets(const PointsToSet &flowSensitiveTargets,
-                                  const PointsToSet &preAnalysisTargets) const;
+  PointsToSet accessTargets(const llvm::Value *pointer,
+                            const PointsToSet &memoryPointsTo) const;
   bool isStrongUpdate(const PointsToSet &targets) const;
   bool resolveIndirectCalls(const lotus::analysis::SVFGNode &node,
                             const PointsToSet &pointsTo);
@@ -187,6 +219,26 @@ private:
   std::unordered_set<NodeID> strongUpdateSites_;
   std::unordered_set<NodeID> weakUpdateSites_;
   std::unordered_set<const llvm::Function *> recursiveFunctions_;
+  /// Nodes which may gain incoming indirect edges through OTF call-graph
+  /// construction (SVF's deltaMap).
+  std::unordered_set<NodeID> deltaNodes_;
+  /// Nodes which may gain outgoing indirect edges to a delta node (SVF's
+  /// deltaSourceMap).
+  std::unordered_set<NodeID> deltaSourceNodes_;
+  /// Objects which have labels (either directly or through an equivalent
+  /// canonical object).
+  std::unordered_set<ObjectID> labelledObjects_;
+  /// Intrinsic actual-outs (memcpy/memmove/memset) read memory which is not
+  /// part of their def set, so every version change of these objects must
+  /// re-evaluate them.
+  std::unordered_map<ObjectID, std::unordered_set<NodeID>> intrinsicDependents_;
+  /// Pending version propagations (SVF's VersionedVarToPropNode worklist).
+  std::queue<VersionedObject> versionPropagationQueue_;
+  std::unordered_set<VersionedObject, VersionedObjectHash>
+      queuedVersionPropagations_;
+  /// Statements affected by a version change (SVF's stmtReliance worklist).
+  std::queue<NodeID> statementWorklist_;
+  std::unordered_set<NodeID> queuedStatements_;
   bool topologyChanged_ = false;
   Statistics stats_;
 };

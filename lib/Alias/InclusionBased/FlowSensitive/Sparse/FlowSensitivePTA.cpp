@@ -553,23 +553,21 @@ FlowSensitivePTA::pointerTargets(const Value *pointer) {
   return topSet(graph_->getValueNode(pointer));
 }
 
-FlowSensitivePTA::PointsToSet FlowSensitivePTA::selectAccessTargets(
-    const StoredSet &flowSensitiveTargets,
-    const PointsToSet &preAnalysisTargets) const {
-  const PointsToSet &flow = materialize(flowSensitiveTargets);
-  if (preAnalysisTargets.empty())
-    return flow;
-  if (flow.empty())
-    return preAnalysisTargets;
-  if (std::any_of(
-          preAnalysisTargets.begin(), preAnalysisTargets.end(),
-          [&](ObjectID object) { return graph_->isUnknownObject(object); }))
-    return flow;
-  if (std::any_of(flow.begin(), flow.end(), [&](ObjectID object) {
-        return graph_->isUnknownObject(object);
-      }))
-    return preAnalysisTargets;
-  return flow;
+FlowSensitivePTA::PointsToSet FlowSensitivePTA::accessTargets(
+    const Value *pointer, const PointsToSet &memoryPointsTo) {
+  if (!pointer || !pointer->getType()->isPointerTy())
+    return expandIndirectObjects(memoryPointsTo);
+  if (graph_->getValueNode(pointer))
+    return expandIndirectObjects(materialize(pointerTargets(pointer)));
+  // The value has no SVFG node (for example a constant-expression GEP or a
+  // hand-built graph): fall back to the object set recorded for the value,
+  // then to the MemorySSA access region.  An empty flow-sensitive set for an
+  // existing node means the pointer is bottom here; using pre-analysis
+  // targets would let a dead store clobber memory or a dead load read it.
+  PointsToSet known = graph_->getObjectIds(pointer);
+  if (known.empty())
+    known = memoryPointsTo;
+  return expandIndirectObjects(known);
 }
 
 FlowSensitivePTA::StoredSet
@@ -682,10 +680,8 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       top = singleton(object);
   } else if (const auto *load = dyn_cast<LoadSVFGNode>(&node)) {
     top = {};
-    StoredSet targets = pointerTargets(accessPointer(load->getInstruction()));
-    PointsToSet targetSet =
-        selectAccessTargets(targets, load->getMemoryPointsTo());
-    targetSet = expandIndirectObjects(targetSet);
+    PointsToSet targetSet = accessTargets(
+        accessPointer(load->getInstruction()), load->getMemoryPointsTo());
     for (ObjectID object : targetSet) {
       if (graph_->isConstantObject(object))
         continue;
@@ -704,10 +700,9 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
     const Value *ptrOp = accessPointer(instruction);
     StoredSet stored =
         valOp ? pointerTargets(valOp) : directInput(node);
-    StoredSet targets =
-        ptrOp ? pointerTargets(ptrOp) : StoredSet{};
-    PointsToSet targetSet =
-        selectAccessTargets(targets, store->getMemoryPointsTo());
+    const PointsToSet targetSet = ptrOp
+        ? accessTargets(ptrOp, store->getMemoryPointsTo())
+        : expandIndirectObjects(store->getMemoryPointsTo());
     const bool strong = isStrongUpdate(targetSet);
     bool updatedAny = false;
     for (ObjectID object : targetSet) {

@@ -488,8 +488,13 @@ int main(int argc, char **argv) {
              << "vfspta.strong-updates=" << stats.strongUpdates << "\n"
              << "vfspta.weak-updates=" << stats.weakUpdates << "\n"
              << "vfspta.indirect-call-edges=" << stats.indirectCallEdges << "\n"
+             << "vfspta.delta-nodes=" << stats.deltaNodes << "\n"
+             << "vfspta.delta-source-nodes=" << stats.deltaSourceNodes << "\n"
              << "vfspta.delta-version-updates=" << stats.deltaVersionUpdates
              << "\n"
+             << "vfspta.delta-relabelings=" << stats.deltaRelabelings << "\n"
+             << "vfspta.statement-worklist-pushes="
+             << stats.statementWorklistPushes << "\n"
              << "vfspta.relabelings=" << stats.relabelings << "\n";
     } else {
       const auto &stats = solver->statistics();
