@@ -165,6 +165,7 @@ private:
   bool resolveIndirectCalls(const lotus::analysis::SVFGNode &node,
                             const StoredSet &pointsTo);
   static const llvm::Value *accessPointer(const llvm::Instruction *instruction);
+  static const llvm::Value *storedValue(const llvm::Instruction *instruction);
 
   const lotus::analysis::SVFG *graph_;
   Config config_;

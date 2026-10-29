@@ -162,11 +162,8 @@ bool VersionedFlowSensitivePTA::storeMayTarget(const StoreSVFGNode &store,
                                                ObjectID object) const {
   PointsToSet targets = expandIndirectObjects(store.getMemoryPointsTo());
   if (targets.empty()) {
-    const auto *instruction =
-        dyn_cast_or_null<StoreInst>(store.getInstruction());
-    if (instruction) {
-      const PointsToSet &known =
-          graph_->getObjectIds(instruction->getPointerOperand());
+    if (const Value *pointer = accessPointer(store.getInstruction())) {
+      const PointsToSet &known = graph_->getObjectIds(pointer);
       targets = expandIndirectObjects(known);
     }
   }
@@ -310,6 +307,10 @@ bool VersionedFlowSensitivePTA::addReliance(ObjectID object, Version source,
 }
 
 void VersionedFlowSensitivePTA::labelObject(ObjectID object) {
+  // Identify the subgraph of nodes relevant to this object.
+  std::unordered_set<NodeID> inSubgraph;
+  std::queue<const SVFGNode *> reachQueue;
+
   std::unordered_map<NodeID, MeldSet> consumedMeld;
   std::unordered_map<NodeID, MeldSet> yieldedMeld;
 
@@ -330,47 +331,85 @@ void VersionedFlowSensitivePTA::labelObject(ObjectID object) {
     // dedicated value-flow node. Seed such PHIs with the initial token so the
     // meld version represents both the bypass and updated paths.
     const auto *memoryPhi = dyn_cast<MSSAPhiSVFGNode>(node);
-    if (isDeltaNode(*node, object))
+    if (isDeltaNode(*node, object)) {
       consumedMeld[nodeID].insert(nodeID + 2);
-    else if (!hasIncoming ||
-             (memoryPhi && memoryPhiNeedsInitial(*memoryPhi, object)))
+      if (inSubgraph.insert(nodeID).second)
+        reachQueue.push(node);
+    } else if (!hasIncoming ||
+               (memoryPhi && memoryPhiNeedsInitial(*memoryPhi, object))) {
       consumedMeld[nodeID].insert(InitialMeldToken);
+      if (inSubgraph.insert(nodeID).second)
+        reachQueue.push(node);
+    }
+    bool defines = false;
+    if (const auto *store = dyn_cast<StoreSVFGNode>(node))
+      defines = storeMayTarget(*store, object);
+    if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node))
+      defines |= intrinsicMayDefine(*actualOut, object);
+    if (defines && inSubgraph.insert(nodeID).second)
+      reachQueue.push(node);
   }
 
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (const auto &[nodeID, node] : *graph_) {
-      if (!inScope(node))
+  // Forward BFS to find all nodes in the object-specific subgraph.
+  while (!reachQueue.empty()) {
+    const SVFGNode *curr = reachQueue.front();
+    reachQueue.pop();
+    for (const SVFGEdge *edge : curr->getOutEdges()) {
+      if (!edge || !inScope(edge->getDstNode()) ||
+          !edgeCarriesObject(*edge, object))
         continue;
-      bool definesNewVersion = false;
-      if (const auto *store = dyn_cast<StoreSVFGNode>(node))
-        definesNewVersion = storeMayTarget(*store, object);
-      if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node))
-        definesNewVersion |= intrinsicMayDefine(*actualOut, object);
-      // Match SVF's storesYieldedMeldVersion: a definition's yielded meld is
-      // its fresh prelabel, not consume U prelabel. Weak updates explicitly
-      // copy consume into yield during transfer; strong updates do not.
-      MeldSet nextYield;
-      if (definesNewVersion)
-        nextYield.insert(nodeID + 2);
-      else
-        nextYield = consumedMeld[nodeID];
-      if (yieldedMeld[nodeID] != nextYield) {
-        yieldedMeld[nodeID] = std::move(nextYield);
-        changed = true;
-      }
+      const SVFGNode *dst = edge->getDstNode();
+      if (inSubgraph.insert(dst->getId()).second)
+        reachQueue.push(dst);
+    }
+  }
+
+  // Worklist-based meld propagation restricted to the subgraph.
+  std::queue<NodeID> worklist;
+  std::unordered_set<NodeID> inWorklist;
+  for (NodeID id : inSubgraph) {
+    worklist.push(id);
+    inWorklist.insert(id);
+  }
+
+  while (!worklist.empty()) {
+    const NodeID nodeID = worklist.front();
+    worklist.pop();
+    inWorklist.erase(nodeID);
+
+    const SVFGNode *node = graph_->getNode(nodeID);
+    if (!node)
+      continue;
+
+    bool definesNewVersion = false;
+    if (const auto *store = dyn_cast<StoreSVFGNode>(node))
+      definesNewVersion = storeMayTarget(*store, object);
+    if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node))
+      definesNewVersion |= intrinsicMayDefine(*actualOut, object);
+
+    MeldSet nextYield;
+    if (definesNewVersion)
+      nextYield.insert(nodeID + 2);
+    else
+      nextYield = consumedMeld[nodeID];
+
+    if (yieldedMeld[nodeID] != nextYield) {
+      yieldedMeld[nodeID] = std::move(nextYield);
       for (const SVFGEdge *edge : node->getOutEdges()) {
         if (!edge || !inScope(edge->getDstNode()) ||
             !edgeCarriesObject(*edge, object))
           continue;
         if (isDeltaNode(*edge->getDstNode(), object))
           continue;
-        MeldSet &destination = consumedMeld[edge->getDstNode()->getId()];
-        const std::size_t oldSize = destination.size();
-        destination.insert(yieldedMeld[nodeID].begin(),
-                           yieldedMeld[nodeID].end());
-        changed |= oldSize != destination.size();
+        const SVFGNode *dst = edge->getDstNode();
+        MeldSet &destConsumed = consumedMeld[dst->getId()];
+        const std::size_t oldSize = destConsumed.size();
+        destConsumed.insert(yieldedMeld[nodeID].begin(),
+                            yieldedMeld[nodeID].end());
+        if (oldSize != destConsumed.size()) {
+          if (inWorklist.insert(dst->getId()).second)
+            worklist.push(dst->getId());
+        }
       }
     }
   }
@@ -876,6 +915,17 @@ VersionedFlowSensitivePTA::accessPointer(const Instruction *instruction) {
   return nullptr;
 }
 
+const Value *
+VersionedFlowSensitivePTA::storedValue(const Instruction *instruction) {
+  if (const auto *store = dyn_cast_or_null<StoreInst>(instruction))
+    return store->getValueOperand();
+  if (const auto *rmw = dyn_cast_or_null<AtomicRMWInst>(instruction))
+    return rmw->getValOperand();
+  if (const auto *cmpxchg = dyn_cast_or_null<AtomicCmpXchgInst>(instruction))
+    return cmpxchg->getNewValOperand();
+  return nullptr;
+}
+
 VersionedFlowSensitivePTA::PointsToSet
 VersionedFlowSensitivePTA::pointerTargets(const Value *pointer) const {
   if (!pointer || !pointer->getType()->isPointerTy())
@@ -924,6 +974,8 @@ bool VersionedFlowSensitivePTA::isStrongUpdate(
   const SVFG::ObjectInfo *info = graph_->getObjectInfo(object);
   if (!info || info->isUnknown || info->isHeap || info->isArray ||
       info->isFieldInsensitive)
+    return false;
+  if (info->baseObjId != 0 && graph_->isFieldInsensitiveObject(info->baseObjId))
     return false;
   const Value *allocation = graph_->getObjectValue(object);
   if (!allocation && info->baseObjId != 0)
@@ -1072,6 +1124,8 @@ bool VersionedFlowSensitivePTA::propagateVersions() {
       continue;
     for (const auto &[sourceVersion, destinations] : objectIt->second) {
       const PointsToSet &source = versionedPointsTo(object, sourceVersion);
+      if (source.empty())
+        continue;
       for (Version destinationVersion : destinations) {
         PointsToSet &destination =
             versionedPointsTo_[{object, destinationVersion}];
@@ -1290,14 +1344,13 @@ bool VersionedFlowSensitivePTA::processNode(const SVFGNode &node) {
       next.insert(memory.begin(), memory.end());
     }
   } else if (const auto *store = dyn_cast<StoreSVFGNode>(&node)) {
-    const auto *instruction =
-        dyn_cast_or_null<StoreInst>(store->getInstruction());
+    const auto *instruction = store->getInstruction();
+    const Value *valOp = storedValue(instruction);
+    const Value *ptrOp = accessPointer(instruction);
     const PointsToSet stored =
-        instruction ? pointerTargets(instruction->getValueOperand())
-                    : directInput(node);
-    PointsToSet targets = instruction
-                              ? pointerTargets(instruction->getPointerOperand())
-                              : PointsToSet{};
+        valOp ? pointerTargets(valOp) : directInput(node);
+    PointsToSet targets =
+        ptrOp ? pointerTargets(ptrOp) : PointsToSet{};
     targets = selectAccessTargets(targets, store->getMemoryPointsTo());
     targets = expandIndirectObjects(targets);
     const bool strong = isStrongUpdate(targets);
@@ -1349,13 +1402,21 @@ bool VersionedFlowSensitivePTA::processNode(const SVFGNode &node) {
 }
 
 bool VersionedFlowSensitivePTA::solveCurrentTopology() {
+  std::vector<const SVFGNode *> orderedNodes;
+  orderedNodes.reserve(graph_->getNumNodes());
+  for (const auto &[nodeID, node] : *graph_)
+    if (inScope(node))
+      orderedNodes.push_back(node);
+
   bool anyChanged = false;
   bool changed = true;
   while (changed && !topologyChanged_) {
     changed = propagateVersions();
-    for (const auto &[nodeID, node] : *graph_)
-      if (inScope(node))
-        changed |= processNode(*node);
+    for (const SVFGNode *node : orderedNodes) {
+      if (topologyChanged_)
+        break;
+      changed |= processNode(*node);
+    }
     anyChanged |= changed;
   }
   return anyChanged;

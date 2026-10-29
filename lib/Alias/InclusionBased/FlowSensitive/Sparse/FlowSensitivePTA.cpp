@@ -536,6 +536,16 @@ const Value *FlowSensitivePTA::accessPointer(const Instruction *instruction) {
   return nullptr;
 }
 
+const Value *FlowSensitivePTA::storedValue(const Instruction *instruction) {
+  if (const auto *store = dyn_cast_or_null<StoreInst>(instruction))
+    return store->getValueOperand();
+  if (const auto *rmw = dyn_cast_or_null<AtomicRMWInst>(instruction))
+    return rmw->getValOperand();
+  if (const auto *cmpxchg = dyn_cast_or_null<AtomicCmpXchgInst>(instruction))
+    return cmpxchg->getNewValOperand();
+  return nullptr;
+}
+
 FlowSensitivePTA::StoredSet
 FlowSensitivePTA::pointerTargets(const Value *pointer) {
   if (!pointer || !pointer->getType()->isPointerTy())
@@ -580,6 +590,8 @@ bool FlowSensitivePTA::isStrongUpdate(const PointsToSet &targets) const {
   const SVFG::ObjectInfo *info = graph_->getObjectInfo(object);
   if (!info || info->isUnknown || info->isHeap || info->isArray ||
       info->isFieldInsensitive)
+    return false;
+  if (info->baseObjId != 0 && graph_->isFieldInsensitiveObject(info->baseObjId))
     return false;
   const Value *allocation = graph_->getObjectValue(object);
   if (!allocation && info->baseObjId != 0)
@@ -687,14 +699,13 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       }
     }
   } else if (const auto *store = dyn_cast<StoreSVFGNode>(&node)) {
-    const auto *instruction =
-        dyn_cast_or_null<StoreInst>(store->getInstruction());
-    StoredSet stored = instruction
-                           ? pointerTargets(instruction->getValueOperand())
-                           : directInput(node);
-    StoredSet targets = instruction
-                            ? pointerTargets(instruction->getPointerOperand())
-                            : StoredSet{};
+    const auto *instruction = store->getInstruction();
+    const Value *valOp = storedValue(instruction);
+    const Value *ptrOp = accessPointer(instruction);
+    StoredSet stored =
+        valOp ? pointerTargets(valOp) : directInput(node);
+    StoredSet targets =
+        ptrOp ? pointerTargets(ptrOp) : StoredSet{};
     PointsToSet targetSet =
         selectAccessTargets(targets, store->getMemoryPointsTo());
     const bool strong = isStrongUpdate(targetSet);
@@ -723,8 +734,10 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
         dyn_cast_or_null<IntrinsicInst>(actualOut->getCallSite());
     if (intrinsic &&
         (intrinsic->getIntrinsicID() == Intrinsic::memcpy ||
-         intrinsic->getIntrinsicID() == Intrinsic::memmove) &&
+         intrinsic->getIntrinsicID() == Intrinsic::memmove ||
+         intrinsic->getIntrinsicID() == Intrinsic::memset) &&
         intrinsic->arg_size() >= 2) {
+      const Intrinsic::ID intrinsicId = intrinsic->getIntrinsicID();
       auto objectsWithFields = [&](const Value *pointer) {
         PointsToSet objects = materialize(pointerTargets(pointer));
         if (objects.empty()) {
@@ -797,8 +810,6 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
           mergeState(allInputs, outState(source));
       }
 
-      const std::vector<RootLocation> sourceRoots =
-          rootLocations(intrinsic->getArgOperand(1));
       const std::vector<RootLocation> destinationRoots =
           rootLocations(intrinsic->getArgOperand(0));
       const auto *lengthConstant =
@@ -851,47 +862,69 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
             const uint64_t relativeOffset = destinationOffset - root.offset;
             if (fullyCopied(relativeOffset,
                             pointerSizeForObject(destination))) {
-              assign(outgoing[destination], empty);
+              if (intrinsicId == Intrinsic::memset) {
+                const auto *fill =
+                    dyn_cast<ConstantInt>(intrinsic->getArgOperand(1));
+                if (fill && fill->isZero())
+                  assign(outgoing[destination], empty);
+                else if (unknownObject != 0)
+                  assign(outgoing[destination], singleton(unknownObject));
+              } else {
+                assign(outgoing[destination], empty);
+              }
             } else if (relativeOffset < copyLength && unknownObject != 0) {
               assign(outgoing[destination], singleton(unknownObject));
             }
           }
         }
-      }
-
-      MemoryState copiedByDestination;
-      for (const auto &[source, value] : allInputs) {
-        const SVFG::ObjectInfo *info = graph_->getObjectInfo(source);
-        const ObjectID sourceBase =
-            info && info->baseObjId != 0 ? info->baseObjId : source;
-        const uint64_t sourceOffset =
-            info && info->hasFieldOffset ? info->fieldOffset : 0;
-        for (const RootLocation &sourceRoot : sourceRoots) {
-          if (sourceRoot.base != sourceBase || sourceOffset < sourceRoot.offset)
-            continue;
-          const uint64_t relativeOffset = sourceOffset - sourceRoot.offset;
-          if (!fullyCopied(relativeOffset, pointerSizeForObject(source)))
-            continue;
-          for (const RootLocation &destinationRoot : destinationRoots) {
-            const uint64_t destinationOffset =
-                destinationRoot.offset + relativeOffset;
-            if (destinationOffset < destinationRoot.offset)
-              continue;
-            const ObjectID destination =
-                destinationOffset == 0
-                    ? destinationRoot.base
-                    : graph_->getOffsetObject(destinationRoot.base,
-                                              destinationOffset);
-            if (destination != 0)
-              merge(copiedByDestination[destination], value);
-          }
+      } else if (intrinsicId == Intrinsic::memset) {
+        const auto *fill = dyn_cast<ConstantInt>(intrinsic->getArgOperand(1));
+        if ((!fill || !fill->isZero()) && unknownObject != 0) {
+          const PointsToSet destinationObjects =
+              objectsWithFields(intrinsic->getArgOperand(0));
+          for (ObjectID destination : destinationObjects)
+            merge(outgoing[destination], singleton(unknownObject));
         }
       }
-      for (const auto &[destination, value] : copiedByDestination)
-        if (hasExactLength)
-          assign(outgoing[destination], value);
-        else
-          merge(outgoing[destination], value);
+
+      if (intrinsicId == Intrinsic::memcpy ||
+          intrinsicId == Intrinsic::memmove) {
+        const std::vector<RootLocation> sourceRoots =
+            rootLocations(intrinsic->getArgOperand(1));
+        MemoryState copiedByDestination;
+        for (const auto &[source, value] : allInputs) {
+          const SVFG::ObjectInfo *info = graph_->getObjectInfo(source);
+          const ObjectID sourceBase =
+              info && info->baseObjId != 0 ? info->baseObjId : source;
+          const uint64_t sourceOffset =
+              info && info->hasFieldOffset ? info->fieldOffset : 0;
+          for (const RootLocation &sourceRoot : sourceRoots) {
+            if (sourceRoot.base != sourceBase || sourceOffset < sourceRoot.offset)
+              continue;
+            const uint64_t relativeOffset = sourceOffset - sourceRoot.offset;
+            if (!fullyCopied(relativeOffset, pointerSizeForObject(source)))
+              continue;
+            for (const RootLocation &destinationRoot : destinationRoots) {
+              const uint64_t destinationOffset =
+                  destinationRoot.offset + relativeOffset;
+              if (destinationOffset < destinationRoot.offset)
+                continue;
+              const ObjectID destination =
+                  destinationOffset == 0
+                      ? destinationRoot.base
+                      : graph_->getOffsetObject(destinationRoot.base,
+                                                destinationOffset);
+              if (destination != 0)
+                merge(copiedByDestination[destination], value);
+            }
+          }
+        }
+        for (const auto &[destination, value] : copiedByDestination)
+          if (hasExactLength)
+            assign(outgoing[destination], value);
+          else
+            merge(outgoing[destination], value);
+      }
     }
   } else if (const auto *gep = dyn_cast<GepSVFGNode>(&node)) {
     const auto *instruction =
