@@ -1,4 +1,5 @@
 add_subdirectory(Sifa)
+add_subdirectory(Automata)
 
 lotus_collect_test_sources(verification_tests
   FailureDirectedTrimmingTest.cpp

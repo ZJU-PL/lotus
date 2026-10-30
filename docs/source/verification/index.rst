@@ -7,6 +7,7 @@ This section documents the verification tools and frameworks used throughout Lot
    :maxdepth: 2
 
    analysis
+   automata
    backend
    crab
    clam
