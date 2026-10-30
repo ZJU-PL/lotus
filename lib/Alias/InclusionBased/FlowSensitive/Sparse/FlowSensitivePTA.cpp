@@ -4,6 +4,7 @@
 
 #include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
 
+#include "Alias/InclusionBased/FlowSensitive/Support/SVFGOrder.h"
 #include "IR/ICFG/CallGraph.h"
 
 #include <algorithm>
@@ -49,12 +50,22 @@ std::string FlowSensitivePTA::statisticsReport() const {
       << stats_.processedLoad << "/" << stats_.processedStore << "/"
       << stats_.processedPhi << "\n";
   out << "  processed actual-param/formal-ret/mssa: "
-      << stats_.processedActualParam << "/" << stats_.processedFormalRet
-      << "/" << stats_.processedMSSA << "\n";
+      << stats_.processedActualParam << "/" << stats_.processedFormalRet << "/"
+      << stats_.processedMSSA << "\n";
   out << "  topology epochs: " << stats_.topologyEpochs << "\n";
   out << "  top-level facts: " << stats_.topLevelFacts << "\n";
   out << "  top-level pts size max/avg: " << stats_.maxTopLevelPtsSize << "/"
       << stats_.averageTopLevelPtsSize << "\n";
+  out << "  pointers/objects: " << stats_.totalPointers << " / "
+      << stats_.totalObjects << " (FI " << stats_.fieldInsensitiveObjects
+      << ", FS " << stats_.fieldSensitiveObjects << ")\n";
+  out << "  pts size max/avg: " << stats_.maxPtsSize << " / "
+      << stats_.averagePtsSize << "\n";
+  out << "  address-taken vars: " << stats_.addrTakenVars << " (max/avg pts "
+      << stats_.maxAddrTakenPtsSize << "/" << stats_.averageAddrTakenPtsSize
+      << ")\n";
+  out << "  clustered objects: " << stats_.clusteredObjects << " ("
+      << stats_.mergedObjectClusters << " merged classes)\n";
   out << "  memory in/out facts: " << stats_.memoryInFacts << " / "
       << stats_.memoryOutFacts << "\n";
   out << "  strong updates: " << stats_.strongUpdates << " (executions "
@@ -64,6 +75,10 @@ std::string FlowSensitivePTA::statisticsReport() const {
   out << "  indirect call edges: " << stats_.indirectCallEdges << "\n";
   out << "  indirect calls rejected by bound: " << stats_.indirectCallsRejected
       << "\n";
+  if (stats_.unboundedIndirectCalls != 0)
+    out << "  WARNING unbounded on-the-fly edges: "
+        << stats_.unboundedIndirectCalls
+        << " (no indirect-call target filter configured)\n";
   if (stats_.unresolvedIndirectCalls != 0)
     out << "  WARNING unresolved indirect callsites: "
         << stats_.unresolvedIndirectCalls << "\n";
@@ -81,7 +96,15 @@ bool FlowSensitivePTA::writeAnalysisResultToFile(
   std::ofstream output(filename, std::ios::trunc);
   if (!output)
     return false;
-  output << "LOTUS_SPARSEPTA 1\n";
+  output << "LOTUS_SPARSEPTA 2\n";
+  // SVF has no separate field-insensitive object: getFIObjVar returns the
+  // base. Lotus allocates a dedicated representative, so record the identity
+  // map explicitly instead of rewriting solving IDs.
+  for (ObjectID object : graph_->getAllObjectIds()) {
+    const ObjectID canonical = graph_->canonicalObjectId(object);
+    if (canonical != object)
+      output << "M " << object << ' ' << canonical << '\n';
+  }
   for (const auto &[node, pointsTo] : topLevelPointsTo_) {
     const PointsToSet &set = materialize(pointsTo);
     output << "T " << node << ' ' << set.size();
@@ -111,7 +134,7 @@ bool FlowSensitivePTA::readAnalysisResultFromFile(const std::string &filename) {
   std::string magic;
   unsigned formatVersion = 0;
   if (!(input >> magic >> formatVersion) || magic != "LOTUS_SPARSEPTA" ||
-      formatVersion != 1)
+      (formatVersion != 1 && formatVersion != 2))
     return false;
 
   topLevelPointsTo_.clear();
@@ -122,6 +145,7 @@ bool FlowSensitivePTA::readAnalysisResultFromFile(const std::string &filename) {
   weakUpdateSites_.clear();
   if (config_.setBackend == PointsToSetBackend::HashConsed)
     arena_.reset();
+  loadedCanonicalObjects_.clear();
   stats_ = {};
 
   auto makeStored = [&](const PointsToSet &set) {
@@ -160,12 +184,29 @@ bool FlowSensitivePTA::readAnalysisResultFromFile(const std::string &filename) {
       if (!(input >> node >> object >> count) || !readSet(count, set))
         return false;
       (record == "I" ? dfIn_ : dfOut_)[node][object] = makeStored(set);
+    } else if (record == "M") {
+      // Field-insensitive identity record. The solving IDs are unchanged, so
+      // the mapping is informational and only queried through
+      // canonicalObject().
+      ObjectID representative = 0;
+      ObjectID base = 0;
+      if (!(input >> representative >> base))
+        return false;
+      loadedCanonicalObjects_[representative] = base;
     } else {
       return false;
     }
   }
   reconnectIndirectCallsAfterRead();
   return input.good() || input.eof();
+}
+
+FlowSensitivePTA::ObjectID
+FlowSensitivePTA::canonicalObject(ObjectID object) const {
+  const auto it = loadedCanonicalObjects_.find(object);
+  if (it != loadedCanonicalObjects_.end())
+    return it->second;
+  return graph_ ? graph_->canonicalObjectId(object) : object;
 }
 
 bool FlowSensitivePTA::hasSameSolution(const FlowSensitivePTA &other,
@@ -413,7 +454,55 @@ FlowSensitivePTA::expandIndirectObjects(const PointsToSet &objects) const {
     const PointsToSet fields = graph_->getFieldObjects(object);
     expanded.insert(fields.begin(), fields.end());
   }
-  return expanded;
+  return mapObjects(expanded);
+}
+
+FlowSensitivePTA::ObjectID FlowSensitivePTA::mapObject(ObjectID object) const {
+  return objectClustering_.empty() ? object : objectClustering_.map(object);
+}
+
+FlowSensitivePTA::PointsToSet
+FlowSensitivePTA::mapObjects(const PointsToSet &objects) const {
+  return objectClustering_.empty() ? objects
+                                   : objectClustering_.mapAll(objects);
+}
+
+FlowSensitivePTA::StoredSet
+FlowSensitivePTA::buildStored(const PointsToSet &set) {
+  StoredSet stored;
+  if (persistentSets_)
+    stored.sharedSet = std::make_shared<const PointsToSet>(set);
+  else if (config_.setBackend == PointsToSetBackend::HashConsed)
+    stored.interned = arena_.intern(set);
+  else
+    stored.mutableSet = set;
+  return stored;
+}
+
+void FlowSensitivePTA::mapStoredInPlace(StoredSet &set) {
+  if (objectClustering_.empty())
+    return;
+  const PointsToSet &objects = materialize(set);
+  PointsToSet mapped;
+  bool changed = false;
+  for (ObjectID object : objects) {
+    const ObjectID representative = mapObject(object);
+    changed |= representative != object;
+    mapped.insert(representative);
+  }
+  if (changed)
+    set = buildStored(mapped);
+}
+
+void FlowSensitivePTA::buildObjectClustering() {
+  objectClustering_ = {};
+  stats_.clusteredObjects = 0;
+  stats_.mergedObjectClusters = 0;
+  if (config_.clusterObjects == Config::ClusterMethod::None)
+    return;
+  objectClustering_ = flow_sensitive::clusterObjectsByType(*graph_);
+  stats_.clusteredObjects = objectClustering_.mergedObjects();
+  stats_.mergedObjectClusters = objectClustering_.mergedClusters();
 }
 
 FlowSensitivePTA::ObjectID
@@ -584,7 +673,7 @@ FlowSensitivePTA::constantPointsTo(const Constant *constant) {
       return constantPointsTo(dyn_cast<Constant>(expression->getOperand(0)));
   const Value *stripped = constant->stripPointerCasts();
   if (const ObjectID object = graph_->getObjectId(stripped))
-    merge(result, singleton(object));
+    merge(result, singleton(mapObject(object)));
   return result;
 }
 
@@ -641,7 +730,7 @@ void FlowSensitivePTA::initializeGlobalMemory() {
         if (info && info->hasFieldOffset && info->fieldOffset == offset)
           storage.insert(object);
       }
-      return storage;
+      return mapObjects(storage);
     };
 
     const DataLayout &layout = module->getDataLayout();
@@ -709,8 +798,9 @@ FlowSensitivePTA::pointerTargets(const Value *pointer) {
   return topSet(graph_->getValueNode(pointer));
 }
 
-FlowSensitivePTA::PointsToSet FlowSensitivePTA::accessTargets(
-    const Value *pointer, const PointsToSet &memoryPointsTo) {
+FlowSensitivePTA::PointsToSet
+FlowSensitivePTA::accessTargets(const Value *pointer,
+                                const PointsToSet &memoryPointsTo) {
   if (!pointer || !pointer->getType()->isPointerTy())
     return expandIndirectObjects(memoryPointsTo);
   if (graph_->getValueNode(pointer))
@@ -741,6 +831,10 @@ bool FlowSensitivePTA::isStrongUpdate(const PointsToSet &targets) const {
   if (targets.size() != 1)
     return false;
   const ObjectID object = *targets.begin();
+  // SVF disables strong updates on any class produced by cluster(): assigning
+  // to one member must not kill the other members' contents.
+  if (objectClustering_.clusterSize(object) > 1)
+    return false;
   const SVFG::ObjectInfo *info = graph_->getObjectInfo(object);
   if (!info || info->isUnknown || info->isHeap || info->isArray ||
       info->isFieldInsensitive)
@@ -787,6 +881,8 @@ bool FlowSensitivePTA::resolveIndirectCalls(const SVFGNode &node,
       }
       if (config_.connectIndirectCall(callSite, target)) {
         ++stats_.indirectCallEdges;
+        if (!config_.isIndirectCallTargetAllowed)
+          ++stats_.unboundedIndirectCalls;
         changed = true;
       }
     }
@@ -905,18 +1001,24 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
   } else if (const auto *load = dyn_cast<LoadSVFGNode>(&node)) {
     ++stats_.processedLoad;
     top = {};
-    PointsToSet targetSet = accessTargets(
-        accessPointer(load->getInstruction()), load->getMemoryPointsTo());
-    for (ObjectID object : targetSet) {
-      if (graph_->isConstantObject(object))
-        continue;
-      auto value = incoming.find(object);
-      if (value != incoming.end()) {
-        merge(top, value->second);
-      } else {
-        for (const auto &[memoryObject, memoryValue] : incoming)
-          if (graph_->isUnknownObject(memoryObject))
-            merge(top, memoryValue);
+    // SVF's pointer-only SVFG has no VFG node for a non-pointer load, so its
+    // result never carries pointer facts.  Reading memory here would only
+    // propagate values the loaded scalar cannot hold.
+    if (!config_.pointerOnlySVFG || !load->getInstruction() ||
+        load->getInstruction()->getType()->isPointerTy()) {
+      PointsToSet targetSet = accessTargets(
+          accessPointer(load->getInstruction()), load->getMemoryPointsTo());
+      for (ObjectID object : targetSet) {
+        if (graph_->isConstantObject(object))
+          continue;
+        auto value = incoming.find(object);
+        if (value != incoming.end()) {
+          merge(top, value->second);
+        } else {
+          for (const auto &[memoryObject, memoryValue] : incoming)
+            if (graph_->isUnknownObject(memoryObject))
+              merge(top, memoryValue);
+        }
       }
     }
   } else if (const auto *store = dyn_cast<StoreSVFGNode>(&node)) {
@@ -924,30 +1026,37 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
     const auto *instruction = store->getInstruction();
     const Value *valOp = storedValue(instruction);
     const Value *ptrOp = accessPointer(instruction);
-    StoredSet stored =
-        valOp ? pointerTargets(valOp) : directInput(node);
-    const PointsToSet targetSet = ptrOp
-        ? accessTargets(ptrOp, store->getMemoryPointsTo())
-        : expandIndirectObjects(store->getMemoryPointsTo());
-    const bool strong = isStrongUpdate(targetSet);
-    bool updatedAny = false;
-    for (ObjectID object : targetSet) {
-      if (graph_->isConstantObject(object))
-        continue;
-      if (strong) {
-        assign(outgoingState()[object], stored);
-      } else {
-        merge(outgoingState()[object], stored);
+    // SVF's processStore() only handles stores of pointer-typed values
+    // (`store->getSrcNode()->isPointer()`); a scalar store cannot change the
+    // pointer contents of its destination.  The node still forwards its IN
+    // state to OUT below, so a following load observes the same memory.
+    const bool pointerStore =
+        !config_.pointerOnlySVFG || !valOp || valOp->getType()->isPointerTy();
+    if (pointerStore) {
+      StoredSet stored = valOp ? pointerTargets(valOp) : directInput(node);
+      const PointsToSet targetSet =
+          ptrOp ? accessTargets(ptrOp, store->getMemoryPointsTo())
+                : expandIndirectObjects(store->getMemoryPointsTo());
+      const bool strong = isStrongUpdate(targetSet);
+      bool updatedAny = false;
+      for (ObjectID object : targetSet) {
+        if (graph_->isConstantObject(object))
+          continue;
+        if (strong) {
+          assign(outgoingState()[object], stored);
+        } else {
+          merge(outgoingState()[object], stored);
+        }
+        updatedAny = true;
       }
-      updatedAny = true;
-    }
-    if (updatedAny) {
-      if (strong) {
-        strongUpdateSites_.insert(node.getId());
-        ++stats_.strongUpdateExecutions;
-      } else {
-        weakUpdateSites_.insert(node.getId());
-        ++stats_.weakUpdateExecutions;
+      if (updatedAny) {
+        if (strong) {
+          strongUpdateSites_.insert(node.getId());
+          ++stats_.strongUpdateExecutions;
+        } else {
+          weakUpdateSites_.insert(node.getId());
+          ++stats_.weakUpdateExecutions;
+        }
       }
     }
   } else if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(&node)) {
@@ -1088,15 +1197,16 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
                 const auto *fill =
                     dyn_cast<ConstantInt>(intrinsic->getArgOperand(1));
                 if (fill && fill->isZero())
-                  assign(outgoingState()[destination], empty);
+                  assign(outgoingState()[mapObject(destination)], empty);
                 else if (unknownObject != 0)
-                  assign(outgoingState()[destination],
+                  assign(outgoingState()[mapObject(destination)],
                          singleton(unknownObject));
               } else {
-                assign(outgoingState()[destination], empty);
+                assign(outgoingState()[mapObject(destination)], empty);
               }
             } else if (relativeOffset < copyLength && unknownObject != 0) {
-              assign(outgoingState()[destination], singleton(unknownObject));
+              assign(outgoingState()[mapObject(destination)],
+                     singleton(unknownObject));
             }
           }
         }
@@ -1106,7 +1216,8 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
           const PointsToSet destinationObjects =
               objectsWithFields(intrinsic->getArgOperand(0));
           for (ObjectID destination : destinationObjects)
-            merge(outgoingState()[destination], singleton(unknownObject));
+            merge(outgoingState()[mapObject(destination)],
+                  singleton(unknownObject));
         }
       }
 
@@ -1122,7 +1233,8 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
           const uint64_t sourceOffset =
               info && info->hasFieldOffset ? info->fieldOffset : 0;
           for (const RootLocation &sourceRoot : sourceRoots) {
-            if (sourceRoot.base != sourceBase || sourceOffset < sourceRoot.offset)
+            if (sourceRoot.base != sourceBase ||
+                sourceOffset < sourceRoot.offset)
               continue;
             const uint64_t relativeOffset = sourceOffset - sourceRoot.offset;
             if (!fullyCopied(relativeOffset, pointerSizeForObject(source)))
@@ -1138,15 +1250,15 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
                       : graph_->getOffsetObject(destinationRoot.base,
                                                 destinationOffset);
               if (destination != 0)
-                merge(copiedByDestination[destination], value);
+                merge(copiedByDestination[mapObject(destination)], value);
             }
           }
         }
         for (const auto &[destination, value] : copiedByDestination)
           if (hasExactLength)
-            assign(outgoingState()[destination], value);
+            assign(outgoingState()[mapObject(destination)], value);
           else
-            merge(outgoingState()[destination], value);
+            merge(outgoingState()[mapObject(destination)], value);
       }
     }
   } else if (const auto *gep = dyn_cast<GepSVFGNode>(&node)) {
@@ -1242,6 +1354,7 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
     top = directInput(node);
   }
 
+  mapStoredInPlace(top);
   const bool topChanged = assign(topLevelPointsTo_[node.getId()], top);
   changed |= topChanged;
   if (topChanged && resolveIndirectCalls(node, top))
@@ -1251,61 +1364,62 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
   return changed;
 }
 
-FlowSensitivePTA::SCCInfo FlowSensitivePTA::computeSCCs() const {
-  SCCInfo result;
-  std::unordered_map<NodeID, int> index, lowlink;
-  std::unordered_set<NodeID> onStack;
-  std::vector<const SVFGNode *> stack;
-  int nextIndex = 0;
-  std::function<void(const SVFGNode *)> visit = [&](const SVFGNode *node) {
-    index[node->getId()] = lowlink[node->getId()] = nextIndex++;
-    stack.push_back(node);
-    onStack.insert(node->getId());
-    for (const SVFGEdge *edge : node->getOutEdges()) {
-      const SVFGNode *successor = edge ? edge->getDstNode() : nullptr;
-      if (!inScope(successor))
-        continue;
-      if (index.find(successor->getId()) == index.end()) {
-        visit(successor);
-        lowlink[node->getId()] =
-            std::min(lowlink[node->getId()], lowlink[successor->getId()]);
-      } else if (onStack.count(successor->getId()) != 0) {
-        lowlink[node->getId()] =
-            std::min(lowlink[node->getId()], index[successor->getId()]);
-      }
-    }
-    if (lowlink[node->getId()] != index[node->getId()])
-      return;
-    result.components.emplace_back();
-    do {
-      const SVFGNode *member = stack.back();
-      stack.pop_back();
-      onStack.erase(member->getId());
-      result.components.back().push_back(member);
-      if (member == node)
-        break;
-    } while (!stack.empty());
-  };
-  for (const auto &entry : *graph_)
-    if (inScope(entry.second) && index.find(entry.first) == index.end())
-      visit(entry.second);
+void FlowSensitivePTA::collectStatistics() {
+  // SVF-named population statistics (FlowSensitiveStat).
+  stats_.totalPointers = graph_->countPointerValueNodes();
+  const auto [fiObjects, fsObjects] = graph_->countBaseObjects();
+  stats_.fieldInsensitiveObjects = fiObjects;
+  stats_.fieldSensitiveObjects = fsObjects;
+  stats_.totalObjects = fiObjects + fsObjects;
 
-  for (std::size_t i = 0; i < result.components.size(); ++i)
-    for (const SVFGNode *node : result.components[i])
-      result.nodeToComponent[node->getId()] = i;
-  result.successors.resize(result.components.size());
-  for (std::size_t i = 0; i < result.components.size(); ++i) {
-    std::unordered_set<std::size_t> successors;
-    for (const SVFGNode *node : result.components[i])
-      for (const SVFGEdge *edge : node->getOutEdges())
-        if (edge && inScope(edge->getDstNode())) {
-          const std::size_t target =
-              result.nodeToComponent[edge->getDstNode()->getId()];
-          if (target != i)
-            successors.insert(target);
-        }
-    result.successors[i].assign(successors.begin(), successors.end());
+  std::size_t inOutFacts = 0;
+  std::size_t inOutFactCount = 0;
+  auto accumulate = [&](const std::unordered_map<NodeID, MemoryState> &states) {
+    for (const auto &[node, state] : states)
+      for (const auto &[object, pointsTo] : state) {
+        const std::size_t size = materialize(pointsTo).size();
+        stats_.maxPtsSize = std::max(stats_.maxPtsSize, size);
+        inOutFacts += size;
+        ++inOutFactCount;
+      }
+  };
+  accumulate(dfIn_);
+  stats_.memoryInFacts = inOutFacts;
+  accumulate(dfOut_);
+  stats_.memoryOutFacts = inOutFacts - stats_.memoryInFacts;
+  if (inOutFactCount != 0)
+    stats_.averagePtsSize =
+        static_cast<double>(inOutFacts) / static_cast<double>(inOutFactCount);
+
+  std::size_t addrTakenTotal = 0;
+  for (const auto &[nodeID, node] : *graph_) {
+    if (!inScope(node))
+      continue;
+    const auto *store = dyn_cast<StoreSVFGNode>(node);
+    if (!store)
+      continue;
+    const Value *pointer = accessPointer(store->getInstruction());
+    if (!pointer || !pointer->getType()->isPointerTy())
+      continue;
+    const std::size_t size = materialize(pointerTargets(pointer)).size();
+    if (size == 0)
+      continue;
+    ++stats_.addrTakenVars;
+    addrTakenTotal += size;
+    stats_.maxAddrTakenPtsSize = std::max(stats_.maxAddrTakenPtsSize, size);
   }
+  if (stats_.addrTakenVars != 0)
+    stats_.averageAddrTakenPtsSize = static_cast<double>(addrTakenTotal) /
+                                     static_cast<double>(stats_.addrTakenVars);
+}
+
+FlowSensitivePTA::SCCInfo FlowSensitivePTA::computeSCCs() const {
+  flow_sensitive::SVFGSCC scc = flow_sensitive::computeSVFGSCCs(
+      *graph_, [this](const SVFGNode *node) { return inScope(node); });
+  SCCInfo result;
+  result.components = std::move(scc.components);
+  result.nodeToComponent = std::move(scc.componentOf);
+  result.successors = std::move(scc.successors);
   return result;
 }
 
@@ -1327,6 +1441,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
     deadline_ = started +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(config_.timeLimitSeconds));
+  buildObjectClustering();
   {
     const auto initializeStarted = std::chrono::steady_clock::now();
     initializeGlobalMemory();
@@ -1410,12 +1525,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
     stats_.averageTopLevelPtsSize =
         static_cast<double>(stats_.topLevelFacts) /
         static_cast<double>(topLevelPointsTo_.size());
-  for (const auto &[node, state] : dfIn_)
-    for (const auto &[object, pointsTo] : state)
-      stats_.memoryInFacts += materialize(pointsTo).size();
-  for (const auto &[node, state] : dfOut_)
-    for (const auto &[object, pointsTo] : state)
-      stats_.memoryOutFacts += materialize(pointsTo).size();
+  collectStatistics();
   stats_.strongUpdates = strongUpdateSites_.size();
   stats_.weakUpdates = weakUpdateSites_.size();
   stats_.svfgHasSU = !strongUpdateSites_.empty();
@@ -1457,7 +1567,7 @@ FlowSensitivePTA::memoryIn(const SVFGNode *node, ObjectID object) const {
   auto state = dfIn_.find(node->getId());
   if (state == dfIn_.end())
     return empty;
-  auto value = state->second.find(object);
+  auto value = state->second.find(mapObject(object));
   return value == state->second.end() ? empty : materialize(value->second);
 }
 
@@ -1469,7 +1579,7 @@ FlowSensitivePTA::memoryOut(const SVFGNode *node, ObjectID object) const {
   auto state = dfOut_.find(node->getId());
   if (state == dfOut_.end())
     return empty;
-  auto value = state->second.find(object);
+  auto value = state->second.find(mapObject(object));
   return value == state->second.end() ? empty : materialize(value->second);
 }
 

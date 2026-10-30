@@ -834,6 +834,47 @@ public:
         result.insert(entry.first);
     return result;
   }
+
+  /// @brief Every abstract object ID that carries metadata.
+  /// Used by statistics that mirror SVF's object population counts.
+  inline std::vector<uint32_t> getAllObjectIds() const {
+    std::vector<uint32_t> ids;
+    ids.reserve(objIdToInfo.size());
+    for (const auto &entry : objIdToInfo)
+      ids.push_back(entry.first);
+    return ids;
+  }
+
+  /// @brief Distinct base objects split by field sensitivity.
+  /// Mirrors SVF's FIObjNum / FSObjNum: only base objects are counted, and a
+  /// base is field-insensitive once any variant access collapsed it.
+  inline std::pair<std::size_t, std::size_t> countBaseObjects() const {
+    std::size_t fieldInsensitive = 0;
+    std::size_t fieldSensitive = 0;
+    for (const auto &entry : objIdToInfo) {
+      const ObjectInfo &info = entry.second;
+      if (info.baseObjId != 0 && info.baseObjId != entry.first)
+        continue; // a field object, not a base
+      if (info.isFieldInsensitive)
+        ++fieldInsensitive;
+      else
+        ++fieldSensitive;
+    }
+    return {fieldInsensitive, fieldSensitive};
+  }
+
+  /// @brief Number of pointer-typed value nodes.
+  /// SVF's TotalPointers counts PAG value nodes; under a pointer-only SVFG
+  /// every one of them is a pointer.
+  inline std::size_t countPointerValueNodes() const {
+    std::size_t count = 0;
+    for (const auto &entry : valueToNodeMap) {
+      const llvm::Value *value = entry.first;
+      if (value && value->getType()->isPointerTy())
+        ++count;
+    }
+    return count;
+  }
   inline bool isSingletonObject(uint32_t objId) const {
     if (const ObjectInfo *info = getObjectInfo(objId))
       return info->isSingleton;
@@ -885,6 +926,17 @@ public:
   /// The returned object has `baseObjId == canonical base` and no field
   /// offset, so `getFieldObjects()` keeps reporting every per-field object.
   uint32_t getOrCreateFieldInsensitiveObject(uint32_t baseObjId);
+
+  /// @brief Canonical identity for result reporting.
+  ///
+  /// SVF has no separate field-insensitive object: `getFIObjVar` returns the
+  /// base object itself, so its dumps never contain two IDs for one struct.
+  /// Lotus allocates a dedicated representative (`FI_OBJ(base)`), which is
+  /// what keeps per-field accesses consistent.  This maps that representative
+  /// back to its base; every other object maps to itself.  Solving must not
+  /// use it -- `getFieldObjects()`/`expandIndirectObjects()` remain the
+  /// precision-preserving path.
+  uint32_t canonicalObjectId(uint32_t objId) const;
 
   inline void setNodeFunctionDebug(uint32_t nodeId, std::string label) {
     nodeFunctionDebug[nodeId] = std::move(label);

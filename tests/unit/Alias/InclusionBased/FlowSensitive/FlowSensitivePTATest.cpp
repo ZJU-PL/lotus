@@ -1051,10 +1051,11 @@ TEST_F(FlowSensitivePTATest, TimeLimitReportsTimeout) {
 
 TEST_F(FlowSensitivePTATest, StatisticsReportDetectsStrongUpdateSites) {
   auto module = parseModule(R"(
+    @x = global i8 0
     define void @f() {
     entry:
-      %p = alloca i32
-      store i32 1, i32* %p
+      %p = alloca i8*
+      store i8* @x, i8** %p
       ret void
     }
   )");
@@ -1430,4 +1431,202 @@ TEST_F(FlowSensitivePTATest, StatisticsReportPerNodeKindAndPointsToSizes) {
   EXPECT_NE(report.find("processed addr/copy/gep/load/store/phi"),
             std::string::npos);
   EXPECT_NE(report.find("top-level pts size max/avg"), std::string::npos);
+}
+
+TEST_F(FlowSensitivePTATest, PointerOnlyModeSkipsScalarStoreStrongUpdates) {
+  auto module = parseModule(R"(
+    @n = global i32 0
+    define void @f() {
+    entry:
+      store i32 7, i32* @n
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  const auto *scalarStore = dyn_cast<StoreInst>(
+      module->getFunction("f")->getEntryBlock().getFirstNonPHI());
+  ASSERT_NE(scalarStore, nullptr);
+  ASSERT_FALSE(scalarStore->getValueOperand()->getType()->isPointerTy());
+
+  constexpr uint32_t object = 300;
+  SVFG graph;
+  auto *store = new StoreSVFGNode(1, nullptr, scalarStore, 0);
+  store->setMemoryDef(1, 1, {object});
+  graph.addNode(store);
+  SVFG::ObjectInfo info;
+  info.isGlobal = true;
+  graph.setObjectInfo(object, info);
+
+  // SVF's pointer-only SVFG has no node for this store, so it must not kill
+  // the (pointer) contents of its destination.
+  FlowSensitivePTA pointerOnly(graph);
+  const auto &stats = pointerOnly.solve();
+  EXPECT_EQ(stats.strongUpdates, 0u);
+  EXPECT_TRUE(pointerOnly.memoryOut(store, object).empty());
+
+  // The pre-parity behaviour processes the scalar store and applies a strong
+  // update with an empty points-to set.
+  FlowSensitivePTA::Config legacyConfig;
+  legacyConfig.pointerOnlySVFG = false;
+  FlowSensitivePTA legacy(graph, legacyConfig);
+  const auto &legacyStats = legacy.solve();
+  EXPECT_EQ(legacyStats.strongUpdates, 1u);
+}
+
+TEST_F(FlowSensitivePTATest,
+       TypeClusteringDisablesStrongUpdatesAndPreservesAliases) {
+  auto module = parseModule(R"(
+    @x = global i8 0
+    define i8* @f() {
+    entry:
+      %a = alloca i8*
+      %b = alloca i8*
+      store i8* @x, i8** %a
+      %result = load i8*, i8** %a
+      ret i8* %result
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  SVFGBuilder graphBuilder(graphConfig);
+  std::unique_ptr<SVFG> graph(graphBuilder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *load = nullptr;
+  for (const Instruction &instruction : instructions(module->getFunction("f")))
+    if (const auto *candidate = dyn_cast<LoadInst>(&instruction))
+      load = candidate;
+  ASSERT_NE(load, nullptr);
+
+  FlowSensitivePTA plain(*graph);
+  const auto &plainStats = plain.solve();
+  EXPECT_GE(plainStats.strongUpdates, 1u);
+  const auto plainResult = plain.pointsTo(load);
+  ASSERT_TRUE(plainResult.has_value());
+
+  FlowSensitivePTA::Config clusteredConfig;
+  clusteredConfig.clusterObjects =
+      FlowSensitivePTA::Config::ClusterMethod::Type;
+  FlowSensitivePTA clustered(*graph, clusteredConfig);
+  const auto &clusteredStats = clustered.solve();
+  EXPECT_GT(clusteredStats.clusteredObjects, 0u);
+  EXPECT_GT(clusteredStats.mergedObjectClusters, 0u);
+  // The two `i8*` slots are one class, so the store must not kill the other
+  // member's contents.
+  EXPECT_EQ(clusteredStats.strongUpdates, 0u);
+  EXPECT_EQ(clustered.pointsTo(load), plainResult);
+  EXPECT_EQ(clustered.mayAlias(load, module->getGlobalVariable("x")),
+            plain.mayAlias(load, module->getGlobalVariable("x")));
+}
+
+TEST_F(FlowSensitivePTATest, FieldInsensitiveIdentitySurvivesResultFile) {
+  auto module = parseModule(R"(
+    %S = type { i8*, i8* }
+    define i8** @f(%S* %base) {
+    entry:
+      %gep = getelementptr %S, %S* %base, i32 0, i32 1
+      ret i8** %gep
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  const auto *gep = dyn_cast<GetElementPtrInst>(
+      module->getFunction("f")->getEntryBlock().getFirstNonPHI());
+  ASSERT_NE(gep, nullptr);
+
+  constexpr uint32_t baseObject = 500;
+  SVFG graph;
+  auto *base = new AddrSVFGNode(1, nullptr, module->getFunction("f")->getArg(0),
+                                baseObject);
+  auto *gepNode = new GepSVFGNode(2, nullptr, gep);
+  graph.addNode(base);
+  graph.addNode(gepNode);
+  SVFG::ObjectInfo info;
+  info.isStack = true;
+  info.baseObjId = baseObject;
+  graph.setObjectInfo(baseObject, info);
+  graph.setObjectValue(baseObject, module->getFunction("f")->getArg(0));
+  graph.addEdge(base, gepNode, SVFGEdgeK::IntraDirect);
+
+  FlowSensitivePTA solved(graph);
+  solved.solve();
+  const auto &result = solved.pointsTo(gepNode);
+  ASSERT_EQ(result.size(), 1u);
+  const uint32_t collapsed = *result.begin();
+  ASSERT_NE(collapsed, baseObject);
+  // The dedicated field-insensitive representative reports its base object as
+  // its identity; SVF has no such extra object in the first place.
+  EXPECT_EQ(solved.canonicalObject(collapsed), baseObject);
+  EXPECT_EQ(solved.canonicalObject(baseObject), baseObject);
+
+  SmallString<256> path;
+  int fileDescriptor = -1;
+  ASSERT_FALSE(sys::fs::createTemporaryFile("lotus-sparsepta-fi", "txt",
+                                            fileDescriptor, path));
+  ::close(fileDescriptor);
+  ASSERT_TRUE(solved.writeAnalysisResultToFile(path.str().str()));
+  FlowSensitivePTA restored(graph);
+  ASSERT_TRUE(restored.readAnalysisResultFromFile(path.str().str()));
+  sys::fs::remove(path);
+  EXPECT_EQ(restored.canonicalObject(collapsed), baseObject);
+}
+
+TEST_F(FlowSensitivePTATest, TypeClusteringOnlyAddsPointsToFacts) {
+  auto module = parseModule(R"(
+    @x = global i8 0
+    @y = global i16 0
+    define i8* @f() {
+    entry:
+      %a = alloca i8*
+      %b = alloca i8*
+      %cast = bitcast i16* @y to i8*
+      store i8* @x, i8** %a
+      store i8* %cast, i8** %a
+      %result = load i8*, i8** %a
+      ret i8* %result
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder(&icfg).build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  SVFGBuilder graphBuilder(graphConfig);
+  std::unique_ptr<SVFG> graph(graphBuilder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *load = nullptr;
+  for (const Instruction &instruction : instructions(module->getFunction("f")))
+    if (const auto *candidate = dyn_cast<LoadInst>(&instruction))
+      load = candidate;
+  ASSERT_NE(load, nullptr);
+
+  FlowSensitivePTA plain(*graph);
+  plain.solve();
+  const auto plainResult = plain.pointsTo(load);
+  ASSERT_TRUE(plainResult.has_value());
+  ASSERT_EQ(plainResult->size(), 1u);
+
+  FlowSensitivePTA::Config clusteredConfig;
+  clusteredConfig.clusterObjects =
+      FlowSensitivePTA::Config::ClusterMethod::Type;
+  FlowSensitivePTA clustered(*graph, clusteredConfig);
+  const auto &clusteredStats = clustered.solve();
+  const auto clusteredResult = clustered.pointsTo(load);
+  ASSERT_TRUE(clusteredResult.has_value());
+  ASSERT_GT(clusteredStats.mergedObjectClusters, 0u);
+
+  // %a and the unused %b form one class, so the second store becomes a weak
+  // update. Coarsening may add facts; it must never remove a mapped plain one.
+  EXPECT_GT(clusteredResult->size(), plainResult->size());
+  const auto mappedPlain = clustered.objectClustering().mapAll(*plainResult);
+  for (FlowSensitivePTA::ObjectID object : mappedPlain)
+    EXPECT_NE(clusteredResult->find(object), clusteredResult->end());
 }

@@ -357,6 +357,13 @@ public:
   /// base object ID for all fields.
   SVFGNodeBS getObjectIdsForValue(const llvm::Value *ptr);
 
+  /// @brief Points-to objects of a pointer from the pre-analysis (AserPTA).
+  ///
+  /// SVF's versioned analysis seeds its meld labels from the auxiliary
+  /// Andersen result (`ander->getPts(store lhs)`); this exposes the same
+  /// information in SVFG object-id space.
+  SVFGNodeBS getPreAnalysisPointsTo(const llvm::Value *ptr);
+
   /// @brief Map base object + GEP to field object ID (field-sensitive if possible).
   ///
   /// Returns the field-sensitive object for GEP-derived pointer when:

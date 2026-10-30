@@ -48,9 +48,39 @@ The versioned solver labels footprint representatives concurrently
 `hardware_concurrency()`, 1 runs sequentially) and merges the results in object
 order, so the labels are independent of thread scheduling.
 `FlowSensitivePTA` also has `writeAnalysisResultToFile` /
-`readAnalysisResultFromFile` (`LOTUS_SPARSEPTA 1`). The versioned solver
-writes `LOTUS_VFSPTA 2` and reads versions 1 and 2. The driver exposes both
-through `--write-pts` / `--read-pts`. These formats store Lotus object IDs.
+`readAnalysisResultFromFile` (`LOTUS_SPARSEPTA 2`; version 1 is still read).
+The versioned solver writes `LOTUS_VFSPTA 2` and reads versions 1 and 2. The
+driver exposes both through `--write-pts` / `--read-pts`. These formats store
+Lotus object IDs; version 2 also records the field-insensitive identity map
+(`M` records for `fspta`, `F` records for `vfspta`) so callers can report a
+representative as its base object.
+
+### Clustering, pointer-only SVFG, and prelabel seeds
+
+These options correspond to SVF knobs that were previously unconditional or
+fixed here:
+
+| Driver flag | Config | Effect |
+| --- | --- | --- |
+| `--cluster-objects=none` | `ClusterMethod::None` | Identity mapping (SVF `plainMap()`), the default |
+| `--cluster-objects=type` | `ClusterMethod::Type` | Merge base objects with the same LLVM type and stack/heap/global/singleton kind (both solvers) |
+| `--cluster-objects=footprint` | `ClusterMethod::Footprint` | Merge objects with identical access footprints (`vfspta` only) |
+| `--pointer-only[=false]` | `pointerOnlySVFG` | Model only pointer-typed loads/stores, like SVF's `memSSA.buildPTROnlySVFG`; default enabled |
+| `--vfspta-prelabel=builder` | `preAnalysisTargets` empty | Seed meld labels from the builder's MemorySSA region sets (default) |
+| `--vfspta-prelabel=pre-analysis` | `preAnalysisTargets` set | Seed meld labels from the auxiliary points-to result (SVF's `prelabel()` reading Andersen) |
+
+Clustering is a sound coarsening for a may-points-to analysis: the object map
+replaces each object with its class representative and every memory/version
+fact is keyed by that representative. Strong updates are disabled on any class
+with more than one member, exactly like SVF's `cluster()` + `isStrongUpdate`.
+`Statistics::clusteredObjects` / `mergedObjectClusters` report the size of the
+partition. A written result file stores post-clustering object IDs, so reload
+it with the same `clusterObjects` setting that produced it.
+
+The `pre-analysis` seed requires the SVFG builder's auxiliary PTA
+(`SVFGBuilder::getPreAnalysisPointsTo`). Without it the driver keeps the
+builder-recorded region sets, which is what hand-built or pre-analysis-free
+graphs must use.
 
 ## Configuration and SVF parity notes
 
@@ -68,6 +98,10 @@ counters report the outcome:
 - `Statistics::indirectCallsRejected` — candidate edges the bound rejected.
 - `Statistics::unresolvedIndirectCalls` — indirect callsites reached while no
   `connectIndirectCall` connector was configured (silent in SVF).
+- `Statistics::unboundedIndirectCalls` — OTF edges materialized while no
+  `isIndirectCallTargetAllowed` predicate was configured. A non-zero value
+  means the call graph is unbounded, unlike SVF's auxiliary-Andersen bound;
+  both reports print a `WARNING` line in that case.
 
 `lotus-alias-fspta` installs the pre-analysis target list for both roles.
 
@@ -87,13 +121,28 @@ Object IDs are allocated through `SVFG::allocateObjectId()` so that
 solve-time object creation and builder allocations share one counter and
 cannot collide.
 
-### Versioned object ordering
+SVF has no separate field-insensitive object (`getFIObjVar` returns the base),
+while Lotus keeps a dedicated representative whose `baseObjId` is the base.
+Solving must use the representative, but reporting should not: result-file
+version 2 records that identity (`M` in `LOTUS_SPARSEPTA`, `F` in
+`LOTUS_VFSPTA`) and both solvers expose `canonicalObject(object)`, which maps a
+representative back to its base and returns every other object unchanged.
 
-`VersionedFlowSensitivePTA::Config::orderVersionedObjectsByWeight` (formerly
-`clusterVersionedObjects`) only controls the order in which objects are
-labelled: footprint representatives with more occurrences are processed first.
-It does **not** merge objects, equivalents, or SVFG node IDs; SVF's
-`cluster()` performs those merges and has no counterpart here.
+### Versioned object ordering and SCC scheduling
+
+`VersionedFlowSensitivePTA::Config::orderVersionedObjectsByWeight`
+(formerly `clusterVersionedObjects`) only controls the order in which objects
+are labelled: footprint representatives with more occurrences are processed
+first. Object merging is selected separately through `Config::clusterObjects`
+(see above).
+
+Both solvers order their statement worklist by the SVFG's strongly connected
+components (shared helper in `Support/SVFGOrder.h`), matching SVF's
+`WPAFSSolver`: components are emitted in reverse topological order and only the
+consumers of a changed statement are revisited. The versioned solver keeps a
+priority queue keyed by `(SCC index, NodeID)`, so the order is deterministic.
+`Statistics::sccs` / `maxSccSize` / `solveIterations` report the decomposition
+and the number of completed sweeps.
 
 ### Statistics
 
@@ -102,11 +151,16 @@ It does **not** merge objects, equivalents, or SVFG node IDs; SVF's
 (`processedAddr`, `processedCopy`, `processedGep`, `processedLoad`,
 `processedStore`, `processedPhi`, `processedActualParam`,
 `processedFormalRet`, `processedMSSA`), top-level points-to sizes
-(`maxTopLevelPtsSize`, `averageTopLevelPtsSize`), the indirect-call bound
-counters, and `fieldInsensitiveCollapses`.
+(`maxTopLevelPtsSize`, `averageTopLevelPtsSize`), the SVF-named population and
+IN/OUT sizes (`totalPointers`, `totalObjects`, `fieldInsensitiveObjects`,
+`fieldSensitiveObjects`, `maxPtsSize`, `averagePtsSize`, `addrTakenVars`,
+`maxAddrTakenPtsSize`, `averageAddrTakenPtsSize`), the indirect-call bound
+counters, `fieldInsensitiveCollapses`, and the clustering counters.
 `VersionedFlowSensitivePTA::statisticsReport()` adds version points-to sizes
-(`nonEmptyVersions`, `maxVersionPtsSize`, `averageVersionPtsSize`) and the same
-bound/collapse counters.
+(`nonEmptyVersions`, `maxVersionPtsSize`, `averageVersionPtsSize`), version
+counts (`totalVersions`, `maxVersionsForObject`, `singleVersionObjects`,
+`totalExistingVPts`, `totalEmptyVPts`), the same population/address-taken and
+clustering counters, and the SCC/sweep counters.
 
 ## Standalone engine status
 
@@ -124,6 +178,8 @@ step and result caching, which this module does not provide.
 - explicit Addr/Copy/GEP/Phi/Load/Store and parameter-flow transfer;
 - canonical `(allocation, normalized byte offset)` field objects, with array
   indices collapsed for field-insensitive updates;
+- pointer-only load/store modelling (`Config::pointerOnlySVFG`, matching SVF's
+  pointer-only SVFG) with an opt-out for the previous behaviour;
 - field-offset-aware aggregate global initializers and `memcpy`/`memmove`;
 - singleton-object strong updates and conservative weak updates;
 - Tarjan SCC decomposition with SCC-local fixed points and successor requeueing;
@@ -142,13 +198,15 @@ This module contains three flow-sensitive analyses:
 - `VersionedFlowSensitivePTA` implements the `vfspta` analysis, which versions
   each abstract object and keys memory facts by that version instead of by
   SVFG location. Its mechanisms are:
-  - object prelabeling and meld versions
+  - object prelabeling and meld versions (region seeds by default, auxiliary
+    points-to seeds with `--vfspta-prelabel=pre-analysis`)
   - consume/yield maps
   - version and statement reliance
-  - strong and weak updates
+  - strong and weak updates, disabled on multi-object clusters
   - intrinsic memory definitions
-  - footprint-equivalent object reuse
+  - footprint-equivalent object reuse and optional object clustering
   - occurrence-weighted propagation
+  - SCC-ordered statement scheduling
   - on-the-fly (OTF) delta-edge updates
   - result persistence (`LOTUS_VFSPTA`, version 2 with version 1 reads)
   - relabeling on a topology change only when recursion changes the

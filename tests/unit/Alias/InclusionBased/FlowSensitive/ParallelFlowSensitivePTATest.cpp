@@ -603,3 +603,39 @@ TEST_F(ParallelFlowSensitivePTATest, IndirectCallBoundIsAppliedInBothPolicies) {
     EXPECT_EQ(connected.count(other), 0u) << "unordered=" << unordered;
   }
 }
+
+TEST_F(ParallelFlowSensitivePTATest, UnorderedPolicyStillReachesAFixedPoint) {
+  auto module = parseModule(R"(
+    @x = global i8 0
+    @slot = global i8* null
+    define i8* @main(i1 %again) {
+    entry:
+      br label %loop
+    loop:
+      store i8* @x, i8** @slot
+      %r = load i8*, i8** @slot
+      br i1 %again, label %loop, label %exit
+    exit:
+      ret i8* %r
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  ICFG icfg;
+  ICFGBuilder(&icfg).build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.memoryPartition = MemoryRegionPartitionStrategy::InterDisjoint;
+  SVFGBuilder builder(graphConfig);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  FlowSensitivePTA::Config config;
+  config.parallel = true;
+  config.unorderedParallel = true;
+  config.workerThreads = 4;
+  FlowSensitivePTA solver(*graph, config);
+  solver.solve();
+  std::string difference;
+  EXPECT_TRUE(solver.isFixedPoint(&difference)) << difference;
+  EXPECT_GT(solver.statistics().parallelCommits, 0U);
+}

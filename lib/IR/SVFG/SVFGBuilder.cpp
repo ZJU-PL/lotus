@@ -842,6 +842,13 @@ uint32_t SVFGBuilder::getCanonicalBaseObjId(uint32_t objId) const {
   return objId;
 }
 
+SVFGNodeBS SVFGBuilder::getPreAnalysisPointsTo(const Value *ptr) {
+  if (!ptr || !ptr->getType()->isPointerTy() || !config.usePointerAnalysis ||
+      !ptaSolverWrapper || !ptaSolverWrapper->solver)
+    return {};
+  return convertPTAObjectsToObjIDs(getPointsToSet(ptr), true);
+}
+
 SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
   SVFGNodeBS result;
   SVFG *graph = getActiveSVFG();

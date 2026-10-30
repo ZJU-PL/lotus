@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "Alias/InclusionBased/FlowSensitive/Support/ObjectClustering.h"
 #include "Alias/Infrastructure/PtsSet/HashConsedPointsToSet.h"
 #include "IR/GraphView.h"
 
@@ -64,6 +65,19 @@ public:
     // the solver stops at a worklist boundary, keeps the partial solution
     // queryable, and sets timedOut().
     double timeLimitSeconds = 0;
+    // Object clustering (SVF's FlowSensitive::cluster()). `None` is the
+    // identity mapping and corresponds to SVF's plainMap(); `Type` merges
+    // base objects with the same LLVM type and kind. Merging is sound for a
+    // may-points-to analysis and disables strong updates on merged classes.
+    enum class ClusterMethod { None, Type };
+    ClusterMethod clusterObjects = ClusterMethod::None;
+    // Model only pointer-typed loads/stores, like SVF's pointer-only SVFG
+    // (memSSA.buildPTROnlySVFG): its `isInterestedSVFVar` keeps pointer-typed
+    // variables only, so a non-pointer access never has a VFG node. Such an
+    // access cannot change pointer contents, but transferring it materialises
+    // empty memory facts and forces the transfer to walk the whole target set.
+    // Set to false to reproduce the pre-parity behaviour.
+    bool pointerOnlySVFG = true;
   };
 
   struct Statistics {
@@ -93,6 +107,9 @@ public:
     std::size_t indirectCallEdges = 0;
     // Edges the pre-analysis filter rejected (SVF: silently dropped).
     std::size_t indirectCallsRejected = 0;
+    // On-the-fly edges materialised without a target filter. Non-zero means
+    // the call graph is unbounded, unlike SVF's auxiliary-Andersen bound.
+    std::size_t unboundedIndirectCalls = 0;
     // Indirect callsites for which no connector was configured.
     std::size_t unresolvedIndirectCalls = 0;
     // Objects collapsed to a field-insensitive representative during solving.
@@ -100,6 +117,22 @@ public:
     // Points-to set sizes over top-level nodes (SVF: MaxPtsSize/AvgPtsSize).
     std::size_t maxTopLevelPtsSize = 0;
     double averageTopLevelPtsSize = 0.0;
+    // SVF-named population and IN/OUT statistics (FlowSensitiveStat).
+    std::size_t totalPointers = 0;           // TotalPointers
+    std::size_t totalObjects = 0;            // TotalObjects
+    std::size_t fieldInsensitiveObjects = 0; // FIObjNum
+    std::size_t fieldSensitiveObjects = 0;   // FSObjNum
+    std::size_t maxPtsSize = 0;              // MaxPtsSize over IN/OUT facts
+    double averagePtsSize = 0.0;             // AvgPtsSize over IN/OUT facts
+    // Store LHS pointers with a non-empty points-to set, and their sizes
+    // (SVF: NumOfAddrTakeVar / MaxAddrTakenVarPts / AvgAddrTakenVarPtsSize).
+    std::size_t addrTakenVars = 0;
+    std::size_t maxAddrTakenPtsSize = 0;
+    double averageAddrTakenPtsSize = 0.0;
+    // Objects merged into a cluster representative, and the number of
+    // non-singleton classes (SVF: cluster() statistics).
+    std::size_t clusteredObjects = 0;
+    std::size_t mergedObjectClusters = 0;
     std::size_t hashConsedUniqueSets = 0;
     std::size_t hashConsedUnionCacheHits = 0;
     std::size_t parallelThreads = 0;
@@ -142,6 +175,11 @@ public:
   const Statistics &statistics() const { return stats_; }
   bool timedOut() const { return stats_.timedOut; }
   PointsToSetBackend setBackend() const { return config_.setBackend; }
+  /// Object partition used by the solver (empty = identity mapping, SVF's
+  /// plainMap()).
+  const flow_sensitive::ObjectClustering &objectClustering() const {
+    return objectClustering_;
+  }
   /// Human-readable statistics report.
   std::string statisticsReport() const;
 
@@ -151,6 +189,10 @@ public:
   /// Load facts written by writeAnalysisResultToFile(). Indirect-call edges
   /// are not stored; callers must rebuild the graph and reconnect them.
   bool readAnalysisResultFromFile(const std::string &filename);
+  /// Canonical identity for result reporting: a dedicated field-insensitive
+  /// representative maps to the base object it collapses. Do not use this for
+  /// solving -- expandIndirectObjects() is the precision-preserving path.
+  ObjectID canonicalObject(ObjectID object) const;
   // Full differential check of public queries. A missing memory entry and an
   // explicit empty entry both answer the empty set. Analyses must share an
   // SVFG.
@@ -210,6 +252,15 @@ private:
   void initializeGlobalMemory();
   StoredSet constantPointsTo(const llvm::Constant *constant);
   SCCInfo computeSCCs() const;
+  /// Fill the SVF-named population / points-to statistics from the solved
+  /// state. Called by both the sequential and parallel solve paths.
+  void collectStatistics();
+  // Object clustering support (SVF's FlowSensitive::cluster()).
+  ObjectID mapObject(ObjectID object) const;
+  PointsToSet mapObjects(const PointsToSet &objects) const;
+  StoredSet buildStored(const PointsToSet &set);
+  void mapStoredInPlace(StoredSet &set);
+  void buildObjectClustering();
   bool transfer(const lotus::analysis::SVFGNode &node);
   StoredSet directInput(const lotus::analysis::SVFGNode &node);
   StoredSet pointerTargets(const llvm::Value *pointer);
@@ -232,6 +283,10 @@ private:
   std::unordered_map<NodeID, MemoryState> dfOut_;
   MemoryState initialMemory_;
   std::unordered_map<ObjectID, ObjectID> fieldInsensitiveObjects_;
+  /// Field-insensitive identity map loaded from a result file (version 2).
+  std::unordered_map<ObjectID, ObjectID> loadedCanonicalObjects_;
+  /// Object partition (empty = identity mapping).
+  flow_sensitive::ObjectClustering objectClustering_;
   std::unordered_set<const llvm::Function *> recursiveFunctions_;
   std::unordered_set<NodeID> strongUpdateSites_;
   std::unordered_set<NodeID> weakUpdateSites_;

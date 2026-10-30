@@ -30,6 +30,8 @@ enum class SetBackendOption { Mutable, HashConsed };
 enum class PartitionOption { Distinct, IntraDisjoint, InterDisjoint };
 enum class AnalysisOption { FlowSensitive, Versioned, ValueFlow };
 enum class ParallelOrderOption { Reference, Unordered };
+enum class ClusterOption { None, Type, Footprint };
+enum class PrelabelOption { Builder, PreAnalysis };
 
 cl::OptionCategory FsptaCategory("Lotus flow-sensitive pointer analyses");
 cl::opt<bool>
@@ -135,6 +137,31 @@ cl::opt<bool> ValidateAnnotations(
     "validate-annotations",
     cl::desc("Validate __aser_alias__/__aser_no_alias__ calls"),
     cl::init(false), cl::cat(FsptaCategory));
+cl::opt<ClusterOption> ClusterObjects(
+    "cluster-objects", cl::desc("Object clustering applied before solving"),
+    cl::values(
+        clEnumValN(ClusterOption::None, "none",
+                   "Identity mapping (SVF's plainMap; default)"),
+        clEnumValN(ClusterOption::Type, "type",
+                   "Merge base objects with the same LLVM type and kind"),
+        clEnumValN(ClusterOption::Footprint, "footprint",
+                   "Merge objects with identical access footprints "
+                   "(vfspta only)")),
+    cl::init(ClusterOption::None), cl::cat(FsptaCategory));
+cl::opt<bool> PointerOnly(
+    "pointer-only",
+    cl::desc("Model only pointer-typed loads/stores, like SVF's pointer-only "
+             "SVFG (default: enabled)"),
+    cl::init(true), cl::cat(FsptaCategory));
+cl::opt<PrelabelOption> VfsptaPrelabel(
+    "vfspta-prelabel", cl::desc("Seed used for vfspta meld labels"),
+    cl::values(
+        clEnumValN(PrelabelOption::Builder, "builder",
+                   "MemorySSA access regions recorded by the SVFG builder "
+                   "(default)"),
+        clEnumValN(PrelabelOption::PreAnalysis, "pre-analysis",
+                   "Points-to sets from the pre-analysis (SVF's prelabel())")),
+    cl::init(PrelabelOption::Builder), cl::cat(FsptaCategory));
 
 MemoryRegionPartitionStrategy partitionStrategy() {
   switch (MemoryPartition) {
@@ -327,6 +354,23 @@ int main(int argc, char **argv) {
               "only\n";
     return 1;
   }
+  if (ClusterObjects == ClusterOption::Footprint &&
+      Analysis != AnalysisOption::Versioned) {
+    errs() << "--cluster-objects=footprint is supported only for "
+              "--analysis=vfspta\n";
+    return 1;
+  }
+  if (VfsptaPrelabel.getNumOccurrences() != 0 &&
+      Analysis != AnalysisOption::Versioned) {
+    errs() << "--vfspta-prelabel is supported only for --analysis=vfspta\n";
+    return 1;
+  }
+  if (Analysis == AnalysisOption::ValueFlow &&
+      (ClusterObjects.getNumOccurrences() != 0 ||
+       PointerOnly.getNumOccurrences() != 0)) {
+    errs() << "--cluster-objects/--pointer-only are unavailable for vfpta\n";
+    return 1;
+  }
   LLVMContext context;
   SMDiagnostic diagnostic;
   std::unique_ptr<Module> module =
@@ -373,6 +417,26 @@ int main(int argc, char **argv) {
     solverConfig.isIndirectCallTargetAllowed = isAllowedIndirectCall;
     solverConfig.versioningThreads = VersioningThreads;
     solverConfig.timeLimitSeconds = TimeLimit;
+    solverConfig.pointerOnlySVFG = PointerOnly;
+    switch (ClusterObjects) {
+    case ClusterOption::None:
+      solverConfig.clusterObjects =
+          VersionedFlowSensitivePTA::Config::ClusterMethod::None;
+      break;
+    case ClusterOption::Type:
+      solverConfig.clusterObjects =
+          VersionedFlowSensitivePTA::Config::ClusterMethod::Type;
+      break;
+    case ClusterOption::Footprint:
+      solverConfig.clusterObjects =
+          VersionedFlowSensitivePTA::Config::ClusterMethod::Footprint;
+      break;
+    }
+    if (VfsptaPrelabel == PrelabelOption::PreAnalysis) {
+      solverConfig.preAnalysisTargets = [&graphBuilder](const Value *value) {
+        return graphBuilder->getPreAnalysisPointsTo(value);
+      };
+    }
     versionedSolver = std::make_unique<VersionedFlowSensitivePTA>(
         *graph, std::move(solverConfig));
     if (!ReadPtsFile.empty()) {
@@ -406,6 +470,10 @@ int main(int argc, char **argv) {
     solverConfig.connectIndirectCall = connectIndirectCall;
     solverConfig.isIndirectCallTargetAllowed = isAllowedIndirectCall;
     solverConfig.timeLimitSeconds = TimeLimit;
+    solverConfig.pointerOnlySVFG = PointerOnly;
+    if (ClusterObjects == ClusterOption::Type)
+      solverConfig.clusterObjects =
+          FlowSensitivePTA::Config::ClusterMethod::Type;
     solver =
         std::make_unique<FlowSensitivePTA>(*graph, std::move(solverConfig));
     if (!ReadPtsFile.empty()) {
@@ -572,7 +640,10 @@ int main(int argc, char **argv) {
              << "vfspta.delta-relabelings=" << stats.deltaRelabelings << "\n"
              << "vfspta.statement-worklist-pushes="
              << stats.statementWorklistPushes << "\n"
-             << "vfspta.relabelings=" << stats.relabelings << "\n";
+             << "vfspta.relabelings=" << stats.relabelings << "\n"
+             << "vfspta.clustered-objects=" << stats.clusteredObjects << "\n"
+             << "vfspta.merged-object-clusters=" << stats.mergedObjectClusters
+             << "\n";
     } else {
       const auto &stats = solver->statistics();
       outs() << "fspta.nodes=" << stats.nodes << "\n"
@@ -589,7 +660,10 @@ int main(int argc, char **argv) {
              << "fspta.weak-update-executions=" << stats.weakUpdateExecutions
              << "\n"
              << "fspta.indirect-call-edges=" << stats.indirectCallEdges << "\n"
-             << "fspta.hash-consed-sets=" << stats.hashConsedUniqueSets << "\n";
+             << "fspta.hash-consed-sets=" << stats.hashConsedUniqueSets << "\n"
+             << "fspta.clustered-objects=" << stats.clusteredObjects << "\n"
+             << "fspta.merged-object-clusters=" << stats.mergedObjectClusters
+             << "\n";
       outs() << "fspta.solve-seconds=" << stats.solveSeconds << "\n"
              << "fspta.parallel-order="
              << (!Parallel ? "sequential"

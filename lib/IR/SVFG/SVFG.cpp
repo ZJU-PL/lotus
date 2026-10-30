@@ -312,6 +312,17 @@ uint32_t SVFG::getOrCreateFieldInsensitiveObject(uint32_t baseObjId) {
   return fiObjId;
 }
 
+uint32_t SVFG::canonicalObjectId(uint32_t objId) const {
+  const ObjectInfo *info = getObjectInfo(objId);
+  if (!info || !info->isFieldInsensitive)
+    return objId;
+  // Only the dedicated representative (whose base differs from itself) is
+  // rewritten.  The marked base already is the canonical object.
+  if (info->baseObjId != 0 && info->baseObjId != objId)
+    return info->baseObjId;
+  return objId;
+}
+
 SVFGNode *SVFG::getCanonicalDefNodeForDDAId(uint32_t ddaId) const {
   if (SVFGNode *valueNode = getValueIdNode(ddaId))
     return valueNode;

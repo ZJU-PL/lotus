@@ -1328,10 +1328,11 @@ TEST_F(VersionedFlowSensitivePTATest, TimeLimitReportsTimeout) {
 TEST_F(VersionedFlowSensitivePTATest,
        StatisticsReportDetectsStrongUpdateSites) {
   auto module = parseModule(R"(
+    @x = global i8 0
     define void @f() {
     entry:
-      %p = alloca i32
-      store i32 1, i32* %p
+      %p = alloca i8*
+      store i8* @x, i8** %p
       ret void
     }
   )");
@@ -1403,11 +1404,12 @@ TEST_F(VersionedFlowSensitivePTATest,
 TEST_F(VersionedFlowSensitivePTATest,
        RecursiveTopologyChangeRelabelsWhenStrongUpdateMayChange) {
   auto module = parseModule(R"(
+    @x = global i8 0
     @function.pointer = global void ()* @target
     define void @target() {
     entry:
-      %slot = alloca i32
-      store i32 1, i32* %slot
+      %slot = alloca i8*
+      store i8* @x, i8** %slot
       %callee = load void ()*, void ()** @function.pointer
       call void %callee()
       ret void
@@ -1711,4 +1713,168 @@ TEST_F(VersionedFlowSensitivePTATest, VersionStatisticsReportSizes) {
             static_cast<double>(stats.maxVersionPtsSize));
   const std::string report = solver.statisticsReport();
   EXPECT_NE(report.find("version pts non-empty/max/avg"), std::string::npos);
+}
+
+TEST_F(VersionedFlowSensitivePTATest, SccOrderingStatisticsAreReported) {
+  auto module = parseModule(R"(
+    @x = global i8 0
+    define i8* @main(i1 %again) {
+    entry:
+      %p = alloca i8*
+      br label %loop
+    loop:
+      store i8* @x, i8** %p
+      br i1 %again, label %loop, label %exit
+    exit:
+      %r = load i8*, i8** %p
+      ret i8* %r
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  SVFGBuilder graphBuilder(graphConfig);
+  std::unique_ptr<SVFG> graph(graphBuilder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  VersionedFlowSensitivePTA solver(*graph);
+  const auto &stats = solver.solve();
+  EXPECT_GT(stats.sccs, 0u);
+  EXPECT_GE(stats.maxSccSize, 1u);
+  EXPECT_GE(stats.solveIterations, 1u);
+  const std::string report = solver.statisticsReport();
+  EXPECT_NE(report.find("sccs:"), std::string::npos);
+  EXPECT_NE(report.find("solve iterations:"), std::string::npos);
+}
+
+TEST_F(VersionedFlowSensitivePTATest,
+       PointerOnlyModeSkipsScalarStoreStrongUpdates) {
+  auto module = parseModule(R"(
+    @n = global i32 0
+    define void @f() {
+    entry:
+      store i32 7, i32* @n
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  const auto *scalarStore = dyn_cast<StoreInst>(
+      module->getFunction("f")->getEntryBlock().getFirstNonPHI());
+  ASSERT_NE(scalarStore, nullptr);
+  ASSERT_FALSE(scalarStore->getValueOperand()->getType()->isPointerTy());
+
+  constexpr uint32_t object = 300;
+  SVFG graph;
+  auto *store = new StoreSVFGNode(1, nullptr, scalarStore, 0);
+  store->setMemoryDef(1, 1, {object});
+  graph.addNode(store);
+  SVFG::ObjectInfo info;
+  info.isGlobal = true;
+  graph.setObjectInfo(object, info);
+
+  VersionedFlowSensitivePTA pointerOnly(graph);
+  EXPECT_EQ(pointerOnly.solve().strongUpdates, 0u);
+
+  VersionedFlowSensitivePTA::Config legacyConfig;
+  legacyConfig.pointerOnlySVFG = false;
+  VersionedFlowSensitivePTA legacy(graph, legacyConfig);
+  EXPECT_EQ(legacy.solve().strongUpdates, 1u);
+}
+
+TEST_F(VersionedFlowSensitivePTATest,
+       TypeClusteringDisablesStrongUpdatesAndPreservesAliases) {
+  auto module = parseModule(R"(
+    @x = global i8 0
+    define i8* @f() {
+    entry:
+      %a = alloca i8*
+      %b = alloca i8*
+      store i8* @x, i8** %a
+      %result = load i8*, i8** %a
+      ret i8* %result
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  SVFGBuilder graphBuilder(graphConfig);
+  std::unique_ptr<SVFG> graph(graphBuilder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *load = nullptr;
+  for (const Instruction &instruction : instructions(module->getFunction("f")))
+    if (const auto *candidate = dyn_cast<LoadInst>(&instruction))
+      load = candidate;
+  ASSERT_NE(load, nullptr);
+
+  VersionedFlowSensitivePTA plain(*graph);
+  const auto &plainStats = plain.solve();
+  EXPECT_GE(plainStats.strongUpdates, 1u);
+  const auto plainResult = plain.pointsTo(load);
+  ASSERT_TRUE(plainResult.has_value());
+
+  VersionedFlowSensitivePTA::Config clusteredConfig;
+  clusteredConfig.clusterObjects =
+      VersionedFlowSensitivePTA::Config::ClusterMethod::Type;
+  VersionedFlowSensitivePTA clustered(*graph, clusteredConfig);
+  const auto &clusteredStats = clustered.solve();
+  EXPECT_GT(clusteredStats.clusteredObjects, 0u);
+  EXPECT_GT(clusteredStats.mergedObjectClusters, 0u);
+  EXPECT_EQ(clusteredStats.strongUpdates, 0u);
+  EXPECT_EQ(clustered.pointsTo(load), plainResult);
+  EXPECT_EQ(clustered.mayAlias(load, module->getGlobalVariable("x")),
+            plain.mayAlias(load, module->getGlobalVariable("x")));
+}
+
+TEST_F(VersionedFlowSensitivePTATest,
+       FootprintClusteringSelectsOneRepresentativePerFootprint) {
+  constexpr uint32_t firstObject = 100;
+  constexpr uint32_t secondObject = 101;
+  SVFG graph;
+  auto *store = new StoreSVFGNode(1, nullptr, nullptr, 0);
+  store->setMemoryDef(1, 1, {firstObject, secondObject});
+  graph.addNode(store);
+  SVFG::ObjectInfo info;
+  info.isGlobal = true;
+  info.isSingleton = true;
+  graph.setObjectInfo(firstObject, info);
+  graph.setObjectInfo(secondObject, info);
+
+  VersionedFlowSensitivePTA::Config config;
+  config.clusterObjects =
+      VersionedFlowSensitivePTA::Config::ClusterMethod::Footprint;
+  VersionedFlowSensitivePTA solver(graph, config);
+  const auto &stats = solver.solve();
+  EXPECT_EQ(solver.objectClustering().map(secondObject), firstObject);
+  EXPECT_EQ(solver.objectClustering().clusterSize(firstObject), 2u);
+  EXPECT_EQ(stats.clusteredObjects, 1u);
+  EXPECT_EQ(stats.mergedObjectClusters, 1u);
+  EXPECT_EQ(solver.getConsume(1, firstObject),
+            solver.getConsume(1, secondObject));
+}
+
+TEST_F(VersionedFlowSensitivePTATest, FieldInsensitiveIdentityIsExposed) {
+  constexpr uint32_t baseObject = 500;
+  SVFG graph;
+  SVFG::ObjectInfo info;
+  info.isGlobal = true;
+  graph.setObjectInfo(baseObject, info);
+  const uint32_t representative =
+      graph.getOrCreateFieldInsensitiveObject(baseObject);
+  ASSERT_NE(representative, 0u);
+  ASSERT_NE(representative, baseObject);
+
+  VersionedFlowSensitivePTA solver(graph);
+  EXPECT_EQ(solver.canonicalObject(representative), baseObject);
+  EXPECT_EQ(solver.canonicalObject(baseObject), baseObject);
 }

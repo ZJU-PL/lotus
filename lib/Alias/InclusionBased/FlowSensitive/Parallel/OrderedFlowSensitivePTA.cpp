@@ -659,6 +659,8 @@ public:
               }
               if (owner.config_.connectIndirectCall(call.first, call.second)) {
                 ++owner.stats_.indirectCallEdges;
+                if (!owner.config_.isIndirectCallTargetAllowed)
+                  ++owner.stats_.unboundedIndirectCalls;
                 owner.topologyChanged_ = true;
               }
             }
@@ -718,6 +720,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveOrderedParallel() {
     deadline_ = started +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(config_.timeLimitSeconds));
+  buildObjectClustering();
   {
     const auto initializeStarted = std::chrono::steady_clock::now();
     initializeGlobalMemory();
@@ -744,12 +747,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveOrderedParallel() {
   }
   for (const auto &entry : topLevelPointsTo_)
     stats_.topLevelFacts += materialize(entry.second).size();
-  for (const auto &entry : dfIn_)
-    for (const auto &fact : entry.second)
-      stats_.memoryInFacts += materialize(fact.second).size();
-  for (const auto &entry : dfOut_)
-    for (const auto &fact : entry.second)
-      stats_.memoryOutFacts += materialize(fact.second).size();
+  collectStatistics();
   stats_.strongUpdates = strongUpdateSites_.size();
   stats_.weakUpdates = weakUpdateSites_.size();
   stats_.svfgHasSU = !strongUpdateSites_.empty();

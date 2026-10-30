@@ -321,6 +321,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
     return solveOrderedParallel();
   const auto started = std::chrono::steady_clock::now();
   stats_ = {};
+  buildObjectClustering();
   hasDeadline_ = config_.timeLimitSeconds != 0;
   if (hasDeadline_)
     deadline_ = started +
@@ -355,6 +356,8 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
       if (config_.connectIndirectCall(call.first, call.second)) {
         changed = true;
         ++stats_.indirectCallEdges;
+        if (!config_.isIndirectCallTargetAllowed)
+          ++stats_.unboundedIndirectCalls;
       }
     }
   } while (changed && !stats_.timedOut);
@@ -366,12 +369,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
   }
   for (const auto &entry : topLevelPointsTo_)
     stats_.topLevelFacts += materialize(entry.second).size();
-  for (const auto &entry : dfIn_)
-    for (const auto &fact : entry.second)
-      stats_.memoryInFacts += materialize(fact.second).size();
-  for (const auto &entry : dfOut_)
-    for (const auto &fact : entry.second)
-      stats_.memoryOutFacts += materialize(fact.second).size();
+  collectStatistics();
   stats_.strongUpdates = strongUpdateSites_.size();
   stats_.weakUpdates = weakUpdateSites_.size();
   stats_.svfgHasSU = !strongUpdateSites_.empty();

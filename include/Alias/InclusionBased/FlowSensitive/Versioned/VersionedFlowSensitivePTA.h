@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include "Alias/InclusionBased/FlowSensitive/Support/ObjectClustering.h"
 #include "IR/GraphView.h"
 
 #include <algorithm>
@@ -49,9 +50,15 @@ public:
     // graph before materialising an edge.
     using IndirectCallFilter =
         std::function<bool(const llvm::CallBase *, const llvm::Function *)>;
+    // Points-to provider used to seed meld labels (SVF's `prelabel()` reads
+    // the auxiliary Andersen analysis: `ander->getPts(store LHS)`).  When
+    // empty, the MemorySSA region sets recorded by the builder are used, with
+    // the value's pre-analysis object set as a fallback.
+    using PointsToProvider = std::function<PointsToSet(const llvm::Value *)>;
     const lotus::analysis::FilteredSVFGView *scope = nullptr;
     IndirectCallConnector connectIndirectCall;
     IndirectCallFilter isIndirectCallTargetAllowed;
+    PointsToProvider preAnalysisTargets;
     // Labels footprint representatives in occurrence-weight order (heaviest
     // first). This is *not* SVF's `cluster()`: no objects, equivalents, or
     // NodeIDs are merged here.
@@ -62,11 +69,31 @@ public:
     // Wall-clock budget for solve() in seconds. Zero disables it. On expiry
     // the solver keeps the current partial solution and sets timedOut().
     double timeLimitSeconds = 0;
+    // Object clustering (SVF's FlowSensitive::cluster()). `None` is the
+    // identity mapping (SVF plainMap()). `Footprint` merges objects with
+    // identical access footprints, which is exactly the partition the solver
+    // already computes for label sharing (an analogue of SVF's regioned
+    // clustering). `Type` is a coarser Lotus-specific policy that merges base
+    // objects with the same LLVM type and kind. Merging is sound for a
+    // may-points-to analysis and disables strong updates on merged classes.
+    enum class ClusterMethod { None, Footprint, Type };
+    ClusterMethod clusterObjects = ClusterMethod::None;
+    // Model only pointer-typed loads/stores, like SVF's pointer-only SVFG
+    // (memSSA.buildPTROnlySVFG). A non-pointer access cannot change pointer
+    // contents; processing it only adds empty version facts and transfer work.
+    // Set to false to reproduce the pre-parity behaviour.
+    bool pointerOnlySVFG = true;
   };
 
   struct Statistics {
     std::size_t nodes = 0;
     std::size_t nodeProcesses = 0;
+    // SVFG SCC decomposition used to order the statement worklist
+    // (SVF: numOfSCC / maxSCCSize).
+    std::size_t sccs = 0;
+    std::size_t maxSccSize = 0;
+    // Completed worklist sweeps (SVF: SolveIterations).
+    std::size_t solveIterations = 0;
     std::size_t versionedObjects = 0;
     std::size_t equivalentObjects = 0;
     std::size_t versions = 0;
@@ -78,6 +105,8 @@ public:
     std::size_t indirectCallEdges = 0;
     // Edges the pre-analysis filter rejected (SVF drops these silently).
     std::size_t indirectCallsRejected = 0;
+    // On-the-fly edges materialised without a target filter (unbounded).
+    std::size_t unboundedIndirectCalls = 0;
     // Indirect callsites for which no connector was configured.
     std::size_t unresolvedIndirectCalls = 0;
     // Objects collapsed to a field-insensitive representative while solving.
@@ -93,6 +122,25 @@ public:
     std::size_t nonEmptyVersions = 0;
     std::size_t maxVersionPtsSize = 0;
     double averageVersionPtsSize = 0.0;
+    // SVF-named version and population statistics
+    // (VersionedFlowSensitiveStat).
+    std::size_t totalVersions = 0;           // TotalVersions
+    std::size_t maxVersionsForObject = 0;    // MaxVersionsForObj
+    std::size_t singleVersionObjects = 0;    // TotalSingleVObjs
+    std::size_t totalExistingVPts = 0;       // TotalExistingVPts
+    std::size_t totalEmptyVPts = 0;          // TotalEmptyVPts
+    std::size_t totalPointers = 0;           // TotalPointers
+    std::size_t totalObjects = 0;            // TotalObjects
+    std::size_t fieldInsensitiveObjects = 0; // FIObjNum
+    std::size_t fieldSensitiveObjects = 0;   // FSObjNum
+    std::size_t maxPtsSize = 0;              // MaxPtsSize
+    double averagePtsSize = 0.0;             // AvgPtsSize
+    std::size_t addrTakenVars = 0;           // NumOfAddrTakeVar
+    std::size_t maxAddrTakenPtsSize = 0;     // MaxAddrTakenVarPts
+    double averageAddrTakenPtsSize = 0.0;    // AvgAddrTakenVarPtsSize
+    // Objects merged into a cluster representative, and non-singleton classes.
+    std::size_t clusteredObjects = 0;
+    std::size_t mergedObjectClusters = 0;
     // Set when Config::timeLimitSeconds expired before a fixed point.
     bool timedOut = false;
     // Set when a store in scope has a unique target (a strong update).
@@ -118,6 +166,10 @@ public:
   const std::vector<Version> &getReliantVersions(ObjectID object,
                                                  Version version) const;
   ObjectID canonicalVersionObject(ObjectID object) const;
+  /// Canonical identity for result reporting: a dedicated field-insensitive
+  /// representative maps to the base it collapses (SVF has no separate FI
+  /// object). Not used for solving.
+  ObjectID canonicalObject(ObjectID object) const;
   const std::vector<NodeID> &getDependentStatements(ObjectID object,
                                                     Version version) const;
 
@@ -126,6 +178,10 @@ public:
 
   const Statistics &statistics() const { return stats_; }
   bool timedOut() const { return stats_.timedOut; }
+  /// Object partition used by the solver (empty = identity mapping).
+  const flow_sensitive::ObjectClustering &objectClustering() const {
+    return objectClustering_;
+  }
   /// Human-readable statistics report.
   std::string statisticsReport() const;
 
@@ -244,6 +300,15 @@ private:
                          ObjectID object) const;
   bool storeMayTarget(const lotus::analysis::StoreSVFGNode &store,
                       ObjectID object) const;
+  // Object clustering support (SVF's FlowSensitive::cluster()).
+  ObjectID mapObject(ObjectID object) const;
+  PointsToSet mapObjects(const PointsToSet &objects) const;
+  void buildObjectClustering(const PointsToSet &objects);
+  /// Pre-analysis targets of a store's LHS: Config::preAnalysisTargets when
+  /// configured (SVF's Andersen-based prelabel seed), else the builder's
+  /// MemorySSA region set, else the value's object set.
+  PointsToSet
+  storeTargetObjects(const lotus::analysis::StoreSVFGNode &store) const;
   bool intrinsicMayDefine(const lotus::analysis::ActualOutSVFGNode &actualOut,
                           ObjectID object) const;
   bool memoryPhiNeedsInitial(const lotus::analysis::MSSAPhiSVFGNode &phi,
@@ -308,6 +373,8 @@ private:
   std::unordered_map<ObjectID, Version> initialVersion_;
   std::unordered_map<ObjectID, std::vector<MeldSet>> versionMelds_;
   std::unordered_map<ObjectID, ObjectID> equivalentObject_;
+  /// Object partition (empty = identity mapping).
+  flow_sensitive::ObjectClustering objectClustering_;
   std::vector<ObjectID> versionProcessingOrder_;
   /// Cached field-insensitive representative per base object.
   std::unordered_map<ObjectID, ObjectID> fieldInsensitiveObjects_;
@@ -335,6 +402,8 @@ private:
   /// Objects which have labels (either directly or through an equivalent
   /// canonical object).
   std::unordered_set<ObjectID> labelledObjects_;
+  /// Field-insensitive identity map loaded from a result file.
+  std::unordered_map<ObjectID, ObjectID> loadedCanonicalObjects_;
   /// Intrinsic actual-outs (memcpy/memmove/memset) read memory which is not
   /// part of their def set, so every version change of these objects must
   /// re-evaluate them.
@@ -344,8 +413,15 @@ private:
   std::unordered_set<VersionedObject, VersionedObjectHash>
       queuedVersionPropagations_;
   /// Statements affected by a version change (SVF's stmtReliance worklist).
-  std::queue<NodeID> statementWorklist_;
+  /// Ordered by SVFG SCC (reverse topological, like SVF's `WPAFSSolver`), then
+  /// by node id for determinism.
+  std::priority_queue<std::pair<std::size_t, NodeID>,
+                      std::vector<std::pair<std::size_t, NodeID>>,
+                      std::greater<>>
+      statementWorklist_;
   std::unordered_set<NodeID> queuedStatements_;
+  /// NodeID -> SVFG SCC index, refreshed whenever the topology changes.
+  std::unordered_map<NodeID, std::size_t> sccComponentOf_;
   bool topologyChanged_ = false;
   bool hasDeadline_ = false;
   std::chrono::steady_clock::time_point deadline_;
