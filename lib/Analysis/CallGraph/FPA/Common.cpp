@@ -107,7 +107,7 @@ DILocation *CommonUtil::getSourceLocation(Instruction *I) {
 
 // 获取函数F的第ArgNo个参数对象
 Argument *CommonUtil::getParamByArgNo(Function *F, int8_t ArgNo) {
-  if (ArgNo >= F->arg_size())
+  if (ArgNo < 0 || static_cast<size_t>(ArgNo) >= F->arg_size())
     return NULL;
 
   int8_t idx = 0;

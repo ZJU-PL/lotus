@@ -61,7 +61,7 @@ namespace wpds {
 
             wpds::hm_hash< wpds_size_t > hasher;
 
-            const wpds_size_t operator()( const KeyPair& kp ) const
+            wpds_size_t operator()( const KeyPair& kp ) const
             {
                 return hasher( combine_wpds_keys( kp.first,kp.second ) );
             }
@@ -71,7 +71,7 @@ namespace wpds {
         struct EqualKeyPair
         {
 
-            const wpds_size_t operator()( const KeyPair& lhs,const KeyPair& rhs ) const
+            wpds_size_t operator()( const KeyPair& lhs,const KeyPair& rhs ) const
             {
                 return ((lhs.first == rhs.first) && (lhs.second == rhs.second));
             }

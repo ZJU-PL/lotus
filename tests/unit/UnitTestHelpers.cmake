@@ -1,8 +1,7 @@
 set(LOTUS_UNIT_TEST_ROOT ${CMAKE_CURRENT_LIST_DIR})
 set(LOTUS_UNIT_TEST_COMMON_INCLUDES
     ${CMAKE_CURRENT_LIST_DIR}
-    ${CMAKE_CURRENT_LIST_DIR}/../../include
-    ${LLVM_INCLUDE_DIRS})
+    ${CMAKE_CURRENT_LIST_DIR}/../../include)
 
 # Non-template LLVM test helpers are compiled once for all suites.
 add_library(lotus_test_llvm_helpers STATIC EXCLUDE_FROM_ALL

@@ -55,10 +55,10 @@ public:
   set<CallInst *> VCallSet;
   set<CallInst *> MatchedICallSet;
 
-  int MIdx;
+  size_t MIdx;
 
   CallGraphPass(GlobalContext *Ctx_, const char *ID_ = NULL)
-      : Ctx(Ctx_), ID(ID_), MIdx(0) {}
+      : ID(ID_), Ctx(Ctx_), MIdx(0) {}
 
   // Run on each module before iterative pass.
   virtual bool doInitialization(Module *M);

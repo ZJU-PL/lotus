@@ -178,7 +178,7 @@ string DiagnosticText::makeTipByPattern(const std::string &pattern,
     for (int i = 0; i < getNumArgs(); i++) {
       ret += getArg(i, fk);
     }
-    return std::move(ret);
+    return ret;
 
   } else {
     string ret = pattern;
@@ -186,19 +186,17 @@ string DiagnosticText::makeTipByPattern(const std::string &pattern,
       string formal_arg = format_str("%c%c%d%c", '$', '(', i + 1, ')');
       replace_all_distinct(ret, formal_arg, getArg(i, fk));
     }
-    return std::move(ret);
+    return ret;
   }
 }
 
 string DiagnosticText::makeDecoratorLocalTip() const {
-  return std::move(
-      makeTipByPattern(DiagnosticEventRegistry::getPattern(event_ID),
-                       FormatKind::FK_DecoratorLocal));
+  return makeTipByPattern(DiagnosticEventRegistry::getPattern(event_ID),
+                          FormatKind::FK_DecoratorLocal);
 }
 string DiagnosticText::makeDecoratorInternationalTip() const {
-  return std::move(
-      makeTipByPattern(DiagnosticEventRegistry::getTipPatternForEvent(event_ID),
-                       FormatKind::FK_DecoratorInternational));
+  return makeTipByPattern(DiagnosticEventRegistry::getTipPatternForEvent(event_ID),
+                          FormatKind::FK_DecoratorInternational);
 }
 
 static void decorator_string_to_HTML(string &to_change) {
@@ -276,35 +274,35 @@ string DiagnosticText::makeTip(FormatKind fk) const {
   case FK_PlainTextLocal: {
     string ret = makeDecoratorLocalTip();
     decorator_string_to_raw_string(ret);
-    return std::move(ret);
+    return ret;
   }
   case FK_PlainTextInternational: {
     string ret = makeDecoratorInternationalTip();
     decorator_string_to_raw_string(ret);
-    return std::move(ret);
+    return ret;
   }
   case FK_HTML: {
     string ret = makeDecoratorInternationalTip();
     decorator_string_to_HTML(ret);
-    return std::move(ret);
+    return ret;
   }
   case FK_HTML2: {
     string ret = makeDecoratorInternationalTip();
     decorator_string_to_HTML2(ret);
-    return std::move(ret);
+    return ret;
   }
   case FK_SimpleFormatted: {
     string ret = makeDecoratorInternationalTip();
     decorator_string_to_simple_formatted(ret);
-    return std::move(ret);
+    return ret;
   }
   case FK_DecoratorLocal: {
     string ret = makeDecoratorLocalTip();
-    return std::move(ret);
+    return ret;
   }
   case FK_DecoratorInternational: {
     string ret = makeDecoratorInternationalTip();
-    return std::move(ret);
+    return ret;
   }
   }
 
@@ -327,7 +325,7 @@ DiagnosticEvent::DiagnosticEvent(const DiagnosticText &event_desc,
 DiagnosticEvent::~DiagnosticEvent() { delete event_desc; }
 
 ReportDecorator::event_ID_t DiagnosticEvent::getEventID() const {
-  return std::move(event_desc->getEventID());
+  return event_desc->getEventID();
 }
 
 int DiagnosticEvent::getNumArgs() const { return event_desc->getNumArgs(); }
@@ -351,7 +349,7 @@ uint64_t DiagnosticEvent::getBinaryAddress() const {
 }
 
 string DiagnosticEvent::makeTip(DiagnosticText::FormatKind fk) const {
-  return std::move(event_desc->makeTip(fk));
+  return event_desc->makeTip(fk);
 }
 
 bool DiagnosticEvent::isTipStartingWithLowerCase() const {

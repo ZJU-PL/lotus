@@ -85,7 +85,7 @@ namespace flow_cutter{
 						if(score < best_score){
 							best_score = score;
 							separator = expanded_graph::extract_original_separator(tail, head, cutter).sep;
-							if(separator.size() > config.max_cut_size)
+							if(separator.size() > static_cast<std::size_t>(config.max_cut_size))
 								break;
 						}
 
@@ -130,7 +130,7 @@ namespace flow_cutter{
 						if(score < best_score){
 							best_score = score;
 							best_cut = cutter.get_current_cut();
-							if(best_cut.size() > config.max_cut_size)
+							if(best_cut.size() > static_cast<std::size_t>(config.max_cut_size))
 								break;
 						}
 
@@ -162,7 +162,7 @@ namespace flow_cutter{
 
 					auto cutter = make_simple_cutter(graph, config);
 					cutter.init(select_random_source_target_pairs(node_count, config.cutter_count, config.random_seed), config.random_seed);
-					while(cutter.get_current_smaller_cut_side_size() < config.min_small_side_size * node_count && cutter.get_current_cut().size() <= config.max_cut_size)
+					while(cutter.get_current_smaller_cut_side_size() < config.min_small_side_size * node_count && cutter.get_current_cut().size() <= static_cast<std::size_t>(config.max_cut_size))
 						if(!cutter.advance())
 							break;
 
@@ -186,7 +186,7 @@ namespace flow_cutter{
 					auto pairs = select_random_source_target_pairs(node_count, config.cutter_count, config.random_seed);
 
 					cutter.init(expanded_graph::expand_source_target_pair_list(pairs), config.random_seed);
-					while(cutter.get_current_smaller_cut_side_size() < config.min_small_side_size * expanded_graph::expanded_node_count(node_count) && cutter.get_current_cut().size() <= config.max_cut_size)
+					while(cutter.get_current_smaller_cut_side_size() < config.min_small_side_size * expanded_graph::expanded_node_count(node_count) && cutter.get_current_cut().size() <= static_cast<std::size_t>(config.max_cut_size))
 						if(!cutter.advance())
 							break;
 
@@ -263,7 +263,7 @@ namespace flow_cutter{
 					if(small_side_size > 4*node_count/10 && cutter.get_current_cut().size() > 2*separator_list.back().size())
 						break;
 
-					if(cutter.get_current_cut().size() > config.max_cut_size)
+					if(cutter.get_current_cut().size() > static_cast<std::size_t>(config.max_cut_size))
 						break;
 
 					if(!cutter.advance())

@@ -8,6 +8,7 @@ This section documents the verification tools and frameworks used throughout Lot
 
    analysis
    automata
+   trace_abstraction
    backend
    crab
    clam

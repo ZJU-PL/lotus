@@ -413,7 +413,7 @@ string IRExpressionRenderer::construct_gep_expr(GEPOperator *gep_inst) {
 
   LLVM_DEBUG(dbgs() << "GEP: " << DIA->getIRString(gep_inst)
                     << ", EXPR: " << gep_expr << "\n";);
-  return std::move(gep_expr);
+  return gep_expr;
 }
 
 tuple<Value *, int64_t, string>

@@ -27,7 +27,9 @@ target_link_libraries(clam
 
 target_include_directories(clam PRIVATE 
   ${CMAKE_SOURCE_DIR}/include
-  SYSTEM ${CRAB_ROOT}/include
+)
+target_include_directories(clam SYSTEM PRIVATE
+  ${CRAB_ROOT}/include
   ${LLVM_INCLUDE_DIRS}
 )
 target_compile_definitions(clam PRIVATE ${CLAM_TOOLS_DEFINITIONS})
@@ -53,7 +55,9 @@ target_link_libraries(clam-diff
 
 target_include_directories(clam-diff PRIVATE 
   ${CMAKE_SOURCE_DIR}/include
-  SYSTEM ${CRAB_ROOT}/include
+)
+target_include_directories(clam-diff SYSTEM PRIVATE
+  ${CRAB_ROOT}/include
   ${LLVM_INCLUDE_DIRS}
 )
 target_compile_definitions(clam-diff PRIVATE ${CLAM_TOOLS_DEFINITIONS})
@@ -74,7 +78,9 @@ target_link_libraries(clam-pp
 
 target_include_directories(clam-pp PRIVATE 
   ${CMAKE_SOURCE_DIR}/include
-  SYSTEM ${CRAB_ROOT}/include
+)
+target_include_directories(clam-pp SYSTEM PRIVATE
+  ${CRAB_ROOT}/include
   ${LLVM_INCLUDE_DIRS}
 )
 target_compile_definitions(clam-pp PRIVATE ${CLAM_TOOLS_DEFINITIONS})
