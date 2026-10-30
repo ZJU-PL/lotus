@@ -651,29 +651,36 @@ FlowSensitivePTA::constantPointsTo(const Constant *constant) {
             if (field != 0)
               merge(exact, singleton(field));
           }
-          if (!materialize(exact).empty())
+          if (!materialize(exact).empty()) {
+            mapStoredInPlace(exact);
             return exact;
+          }
         }
       }
       const PointsToSet &known = graph_->getObjectIds(constant);
       for (ObjectID object : known)
         merge(result, singleton(object));
-      if (!known.empty())
+      if (!known.empty()) {
+        mapStoredInPlace(result);
         return result;
+      }
       return constantPointsTo(dyn_cast<Constant>(expression->getOperand(0)));
     }
   }
   const PointsToSet &known = graph_->getObjectIds(constant);
   for (ObjectID object : known)
     merge(result, singleton(object));
-  if (!known.empty())
+  if (!known.empty()) {
+    mapStoredInPlace(result);
     return result;
+  }
   if (const auto *expression = dyn_cast<ConstantExpr>(constant))
     if (expression->isCast())
       return constantPointsTo(dyn_cast<Constant>(expression->getOperand(0)));
   const Value *stripped = constant->stripPointerCasts();
   if (const ObjectID object = graph_->getObjectId(stripped))
     merge(result, singleton(mapObject(object)));
+  mapStoredInPlace(result);
   return result;
 }
 
@@ -1073,7 +1080,8 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
         PointsToSet objects = materialize(pointerTargets(pointer));
         if (objects.empty()) {
           const PointsToSet &preAnalysis = graph_->getObjectIds(pointer);
-          objects.insert(preAnalysis.begin(), preAnalysis.end());
+          for (ObjectID object : preAnalysis)
+            objects.insert(mapObject(object));
         }
         PointsToSet expanded = objects;
         for (ObjectID object : objects) {
@@ -1106,7 +1114,7 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
               expanded.insert(candidateObject);
           }
         }
-        return expanded;
+        return mapObjects(expanded);
       };
 
       struct RootLocation {
@@ -1117,7 +1125,8 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
         PointsToSet roots = materialize(pointerTargets(pointer));
         if (roots.empty()) {
           const PointsToSet &preAnalysis = graph_->getObjectIds(pointer);
-          roots.insert(preAnalysis.begin(), preAnalysis.end());
+          for (ObjectID object : preAnalysis)
+            roots.insert(mapObject(object));
         }
         std::vector<RootLocation> locations;
         for (ObjectID root : roots) {
@@ -1400,6 +1409,11 @@ void FlowSensitivePTA::collectStatistics() {
       continue;
     const Value *pointer = accessPointer(store->getInstruction());
     if (!pointer || !pointer->getType()->isPointerTy())
+      continue;
+    // Pointer-only mode ignores scalar stores, so they do not contribute an
+    // address-taken variable either.
+    const Value *stored = storedValue(store->getInstruction());
+    if (config_.pointerOnlySVFG && stored && !stored->getType()->isPointerTy())
       continue;
     const std::size_t size = materialize(pointerTargets(pointer)).size();
     if (size == 0)

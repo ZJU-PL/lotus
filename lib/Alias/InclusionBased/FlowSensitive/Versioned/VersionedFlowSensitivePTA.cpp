@@ -2280,6 +2280,11 @@ VersionedFlowSensitivePTA::solve() {
       const Value *pointer = accessPointer(store->getInstruction());
       if (!pointer || !pointer->getType()->isPointerTy())
         continue;
+      // Pointer-only mode ignores scalar stores, so they do not contribute an
+      // address-taken variable either.
+      const Value *stored = storedValue(store->getInstruction());
+      if (config_.pointerOnlySVFG && stored && !stored->getType()->isPointerTy())
+        continue;
       const std::size_t size =
           accessTargets(pointer, store->getMemoryPointsTo()).size();
       if (size == 0)
