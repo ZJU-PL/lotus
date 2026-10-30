@@ -3,9 +3,12 @@
 #include "IR/ICFG/CallGraph.h"
 
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <sstream>
+#include <thread>
 
 #include <llvm/ADT/SCCIterator.h>
 #include <llvm/Analysis/CallGraph.h>
@@ -24,6 +27,34 @@ namespace lotus::alias {
 
 namespace {
 constexpr VersionedFlowSensitivePTA::NodeID InitialMeldToken = 1;
+
+// Collect the edges incident to the actual nodes of \p callSite and the formal
+// nodes of \p callee.
+void collectCallsiteCalleeEdges(const SVFG &graph,
+                                const llvm::CallBase *callSite,
+                                const llvm::Function *callee,
+                                std::unordered_set<const SVFGEdge *> &edges) {
+  auto collect = [&](const SVFGNodeSet &nodes) {
+    for (const SVFGNode *node : nodes) {
+      if (!node)
+        continue;
+      for (const SVFGEdge *edge : node->getInEdges())
+        if (edge)
+          edges.insert(edge);
+      for (const SVFGEdge *edge : node->getOutEdges())
+        if (edge)
+          edges.insert(edge);
+    }
+  };
+  collect(graph.getActualParms(callSite));
+  collect(graph.getActualIns(callSite));
+  collect(graph.getActualRets(callSite));
+  collect(graph.getActualOuts(callSite));
+  collect(graph.getFormalParms(callee));
+  collect(graph.getFormalIns(callee));
+  collect(graph.getFormalRets(callee));
+  collect(graph.getFormalOuts(callee));
+}
 } // namespace
 
 VersionedFlowSensitivePTA::VersionedFlowSensitivePTA(const SVFG &graph)
@@ -112,6 +143,24 @@ void VersionedFlowSensitivePTA::initializeRecursiveFunctions() {
         if (node && node->getFunction())
           recursiveFunctions_.insert(node->getFunction());
   }
+}
+
+bool VersionedFlowSensitivePTA::recursionChangeAffectsStrongUpdates(
+    const std::unordered_set<const llvm::Function *> &previous) const {
+  if (recursiveFunctions_ == previous)
+    return false;
+  // A store in a recursive function is a weak update. If no strong-update
+  // site sits in a function whose recursion status changed, the existing
+  // labels remain valid and a whole-graph relabel is unnecessary.
+  for (NodeID site : strongUpdateSites_) {
+    const SVFGNode *node = graph_->getNode(site);
+    const Function *function = node ? node->getFunction() : nullptr;
+    if (!function)
+      continue;
+    if (previous.count(function) != recursiveFunctions_.count(function))
+      return true;
+  }
+  return false;
 }
 
 bool VersionedFlowSensitivePTA::functionHasKnownCaller(
@@ -307,39 +356,52 @@ void VersionedFlowSensitivePTA::buildDeltaMaps() {
 VersionedFlowSensitivePTA::PointsToSet
 VersionedFlowSensitivePTA::relevantObjects() const {
   PointsToSet objects;
-  for (const auto &[object, label] : graph_->getObjectDebugMap())
-    objects.insert(object);
   for (const auto &[nodeID, node] : *graph_) {
     if (!inScope(node))
       continue;
-    for (const SVFGEdge *edge : node->getOutEdges()) {
-      if (!edge || !isIndirectVFGEdge(edge->getEdgeKind()))
-        continue;
-      const PointsToSet guarded = expandIndirectObjects(edge->getPointsTo());
-      objects.insert(guarded.begin(), guarded.end());
-    }
     if (const auto *store = dyn_cast<StoreSVFGNode>(node)) {
-      const PointsToSet targets =
-          expandIndirectObjects(store->getMemoryPointsTo());
+      PointsToSet targets = store->getMemoryPointsTo();
+      if (targets.empty())
+        if (const Value *pointer = accessPointer(store->getInstruction()))
+          targets = graph_->getObjectIds(pointer);
+      targets = expandIndirectObjects(targets);
       objects.insert(targets.begin(), targets.end());
     }
-    if (const auto *load = dyn_cast<LoadSVFGNode>(node)) {
-      const PointsToSet targets =
-          expandIndirectObjects(load->getMemoryPointsTo());
-      objects.insert(targets.begin(), targets.end());
+    if (!isDeltaNode(nodeID))
+      continue;
+    if (const auto *mssa = dyn_cast<MSSASVFGNode>(node)) {
+      const PointsToSet definitions =
+          expandIndirectObjects(mssa->getDefSVFVars());
+      objects.insert(definitions.begin(), definitions.end());
     }
   }
-  return objects;
-}
 
-VersionedFlowSensitivePTA::Version
-VersionedFlowSensitivePTA::internVersion(ObjectID object, const MeldSet &meld) {
-  auto &melds = versionMelds_[object];
-  for (std::size_t i = 0; i < melds.size(); ++i)
-    if (melds[i] == meld)
-      return static_cast<Version>(i + 1);
-  melds.push_back(meld);
-  return static_cast<Version>(melds.size());
+  // Global initialisers write memory without a store node, so their storage
+  // objects need a version for initializeGlobalMemory() to fill.
+  const Module *module = nullptr;
+  for (const auto &[nodeID, node] : *graph_)
+    if (const Function *function = node->getFunction()) {
+      module = function->getParent();
+      break;
+    }
+  if (module)
+    for (const GlobalVariable &global : module->globals()) {
+      if (!global.hasInitializer())
+        continue;
+      PointsToSet bases;
+      if (ObjectID object = graph_->getObjectId(&global))
+        bases.insert(object);
+      if (bases.empty()) {
+        const PointsToSet &known = graph_->getObjectIds(&global);
+        bases.insert(known.begin(), known.end());
+      }
+      for (ObjectID base : bases) {
+        objects.insert(base);
+        const PointsToSet fields = graph_->getFieldObjects(base);
+        objects.insert(fields.begin(), fields.end());
+      }
+    }
+  return objects;
 }
 
 bool VersionedFlowSensitivePTA::addReliance(ObjectID object, Version source,
@@ -356,7 +418,8 @@ bool VersionedFlowSensitivePTA::addReliance(ObjectID object, Version source,
   return false;
 }
 
-void VersionedFlowSensitivePTA::labelObject(ObjectID object) {
+void VersionedFlowSensitivePTA::computeObjectLabels(
+    ObjectID object, ObjectLabels &labels) const {
   // Identify the subgraph of nodes relevant to this object.
   std::unordered_set<NodeID> inSubgraph;
   std::queue<const SVFGNode *> reachQueue;
@@ -469,20 +532,20 @@ void VersionedFlowSensitivePTA::labelObject(ObjectID object) {
 
   MeldSet initialMeld;
   initialMeld.insert(InitialMeldToken);
-  initialVersion_[object] = internVersion(object, initialMeld);
+  labels.initialVersion = labels.intern(initialMeld);
   for (const auto &[nodeID, node] : *graph_) {
     if (!inScope(node))
       continue;
     if (!consumedMeld[nodeID].empty()) {
-      const Version consumed = internVersion(object, consumedMeld[nodeID]);
-      consume_[nodeID][object] = consumed;
+      const Version consumed = labels.intern(consumedMeld[nodeID]);
+      labels.consume[nodeID] = consumed;
       const auto *memoryPhi = dyn_cast<MSSAPhiSVFGNode>(node);
       if (memoryPhi && memoryPhiNeedsInitial(*memoryPhi, object) &&
           consumedMeld[nodeID].count(InitialMeldToken) != 0)
-        addReliance(object, initialVersion_[object], consumed);
+        labels.addReliance(labels.initialVersion, consumed);
     }
     if (!yieldedMeld[nodeID].empty())
-      yield_[nodeID][object] = internVersion(object, yieldedMeld[nodeID]);
+      labels.yield[nodeID] = labels.intern(yieldedMeld[nodeID]);
   }
 
   for (const auto &[nodeID, node] : *graph_) {
@@ -492,18 +555,18 @@ void VersionedFlowSensitivePTA::labelObject(ObjectID object) {
       if (!edge || !inScope(edge->getDstNode()) ||
           !edgeCarriesObject(*edge, object))
         continue;
-      addReliance(object, getYield(nodeID, object),
-                  getConsume(edge->getDstNode()->getId(), object));
+      labels.addReliance(labels.yieldAt(nodeID),
+                         labels.consumeAt(edge->getDstNode()->getId()));
     }
   }
   for (const auto &[nodeID, node] : *graph_) {
     if (!inScope(node) ||
         !isa<LoadSVFGNode, StoreSVFGNode, ActualOutSVFGNode>(node))
       continue;
-    const Version consumed = getConsume(nodeID, object);
+    const Version consumed = labels.consumeAt(nodeID);
     if (consumed == InvalidVersion)
       continue;
-    auto &statements = statementReliance_[object][consumed];
+    auto &statements = labels.statements[consumed];
     if (std::find(statements.begin(), statements.end(), nodeID) ==
         statements.end())
       statements.push_back(nodeID);
@@ -532,8 +595,30 @@ void VersionedFlowSensitivePTA::labelObject(ObjectID object) {
           0)
         touchesObject = true;
     if (touchesObject)
-      intrinsicDependents_[object].insert(nodeID);
+      labels.intrinsicDependents.insert(nodeID);
   }
+}
+
+void VersionedFlowSensitivePTA::mergeObjectLabels(ObjectID object,
+                                                  ObjectLabels &&labels) {
+  initialVersion_[object] = labels.initialVersion;
+  versionMelds_[object] = std::move(labels.melds);
+  for (const auto &[location, version] : labels.consume)
+    consume_[location][object] = version;
+  for (const auto &[location, version] : labels.yield)
+    yield_[location][object] = version;
+  if (!labels.reliance.empty())
+    versionReliance_[object] = std::move(labels.reliance);
+  if (!labels.statements.empty())
+    statementReliance_[object] = std::move(labels.statements);
+  if (!labels.intrinsicDependents.empty())
+    intrinsicDependents_[object] = std::move(labels.intrinsicDependents);
+}
+
+void VersionedFlowSensitivePTA::labelObject(ObjectID object) {
+  ObjectLabels labels;
+  computeObjectLabels(object, labels);
+  mergeObjectLabels(object, std::move(labels));
 }
 
 std::vector<VersionedFlowSensitivePTA::FootprintEntry>
@@ -592,15 +677,28 @@ void VersionedFlowSensitivePTA::buildVersionProcessingOrder() {
   versionProcessingOrder_.reserve(versionMelds_.size());
   for (const auto &[object, melds] : versionMelds_)
     versionProcessingOrder_.push_back(object);
+  // Precompute each object's occurrence weight once; computing it inside the
+  // comparator makes ordering O(n log n * |consume_|).
+  std::unordered_map<ObjectID, std::size_t> weights;
+  weights.reserve(versionMelds_.size());
+  for (const auto &[object, melds] : versionMelds_)
+    weights.emplace(object, std::size_t{1});
+  for (const auto &[object, reliance] : versionReliance_) {
+    auto weightIt = weights.find(object);
+    if (weightIt == weights.end())
+      continue;
+    for (const auto &entry : reliance)
+      weightIt->second += 1 + entry.second.size();
+  }
+  for (const auto &[location, objects] : consume_)
+    for (const auto &entry : objects) {
+      auto weightIt = weights.find(entry.first);
+      if (weightIt != weights.end())
+        ++weightIt->second;
+    }
   auto occurrenceWeight = [&](ObjectID object) {
-    std::size_t weight = 1;
-    auto objectIt = versionReliance_.find(object);
-    if (objectIt != versionReliance_.end())
-      for (const auto &[source, destinations] : objectIt->second)
-        weight += 1 + destinations.size();
-    for (const auto &[location, objects] : consume_)
-      weight += objects.count(object);
-    return weight;
+    auto weightIt = weights.find(object);
+    return weightIt == weights.end() ? std::size_t{0} : weightIt->second;
   };
   if (config_.clusterVersionedObjects)
     std::stable_sort(versionProcessingOrder_.begin(),
@@ -631,7 +729,13 @@ void VersionedFlowSensitivePTA::buildVersionLabels() {
   stats_.equivalentObjects = 0;
   buildDeltaMaps();
   const PointsToSet objects = relevantObjects();
+  // Objects with identical footprints share version labels. Compute one
+  // representative per footprint, label the representatives concurrently,
+  // then merge them in object order so the result does not depend on timing.
+  std::vector<ObjectID> representatives;
+  std::vector<std::pair<ObjectID, ObjectID>> equivalents;
   std::map<std::vector<FootprintEntry>, ObjectID> footprintOwners;
+  representatives.reserve(objects.size());
   for (ObjectID object : objects) {
     labelledObjects_.insert(object);
     std::vector<FootprintEntry> footprint = versionFootprint(object);
@@ -639,13 +743,45 @@ void VersionedFlowSensitivePTA::buildVersionLabels() {
     if (owner == footprintOwners.end()) {
       equivalentObject_[object] = object;
       footprintOwners.emplace(std::move(footprint), object);
-      labelObject(object);
+      representatives.push_back(object);
     } else {
       equivalentObject_[object] = owner->second;
-      copyVersionLabels(owner->second, object);
-      ++stats_.equivalentObjects;
+      equivalents.emplace_back(object, owner->second);
     }
   }
+
+  std::vector<ObjectLabels> labels(representatives.size());
+  auto computeLabels = [&](std::size_t index) {
+    computeObjectLabels(representatives[index], labels[index]);
+  };
+  std::size_t threadCount = config_.versioningThreads;
+  if (threadCount == 0)
+    threadCount = std::max(1u, std::thread::hardware_concurrency());
+  threadCount = std::min(threadCount, representatives.size());
+  if (threadCount <= 1) {
+    for (std::size_t index = 0; index < representatives.size(); ++index)
+      computeLabels(index);
+  } else {
+    std::atomic<std::size_t> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(threadCount);
+    for (std::size_t worker = 0; worker < threadCount; ++worker)
+      workers.emplace_back([&]() {
+        for (std::size_t index = next.fetch_add(1);
+             index < representatives.size(); index = next.fetch_add(1)) {
+          computeLabels(index);
+        }
+      });
+    for (std::thread &worker : workers)
+      worker.join();
+  }
+
+  for (std::size_t index = 0; index < representatives.size(); ++index)
+    mergeObjectLabels(representatives[index], std::move(labels[index]));
+  for (const auto &[object, representative] : equivalents)
+    copyVersionLabels(representative, object);
+
+  stats_.equivalentObjects = equivalents.size();
   stats_.versionedObjects = objects.size();
   stats_.versions = 0;
   for (const auto &[object, melds] : versionMelds_)
@@ -737,7 +873,8 @@ bool VersionedFlowSensitivePTA::writeVersionedAnalysisResultToFile(
   std::ofstream output(filename, std::ios::trunc);
   if (!output)
     return false;
-  output << "LOTUS_VFSPTA 1\n";
+  output << "LOTUS_VFSPTA 2\n";
+  output << "U " << (stats_.svfgHasSU ? 1 : 0) << '\n';
   for (const auto &[location, objects] : consume_)
     for (const auto &[object, version] : objects)
       output << "C " << location << ' ' << object << ' ' << version << '\n';
@@ -793,7 +930,7 @@ bool VersionedFlowSensitivePTA::readVersionedAnalysisResultFromFile(
   std::string magic;
   unsigned formatVersion = 0;
   if (!(input >> magic >> formatVersion) || magic != "LOTUS_VFSPTA" ||
-      formatVersion != 1)
+      (formatVersion != 1 && formatVersion != 2))
     return false;
 
   topLevelPointsTo_.clear();
@@ -805,6 +942,15 @@ bool VersionedFlowSensitivePTA::readVersionedAnalysisResultFromFile(
   initialVersion_.clear();
   versionMelds_.clear();
   equivalentObject_.clear();
+  labelledObjects_.clear();
+  deltaNodes_.clear();
+  deltaSourceNodes_.clear();
+  strongUpdateSites_.clear();
+  weakUpdateSites_.clear();
+  versionPropagationQueue_ = {};
+  queuedVersionPropagations_.clear();
+  statementWorklist_ = {};
+  queuedStatements_.clear();
   stats_ = {};
 
   auto readSet = [&](std::size_t count, PointsToSet &set) {
@@ -820,7 +966,12 @@ bool VersionedFlowSensitivePTA::readVersionedAnalysisResultFromFile(
   while (input >> record) {
     if (record == "E")
       break;
-    if (record == "C" || record == "Y") {
+    if (record == "U") {
+      unsigned hasSU = 0;
+      if (!(input >> hasSU))
+        return false;
+      stats_.svfgHasSU = hasSU != 0;
+    } else if (record == "C" || record == "Y") {
       NodeID location = 0;
       ObjectID object = 0;
       Version version = InvalidVersion;
@@ -908,7 +1059,14 @@ bool VersionedFlowSensitivePTA::readVersionedAnalysisResultFromFile(
   for (const auto &[object, versions] : statementReliance_)
     for (const auto &[version, statements] : versions)
       stats_.statementReliances += statements.size();
+  // Restore bookkeeping that the file format omits, so the loaded solver can
+  // answer queries and accept new on-the-fly edges.
+  for (const auto &[object, melds] : versionMelds_)
+    labelledObjects_.insert(object);
+  buildDeltaMaps();
   buildVersionProcessingOrder();
+  // Reconnect the indirect-call edges the saved solution depends on.
+  reconnectIndirectCallsAfterRead();
   return true;
 }
 
@@ -992,12 +1150,15 @@ void VersionedFlowSensitivePTA::initializeGlobalMemory() {
             return;
           }
           if (auto *array = dyn_cast<ArrayType>(type)) {
-            const uint64_t stride =
-                layout.getTypeAllocSize(array->getElementType());
+            // Arrays collapse to their base object in gepTransfer(), so every
+            // element initialiser targets the same offset. A per-element stride
+            // would seed unreachable field objects and drop later initialisers.
+            // Keep this in sync with
+            // FlowSensitivePTA::initializeGlobalMemory().
             for (uint64_t element = 0; element < array->getNumElements();
                  ++element)
               seed(constant->getAggregateElement(element),
-                   array->getElementType(), offset + element * stride);
+                   array->getElementType(), offset);
           }
         };
     seed(global.getInitializer(), global.getValueType(), 0);
@@ -1145,10 +1306,61 @@ void VersionedFlowSensitivePTA::updateConnectedNodes(
   buildVersionProcessingOrder();
 }
 
+void VersionedFlowSensitivePTA::reconnectIndirectCallsAfterRead() {
+  if (!config_.connectIndirectCall)
+    return;
+
+  // The file stores solved facts but not the edges added by on-the-fly
+  // call-graph construction. Recover them from the loaded solution: for each
+  // indirect callsite, connect the callees its function pointer points to.
+  std::vector<std::pair<const CallBase *, const Function *>> connections;
+  std::unordered_set<const CallBase *> seenCallsites;
+  for (const auto &[functionPointer, callSites] : graph_->getIndCallSiteMap()) {
+    for (const CallBase *callSite : callSites) {
+      if (!callSite || !seenCallsites.insert(callSite).second)
+        continue;
+      const Value *called = callSite->getCalledOperand();
+      if (!called)
+        continue;
+      called = called->stripPointerCasts();
+      const SVFGNode *node = graph_->getValueNode(called);
+      if (!node)
+        continue;
+      for (ObjectID object : pointsTo(node)) {
+        const auto *target =
+            dyn_cast_or_null<Function>(graph_->getObjectValue(object));
+        if (target && !target->isDeclaration())
+          connections.emplace_back(callSite, target);
+      }
+    }
+  }
+
+  bool connectedAny = false;
+  for (const auto &[callSite, target] : connections) {
+    if (graph_->hasConnectedCallee(callSite, target))
+      continue;
+    std::unordered_set<const SVFGEdge *> oldEdges;
+    collectCallsiteCalleeEdges(*graph_, callSite, target, oldEdges);
+    if (!config_.connectIndirectCall(callSite, target))
+      continue;
+    connectedAny = true;
+    std::unordered_set<const SVFGEdge *> currentEdges;
+    collectCallsiteCalleeEdges(*graph_, callSite, target, currentEdges);
+    std::vector<const SVFGEdge *> newEdges;
+    for (const SVFGEdge *edge : currentEdges)
+      if (oldEdges.count(edge) == 0)
+        newEdges.push_back(edge);
+    updateConnectedNodes(newEdges);
+  }
+  if (connectedAny)
+    initializeRecursiveFunctions();
+}
+
 bool VersionedFlowSensitivePTA::resolveIndirectCalls(
     const SVFGNode &node, const PointsToSet &pointsToSet) {
   if (!config_.connectIndirectCall)
     return false;
+  const auto otfStarted = std::chrono::steady_clock::now();
   bool changed = false;
   const NodeID functionPointer =
       node.hasValueId() ? node.getValueId() : node.getId();
@@ -1158,11 +1370,10 @@ bool VersionedFlowSensitivePTA::resolveIndirectCalls(
           dyn_cast_or_null<Function>(graph_->getObjectValue(object));
       if (!target || target->isDeclaration())
         continue;
+      // Snapshot only the edges incident to this callsite/callee's actual and
+      // formal nodes.
       std::unordered_set<const SVFGEdge *> oldEdges;
-      for (const auto &[nodeID, graphNode] : *graph_)
-        for (const SVFGEdge *edge : graphNode->getOutEdges())
-          if (edge)
-            oldEdges.insert(edge);
+      collectCallsiteCalleeEdges(*graph_, callSite, target, oldEdges);
       const auto oldRecursiveFunctions = recursiveFunctions_;
       const bool wasConnected =
           graph_->getConnectedCallees(callSite).count(target) != 0;
@@ -1174,17 +1385,22 @@ bool VersionedFlowSensitivePTA::resolveIndirectCalls(
       if (callbackReportedChange || newlyConnected) {
         ++stats_.indirectCallEdges;
         changed = true;
+        std::unordered_set<const SVFGEdge *> currentEdges;
+        collectCallsiteCalleeEdges(*graph_, callSite, target, currentEdges);
         std::vector<const SVFGEdge *> newEdges;
-        for (const auto &[nodeID, graphNode] : *graph_)
-          for (const SVFGEdge *edge : graphNode->getOutEdges())
-            if (edge && oldEdges.count(edge) == 0)
-              newEdges.push_back(edge);
+        newEdges.reserve(currentEdges.size());
+        for (const SVFGEdge *edge : currentEdges)
+          if (oldEdges.count(edge) == 0)
+            newEdges.push_back(edge);
         updateConnectedNodes(newEdges);
         initializeRecursiveFunctions();
-        if (recursiveFunctions_ != oldRecursiveFunctions)
+        if (recursionChangeAffectsStrongUpdates(oldRecursiveFunctions))
           topologyChanged_ = true;
       }
     }
+  stats_.otfSeconds += std::chrono::duration<double>(
+                           std::chrono::steady_clock::now() - otfStarted)
+                           .count();
   return changed;
 }
 
@@ -1306,7 +1522,12 @@ void VersionedFlowSensitivePTA::propagateVersion(ObjectID object, Version source
 
 bool VersionedFlowSensitivePTA::drainVersionPropagation() {
   bool changed = false;
-  while (!versionPropagationQueue_.empty() && !topologyChanged_) {
+  while (!versionPropagationQueue_.empty() && !topologyChanged_ &&
+         !stats_.timedOut) {
+    if (timeLimitExceeded()) {
+      noteTimeout();
+      break;
+    }
     const VersionedObject pending = versionPropagationQueue_.front();
     versionPropagationQueue_.pop();
     queuedVersionPropagations_.erase(pending);
@@ -1623,6 +1844,36 @@ bool VersionedFlowSensitivePTA::processNode(const SVFGNode &node) {
   return true;
 }
 
+bool VersionedFlowSensitivePTA::timeLimitExceeded() const {
+  return hasDeadline_ && std::chrono::steady_clock::now() >= deadline_;
+}
+
+std::string VersionedFlowSensitivePTA::statisticsReport() const {
+  std::ostringstream out;
+  out << "VersionedFlowSensitivePTA statistics\n";
+  out << "  nodes: " << stats_.nodes << "\n";
+  out << "  node processes: " << stats_.nodeProcesses << "\n";
+  out << "  versioned objects: " << stats_.versionedObjects << " ("
+      << stats_.equivalentObjects << " equivalent)\n";
+  out << "  versions: " << stats_.versions << "\n";
+  out << "  versioned facts: " << stats_.versionedFacts << "\n";
+  out << "  version propagations: " << stats_.versionPropagations << "\n";
+  out << "  statement reliances: " << stats_.statementReliances << "\n";
+  out << "  strong updates: " << stats_.strongUpdates << "\n";
+  out << "  weak updates: " << stats_.weakUpdates << "\n";
+  out << "  indirect call edges: " << stats_.indirectCallEdges << "\n";
+  out << "  delta nodes/sources: " << stats_.deltaNodes << " / "
+      << stats_.deltaSourceNodes << "\n";
+  out << "  delta version updates: " << stats_.deltaVersionUpdates << "\n";
+  out << "  relabelings: " << stats_.relabelings << " (incremental "
+      << stats_.deltaRelabelings << ")\n";
+  out << "  svfgHasSU: " << (stats_.svfgHasSU ? "yes" : "no") << "\n";
+  out << "  time: solve " << stats_.solveSeconds << "s, labeling "
+      << stats_.labelingSeconds << "s, otf " << stats_.otfSeconds << "s\n";
+  out << "  timed out: " << (stats_.timedOut ? "yes" : "no") << "\n";
+  return out.str();
+}
+
 bool VersionedFlowSensitivePTA::solveCurrentTopology() {
   // SVF seeds the solver worklist with every node once (SCCDetect) and then
   // revisits only the successors of changed nodes plus the statements which
@@ -1637,9 +1888,14 @@ bool VersionedFlowSensitivePTA::solveCurrentTopology() {
 
   bool anyChanged = false;
   bool changed = true;
-  while (changed && !topologyChanged_) {
+  while (changed && !topologyChanged_ && !stats_.timedOut) {
     changed = drainVersionPropagation();
-    while (!statementWorklist_.empty() && !topologyChanged_) {
+    while (!statementWorklist_.empty() && !topologyChanged_ &&
+           !stats_.timedOut) {
+      if (timeLimitExceeded()) {
+        noteTimeout();
+        break;
+      }
       const NodeID nodeID = statementWorklist_.front();
       statementWorklist_.pop();
       queuedStatements_.erase(nodeID);
@@ -1658,15 +1914,32 @@ bool VersionedFlowSensitivePTA::solveCurrentTopology() {
 
 const VersionedFlowSensitivePTA::Statistics &
 VersionedFlowSensitivePTA::solve() {
+  const auto started = std::chrono::steady_clock::now();
   stats_ = {};
+  hasDeadline_ = config_.timeLimitSeconds != 0;
+  if (hasDeadline_)
+    deadline_ = started +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(config_.timeLimitSeconds));
   do {
+    if (timeLimitExceeded()) {
+      stats_.timedOut = true;
+      break;
+    }
     topologyChanged_ = false;
     initializeRecursiveFunctions();
     topLevelPointsTo_.clear();
     versionedPointsTo_.clear();
     strongUpdateSites_.clear();
     weakUpdateSites_.clear();
-    buildVersionLabels();
+    {
+      const auto labelingStarted = std::chrono::steady_clock::now();
+      buildVersionLabels();
+      stats_.labelingSeconds +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        labelingStarted)
+              .count();
+    }
     initializeGlobalMemory();
     // Global initializers live in the per-object initial version; push them
     // into the versions which rely on it before solving starts (the old
@@ -1678,7 +1951,7 @@ VersionedFlowSensitivePTA::solve() {
         propagateVersion(object, version->second);
     }
     solveCurrentTopology();
-  } while (topologyChanged_);
+  } while (topologyChanged_ && !stats_.timedOut);
 
   for (const auto &[nodeID, node] : *graph_)
     if (inScope(node))
@@ -1692,6 +1965,10 @@ VersionedFlowSensitivePTA::solve() {
       stats_.statementReliances += statements.size();
   stats_.strongUpdates = strongUpdateSites_.size();
   stats_.weakUpdates = weakUpdateSites_.size();
+  stats_.svfgHasSU = !strongUpdateSites_.empty();
+  stats_.solveSeconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+          .count();
   return stats_;
 }
 

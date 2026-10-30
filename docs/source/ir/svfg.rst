@@ -353,6 +353,7 @@ Core Files
 * **SVFG.h/cpp**: Main graph class with node/edge management.
 * **SVFGBase.h**: Node/edge kind enumerations and type-checking helpers.
 * **SVFGNode.h**: Complete node type hierarchy.
+* **SVFGNodeBS.h**: Compact sparse points-to set (sorted 64-bit words, formerly ``std::set<uint32_t>``).
 * **SVFGEdge.h**: Complete edge type hierarchy.
 * **SVFGBuilder.h/cpp**: Builder with AserPTA integration.
 * **SVFGBuilderNodes.cpp**: Node construction logic.

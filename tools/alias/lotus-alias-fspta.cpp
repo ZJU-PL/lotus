@@ -48,6 +48,11 @@ cl::opt<unsigned> Threads(
     "threads",
     cl::desc("Parallel workers including caller (0: hardware concurrency)"),
     cl::init(0), cl::cat(FsptaCategory));
+cl::opt<unsigned> VersioningThreads(
+    "versioning-threads",
+    cl::desc("Threads computing vfspta version labels (0: hardware "
+             "concurrency, 1: sequential)"),
+    cl::init(0), cl::cat(FsptaCategory));
 cl::opt<bool> VerifyParallel(
     "verify-parallel",
     cl::desc("Compare every fspta result with sequential solving"),
@@ -104,6 +109,25 @@ cl::opt<bool> PrintMemory("print-memory",
                           cl::init(false), cl::cat(FsptaCategory));
 cl::opt<bool> DumpStats("dump-stats", cl::desc("Print solver statistics"),
                         cl::init(true), cl::cat(FsptaCategory));
+cl::opt<double> TimeLimit(
+    "time-limit",
+    cl::desc("Wall-clock budget for the flow-sensitive solve in seconds "
+             "(0 disables the limit)"),
+    cl::init(0.0), cl::cat(FsptaCategory));
+cl::opt<bool> StatsReport(
+    "stats-report",
+    cl::desc("Print the solver's full statistics report (SVF PrintStat-like)"),
+    cl::init(false), cl::cat(FsptaCategory));
+cl::opt<std::string> ReadPtsFile(
+    "read-pts",
+    cl::desc("Read solved points-to facts from a Lotus result file instead of "
+             "solving"),
+    cl::init(""), cl::cat(FsptaCategory));
+cl::opt<std::string> WritePtsFile(
+    "write-pts",
+    cl::desc("Write solved points-to facts to a Lotus result file after "
+             "solving"),
+    cl::init(""), cl::cat(FsptaCategory));
 cl::opt<std::string>
     DumpSVFG("dump-svfg", cl::desc("Write the initialized SVFG as a DOT file"),
              cl::init(""), cl::cat(FsptaCategory));
@@ -293,6 +317,16 @@ int main(int argc, char **argv) {
     errs() << "--parallel-block-size must be positive\n";
     return 1;
   }
+  if (!ReadPtsFile.empty() && VerifyParallel) {
+    errs() << "--verify-parallel cannot be combined with --read-pts\n";
+    return 1;
+  }
+  if ((!ReadPtsFile.empty() || !WritePtsFile.empty()) &&
+      Analysis == AnalysisOption::ValueFlow) {
+    errs() << "--read-pts/--write-pts support --analysis=fspta and vfspta "
+              "only\n";
+    return 1;
+  }
   LLVMContext context;
   SMDiagnostic diagnostic;
   std::unique_ptr<Module> module =
@@ -332,9 +366,25 @@ int main(int argc, char **argv) {
   if (Analysis == AnalysisOption::Versioned) {
     VersionedFlowSensitivePTA::Config solverConfig;
     solverConfig.connectIndirectCall = connectIndirectCall;
+    solverConfig.versioningThreads = VersioningThreads;
+    solverConfig.timeLimitSeconds = TimeLimit;
     versionedSolver = std::make_unique<VersionedFlowSensitivePTA>(
         *graph, std::move(solverConfig));
-    versionedSolver->solve();
+    if (!ReadPtsFile.empty()) {
+      if (!versionedSolver->readVersionedAnalysisResultFromFile(ReadPtsFile)) {
+        errs() << "failed to read points-to results from '" << ReadPtsFile
+               << "'\n";
+        return 1;
+      }
+    } else {
+      versionedSolver->solve();
+    }
+    if (!WritePtsFile.empty() &&
+        !versionedSolver->writeVersionedAnalysisResultToFile(WritePtsFile)) {
+      errs() << "failed to write points-to results to '" << WritePtsFile
+             << "'\n";
+      return 1;
+    }
   } else {
     FlowSensitivePTA::Config solverConfig;
     solverConfig.parallel = Parallel;
@@ -349,10 +399,25 @@ int main(int argc, char **argv) {
                                   ? PointsToSetBackend::HashConsed
                                   : PointsToSetBackend::Mutable;
     solverConfig.connectIndirectCall = connectIndirectCall;
+    solverConfig.timeLimitSeconds = TimeLimit;
     solver =
         std::make_unique<FlowSensitivePTA>(*graph, std::move(solverConfig));
-    solver->solve();
-    if (VerifyParallel) {
+    if (!ReadPtsFile.empty()) {
+      if (!solver->readAnalysisResultFromFile(ReadPtsFile)) {
+        errs() << "failed to read points-to results from '" << ReadPtsFile
+               << "'\n";
+        return 1;
+      }
+    } else {
+      solver->solve();
+    }
+    if (!WritePtsFile.empty() &&
+        !solver->writeAnalysisResultToFile(WritePtsFile)) {
+      errs() << "failed to write points-to results to '" << WritePtsFile
+             << "'\n";
+      return 1;
+    }
+    if (VerifyParallel && ReadPtsFile.empty()) {
       // Both solvers see the final graph after all parallel topology epochs.
       // No additional graph mutation is permitted during this comparison.
       FlowSensitivePTA reference(*graph);
@@ -471,6 +536,12 @@ int main(int argc, char **argv) {
         outs() << "}\n";
       }
     }
+  }
+  if (StatsReport) {
+    outs() << (versionedSolver ? versionedSolver->statisticsReport()
+                               : solver->statisticsReport());
+    if (versionedSolver ? versionedSolver->timedOut() : solver->timedOut())
+      outs() << "warning: solve timed out; results are a partial fixed point\n";
   }
   if (DumpStats) {
     if (versionedSolver) {

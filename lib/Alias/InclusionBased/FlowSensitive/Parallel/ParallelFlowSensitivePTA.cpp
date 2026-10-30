@@ -77,6 +77,15 @@ class FlowSensitivePTA::ParallelExecution {
 
   void worker() {
     try {
+      if (owner.timeLimitExceeded()) {
+        owner.noteTimeout();
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          stopped = true;
+        }
+        changed.notify_all();
+        return;
+      }
       Config config = owner.config_;
       config.parallel = false;
       // Immutable snapshots contain ordinary sets. Interning is performed
@@ -287,7 +296,7 @@ public:
       return result;
     };
     for (const Slot &slot : slots) {
-      if (!owner.inScope(slot.node))
+      if (!owner.inScope(slot.node) || !slot.snapshot)
         continue;
       const NodeID id = slot.node->getId();
       owner.topLevelPointsTo_[id] = exportSet(slot.snapshot->top);
@@ -309,8 +318,17 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
     return solveOrderedParallel();
   const auto started = std::chrono::steady_clock::now();
   stats_ = {};
+  hasDeadline_ = config_.timeLimitSeconds != 0;
+  if (hasDeadline_)
+    deadline_ = started +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(config_.timeLimitSeconds));
   bool changed;
   do {
+    if (timeLimitExceeded()) {
+      stats_.timedOut = true;
+      break;
+    }
     ++stats_.topologyEpochs;
     topLevelPointsTo_.clear();
     dfIn_.clear();
@@ -330,7 +348,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
         changed = true;
         ++stats_.indirectCallEdges;
       }
-  } while (changed);
+  } while (changed && !stats_.timedOut);
   const SCCInfo scc = computeSCCs();
   stats_.sccs = scc.components.size();
   for (const auto &component : scc.components) {
@@ -347,6 +365,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
       stats_.memoryOutFacts += materialize(fact.second).size();
   stats_.strongUpdates = strongUpdateSites_.size();
   stats_.weakUpdates = weakUpdateSites_.size();
+  stats_.svfgHasSU = !strongUpdateSites_.empty();
   if (config_.setBackend == PointsToSetBackend::HashConsed) {
     const auto hashStats = arena_.statistics();
     stats_.hashConsedUniqueSets = hashStats.uniqueSets;

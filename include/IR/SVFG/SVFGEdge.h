@@ -108,6 +108,7 @@
 #pragma once
 
 #include "IR/SVFG/SVFGBase.h"
+#include "IR/SVFG/SVFGNodeBS.h"
 
 #include <set>
 #include <string>
@@ -147,13 +148,13 @@ private:
   EdgeWeight weight;
   const llvm::CallBase *callSite;
   std::string callSiteDebug;
-  std::set<uint32_t> pointsTo;
+  SVFGNodeBS pointsTo;
 
 public:
   /// @brief Construct edge
   SVFGEdge(SVFGNode *s, SVFGNode *d, SVFGEdgeK k,
            EdgeWeight w = EdgeWeight::One, const llvm::CallBase *cs = nullptr,
-           std::string csDebug = {}, std::set<uint32_t> pts = {})
+           std::string csDebug = {}, SVFGNodeBS pts = {})
       : src(s), dst(d), kind(k), weight(w), callSite(cs),
         callSiteDebug(std::move(csDebug)), pointsTo(std::move(pts)) {}
 
@@ -174,8 +175,8 @@ public:
   inline const std::string &getCallSiteDebug() const { return callSiteDebug; }
   inline void setCallSiteDebug(std::string s) { callSiteDebug = std::move(s); }
   inline bool hasCallSiteDebug() const { return !callSiteDebug.empty(); }
-  inline const std::set<uint32_t> &getPointsTo() const { return pointsTo; }
-  inline bool addPointsTo(const std::set<uint32_t> &pts) {
+  inline const SVFGNodeBS &getPointsTo() const { return pointsTo; }
+  inline bool addPointsTo(const SVFGNodeBS &pts) {
     const size_t oldSize = pointsTo.size();
     pointsTo.insert(pts.begin(), pts.end());
     return pointsTo.size() != oldSize;

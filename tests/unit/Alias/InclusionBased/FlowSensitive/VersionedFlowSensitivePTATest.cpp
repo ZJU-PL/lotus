@@ -1,8 +1,14 @@
 #include "Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h"
 
+#include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/SVFGBuilder.h"
 #include "TestUtils/LLVMHelpers.h"
+
+#include <fstream>
+#include <iterator>
+#include <set>
+#include <string>
 
 #include <gtest/gtest.h>
 #include <llvm/ADT/SmallString.h>
@@ -22,9 +28,9 @@ TEST_F(VersionedFlowSensitivePTATest,
   constexpr uint32_t firstObject = 100;
   constexpr uint32_t secondObject = 101;
   SVFG graph;
-  graph.addNode(new DummySVFGNode(1, nullptr));
-  graph.setObjectDebug(firstObject, "first");
-  graph.setObjectDebug(secondObject, "second");
+  auto *store = new StoreSVFGNode(1, nullptr, nullptr, 0);
+  store->setMemoryDef(1, 1, {firstObject, secondObject});
+  graph.addNode(store);
   SVFG::ObjectInfo info;
   info.isGlobal = true;
   info.isSingleton = true;
@@ -38,6 +44,87 @@ TEST_F(VersionedFlowSensitivePTATest,
   EXPECT_EQ(stats.equivalentObjects, 1u);
   EXPECT_EQ(solver.getConsume(1, firstObject),
             solver.getConsume(1, secondObject));
+}
+
+TEST_F(VersionedFlowSensitivePTATest,
+       VersioningThreadsProduceTheSameLabelsAsSequential) {
+  auto module = parseModule(R"(
+    @a = global i8 0
+    @b = global i8 0
+    @c = global i8 0
+    define i8* @main() {
+    entry:
+      %p = alloca i8*
+      %q = alloca i8*
+      store i8* @a, i8** %p
+      store i8* @b, i8** %p
+      store i8* @c, i8** %q
+      %first = load i8*, i8** %p
+      %second = load i8*, i8** %q
+      ret i8* %first
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  graphConfig.resolveIndirectCalls = false;
+  SVFGBuilder builder(graphConfig);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *second = nullptr;
+  for (const Instruction &instruction :
+       instructions(module->getFunction("main")))
+    if (const auto *candidate = dyn_cast<LoadInst>(&instruction))
+      if (candidate->getName() == "second")
+        second = candidate;
+  ASSERT_NE(second, nullptr);
+
+  VersionedFlowSensitivePTA::Config sequentialConfig;
+  sequentialConfig.versioningThreads = 1;
+  VersionedFlowSensitivePTA sequential(*graph, sequentialConfig);
+  sequential.solve();
+
+  VersionedFlowSensitivePTA::Config parallelConfig;
+  parallelConfig.versioningThreads = 4;
+  VersionedFlowSensitivePTA parallel(*graph, parallelConfig);
+  parallel.solve();
+
+  EXPECT_EQ(sequential.pointsTo(second), parallel.pointsTo(second));
+  EXPECT_EQ(sequential.statistics().versions, parallel.statistics().versions);
+  EXPECT_EQ(sequential.statistics().equivalentObjects,
+            parallel.statistics().equivalentObjects);
+
+  SmallString<256> sequentialPath;
+  SmallString<256> parallelPath;
+  int sequentialFd = -1;
+  int parallelFd = -1;
+  ASSERT_FALSE(sys::fs::createTemporaryFile("lotus-vfspta-seq", "txt",
+                                            sequentialFd, sequentialPath));
+  ASSERT_FALSE(sys::fs::createTemporaryFile("lotus-vfspta-par", "txt",
+                                            parallelFd, parallelPath));
+  ::close(sequentialFd);
+  ::close(parallelFd);
+  ASSERT_TRUE(sequential.writeVersionedAnalysisResultToFile(
+      sequentialPath.str().str()));
+  ASSERT_TRUE(
+      parallel.writeVersionedAnalysisResultToFile(parallelPath.str().str()));
+  std::ifstream sequentialInput(sequentialPath.str().str());
+  std::ifstream parallelInput(parallelPath.str().str());
+  const std::string sequentialResult(
+      (std::istreambuf_iterator<char>(sequentialInput)),
+      std::istreambuf_iterator<char>());
+  const std::string parallelResult(
+      (std::istreambuf_iterator<char>(parallelInput)),
+      std::istreambuf_iterator<char>());
+  sys::fs::remove(sequentialPath);
+  sys::fs::remove(parallelPath);
+  EXPECT_EQ(sequentialResult, parallelResult);
 }
 
 TEST_F(VersionedFlowSensitivePTATest,
@@ -118,6 +205,7 @@ TEST_F(VersionedFlowSensitivePTATest,
   graph.addNode(address);
   graph.addNode(source);
   graph.addNode(formalIn);
+  graph.addFormalIn(target, formalIn);
   graph.setObjectValue(functionObject, target);
   SVFG::ObjectInfo functionInfo;
   functionInfo.isFunction = true;
@@ -1060,4 +1148,374 @@ TEST_F(VersionedFlowSensitivePTATest,
   EXPECT_EQ(stats.deltaRelabelings, 0u);
   EXPECT_GT(stats.deltaSourceNodes, 0u);
   EXPECT_GT(stats.deltaVersionUpdates, 0u);
+}
+
+TEST_F(VersionedFlowSensitivePTATest,
+       ArrayGlobalInitializerMatchesSparseFlowSensitive) {
+  auto module = parseModule(R"(
+    @x = global i8 0
+    @y = global i8 0
+    @array = global [2 x i8*] [i8* @x, i8* @y]
+    define i8* @main() {
+    entry:
+      %element = getelementptr inbounds [2 x i8*], [2 x i8*]* @array, i64 0, i64 1
+      %result = load i8*, i8** %element
+      ret i8* %result
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig config;
+  config.usePointerAnalysis = true;
+  config.buildMSSA = true;
+  SVFGBuilder builder(config);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *load = nullptr;
+  for (const Instruction &instruction :
+       instructions(module->getFunction("main")))
+    if (const auto *candidate = dyn_cast<LoadInst>(&instruction))
+      load = candidate;
+  ASSERT_NE(load, nullptr);
+
+  FlowSensitivePTA sparse(*graph);
+  sparse.solve();
+  VersionedFlowSensitivePTA versioned(*graph);
+  versioned.solve();
+
+  const auto sparseResult = sparse.pointsTo(load);
+  const auto versionedResult = versioned.pointsTo(load);
+  ASSERT_TRUE(sparseResult.has_value());
+  ASSERT_TRUE(versionedResult.has_value());
+  EXPECT_EQ(*sparseResult, *versionedResult);
+
+  auto pointsToY = [&](const PointsToSet &set) {
+    return std::any_of(set.begin(), set.end(), [&](uint32_t object) {
+      return graph->getObjectValue(object) == module->getGlobalVariable("y");
+    });
+  };
+  EXPECT_TRUE(pointsToY(*sparseResult));
+  EXPECT_TRUE(pointsToY(*versionedResult));
+}
+
+TEST_F(VersionedFlowSensitivePTATest,
+       RestoredSolutionReconnectsIndirectCallEdges) {
+  auto module = parseModule(R"(
+    @y = global i8 0
+    @function.pointer = global void (i8**)* @target
+    define void @target(i8** %pointer) {
+    entry:
+      store i8* @y, i8** %pointer
+      ret void
+    }
+    define i8* @main() {
+    entry:
+      %slot = alloca i8*
+      %callee = load void (i8**)*, void (i8**)** @function.pointer
+      call void %callee(i8** %slot)
+      %result = load i8*, i8** %slot
+      ret i8* %result
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  const Function *mainFunction = module->getFunction("main");
+  ASSERT_NE(mainFunction, nullptr);
+  const CallBase *indirectCall = nullptr;
+  const LoadInst *result = nullptr;
+  for (const Instruction &instruction : instructions(mainFunction)) {
+    if (const auto *call = dyn_cast<CallBase>(&instruction))
+      if (!call->getCalledFunction())
+        indirectCall = call;
+    if (const auto *load = dyn_cast<LoadInst>(&instruction))
+      if (load->getName() == "result")
+        result = load;
+  }
+  ASSERT_NE(indirectCall, nullptr);
+  ASSERT_NE(result, nullptr);
+
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  graphConfig.resolveIndirectCalls = false;
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilder builder(graphConfig);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  auto connector = [](SVFGBuilder &source, SVFG *targetGraph) {
+    return [&source, targetGraph](const CallBase *callSite,
+                                  const Function *callee) {
+      std::vector<SVFGEdge *> edges;
+      return source.connectCallSiteToCalleeOnTheFly(targetGraph, callSite,
+                                                    callee, edges);
+    };
+  };
+
+  SmallString<256> path;
+  int fileDescriptor = -1;
+  ASSERT_FALSE(sys::fs::createTemporaryFile("lotus-vfspta-resume", "txt",
+                                            fileDescriptor, path));
+  ::close(fileDescriptor);
+
+  VersionedFlowSensitivePTA::Config solvedConfig;
+  solvedConfig.connectIndirectCall = connector(builder, graph.get());
+  VersionedFlowSensitivePTA solved(*graph, std::move(solvedConfig));
+  solved.solve();
+  const auto solvedPointsTo = solved.pointsTo(result);
+  ASSERT_TRUE(solvedPointsTo.has_value());
+  ASSERT_FALSE(graph->getConnectedCallees(indirectCall).empty());
+  ASSERT_TRUE(std::any_of(
+      solvedPointsTo->begin(), solvedPointsTo->end(), [&](uint32_t object) {
+        return graph->getObjectValue(object) == module->getGlobalVariable("y");
+      }));
+  ASSERT_TRUE(solved.writeVersionedAnalysisResultToFile(path.str().str()));
+
+  // Resume into a fresh graph built without any indirect-call edges.
+  ICFG resumeIcfg;
+  ICFGBuilder resumeIcfgBuilder(&resumeIcfg);
+  resumeIcfgBuilder.build(module.get());
+  SVFGBuilder resumeBuilder(graphConfig);
+  std::unique_ptr<SVFG> resumeGraph(resumeBuilder.build(&resumeIcfg));
+  ASSERT_NE(resumeGraph, nullptr);
+  ASSERT_TRUE(resumeGraph->getConnectedCallees(indirectCall).empty());
+  ASSERT_NE(resumeGraph->getValueNode(result), nullptr);
+  ASSERT_EQ(graph->getValueNode(result)->getId(),
+            resumeGraph->getValueNode(result)->getId());
+
+  VersionedFlowSensitivePTA::Config resumeConfig;
+  resumeConfig.connectIndirectCall =
+      connector(resumeBuilder, resumeGraph.get());
+  VersionedFlowSensitivePTA restored(*resumeGraph, std::move(resumeConfig));
+  ASSERT_TRUE(restored.readVersionedAnalysisResultFromFile(path.str().str()));
+  sys::fs::remove(path);
+
+  // Reading must replay the on-the-fly connections the saved solution needs.
+  EXPECT_FALSE(resumeGraph->getConnectedCallees(indirectCall).empty());
+
+  auto objectValues = [](SVFG &source, const PointsToSet &set) {
+    std::set<const Value *> values;
+    for (uint32_t object : set)
+      values.insert(source.getObjectValue(object));
+    return values;
+  };
+  const auto restoredPointsTo = restored.pointsTo(result);
+  ASSERT_TRUE(restoredPointsTo.has_value());
+  EXPECT_EQ(objectValues(*graph, *solvedPointsTo),
+            objectValues(*resumeGraph, *restoredPointsTo));
+}
+
+TEST_F(VersionedFlowSensitivePTATest, TimeLimitReportsTimeout) {
+  SVFG graph;
+  VersionedFlowSensitivePTA::Config config;
+  config.timeLimitSeconds = -1; // already expired
+  VersionedFlowSensitivePTA solver(graph, config);
+  solver.solve();
+  EXPECT_TRUE(solver.timedOut());
+  EXPECT_TRUE(solver.statistics().timedOut);
+  const std::string report = solver.statisticsReport();
+  EXPECT_NE(report.find("timed out: yes"), std::string::npos);
+  EXPECT_NE(report.find("svfgHasSU: no"), std::string::npos);
+}
+
+TEST_F(VersionedFlowSensitivePTATest,
+       StatisticsReportDetectsStrongUpdateSites) {
+  auto module = parseModule(R"(
+    define void @f() {
+    entry:
+      %p = alloca i32
+      store i32 1, i32* %p
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig config;
+  config.usePointerAnalysis = true;
+  config.buildMSSA = true;
+  SVFGBuilder builder(config);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  VersionedFlowSensitivePTA solver(*graph);
+  solver.solve();
+  EXPECT_TRUE(solver.statistics().svfgHasSU);
+  const std::string report = solver.statisticsReport();
+  EXPECT_NE(report.find("svfgHasSU: yes"), std::string::npos);
+}
+
+TEST_F(VersionedFlowSensitivePTATest,
+       RecursiveTopologyChangeWithoutStrongUpdatesAvoidsRelabeling) {
+  auto module = parseModule(R"(
+    @function.pointer = global void ()* @target
+    define void @target() {
+    entry:
+      %callee = load void ()*, void ()** @function.pointer
+      call void %callee()
+      ret void
+    }
+    define i32 @main() {
+    entry:
+      %callee = load void ()*, void ()** @function.pointer
+      call void %callee()
+      ret i32 0
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  graphConfig.resolveIndirectCalls = false;
+  SVFGBuilder builder(graphConfig);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  VersionedFlowSensitivePTA::Config solverConfig;
+  solverConfig.connectIndirectCall = [&](const CallBase *callSite,
+                                         const Function *target) {
+    std::vector<SVFGEdge *> edges;
+    return builder.connectCallSiteToCalleeOnTheFly(graph.get(), callSite,
+                                                   target, edges);
+  };
+  VersionedFlowSensitivePTA solver(*graph, std::move(solverConfig));
+  const auto &stats = solver.solve();
+  EXPECT_GT(stats.indirectCallEdges, 0u);
+  // target becomes self-recursive, but it contains no strong-update site, so
+  // the existing version labels stay valid: only the initial labelling runs.
+  EXPECT_EQ(stats.relabelings, 1u);
+  EXPECT_GT(stats.deltaVersionUpdates, 0u);
+}
+
+TEST_F(VersionedFlowSensitivePTATest,
+       RecursiveTopologyChangeRelabelsWhenStrongUpdateMayChange) {
+  auto module = parseModule(R"(
+    @function.pointer = global void ()* @target
+    define void @target() {
+    entry:
+      %slot = alloca i32
+      store i32 1, i32* %slot
+      %callee = load void ()*, void ()** @function.pointer
+      call void %callee()
+      ret void
+    }
+    define i32 @main() {
+    entry:
+      %callee = load void ()*, void ()** @function.pointer
+      call void %callee()
+      ret i32 0
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  graphConfig.resolveIndirectCalls = false;
+  SVFGBuilder builder(graphConfig);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  VersionedFlowSensitivePTA::Config solverConfig;
+  solverConfig.connectIndirectCall = [&](const CallBase *callSite,
+                                         const Function *target) {
+    std::vector<SVFGEdge *> edges;
+    return builder.connectCallSiteToCalleeOnTheFly(graph.get(), callSite,
+                                                   target, edges);
+  };
+  VersionedFlowSensitivePTA solver(*graph, std::move(solverConfig));
+  const auto &stats = solver.solve();
+  EXPECT_GT(stats.indirectCallEdges, 0u);
+  // The store in the newly recursive function must switch from strong to weak,
+  // which invalidates the labels: one relabel per solve epoch is expected.
+  EXPECT_EQ(stats.relabelings, 2u);
+  EXPECT_EQ(stats.strongUpdates, 0u);
+}
+
+TEST_F(VersionedFlowSensitivePTATest, ReadsLegacyV1ResultFile) {
+  auto module = parseModule(R"(
+    @y = global i8 0
+    define i8* @main() {
+    entry:
+      %slot = alloca i8*
+      store i8* @y, i8** %slot
+      %result = load i8*, i8** %slot
+      ret i8* %result
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig config;
+  config.usePointerAnalysis = true;
+  config.buildMSSA = true;
+  SVFGBuilder builder(config);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *load = nullptr;
+  for (const Instruction &instruction :
+       instructions(module->getFunction("main")))
+    if (const auto *candidate = dyn_cast<LoadInst>(&instruction))
+      load = candidate;
+  ASSERT_NE(load, nullptr);
+
+  VersionedFlowSensitivePTA solved(*graph);
+  solved.solve();
+  const auto pointsTo = solved.pointsTo(load);
+  ASSERT_TRUE(pointsTo.has_value());
+
+  SmallString<256> currentPath;
+  int currentFD = -1;
+  ASSERT_FALSE(sys::fs::createTemporaryFile("lotus-vfspta-v2", "txt", currentFD,
+                                            currentPath));
+  ::close(currentFD);
+  ASSERT_TRUE(
+      solved.writeVersionedAnalysisResultToFile(currentPath.str().str()));
+
+  std::string content;
+  {
+    std::ifstream input(currentPath.str().str());
+    content.assign(std::istreambuf_iterator<char>(input),
+                   std::istreambuf_iterator<char>());
+  }
+  const std::string header = "LOTUS_VFSPTA 2";
+  const auto headerPos = content.find(header);
+  ASSERT_NE(headerPos, std::string::npos);
+  content.replace(headerPos, header.size(), "LOTUS_VFSPTA 1");
+
+  SmallString<256> legacyPath;
+  int legacyFD = -1;
+  ASSERT_FALSE(sys::fs::createTemporaryFile("lotus-vfspta-v1", "txt", legacyFD,
+                                            legacyPath));
+  ::close(legacyFD);
+  {
+    std::ofstream output(legacyPath.str().str(), std::ios::trunc);
+    output << content;
+  }
+
+  VersionedFlowSensitivePTA restored(*graph);
+  EXPECT_TRUE(
+      restored.readVersionedAnalysisResultFromFile(legacyPath.str().str()));
+  EXPECT_EQ(restored.pointsTo(load), *pointsTo);
+  sys::fs::remove(currentPath);
+  sys::fs::remove(legacyPath);
 }

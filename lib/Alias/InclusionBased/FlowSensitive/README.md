@@ -39,6 +39,19 @@ Precise memory reads check object contents and entry presence; missing entries
 also validate the wildcard namespace. `--parallel-object-certificates=false`
 selects whole-channel validation for comparison.
 
+Both solvers accept `Config::timeLimitSeconds` (CLI: `--time-limit`). On
+expiry the solve stops at the current worklist boundary, keeps the partial
+solution queryable, and reports `timedOut()`. `--stats-report` prints the timer
+breakdown (solve/labeling/OTF) and `svfgHasSU`.
+The versioned solver labels footprint representatives concurrently
+(`Config::versioningThreads`, CLI: `--versioning-threads`; 0 selects
+`hardware_concurrency()`, 1 runs sequentially) and merges the results in object
+order, so the labels are independent of thread scheduling.
+`FlowSensitivePTA` also has `writeAnalysisResultToFile` /
+`readAnalysisResultFromFile` (`LOTUS_SPARSEPTA 1`). The versioned solver
+writes `LOTUS_VFSPTA 2` and reads versions 1 and 2. The driver exposes both
+through `--write-pts` / `--read-pts`. These formats store Lotus object IDs.
+
 `FlowSensitivePTA` is the thread-independent sparse solver. It maintains:
 
 - top-level points-to sets for pointer-producing SVFG nodes;
@@ -72,7 +85,9 @@ This module contains three flow-sensitive analyses:
   - footprint-equivalent object reuse
   - occurrence-weighted propagation
   - on-the-fly (OTF) delta-edge updates
-  - result persistence
+  - result persistence (`LOTUS_VFSPTA`, version 2 with version 1 reads)
+  - relabeling on a topology change only when recursion changes the
+    strong-update status of an existing site
 - `ValueFlowPTA` implements the value-flow formulation of Li, Cifuentes, and
   Keynes (ESEC/FSE 2011). It builds a field-insensitive value-flow graph
   directly from LLVM IR, orders indirect-flow construction by object escape,

@@ -18,6 +18,8 @@
 
 #include "IR/GraphView.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -45,6 +47,12 @@ public:
     const lotus::analysis::FilteredSVFGView *scope = nullptr;
     IndirectCallConnector connectIndirectCall;
     bool clusterVersionedObjects = true;
+    // Threads used to compute object version labels. Zero selects
+    // hardware_concurrency(); one runs sequentially.
+    unsigned versioningThreads = 0;
+    // Wall-clock budget for solve() in seconds. Zero disables it. On expiry
+    // the solver keeps the current partial solution and sets timedOut().
+    double timeLimitSeconds = 0;
   };
 
   struct Statistics {
@@ -65,6 +73,13 @@ public:
     std::size_t deltaRelabelings = 0;
     std::size_t statementWorklistPushes = 0;
     std::size_t relabelings = 0;
+    // Set when Config::timeLimitSeconds expired before a fixed point.
+    bool timedOut = false;
+    // Set when a store in scope has a unique target (a strong update).
+    bool svfgHasSU = false;
+    double solveSeconds = 0;
+    double labelingSeconds = 0;
+    double otfSeconds = 0;
   };
 
   explicit VersionedFlowSensitivePTA(const lotus::analysis::SVFG &graph);
@@ -90,6 +105,9 @@ public:
   bool readVersionedAnalysisResultFromFile(const std::string &filename);
 
   const Statistics &statistics() const { return stats_; }
+  bool timedOut() const { return stats_.timedOut; }
+  /// Human-readable statistics report.
+  std::string statisticsReport() const;
 
 private:
   struct VersionedObject {
@@ -138,11 +156,58 @@ private:
   };
 
   bool inScope(const lotus::analysis::SVFGNode *node) const;
+  bool timeLimitExceeded() const;
+  void noteTimeout() { stats_.timedOut = true; }
   void initializeRecursiveFunctions();
+  /// Returns true if a function with a strong-update site changed its
+  /// recursion status, which invalidates the version labels.
+  bool recursionChangeAffectsStrongUpdates(
+      const std::unordered_set<const llvm::Function *> &previous) const;
   bool functionHasKnownCaller(const llvm::Function *function) const;
   void buildDeltaMaps();
   void buildVersionLabels();
+  /// Version labels for a single object, accumulated without touching shared
+  /// solver state so several objects can be labelled concurrently.
+  struct ObjectLabels {
+    std::vector<MeldSet> melds;
+    Version initialVersion = InvalidVersion;
+    std::unordered_map<NodeID, Version> consume;
+    std::unordered_map<NodeID, Version> yield;
+    std::unordered_map<Version, std::vector<Version>> reliance;
+    std::unordered_map<Version, std::vector<NodeID>> statements;
+    std::unordered_set<NodeID> intrinsicDependents;
+
+    Version intern(const MeldSet &meld) {
+      for (std::size_t i = 0; i < melds.size(); ++i)
+        if (melds[i] == meld)
+          return static_cast<Version>(i + 1);
+      melds.push_back(meld);
+      return static_cast<Version>(melds.size());
+    }
+    Version consumeAt(NodeID location) const {
+      auto it = consume.find(location);
+      return it == consume.end() ? InvalidVersion : it->second;
+    }
+    Version yieldAt(NodeID location) const {
+      auto it = yield.find(location);
+      return it == yield.end() ? InvalidVersion : it->second;
+    }
+    bool addReliance(Version source, Version destination) {
+      if (source == InvalidVersion || destination == InvalidVersion ||
+          source == destination)
+        return false;
+      auto &destinations = reliance[source];
+      if (std::find(destinations.begin(), destinations.end(), destination) ==
+          destinations.end()) {
+        destinations.push_back(destination);
+        return true;
+      }
+      return false;
+    }
+  };
   void labelObject(ObjectID object);
+  void computeObjectLabels(ObjectID object, ObjectLabels &labels) const;
+  void mergeObjectLabels(ObjectID object, ObjectLabels &&labels);
   bool labelObjectIncremental(ObjectID object);
   std::vector<FootprintEntry> versionFootprint(ObjectID object) const;
   void copyVersionLabels(ObjectID canonical, ObjectID object);
@@ -165,11 +230,12 @@ private:
   bool deltaCarriesObject(const lotus::analysis::SVFGNode &node,
                           ObjectID object) const;
   PointsToSet objectsWithFields(const llvm::Value *pointer) const;
-  Version internVersion(ObjectID object, const MeldSet &meld);
   bool addReliance(ObjectID object, Version source, Version destination);
   void buildVersionProcessingOrder();
   void updateConnectedNodes(
       const std::vector<const lotus::analysis::SVFGEdge *> &newEdges);
+  /// Re-materialise the indirect-call edges a loaded solution depends on.
+  void reconnectIndirectCallsAfterRead();
 
   bool solveCurrentTopology();
   /// Propagate o:v into every version which relies on it.
@@ -240,6 +306,8 @@ private:
   std::queue<NodeID> statementWorklist_;
   std::unordered_set<NodeID> queuedStatements_;
   bool topologyChanged_ = false;
+  bool hasDeadline_ = false;
+  std::chrono::steady_clock::time_point deadline_;
   Statistics stats_;
 };
 

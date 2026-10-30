@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <functional>
 #include <queue>
+#include <sstream>
 #include <unordered_set>
 
 #include <llvm/ADT/SCCIterator.h>
@@ -30,6 +32,124 @@ FlowSensitivePTA::FlowSensitivePTA(const SVFG &graph)
 
 FlowSensitivePTA::FlowSensitivePTA(const SVFG &graph, Config config)
     : graph_(&graph), config_(config) {}
+
+bool FlowSensitivePTA::timeLimitExceeded() const {
+  return hasDeadline_ && std::chrono::steady_clock::now() >= deadline_;
+}
+
+std::string FlowSensitivePTA::statisticsReport() const {
+  std::ostringstream out;
+  out << "FlowSensitivePTA statistics\n";
+  out << "  nodes: " << stats_.nodes << "\n";
+  out << "  sccs: " << stats_.sccs << " (max " << stats_.maxSccSize << ")\n";
+  out << "  node processes: " << stats_.nodeProcesses << "\n";
+  out << "  topology epochs: " << stats_.topologyEpochs << "\n";
+  out << "  top-level facts: " << stats_.topLevelFacts << "\n";
+  out << "  memory in/out facts: " << stats_.memoryInFacts << " / "
+      << stats_.memoryOutFacts << "\n";
+  out << "  strong updates: " << stats_.strongUpdates << " (executions "
+      << stats_.strongUpdateExecutions << ")\n";
+  out << "  weak updates: " << stats_.weakUpdates << " (executions "
+      << stats_.weakUpdateExecutions << ")\n";
+  out << "  indirect call edges: " << stats_.indirectCallEdges << "\n";
+  out << "  svfgHasSU: " << (stats_.svfgHasSU ? "yes" : "no") << "\n";
+  out << "  time: solve " << stats_.solveSeconds << "s, initialize "
+      << stats_.initializeSeconds << "s, otf " << stats_.otfSeconds << "s\n";
+  out << "  timed out: " << (stats_.timedOut ? "yes" : "no") << "\n";
+  return out.str();
+}
+
+bool FlowSensitivePTA::writeAnalysisResultToFile(
+    const std::string &filename) const {
+  std::ofstream output(filename, std::ios::trunc);
+  if (!output)
+    return false;
+  output << "LOTUS_SPARSEPTA 1\n";
+  for (const auto &[node, pointsTo] : topLevelPointsTo_) {
+    const PointsToSet &set = materialize(pointsTo);
+    output << "T " << node << ' ' << set.size();
+    for (ObjectID object : set)
+      output << ' ' << object;
+    output << '\n';
+  }
+  auto writeMemory =
+      [&](char kind, const std::unordered_map<NodeID, MemoryState> &states) {
+        for (const auto &[node, state] : states)
+          for (const auto &[object, pointsTo] : state) {
+            const PointsToSet &set = materialize(pointsTo);
+            output << kind << ' ' << node << ' ' << object << ' ' << set.size();
+            for (ObjectID target : set)
+              output << ' ' << target;
+            output << '\n';
+          }
+      };
+  writeMemory('I', dfIn_);
+  writeMemory('O', dfOut_);
+  output << "E\n";
+  return output.good();
+}
+
+bool FlowSensitivePTA::readAnalysisResultFromFile(const std::string &filename) {
+  std::ifstream input(filename);
+  std::string magic;
+  unsigned formatVersion = 0;
+  if (!(input >> magic >> formatVersion) || magic != "LOTUS_SPARSEPTA" ||
+      formatVersion != 1)
+    return false;
+
+  topLevelPointsTo_.clear();
+  dfIn_.clear();
+  dfOut_.clear();
+  initialMemory_.clear();
+  strongUpdateSites_.clear();
+  weakUpdateSites_.clear();
+  if (config_.setBackend == PointsToSetBackend::HashConsed)
+    arena_.reset();
+  stats_ = {};
+
+  auto makeStored = [&](const PointsToSet &set) {
+    StoredSet stored;
+    if (config_.setBackend == PointsToSetBackend::HashConsed)
+      stored.interned = arena_.intern(set);
+    else
+      stored.mutableSet = set;
+    return stored;
+  };
+  auto readSet = [&](std::size_t count, PointsToSet &set) {
+    for (std::size_t i = 0; i < count; ++i) {
+      ObjectID value = 0;
+      if (!(input >> value))
+        return false;
+      set.insert(value);
+    }
+    return true;
+  };
+  std::string record;
+  while (input >> record) {
+    if (record == "E")
+      break;
+    if (record == "T") {
+      NodeID node = 0;
+      std::size_t count = 0;
+      PointsToSet set;
+      if (!(input >> node >> count) || !readSet(count, set))
+        return false;
+      topLevelPointsTo_[node] = makeStored(set);
+    } else if (record == "I" || record == "O") {
+      NodeID node = 0;
+      ObjectID object = 0;
+      std::size_t count = 0;
+      PointsToSet set;
+      if (!(input >> node >> object >> count) || !readSet(count, set))
+        return false;
+      (record == "I" ? dfIn_ : dfOut_)[node][object] = makeStored(set);
+    } else {
+      return false;
+    }
+  }
+  reconnectIndirectCallsAfterRead();
+  return input.good() || input.eof();
+}
 
 bool FlowSensitivePTA::hasSameSolution(const FlowSensitivePTA &other,
                                        std::string *difference) const {
@@ -604,6 +724,7 @@ bool FlowSensitivePTA::resolveIndirectCalls(const SVFGNode &node,
                                             const StoredSet &pointsTo) {
   if (!config_.connectIndirectCall)
     return false;
+  const auto otfStarted = std::chrono::steady_clock::now();
   bool changed = false;
   const NodeID functionPointer =
       node.hasValueId() ? node.getValueId() : node.getId();
@@ -619,7 +740,47 @@ bool FlowSensitivePTA::resolveIndirectCalls(const SVFGNode &node,
       }
     }
   }
+  stats_.otfSeconds += std::chrono::duration<double>(
+                           std::chrono::steady_clock::now() - otfStarted)
+                           .count();
   return changed;
+}
+
+void FlowSensitivePTA::reconnectIndirectCallsAfterRead() {
+  if (!config_.connectIndirectCall)
+    return;
+
+  // The file stores solved facts but not the edges added by on-the-fly
+  // call-graph construction. Recover them from the loaded solution: for each
+  // indirect callsite, connect the callees its function pointer points to.
+  std::vector<std::pair<const CallBase *, const Function *>> connections;
+  std::unordered_set<const CallBase *> seenCallsites;
+  for (const auto &[functionPointer, callSites] : graph_->getIndCallSiteMap()) {
+    for (const CallBase *callSite : callSites) {
+      if (!callSite || !seenCallsites.insert(callSite).second)
+        continue;
+      const Value *called = callSite->getCalledOperand();
+      if (!called)
+        continue;
+      called = called->stripPointerCasts();
+      const SVFGNode *node = graph_->getValueNode(called);
+      if (!node)
+        continue;
+      for (ObjectID object : materialize(topSet(node))) {
+        const auto *target =
+            dyn_cast_or_null<Function>(graph_->getObjectValue(object));
+        if (target && !target->isDeclaration())
+          connections.emplace_back(callSite, target);
+      }
+    }
+  }
+
+  for (const auto &[callSite, target] : connections) {
+    if (graph_->hasConnectedCallee(callSite, target))
+      continue;
+    if (config_.connectIndirectCall(callSite, target))
+      ++stats_.indirectCallEdges;
+  }
 }
 
 bool FlowSensitivePTA::transfer(const SVFGNode &node) {
@@ -670,7 +831,18 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
     mergeState(incoming, initialMemory_);
   changed |= assignState(dfIn_[node.getId()], incoming);
 
-  MemoryState outgoing = incoming;
+  // Materialise the memory-OUT state lazily: most nodes (addresses, copies,
+  // phis, loads) never write memory, so their OUT equals IN and no copy is
+  // needed.  OUT is only materialised on the first write.
+  MemoryState outgoing;
+  bool outgoingWritten = false;
+  auto outgoingState = [&]() -> MemoryState & {
+    if (!outgoingWritten) {
+      outgoing = incoming;
+      outgoingWritten = true;
+    }
+    return outgoing;
+  };
   StoredSet top = topSet(&node);
   if (const auto *address = dyn_cast<AddrSVFGNode>(&node)) {
     ObjectID object = address->getObjectId();
@@ -709,9 +881,9 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       if (graph_->isConstantObject(object))
         continue;
       if (strong) {
-        assign(outgoing[object], stored);
+        assign(outgoingState()[object], stored);
       } else {
-        merge(outgoing[object], stored);
+        merge(outgoingState()[object], stored);
       }
       updatedAny = true;
     }
@@ -797,7 +969,7 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       for (const SVFGNode *actualInNode :
            graph_->getActualIns(actualOut->getCallSite())) {
         mergeState(allInputs, inState(actualInNode));
-        mergeState(outgoing, inState(actualInNode));
+        mergeState(outgoingState(), inState(actualInNode));
       }
       for (const SVFGEdge *edge : node.getInEdges()) {
         const SVFGNode *source = edge ? edge->getSrcNode() : nullptr;
@@ -861,14 +1033,15 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
                 const auto *fill =
                     dyn_cast<ConstantInt>(intrinsic->getArgOperand(1));
                 if (fill && fill->isZero())
-                  assign(outgoing[destination], empty);
+                  assign(outgoingState()[destination], empty);
                 else if (unknownObject != 0)
-                  assign(outgoing[destination], singleton(unknownObject));
+                  assign(outgoingState()[destination],
+                         singleton(unknownObject));
               } else {
-                assign(outgoing[destination], empty);
+                assign(outgoingState()[destination], empty);
               }
             } else if (relativeOffset < copyLength && unknownObject != 0) {
-              assign(outgoing[destination], singleton(unknownObject));
+              assign(outgoingState()[destination], singleton(unknownObject));
             }
           }
         }
@@ -878,7 +1051,7 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
           const PointsToSet destinationObjects =
               objectsWithFields(intrinsic->getArgOperand(0));
           for (ObjectID destination : destinationObjects)
-            merge(outgoing[destination], singleton(unknownObject));
+            merge(outgoingState()[destination], singleton(unknownObject));
         }
       }
 
@@ -916,9 +1089,9 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
         }
         for (const auto &[destination, value] : copiedByDestination)
           if (hasExactLength)
-            assign(outgoing[destination], value);
+            assign(outgoingState()[destination], value);
           else
-            merge(outgoing[destination], value);
+            merge(outgoingState()[destination], value);
       }
     }
   } else if (const auto *gep = dyn_cast<GepSVFGNode>(&node)) {
@@ -991,7 +1164,8 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
   changed |= topChanged;
   if (topChanged && resolveIndirectCalls(node, top))
     topologyChanged_ = true;
-  changed |= assignState(dfOut_[node.getId()], outgoing);
+  changed |=
+      assignState(dfOut_[node.getId()], outgoingWritten ? outgoing : incoming);
   return changed;
 }
 
@@ -1066,8 +1240,24 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
   stats_ = {};
   if (config_.setBackend == PointsToSetBackend::HashConsed)
     arena_.reset();
-  initializeGlobalMemory();
+  hasDeadline_ = config_.timeLimitSeconds != 0;
+  if (hasDeadline_)
+    deadline_ = started +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(config_.timeLimitSeconds));
+  {
+    const auto initializeStarted = std::chrono::steady_clock::now();
+    initializeGlobalMemory();
+    stats_.initializeSeconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      initializeStarted)
+            .count();
+  }
   do {
+    if (timeLimitExceeded()) {
+      stats_.timedOut = true;
+      break;
+    }
     ++stats_.topologyEpochs;
     topologyChanged_ = false;
     initializeRecursiveFunctions();
@@ -1081,7 +1271,11 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
       stats_.nodes += scc.components[i].size();
       stats_.maxSccSize = std::max(stats_.maxSccSize, scc.components[i].size());
     }
-    while (!worklist.empty()) {
+    while (!worklist.empty() && !stats_.timedOut) {
+      if (timeLimitExceeded()) {
+        stats_.timedOut = true;
+        break;
+      }
       const std::size_t component = worklist.front();
       worklist.pop();
       queued[component] = false;
@@ -1092,7 +1286,11 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
         localWorklist.push(node);
         locallyQueued.insert(node->getId());
       }
-      while (!localWorklist.empty() && !topologyChanged_) {
+      while (!localWorklist.empty() && !topologyChanged_ && !stats_.timedOut) {
+        if (timeLimitExceeded()) {
+          stats_.timedOut = true;
+          break;
+        }
         const SVFGNode *node = localWorklist.front();
         localWorklist.pop();
         locallyQueued.erase(node->getId());
@@ -1118,7 +1316,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
             worklist.push(successor);
           }
     }
-  } while (topologyChanged_);
+  } while (topologyChanged_ && !stats_.timedOut);
   for (const auto &[node, pointsTo] : topLevelPointsTo_)
     stats_.topLevelFacts += materialize(pointsTo).size();
   for (const auto &[node, state] : dfIn_)
@@ -1129,6 +1327,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
       stats_.memoryOutFacts += materialize(pointsTo).size();
   stats_.strongUpdates = strongUpdateSites_.size();
   stats_.weakUpdates = weakUpdateSites_.size();
+  stats_.svfgHasSU = !strongUpdateSites_.empty();
   if (config_.setBackend == PointsToSetBackend::HashConsed) {
     const auto hashStats = arena_.statistics();
     stats_.hashConsedUniqueSets = hashStats.uniqueSets;

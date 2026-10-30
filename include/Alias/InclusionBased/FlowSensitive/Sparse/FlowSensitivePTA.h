@@ -7,6 +7,7 @@
 #include "Alias/Infrastructure/PtsSet/HashConsedPointsToSet.h"
 #include "IR/GraphView.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -52,6 +53,10 @@ public:
     bool parallelObjectCertificates = true;
     // Zero selects hardware_concurrency(); includes the calling thread.
     unsigned workerThreads = 0;
+    // Wall-clock budget for solve() in seconds. Zero disables it. On expiry
+    // the solver stops at a worklist boundary, keeps the partial solution
+    // queryable, and sets timedOut().
+    double timeLimitSeconds = 0;
   };
 
   struct Statistics {
@@ -84,7 +89,13 @@ public:
     std::size_t parallelWildcardReads = 0;
     std::size_t parallelObjectSalvages = 0;
     std::size_t topologyEpochs = 0;
+    // Set when Config::timeLimitSeconds expired before a fixed point.
+    bool timedOut = false;
+    // Set when a store in scope has a unique target (a strong update).
+    bool svfgHasSU = false;
     double solveSeconds = 0;
+    double initializeSeconds = 0;
+    double otfSeconds = 0;
   };
 
   explicit FlowSensitivePTA(const lotus::analysis::SVFG &graph);
@@ -101,7 +112,17 @@ public:
                                const llvm::Value *rhs) const;
 
   const Statistics &statistics() const { return stats_; }
+  bool timedOut() const { return stats_.timedOut; }
   PointsToSetBackend setBackend() const { return config_.setBackend; }
+  /// Human-readable statistics report.
+  std::string statisticsReport() const;
+
+  /// Serialize the solved points-to and IN/OUT memory facts as
+  /// LOTUS_SPARSEPTA version 1 (Lotus object IDs).
+  bool writeAnalysisResultToFile(const std::string &filename) const;
+  /// Load facts written by writeAnalysisResultToFile(). Indirect-call edges
+  /// are not stored; callers must rebuild the graph and reconnect them.
+  bool readAnalysisResultFromFile(const std::string &filename);
   // Full differential check of public queries. A missing memory entry and an
   // explicit empty entry both answer the empty set. Analyses must share an
   // SVFG.
@@ -134,6 +155,8 @@ private:
   };
 
   bool inScope(const lotus::analysis::SVFGNode *node) const;
+  bool timeLimitExceeded() const;
+  void noteTimeout() { stats_.timedOut = true; }
   StoredSet singleton(ObjectID object);
   const PointsToSet &materialize(const StoredSet &set) const;
   bool merge(StoredSet &destination, const StoredSet &source);
@@ -164,6 +187,8 @@ private:
   bool isStrongUpdate(const PointsToSet &targets) const;
   bool resolveIndirectCalls(const lotus::analysis::SVFGNode &node,
                             const StoredSet &pointsTo);
+  /// Re-materialise the indirect-call edges a loaded solution depends on.
+  void reconnectIndirectCallsAfterRead();
   static const llvm::Value *accessPointer(const llvm::Instruction *instruction);
   static const llvm::Value *storedValue(const llvm::Instruction *instruction);
 
@@ -179,6 +204,8 @@ private:
   std::unordered_set<NodeID> strongUpdateSites_;
   std::unordered_set<NodeID> weakUpdateSites_;
   bool topologyChanged_ = false;
+  bool hasDeadline_ = false;
+  std::chrono::steady_clock::time_point deadline_;
   Statistics stats_;
 };
 
