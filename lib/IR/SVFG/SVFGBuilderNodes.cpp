@@ -149,7 +149,7 @@ void SVFGBuilder::buildNodes() {
               byteOffset == 0 ? baseObject
                               : svfg->getOffsetObject(baseObject, byteOffset);
           if (fieldObject == 0) {
-            fieldObject = nextObjId++;
+            fieldObject = allocateObjectId();
             SVFG::ObjectInfo info;
             if (const auto *baseInfo = svfg->getObjectInfo(baseObject))
               info = *baseInfo;

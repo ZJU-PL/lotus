@@ -135,7 +135,7 @@ public:
   /// Object IDs live in a disjoint namespace from SVFG node IDs.
   /// This avoids accidental collisions in DDA where `DPItem::cur` can hold
   /// either a pointer (SVFG node ID) or an abstract object ID.
-  static constexpr uint32_t kObjIdBase = 1u << 30;
+  static constexpr uint32_t kObjIdBase = SVFG::kObjectIdBase;
 
   /// @brief Memory region version info
   struct MemRegVer {
@@ -196,6 +196,13 @@ private:
 
   /// @brief Next memory region ID (separate from node IDs)
   uint32_t nextMemRegId;
+
+  /// @brief Allocate an abstract object ID.
+  ///
+  /// Allocations go through the attached SVFG when one exists so that
+  /// solve-time object creation (field-insensitive collapse) cannot collide
+  /// with builder IDs.
+  uint32_t allocateObjectId();
 
   /// @brief Next top-level value-symbol ID.
   uint32_t nextValueId = kValueIdBase;

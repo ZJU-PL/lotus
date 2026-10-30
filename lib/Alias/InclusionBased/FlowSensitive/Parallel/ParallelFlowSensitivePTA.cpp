@@ -145,6 +145,9 @@ class FlowSensitivePTA::ParallelExecution {
                         return false;
                       })
                 : Config::IndirectCallConnector{};
+        // The worker only proposes candidates; the owner applies the bound
+        // when it retires them, so rejections are counted exactly once.
+        evaluator.config_.isIndirectCallTargetAllowed = {};
 
         const NodeID id = slots[task].node->getId();
         evaluator.strongUpdateSites_.clear();
@@ -343,11 +346,17 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
     ParallelExecution execution(*this);
     const auto calls = execution.run();
     changed = false;
-    for (const auto &call : calls)
+    for (const auto &call : calls) {
+      if (config_.isIndirectCallTargetAllowed &&
+          !config_.isIndirectCallTargetAllowed(call.first, call.second)) {
+        ++stats_.indirectCallsRejected;
+        continue;
+      }
       if (config_.connectIndirectCall(call.first, call.second)) {
         changed = true;
         ++stats_.indirectCallEdges;
       }
+    }
   } while (changed && !stats_.timedOut);
   const SCCInfo scc = computeSCCs();
   stats_.sccs = scc.components.size();

@@ -188,6 +188,12 @@ public:
   using iterator = SVFGNodeMap::iterator;
   using const_iterator = SVFGNodeMap::const_iterator;
 
+  /// @brief Base of the abstract-object ID namespace.
+  ///
+  /// Shared with SVFGBuilder::kObjIdBase so builder and solve-time allocations
+  /// draw from the same counter.
+  static constexpr uint32_t kObjectIdBase = 1u << 30;
+
   /// @brief Object metadata for DDA (heap/stack/field-insensitive/etc.).
   ///
   /// This metadata is monotonic and merged by OR in updateObjectInfo().
@@ -255,6 +261,12 @@ private:
 
   /// @brief Next available node ID
   uint32_t nextNodeId;
+
+  /// @brief Next available abstract object ID.
+  ///
+  /// Object IDs are disjoint from node and value-symbol IDs, so a DPItem may
+  /// hold either a node ID or an object ID.
+  uint32_t nextObjectId = kObjectIdBase;
 
   /// @brief Statistics
   SVFGStat stat;
@@ -843,6 +855,36 @@ public:
       fields.insert(objId);
     return fields;
   }
+
+  //===------------------------------------------------------------------===
+  // Solve-time object creation
+  //
+  // Mirrors SVF's `SVFIR::setObjFieldInsensitive` / `getFIObjVar`: analyses
+  // which discover a variant field access while solving can collapse the
+  // struct into a single representative without rebuilding the graph.
+  //===------------------------------------------------------------------===
+
+  /// @brief Allocate a fresh abstract object ID that cannot collide with the
+  /// IDs handed out by SVFGBuilder (which allocates through this method when a
+  /// graph is attached).
+  inline uint32_t allocateObjectId() { return nextObjectId++; }
+
+  /// @brief Ensure future allocations do not reuse IDs below @p id.
+  inline void raiseObjectIdFloor(uint32_t id) {
+    if (id > nextObjectId)
+      nextObjectId = id;
+  }
+
+  /// @brief Field-insensitive representative for @p baseObjId, or 0 if none
+  /// exists yet.
+  uint32_t getFieldInsensitiveObject(uint32_t baseObjId) const;
+
+  /// @brief Field-insensitive representative for @p baseObjId, creating one
+  /// and marking the base field-insensitive if necessary.
+  ///
+  /// The returned object has `baseObjId == canonical base` and no field
+  /// offset, so `getFieldObjects()` keeps reporting every per-field object.
+  uint32_t getOrCreateFieldInsensitiveObject(uint32_t baseObjId);
 
   inline void setNodeFunctionDebug(uint32_t nodeId, std::string label) {
     nodeFunctionDebug[nodeId] = std::move(label);

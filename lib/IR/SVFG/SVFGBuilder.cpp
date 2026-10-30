@@ -707,7 +707,7 @@ SVFGNodeBS SVFGBuilder::convertPTAObjectsToObjIDs(
       SVFGBuilderConfig::MemModelType::FieldInsensitive) {
     if (!ptaObjects.empty()) {
       if (unknownObjId == 0) {
-        unknownObjId = nextObjId++;
+        unknownObjId = allocateObjectId();
         if (svfg) {
           svfg->setObjectDebug(unknownObjId, "FI_ANY_OBJECT");
           SVFG::ObjectInfo info;
@@ -772,7 +772,7 @@ SVFGNodeBS SVFGBuilder::convertPTAObjectsToObjIDs(
       continue;
     }
 
-    const uint32_t objId = nextObjId++;
+    const uint32_t objId = allocateObjectId();
     ptaObjectToObjId.emplace(v, objId);
     objIdToPTAObject.emplace(objId, v);
     result.insert(objId);
@@ -814,7 +814,7 @@ SVFGBuilder::getOrCreateCanonicalObjectIdForValue(const Value *v,
     }
   }
 
-  const uint32_t objId = nextObjId++;
+  const uint32_t objId = allocateObjectId();
   if (info.baseObjId == 0)
     info.baseObjId = objId;
   svfg->setObjectInfo(objId, info);
@@ -976,7 +976,7 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
 
     uint32_t fieldObjId = queryAserFieldObject();
     if (fieldObjId == 0)
-      fieldObjId = nextObjId++;
+      fieldObjId = allocateObjectId();
     SVFG::ObjectInfo info;
     if (const SVFG::ObjectInfo *baseInfo =
             graph->getObjectInfo(canonicalBaseObjId))
@@ -1097,7 +1097,7 @@ uint32_t SVFGBuilder::getOrCreateFIObjId(uint32_t baseObjId) {
     baseObjToFIObjId[canonicalBaseObjId] = baseObjId;
     return baseObjId;
   }
-  const uint32_t fiObjId = nextObjId++;
+  const uint32_t fiObjId = allocateObjectId();
   baseObjToFIObjId[canonicalBaseObjId] = fiObjId;
   if (graph) {
     SVFG::ObjectInfo baseUpdate;
@@ -1123,7 +1123,7 @@ uint32_t SVFGBuilder::getOrCreateFIObjId(uint32_t baseObjId) {
 uint32_t SVFGBuilder::getOrCreateUnknownObjId() {
   if (unknownObjId != 0)
     return unknownObjId;
-  unknownObjId = nextObjId++;
+  unknownObjId = allocateObjectId();
   if (SVFG *graph = getActiveSVFG()) {
     graph->setObjectDebug(unknownObjId, "ANY_OBJECT");
     SVFG::ObjectInfo info;
@@ -1131,6 +1131,18 @@ uint32_t SVFGBuilder::getOrCreateUnknownObjId() {
     graph->setObjectInfo(unknownObjId, info);
   }
   return unknownObjId;
+}
+
+uint32_t SVFGBuilder::allocateObjectId() {
+  uint32_t objId;
+  if (SVFG *graph = getActiveSVFG()) {
+    objId = graph->allocateObjectId();
+  } else {
+    objId = nextObjId;
+  }
+  if (objId >= nextObjId)
+    nextObjId = objId + 1;
+  return objId;
 }
 
 uint32_t SVFGBuilder::getUnknownObjId() { return getOrCreateUnknownObjId(); }

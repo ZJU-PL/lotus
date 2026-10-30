@@ -44,9 +44,18 @@ public:
   struct Config {
     using IndirectCallConnector =
         std::function<bool(const llvm::CallBase *, const llvm::Function *)>;
+    // Rejects on-the-fly indirect-call edges that the pre-analysis does not
+    // consider feasible. SVF bounds these with the auxiliary Andersen call
+    // graph before materialising an edge.
+    using IndirectCallFilter =
+        std::function<bool(const llvm::CallBase *, const llvm::Function *)>;
     const lotus::analysis::FilteredSVFGView *scope = nullptr;
     IndirectCallConnector connectIndirectCall;
-    bool clusterVersionedObjects = true;
+    IndirectCallFilter isIndirectCallTargetAllowed;
+    // Labels footprint representatives in occurrence-weight order (heaviest
+    // first). This is *not* SVF's `cluster()`: no objects, equivalents, or
+    // NodeIDs are merged here.
+    bool orderVersionedObjectsByWeight = true;
     // Threads used to compute object version labels. Zero selects
     // hardware_concurrency(); one runs sequentially.
     unsigned versioningThreads = 0;
@@ -67,12 +76,23 @@ public:
     std::size_t strongUpdates = 0;
     std::size_t weakUpdates = 0;
     std::size_t indirectCallEdges = 0;
+    // Edges the pre-analysis filter rejected (SVF drops these silently).
+    std::size_t indirectCallsRejected = 0;
+    // Indirect callsites for which no connector was configured.
+    std::size_t unresolvedIndirectCalls = 0;
+    // Objects collapsed to a field-insensitive representative while solving.
+    std::size_t fieldInsensitiveCollapses = 0;
     std::size_t deltaNodes = 0;
     std::size_t deltaSourceNodes = 0;
     std::size_t deltaVersionUpdates = 0;
     std::size_t deltaRelabelings = 0;
     std::size_t statementWorklistPushes = 0;
     std::size_t relabelings = 0;
+    // Version-points-to sizes (SVF: TotalNonEmptyVPts, MaxVersionPtsSize,
+    // AvgVersionPtsSize).
+    std::size_t nonEmptyVersions = 0;
+    std::size_t maxVersionPtsSize = 0;
+    double averageVersionPtsSize = 0.0;
     // Set when Config::timeLimitSeconds expired before a fixed point.
     bool timedOut = false;
     // Set when a store in scope has a unique target (a strong update).
@@ -158,6 +178,13 @@ private:
   bool inScope(const lotus::analysis::SVFGNode *node) const;
   bool timeLimitExceeded() const;
   void noteTimeout() { stats_.timedOut = true; }
+  /// Field-insensitive representative for a base object, collapsing the struct
+  /// on first use exactly like SVF's setObjFieldInsensitive/getFIObjVar.
+  ObjectID fieldInsensitiveRepresentative(ObjectID base);
+  /// Rebuild the per-object edge index used by versionFootprint() and
+  /// computeObjectLabels() so labelling is proportional to an object's
+  /// footprint instead of the whole graph.
+  void buildObjectIndex();
   void initializeRecursiveFunctions();
   /// Returns true if a function with a strong-update site changed its
   /// recursion status, which invalidates the version labels.
@@ -261,7 +288,7 @@ private:
   bool isStrongUpdate(const PointsToSet &targets) const;
   bool resolveIndirectCalls(const lotus::analysis::SVFGNode &node,
                             const PointsToSet &pointsTo);
-  PointsToSet gepTransfer(const lotus::analysis::GepSVFGNode &gep) const;
+  PointsToSet gepTransfer(const lotus::analysis::GepSVFGNode &gep);
 
   void initializeGlobalMemory();
   PointsToSet constantPointsTo(const llvm::Constant *constant) const;
@@ -282,6 +309,20 @@ private:
   std::unordered_map<ObjectID, std::vector<MeldSet>> versionMelds_;
   std::unordered_map<ObjectID, ObjectID> equivalentObject_;
   std::vector<ObjectID> versionProcessingOrder_;
+  /// Cached field-insensitive representative per base object.
+  std::unordered_map<ObjectID, ObjectID> fieldInsensitiveObjects_;
+  /// In-scope indirect edges that carry each object. Rebuilt by
+  /// buildObjectIndex() before every labelling pass.
+  std::unordered_map<ObjectID, std::vector<const lotus::analysis::SVFGEdge *>>
+      objectIndex_;
+  std::vector<const lotus::analysis::SVFGNode *> allNodes_;
+  std::vector<const lotus::analysis::SVFGNode *> statementNodes_;
+  std::vector<const lotus::analysis::StoreSVFGNode *> storeNodes_;
+  std::vector<const lotus::analysis::ActualOutSVFGNode *> actualOutNodes_;
+  std::vector<const lotus::analysis::MSSAPhiSVFGNode *> memoryPhiNodes_;
+  /// Indirect edges guarded by the unknown object: they carry every object and
+  /// therefore cannot be indexed precisely.
+  std::vector<const lotus::analysis::SVFGEdge *> wildcardEdges_;
   std::unordered_set<NodeID> strongUpdateSites_;
   std::unordered_set<NodeID> weakUpdateSites_;
   std::unordered_set<const llvm::Function *> recursiveFunctions_;

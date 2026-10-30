@@ -351,11 +351,15 @@ int main(int argc, char **argv) {
   if (!DumpSVFG.empty())
     graph->dump(DumpSVFG);
 
-  auto connectIndirectCall = [&](const CallBase *callSite,
-                                 const Function *target) {
+  auto isAllowedIndirectCall = [&](const CallBase *callSite,
+                                   const Function *target) {
     const std::vector<const Function *> allowed =
         graphBuilder->getIndirectCallTargets(callSite);
-    if (std::find(allowed.begin(), allowed.end(), target) == allowed.end())
+    return std::find(allowed.begin(), allowed.end(), target) != allowed.end();
+  };
+  auto connectIndirectCall = [&](const CallBase *callSite,
+                                 const Function *target) {
+    if (!isAllowedIndirectCall(callSite, target))
       return false;
     std::vector<SVFGEdge *> edges;
     return graphBuilder->connectCallSiteToCalleeOnTheFly(graph.get(), callSite,
@@ -366,6 +370,7 @@ int main(int argc, char **argv) {
   if (Analysis == AnalysisOption::Versioned) {
     VersionedFlowSensitivePTA::Config solverConfig;
     solverConfig.connectIndirectCall = connectIndirectCall;
+    solverConfig.isIndirectCallTargetAllowed = isAllowedIndirectCall;
     solverConfig.versioningThreads = VersioningThreads;
     solverConfig.timeLimitSeconds = TimeLimit;
     versionedSolver = std::make_unique<VersionedFlowSensitivePTA>(
@@ -399,6 +404,7 @@ int main(int argc, char **argv) {
                                   ? PointsToSetBackend::HashConsed
                                   : PointsToSetBackend::Mutable;
     solverConfig.connectIndirectCall = connectIndirectCall;
+    solverConfig.isIndirectCallTargetAllowed = isAllowedIndirectCall;
     solverConfig.timeLimitSeconds = TimeLimit;
     solver =
         std::make_unique<FlowSensitivePTA>(*graph, std::move(solverConfig));

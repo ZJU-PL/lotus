@@ -1237,3 +1237,197 @@ TEST_F(FlowSensitivePTATest, RestoredSolutionReconnectsIndirectCallEdges) {
   EXPECT_EQ(objectValues(*graph, *solvedPointsTo),
             objectValues(*resumeGraph, *restoredPointsTo));
 }
+
+TEST_F(FlowSensitivePTATest, OnTheFlyBoundRejectsInfeasibleTargets) {
+  auto module = parseModule(R"(
+    define void @target() { ret void }
+    define void @other() { ret void }
+    define void @main(void ()** %fp) {
+    entry:
+      %f = load void ()*, void ()** %fp
+      call void %f()
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  const Function *target = module->getFunction("target");
+  const Function *other = module->getFunction("other");
+  const CallBase *call = nullptr;
+  for (const Instruction &instruction :
+       instructions(module->getFunction("main")))
+    if (const auto *candidate = dyn_cast<CallBase>(&instruction))
+      call = candidate;
+  ASSERT_NE(target, nullptr);
+  ASSERT_NE(other, nullptr);
+  ASSERT_NE(call, nullptr);
+
+  constexpr uint32_t targetObject = 300;
+  constexpr uint32_t otherObject = 301;
+  constexpr uint32_t functionPointerId = 400;
+  SVFG graph;
+  auto *targetAddress =
+      new AddrSVFGNode(1, nullptr, target, targetObject);
+  targetAddress->setValueId(functionPointerId);
+  auto *otherAddress = new AddrSVFGNode(2, nullptr, other, otherObject);
+  otherAddress->setValueId(functionPointerId);
+  auto *phi = new PhiSVFGNode(3, SVFGK::IntraPhi, nullptr,
+                              static_cast<const Value *>(nullptr));
+  phi->setValueId(functionPointerId);
+  for (SVFGNode *node : std::vector<SVFGNode *>{targetAddress, otherAddress,
+                                                phi})
+    graph.addNode(node);
+  SVFG::ObjectInfo info;
+  info.isFunction = true;
+  info.isSingleton = true;
+  graph.setObjectValue(targetObject, target);
+  graph.setObjectInfo(targetObject, info);
+  graph.setObjectValue(otherObject, other);
+  graph.setObjectInfo(otherObject, info);
+  graph.addEdge(targetAddress, phi, SVFGEdgeK::IntraDirect);
+  graph.addEdge(otherAddress, phi, SVFGEdgeK::IntraDirect);
+  graph.addIndCallSite(functionPointerId, call);
+
+  FlowSensitivePTA::Config config;
+  config.connectIndirectCall = [&](const CallBase *site,
+                                   const Function *callee) {
+    return graph.markConnectedCallee(site, callee);
+  };
+  config.isIndirectCallTargetAllowed = [&](const CallBase *,
+                                           const Function *callee) {
+    return callee == target;
+  };
+  FlowSensitivePTA solver(graph, std::move(config));
+  const auto &stats = solver.solve();
+  EXPECT_EQ(stats.indirectCallEdges, 1u);
+  EXPECT_GE(stats.indirectCallsRejected, 1u);
+  EXPECT_EQ(stats.unresolvedIndirectCalls, 0u);
+  EXPECT_TRUE(graph.hasConnectedCallee(call, target));
+  EXPECT_FALSE(graph.hasConnectedCallee(call, other));
+}
+
+TEST_F(FlowSensitivePTATest, MissingConnectorCountsUnresolvedIndirectCalls) {
+  auto module = parseModule(R"(
+    define void @target() { ret void }
+    define void @main(void ()** %fp) {
+    entry:
+      %f = load void ()*, void ()** %fp
+      call void %f()
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  const Function *target = module->getFunction("target");
+  const CallBase *call = nullptr;
+  for (const Instruction &instruction :
+       instructions(module->getFunction("main")))
+    if (const auto *candidate = dyn_cast<CallBase>(&instruction))
+      call = candidate;
+  ASSERT_NE(target, nullptr);
+  ASSERT_NE(call, nullptr);
+
+  constexpr uint32_t targetObject = 300;
+  constexpr uint32_t functionPointerId = 400;
+  SVFG graph;
+  auto *targetAddress =
+      new AddrSVFGNode(1, nullptr, target, targetObject);
+  targetAddress->setValueId(functionPointerId);
+  graph.addNode(targetAddress);
+  SVFG::ObjectInfo info;
+  info.isFunction = true;
+  info.isSingleton = true;
+  graph.setObjectValue(targetObject, target);
+  graph.setObjectInfo(targetObject, info);
+  graph.addIndCallSite(functionPointerId, call);
+
+  FlowSensitivePTA solver(graph);
+  const auto &stats = solver.solve();
+  EXPECT_EQ(stats.indirectCallEdges, 0u);
+  EXPECT_EQ(stats.indirectCallsRejected, 0u);
+  EXPECT_EQ(stats.unresolvedIndirectCalls, 1u);
+  EXPECT_NE(solver.statisticsReport().find("unresolved indirect callsites"),
+            std::string::npos);
+}
+
+TEST_F(FlowSensitivePTATest, UnannotatedGepCollapsesToFieldInsensitiveObject) {
+  auto module = parseModule(R"(
+    %S = type { i8*, i8* }
+    define i8** @f(%S* %base) {
+    entry:
+      %gep = getelementptr %S, %S* %base, i32 0, i32 1
+      ret i8** %gep
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  const auto *gep = dyn_cast<GetElementPtrInst>(
+      module->getFunction("f")->getEntryBlock().getFirstNonPHI());
+  ASSERT_NE(gep, nullptr);
+
+  // A hand-built (or deserialized) graph may carry no GepAccessInfo for a
+  // GEP. That is the same condition under which a variant field access
+  // reaches the solver, so the transfer must collapse the struct instead
+  // of keeping per-field objects.
+  constexpr uint32_t baseObject = 500;
+  SVFG graph;
+  auto *base = new AddrSVFGNode(1, nullptr, module->getFunction("f")->getArg(0),
+                                baseObject);
+  auto *gepNode = new GepSVFGNode(2, nullptr, gep);
+  graph.addNode(base);
+  graph.addNode(gepNode);
+  SVFG::ObjectInfo info;
+  info.isStack = true;
+  info.baseObjId = baseObject;
+  graph.setObjectInfo(baseObject, info);
+  graph.setObjectValue(baseObject, module->getFunction("f")->getArg(0));
+  graph.addEdge(base, gepNode, SVFGEdgeK::IntraDirect);
+
+  FlowSensitivePTA solver(graph);
+  const auto &stats = solver.solve();
+  const auto &result = solver.pointsTo(gepNode);
+  ASSERT_EQ(result.size(), 1u);
+  const uint32_t collapsed = *result.begin();
+  EXPECT_NE(collapsed, baseObject);
+  EXPECT_TRUE(graph.isFieldInsensitiveObject(baseObject));
+  const SVFG::ObjectInfo *collapsedInfo = graph.getObjectInfo(collapsed);
+  ASSERT_NE(collapsedInfo, nullptr);
+  EXPECT_TRUE(collapsedInfo->isFieldInsensitive);
+  EXPECT_FALSE(collapsedInfo->hasFieldOffset);
+  EXPECT_EQ(collapsedInfo->baseObjId, baseObject);
+  EXPECT_EQ(stats.fieldInsensitiveCollapses, 1u);
+}
+
+TEST_F(FlowSensitivePTATest, StatisticsReportPerNodeKindAndPointsToSizes) {
+  auto module = parseModule(R"(
+    @x = global i8 0
+    define i8* @f() {
+    entry:
+      %p = alloca i8*
+      store i8* @x, i8** %p
+      %q = load i8*, i8** %p
+      ret i8* %q
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  SVFGBuilder graphBuilder(graphConfig);
+  std::unique_ptr<SVFG> graph(graphBuilder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  FlowSensitivePTA solver(*graph);
+  const auto &stats = solver.solve();
+  EXPECT_GE(stats.solveIterations, 1u);
+  EXPECT_GE(stats.processedAddr, 1u);
+  EXPECT_GE(stats.processedLoad, 1u);
+  EXPECT_GE(stats.processedStore, 1u);
+  EXPECT_GE(stats.maxTopLevelPtsSize, 1u);
+  EXPECT_GT(stats.averageTopLevelPtsSize, 0.0);
+  EXPECT_LE(stats.averageTopLevelPtsSize,
+            static_cast<double>(stats.maxTopLevelPtsSize));
+  const std::string report = solver.statisticsReport();
+  EXPECT_NE(report.find("processed addr/copy/gep/load/store/phi"),
+            std::string::npos);
+  EXPECT_NE(report.find("top-level pts size max/avg"), std::string::npos);
+}

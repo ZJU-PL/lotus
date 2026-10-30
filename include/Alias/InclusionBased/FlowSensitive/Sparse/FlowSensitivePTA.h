@@ -29,9 +29,16 @@ public:
   struct Config {
     using IndirectCallConnector =
         std::function<bool(const llvm::CallBase *, const llvm::Function *)>;
+    // Rejects on-the-fly indirect-call edges that the pre-analysis does not
+    // consider feasible. SVF applies the same bound with its auxiliary
+    // Andersen call graph before materialising an edge; leaving this empty
+    // removes the bound and is only safe for graphs without indirect calls.
+    using IndirectCallFilter =
+        std::function<bool(const llvm::CallBase *, const llvm::Function *)>;
     PointsToSetBackend setBackend = PointsToSetBackend::Mutable;
     const lotus::analysis::FilteredSVFGView *scope = nullptr;
     IndirectCallConnector connectIndirectCall;
+    IndirectCallFilter isIndirectCallTargetAllowed;
     // Pipeline transfers over immutable, validated effect snapshots. Graph
     // mutation through connectIndirectCall occurs only between solving epochs.
     bool parallel = false;
@@ -64,6 +71,18 @@ public:
     std::size_t sccs = 0;
     std::size_t maxSccSize = 0;
     std::size_t nodeProcesses = 0;
+    // Per-node-kind transfer counts (SVF: ProcessedAddr, ProcessedCopy, ...).
+    std::size_t processedAddr = 0;
+    std::size_t processedCopy = 0;
+    std::size_t processedGep = 0;
+    std::size_t processedLoad = 0;
+    std::size_t processedStore = 0;
+    std::size_t processedPhi = 0;
+    std::size_t processedActualParam = 0;
+    std::size_t processedFormalRet = 0;
+    std::size_t processedMSSA = 0;
+    // SCC-worklist rounds, counted the way SVF counts SolveIterations.
+    std::size_t solveIterations = 0;
     std::size_t topLevelFacts = 0;
     std::size_t memoryInFacts = 0;
     std::size_t memoryOutFacts = 0;
@@ -72,6 +91,15 @@ public:
     std::size_t strongUpdateExecutions = 0;
     std::size_t weakUpdateExecutions = 0;
     std::size_t indirectCallEdges = 0;
+    // Edges the pre-analysis filter rejected (SVF: silently dropped).
+    std::size_t indirectCallsRejected = 0;
+    // Indirect callsites for which no connector was configured.
+    std::size_t unresolvedIndirectCalls = 0;
+    // Objects collapsed to a field-insensitive representative during solving.
+    std::size_t fieldInsensitiveCollapses = 0;
+    // Points-to set sizes over top-level nodes (SVF: MaxPtsSize/AvgPtsSize).
+    std::size_t maxTopLevelPtsSize = 0;
+    double averageTopLevelPtsSize = 0.0;
     std::size_t hashConsedUniqueSets = 0;
     std::size_t hashConsedUnionCacheHits = 0;
     std::size_t parallelThreads = 0;
@@ -157,6 +185,9 @@ private:
   bool inScope(const lotus::analysis::SVFGNode *node) const;
   bool timeLimitExceeded() const;
   void noteTimeout() { stats_.timedOut = true; }
+  // Field-insensitive representative for a base object, collapsing the struct
+  // on first use exactly like SVF's setObjFieldInsensitive/getFIObjVar.
+  ObjectID fieldInsensitiveRepresentative(ObjectID base);
   StoredSet singleton(ObjectID object);
   const PointsToSet &materialize(const StoredSet &set) const;
   bool merge(StoredSet &destination, const StoredSet &source);
@@ -200,6 +231,7 @@ private:
   std::unordered_map<NodeID, MemoryState> dfIn_;
   std::unordered_map<NodeID, MemoryState> dfOut_;
   MemoryState initialMemory_;
+  std::unordered_map<ObjectID, ObjectID> fieldInsensitiveObjects_;
   std::unordered_set<const llvm::Function *> recursiveFunctions_;
   std::unordered_set<NodeID> strongUpdateSites_;
   std::unordered_set<NodeID> weakUpdateSites_;

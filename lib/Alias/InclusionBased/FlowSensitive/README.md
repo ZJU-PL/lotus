@@ -52,6 +52,71 @@ order, so the labels are independent of thread scheduling.
 writes `LOTUS_VFSPTA 2` and reads versions 1 and 2. The driver exposes both
 through `--write-pts` / `--read-pts`. These formats store Lotus object IDs.
 
+## Configuration and SVF parity notes
+
+### On-the-fly indirect-call bound
+
+On-the-fly (OTF) call-graph construction is bounded by the pre-analysis. Both
+solvers accept `Config::isIndirectCallTargetAllowed`, a predicate evaluated
+before an OTF edge is materialized; it is the equivalent of SVF's use of the
+auxiliary Andersen call graph in `FlowSensitive::updateCallGraph`. Leaving it
+empty removes the bound, which is only safe for graphs without indirect calls.
+The parallel pipelines only propose candidates in workers; the calling thread
+applies the bound when it retires them, so each candidate is judged once. Two
+counters report the outcome:
+
+- `Statistics::indirectCallsRejected` — candidate edges the bound rejected.
+- `Statistics::unresolvedIndirectCalls` — indirect callsites reached while no
+  `connectIndirectCall` connector was configured (silent in SVF).
+
+`lotus-alias-fspta` installs the pre-analysis target list for both roles.
+
+### Dynamic field-insensitive collapse
+
+`SVFG::getOrCreateFieldInsensitiveObject()` and
+`SVFG::getFieldInsensitiveObject()` mirror SVF's
+`SVFIR::setObjFieldInsensitive` / `getFIObjVar`. When a GEP reaches the solver
+without `GepAccessInfo` (a graph built, loaded, or hand-constructed without
+that annotation, or SVF's variant field GEP), the GEP transfer collapses the
+struct into a dedicated field-insensitive representative instead of keeping
+per-field objects. `Statistics::fieldInsensitiveCollapses` counts objects
+collapsed during solving; a collapse the SVFG builder already performed is not
+counted again.
+
+Object IDs are allocated through `SVFG::allocateObjectId()` so that
+solve-time object creation and builder allocations share one counter and
+cannot collide.
+
+### Versioned object ordering
+
+`VersionedFlowSensitivePTA::Config::orderVersionedObjectsByWeight` (formerly
+`clusterVersionedObjects`) only controls the order in which objects are
+labelled: footprint representatives with more occurrences are processed first.
+It does **not** merge objects, equivalents, or SVFG node IDs; SVF's
+`cluster()` performs those merges and has no counterpart here.
+
+### Statistics
+
+`FlowSensitivePTA::statisticsReport()` additionally reports
+`solveIterations`, per-node-kind transfer counts
+(`processedAddr`, `processedCopy`, `processedGep`, `processedLoad`,
+`processedStore`, `processedPhi`, `processedActualParam`,
+`processedFormalRet`, `processedMSSA`), top-level points-to sizes
+(`maxTopLevelPtsSize`, `averageTopLevelPtsSize`), the indirect-call bound
+counters, and `fieldInsensitiveCollapses`.
+`VersionedFlowSensitivePTA::statisticsReport()` adds version points-to sizes
+(`nonEmptyVersions`, `maxVersionPtsSize`, `averageVersionPtsSize`) and the same
+bound/collapse counters.
+
+## Standalone engine status
+
+`FlowSensitivePTA` and `VersionedFlowSensitivePTA` are standalone engines in
+this tree: they are driven by `lotus-alias-fspta`, the tests, and direct API
+use. They are not registered as an `AliasAnalysis` implementation, so
+framework clients that require that interface cannot select them by name.
+Wrapping them for the framework would need a call-graph/pre-analysis setup
+step and result caching, which this module does not provide.
+
 `FlowSensitivePTA` is the thread-independent sparse solver. It maintains:
 
 - top-level points-to sets for pointer-producing SVFG nodes;

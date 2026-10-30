@@ -265,6 +265,9 @@ class FlowSensitivePTA::OrderedExecution {
                 return false;
               })
             : Config::IndirectCallConnector{};
+    // The worker only proposes candidates; the owner applies the bound when it
+    // retires them, so rejections are counted exactly once.
+    evaluator.config_.isIndirectCallTargetAllowed = {};
     evaluator.strongUpdateSites_.clear();
     evaluator.weakUpdateSites_.clear();
     const auto strongBefore = evaluator.stats_.strongUpdateExecutions;
@@ -647,11 +650,18 @@ public:
               if (failure)
                 std::rethrow_exception(failure);
             }
-            for (const auto &call : draft->calls)
+            for (const auto &call : draft->calls) {
+              if (owner.config_.isIndirectCallTargetAllowed &&
+                  !owner.config_.isIndirectCallTargetAllowed(call.first,
+                                                             call.second)) {
+                ++owner.stats_.indirectCallsRejected;
+                continue;
+              }
               if (owner.config_.connectIndirectCall(call.first, call.second)) {
                 ++owner.stats_.indirectCallEdges;
                 owner.topologyChanged_ = true;
               }
+            }
             {
               std::lock_guard<std::mutex> lock(mutex);
               if (!owner.topologyChanged_)
