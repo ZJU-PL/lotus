@@ -79,19 +79,34 @@ public:
     return mapped;
   }
 
-  /// Merge @p object into the class of @p representative.
+  /// Merge @p object's class into the class of @p representative.
+  ///
+  /// Both arguments may already belong to a class; the classes are folded and
+  /// their sizes combined, so `merge()` can be called in any order.
   void merge(ClusterObjectID object, ClusterObjectID representative) {
     representative = map(representative);
+    object = map(object);
     if (object == 0 || representative == 0 || object == representative)
       return;
     if (representative_.count(object) != 0)
       return;
     representative_[object] = representative;
-    std::size_t &size = sizes_[representative];
-    if (size == 0)
-      size = 1; // the representative itself
-    ++size;
-    if (size == 2)
+    std::size_t objectSize = 1;
+    if (const auto it = sizes_.find(object); it != sizes_.end()) {
+      objectSize = it->second;
+      sizes_.erase(it);
+    }
+    std::size_t &targetSize = sizes_[representative];
+    if (targetSize == 0)
+      targetSize = 1; // the representative itself
+    const bool objectWasMerged = objectSize > 1;
+    const bool targetWasMerged = targetSize > 1;
+    targetSize += objectSize;
+    // The object's class is replaced by the combined class: drop its cluster
+    // count and add the target's only if it was a singleton before.
+    if (objectWasMerged)
+      --mergedClusters_;
+    if (!targetWasMerged && targetSize > 1)
       ++mergedClusters_;
     ++merged_;
   }

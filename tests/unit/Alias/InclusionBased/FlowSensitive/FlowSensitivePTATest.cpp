@@ -1576,6 +1576,29 @@ TEST_F(FlowSensitivePTATest, FieldInsensitiveIdentitySurvivesResultFile) {
   EXPECT_EQ(restored.canonicalObject(collapsed), baseObject);
 }
 
+TEST_F(FlowSensitivePTATest, ObjectClusteringFoldsMergedClasses) {
+  flow_sensitive::ObjectClustering clustering;
+  clustering.merge(2, 1); // {1, 2}
+  clustering.merge(4, 3); // {3, 4}
+  clustering.merge(1, 3); // fold {1, 2} into {3, 4}
+
+  EXPECT_EQ(clustering.map(1), 3u);
+  EXPECT_EQ(clustering.map(2), 3u);
+  EXPECT_EQ(clustering.map(3), 3u);
+  EXPECT_EQ(clustering.map(4), 3u);
+  EXPECT_EQ(clustering.clusterSize(1), 4u);
+  EXPECT_EQ(clustering.clusterSize(4), 4u);
+  EXPECT_EQ(clustering.mergedObjects(), 3u);
+  EXPECT_EQ(clustering.mergedClusters(), 1u);
+
+  // A singleton merged into the folded class grows it without changing the
+  // number of merged classes.
+  clustering.merge(5, 4);
+  EXPECT_EQ(clustering.clusterSize(5), 5u);
+  EXPECT_EQ(clustering.mergedObjects(), 4u);
+  EXPECT_EQ(clustering.mergedClusters(), 1u);
+}
+
 TEST_F(FlowSensitivePTATest, TypeClusteringOnlyAddsPointsToFacts) {
   auto module = parseModule(R"(
     @x = global i8 0
