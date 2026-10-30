@@ -367,6 +367,11 @@ int main(int argc, char **argv) {
               "--analysis=vfspta\n";
     return 1;
   }
+  if (VfsptaIncrementalRecursion && Analysis != AnalysisOption::Versioned) {
+    errs() << "--vfspta-incremental-recursion is supported only for "
+              "--analysis=vfspta\n";
+    return 1;
+  }
   if (VfsptaPrelabel.getNumOccurrences() != 0 &&
       Analysis != AnalysisOption::Versioned) {
     errs() << "--vfspta-prelabel is supported only for --analysis=vfspta\n";
