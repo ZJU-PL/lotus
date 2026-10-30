@@ -83,6 +83,9 @@ public:
     // contents; processing it only adds empty version facts and transfer work.
     // Set to false to reproduce the pre-parity behaviour.
     bool pointerOnlySVFG = true;
+    // Demote strong updates to weak updates incrementally when an on-the-fly
+    // indirect call introduces recursion, avoiding a whole-graph relabel.
+    bool incrementalRecursionUpdate = false;
   };
 
   struct Statistics {
@@ -115,6 +118,7 @@ public:
     std::size_t deltaSourceNodes = 0;
     std::size_t deltaVersionUpdates = 0;
     std::size_t deltaRelabelings = 0;
+    std::size_t incrementalDemotions = 0;
     std::size_t statementWorklistPushes = 0;
     std::size_t relabelings = 0;
     // Version-points-to sizes (SVF: TotalNonEmptyVPts, MaxVersionPtsSize,
@@ -246,6 +250,8 @@ private:
   /// recursion status, which invalidates the version labels.
   bool recursionChangeAffectsStrongUpdates(
       const std::unordered_set<const llvm::Function *> &previous) const;
+  void demoteStrongUpdatesToWeak(
+      const std::unordered_set<const llvm::Function *> &previous);
   bool functionHasKnownCaller(const llvm::Function *function) const;
   void buildDeltaMaps();
   void buildVersionLabels();

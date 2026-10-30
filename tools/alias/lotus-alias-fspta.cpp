@@ -3,6 +3,7 @@
  * @brief Driver for Lotus flow-sensitive pointer analyses.
  */
 #include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/FlowSensitive/Support/PointerOnlyView.h"
 #include "Alias/InclusionBased/FlowSensitive/ValueFlow/ValueFlowPTA.h"
 #include "Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/CLIUtils.h"
@@ -153,6 +154,12 @@ cl::opt<bool> PointerOnly(
     cl::desc("Model only pointer-typed loads/stores, like SVF's pointer-only "
              "SVFG (default: enabled)"),
     cl::init(true), cl::cat(FsptaCategory));
+cl::opt<bool> VfsptaIncrementalRecursion(
+    "vfspta-incremental-recursion",
+    cl::desc("Demote strong updates to weak updates incrementally when an "
+             "indirect call creates recursion, avoiding a whole-graph relabel "
+             "(default: disabled)"),
+    cl::init(false), cl::cat(FsptaCategory));
 cl::opt<PrelabelOption> VfsptaPrelabel(
     "vfspta-prelabel", cl::desc("Seed used for vfspta meld labels"),
     cl::values(
@@ -409,15 +416,23 @@ int main(int argc, char **argv) {
     return graphBuilder->connectCallSiteToCalleeOnTheFly(graph.get(), callSite,
                                                          target, edges);
   };
+  std::unique_ptr<lotus::analysis::FilteredSVFGView> pointerOnlyView;
+  if (PointerOnly)
+    pointerOnlyView =
+        lotus::alias::flow_sensitive::createPointerOnlySVFGView(*graph);
+
   std::unique_ptr<FlowSensitivePTA> solver;
   std::unique_ptr<VersionedFlowSensitivePTA> versionedSolver;
   if (Analysis == AnalysisOption::Versioned) {
     VersionedFlowSensitivePTA::Config solverConfig;
+    if (pointerOnlyView)
+      solverConfig.scope = pointerOnlyView.get();
     solverConfig.connectIndirectCall = connectIndirectCall;
     solverConfig.isIndirectCallTargetAllowed = isAllowedIndirectCall;
     solverConfig.versioningThreads = VersioningThreads;
     solverConfig.timeLimitSeconds = TimeLimit;
     solverConfig.pointerOnlySVFG = PointerOnly;
+    solverConfig.incrementalRecursionUpdate = VfsptaIncrementalRecursion;
     switch (ClusterObjects) {
     case ClusterOption::None:
       solverConfig.clusterObjects =
@@ -456,6 +471,8 @@ int main(int argc, char **argv) {
     }
   } else {
     FlowSensitivePTA::Config solverConfig;
+    if (pointerOnlyView)
+      solverConfig.scope = pointerOnlyView.get();
     solverConfig.parallel = Parallel;
     solverConfig.unorderedParallel =
         ParallelOrder == ParallelOrderOption::Unordered;

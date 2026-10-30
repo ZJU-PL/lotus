@@ -164,6 +164,44 @@ bool VersionedFlowSensitivePTA::recursionChangeAffectsStrongUpdates(
   return false;
 }
 
+void VersionedFlowSensitivePTA::demoteStrongUpdatesToWeak(
+    const std::unordered_set<const llvm::Function *> &previous) {
+  std::vector<NodeID> toDemote;
+  for (NodeID site : strongUpdateSites_) {
+    const SVFGNode *node = graph_->getNode(site);
+    const Function *function = node ? node->getFunction() : nullptr;
+    if (function && recursiveFunctions_.count(function) != 0 &&
+        previous.count(function) == 0) {
+      toDemote.push_back(site);
+    }
+  }
+  for (NodeID site : toDemote) {
+    strongUpdateSites_.erase(site);
+    weakUpdateSites_.insert(site);
+    ++stats_.incrementalDemotions;
+    const auto *store = dyn_cast_or_null<StoreSVFGNode>(graph_->getNode(site));
+    if (!store)
+      continue;
+    const Value *ptrOp = accessPointer(store->getInstruction());
+    const PointsToSet targets =
+        accessTargets(ptrOp, store->getMemoryPointsTo());
+    for (ObjectID object : targets) {
+      const Version consumed = getConsume(site, object);
+      const Version yielded = getYield(site, object);
+      if (consumed != InvalidVersion && yielded != InvalidVersion) {
+        const PointsToSet incoming = versionedPointsTo(object, consumed);
+        PointsToSet &destination = versionedPointsTo_[{object, yielded}];
+        const std::size_t oldSize = destination.size();
+        destination.insert(incoming.begin(), incoming.end());
+        if (destination.size() != oldSize) {
+          propagateVersion(object, yielded);
+          enqueueDependentStatements(object, yielded);
+        }
+      }
+    }
+  }
+}
+
 bool VersionedFlowSensitivePTA::functionHasKnownCaller(
     const Function *function) const {
   if (!function)
@@ -268,8 +306,23 @@ VersionedFlowSensitivePTA::storeTargetObjects(
     const StoreSVFGNode &store) const {
   const Value *pointer = accessPointer(store.getInstruction());
   PointsToSet targets;
-  if (config_.preAnalysisTargets && pointer)
-    targets = config_.preAnalysisTargets(pointer);
+  if (config_.preAnalysisTargets && pointer) {
+    PointsToSet pre = config_.preAnalysisTargets(pointer);
+    const PointsToSet &mem = store.getMemoryPointsTo();
+    if (!mem.empty() && !pre.empty()) {
+      PointsToSet intersected;
+      for (ObjectID obj : pre) {
+        if (mem.count(obj) != 0 || graph_->isUnknownObject(obj))
+          intersected.insert(obj);
+      }
+      if (!intersected.empty())
+        targets = std::move(intersected);
+      else
+        targets = std::move(pre);
+    } else {
+      targets = std::move(pre);
+    }
+  }
   if (targets.empty())
     targets = store.getMemoryPointsTo();
   if (targets.empty() && pointer)
@@ -567,106 +620,203 @@ void VersionedFlowSensitivePTA::computeObjectLabels(
   for (const SVFGEdge *edge : wildcardEdges_)
     addEdge(edge);
 
-  std::unordered_set<NodeID> inSubgraph;
-  std::queue<const SVFGNode *> reachQueue;
+  // 1. Identify starting nodes and boundary nodes
+  std::vector<const SVFGNode *> startingNodes;
+  std::unordered_set<NodeID> isStarting;
+  auto addStartingNode = [&](const SVFGNode *node) {
+    if (node && isStarting.insert(node->getId()).second)
+      startingNodes.push_back(node);
+  };
 
-  std::unordered_map<NodeID, MeldSet> consumedMeld;
-  std::unordered_map<NodeID, MeldSet> yieldedMeld;
+  auto isBoundaryNode = [&](NodeID nodeID) -> bool {
+    const SVFGNode *node = graph_->getNode(nodeID);
+    if (!node)
+      return false;
+    if (isDeltaNode(nodeID) && deltaCarriesObject(*node, object))
+      return true;
+    if (const auto *store = dyn_cast<StoreSVFGNode>(node))
+      return storeMayTarget(*store, object);
+    if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node))
+      return intrinsicMayDefine(*actualOut, object);
+    return false;
+  };
 
-  // Seed pass.  `hasIncoming` is built from precisely the edges which carry
-  // this object, so "no incoming object-carrying edge" is O(1) here; the
-  // original scanned every in-edge of every node per object.
   for (const SVFGNode *node : allNodes_) {
     const NodeID nodeID = node->getId();
     const auto *memoryPhi = dyn_cast<MSSAPhiSVFGNode>(node);
     const bool deltaNode =
         isDeltaNode(nodeID) && deltaCarriesObject(*node, object);
     if (deltaNode) {
-      consumedMeld[nodeID].insert(nodeID + 2);
-      if (inSubgraph.insert(nodeID).second)
-        reachQueue.push(node);
+      addStartingNode(node);
     } else if (!hasIncoming.count(nodeID) ||
                (memoryPhi && memoryPhiNeedsInitial(*memoryPhi, object))) {
-      // Lotus MemorySSA currently represents a CFG join with a memory PHI whose
-      // explicit incoming SVFG edges can all name the materialized store side;
-      // the bypass/entry definition is retained in the PHI operands but has no
-      // dedicated value-flow node. Seed such PHIs with the initial token so the
-      // meld version represents both the bypass and updated paths.
-      consumedMeld[nodeID].insert(InitialMeldToken);
-      if (inSubgraph.insert(nodeID).second)
-        reachQueue.push(node);
+      addStartingNode(node);
     }
     bool defines = false;
     if (const auto *store = dyn_cast<StoreSVFGNode>(node))
       defines = storeMayTarget(*store, object);
     if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node))
       defines |= intrinsicMayDefine(*actualOut, object);
-    if (defines && inSubgraph.insert(nodeID).second)
-      reachQueue.push(node);
+    if (defines)
+      addStartingNode(node);
   }
 
-  // Forward BFS to find all nodes in the object-specific subgraph.
-  while (!reachQueue.empty()) {
-    const SVFGNode *curr = reachQueue.front();
-    reachQueue.pop();
-    auto next = adjacency.find(curr->getId());
-    if (next == adjacency.end())
+  // 2. Tarjan SCC on the overlay graph
+  std::unordered_map<NodeID, int> partOf;
+  std::unordered_map<NodeID, int> index;
+  std::unordered_map<NodeID, int> lowlink;
+  std::unordered_set<NodeID> onStack;
+  std::vector<NodeID> stack;
+  int currentIndex = 0;
+  int currentSCC = 0;
+
+  struct Frame {
+    NodeID u;
+    std::size_t edgeIdx;
+  };
+  std::vector<Frame> callStack;
+
+  for (const SVFGNode *startNode : startingNodes) {
+    NodeID root = startNode->getId();
+    if (index.count(root) != 0)
       continue;
-    for (const SVFGEdge *edge : next->second) {
-      const SVFGNode *dst = edge->getDstNode();
-      if (inSubgraph.insert(dst->getId()).second)
-        reachQueue.push(dst);
+
+    index[root] = lowlink[root] = currentIndex++;
+    stack.push_back(root);
+    onStack.insert(root);
+    callStack.push_back({root, 0});
+
+    while (!callStack.empty()) {
+      Frame &top = callStack.back();
+      NodeID u = top.u;
+      auto adjIt = adjacency.find(u);
+      const auto *edges = (adjIt != adjacency.end()) ? &adjIt->second : nullptr;
+
+      if (edges && top.edgeIdx < edges->size()) {
+        const SVFGEdge *edge = (*edges)[top.edgeIdx++];
+        const SVFGNode *dstNode = edge->getDstNode();
+        NodeID v = dstNode->getId();
+
+        if (isBoundaryNode(v))
+          continue;
+
+        if (index.count(v) == 0) {
+          index[v] = lowlink[v] = currentIndex++;
+          stack.push_back(v);
+          onStack.insert(v);
+          callStack.push_back({v, 0});
+        } else if (onStack.count(v) != 0) {
+          lowlink[u] = std::min(lowlink[u], index[v]);
+        }
+      } else {
+        if (lowlink[u] == index[u]) {
+          while (true) {
+            NodeID w = stack.back();
+            stack.pop_back();
+            onStack.erase(w);
+            partOf[w] = currentSCC;
+            if (w == u)
+              break;
+          }
+          ++currentSCC;
+        }
+        callStack.pop_back();
+        if (!callStack.empty()) {
+          NodeID p = callStack.back().u;
+          lowlink[p] = std::min(lowlink[p], lowlink[u]);
+        }
+      }
     }
   }
 
-  // Worklist-based meld propagation restricted to the subgraph.
-  std::queue<NodeID> worklist;
-  std::unordered_set<NodeID> inWorklist;
-  for (NodeID id : inSubgraph) {
-    worklist.push(id);
-    inWorklist.insert(id);
-  }
+  // 3. Topological sort of reached nodes
+  std::vector<NodeID> todoList;
+  todoList.reserve(partOf.size());
+  for (const auto &[nodeID, scc] : partOf)
+    todoList.push_back(nodeID);
 
-  while (!worklist.empty()) {
-    const NodeID nodeID = worklist.front();
-    worklist.pop();
-    inWorklist.erase(nodeID);
+  std::sort(todoList.begin(), todoList.end(),
+            [&](NodeID a, NodeID b) { return partOf[a] > partOf[b]; });
 
-    const SVFGNode *node = graph_->getNode(nodeID);
+  // 4. Initialize meld sets
+  std::vector<MeldSet> sccConsumedMeld(currentSCC);
+  std::unordered_map<NodeID, MeldSet> storesYieldedMeld;
+
+  for (NodeID n : todoList) {
+    const SVFGNode *node = graph_->getNode(n);
     if (!node)
       continue;
+    const auto *memoryPhi = dyn_cast<MSSAPhiSVFGNode>(node);
+    const bool deltaNode = isDeltaNode(n) && deltaCarriesObject(*node, object);
+    if (deltaNode) {
+      sccConsumedMeld[partOf[n]].insert(n + 2);
+    } else if (!hasIncoming.count(n) ||
+               (memoryPhi && memoryPhiNeedsInitial(*memoryPhi, object))) {
+      sccConsumedMeld[partOf[n]].insert(InitialMeldToken);
+    }
+    bool defines = false;
+    if (const auto *store = dyn_cast<StoreSVFGNode>(node))
+      defines = storeMayTarget(*store, object);
+    if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node))
+      defines |= intrinsicMayDefine(*actualOut, object);
+    if (defines)
+      storesYieldedMeld[n].insert(n + 2);
+  }
 
+  // 5. Single forward topological pass
+  for (NodeID n : todoList) {
+    const SVFGNode *node = graph_->getNode(n);
+    if (!node)
+      continue;
     bool definesNewVersion = false;
     if (const auto *store = dyn_cast<StoreSVFGNode>(node))
       definesNewVersion = storeMayTarget(*store, object);
     if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node))
       definesNewVersion |= intrinsicMayDefine(*actualOut, object);
 
-    MeldSet nextYield;
-    if (definesNewVersion)
-      nextYield.insert(nodeID + 2);
-    else
-      nextYield = consumedMeld[nodeID];
+    const MeldSet &nYield = definesNewVersion ? storesYieldedMeld[n]
+                                              : sccConsumedMeld[partOf[n]];
+    if (nYield.empty())
+      continue;
 
-    if (yieldedMeld[nodeID] != nextYield) {
-      yieldedMeld[nodeID] = std::move(nextYield);
-      auto next = adjacency.find(nodeID);
-      if (next == adjacency.end())
+    auto adjIt = adjacency.find(n);
+    if (adjIt == adjacency.end())
+      continue;
+
+    for (const SVFGEdge *edge : adjIt->second) {
+      const SVFGNode *dst = edge->getDstNode();
+      NodeID dstID = dst->getId();
+      if (isDeltaNode(dstID) && deltaCarriesObject(*dst, object))
         continue;
-      for (const SVFGEdge *edge : next->second) {
-        const SVFGNode *dst = edge->getDstNode();
-        if (isDeltaNode(dst->getId()) && deltaCarriesObject(*dst, object))
-          continue;
-        MeldSet &destConsumed = consumedMeld[dst->getId()];
-        const std::size_t oldSize = destConsumed.size();
-        destConsumed.insert(yieldedMeld[nodeID].begin(),
-                            yieldedMeld[nodeID].end());
-        if (oldSize != destConsumed.size()) {
-          if (inWorklist.insert(dst->getId()).second)
-            worklist.push(dst->getId());
-        }
+      auto dstPartOfIt = partOf.find(dstID);
+      if (dstPartOfIt == partOf.end())
+        continue;
+      int dstSCC = dstPartOfIt->second;
+      if (dstSCC != partOf[n] || definesNewVersion) {
+        sccConsumedMeld[dstSCC].insert(nYield.begin(), nYield.end());
       }
     }
+  }
+
+  std::unordered_map<NodeID, MeldSet> consumedMeld;
+  std::unordered_map<NodeID, MeldSet> yieldedMeld;
+
+  for (NodeID n : todoList) {
+    const SVFGNode *node = graph_->getNode(n);
+    if (!node)
+      continue;
+    bool definesNewVersion = false;
+    if (const auto *store = dyn_cast<StoreSVFGNode>(node))
+      definesNewVersion = storeMayTarget(*store, object);
+    if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node))
+      definesNewVersion |= intrinsicMayDefine(*actualOut, object);
+
+    if (!sccConsumedMeld[partOf[n]].empty())
+      consumedMeld[n] = sccConsumedMeld[partOf[n]];
+    if (definesNewVersion)
+      yieldedMeld[n] = storesYieldedMeld[n];
+    else if (!sccConsumedMeld[partOf[n]].empty())
+      yieldedMeld[n] = sccConsumedMeld[partOf[n]];
   }
 
   MeldSet initialMeld;
@@ -1590,8 +1740,12 @@ bool VersionedFlowSensitivePTA::resolveIndirectCalls(
             newEdges.push_back(edge);
         updateConnectedNodes(newEdges);
         initializeRecursiveFunctions();
-        if (recursionChangeAffectsStrongUpdates(oldRecursiveFunctions))
-          topologyChanged_ = true;
+        if (recursionChangeAffectsStrongUpdates(oldRecursiveFunctions)) {
+          if (config_.incrementalRecursionUpdate)
+            demoteStrongUpdatesToWeak(oldRecursiveFunctions);
+          else
+            topologyChanged_ = true;
+        }
       }
     }
   stats_.otfSeconds += std::chrono::duration<double>(
