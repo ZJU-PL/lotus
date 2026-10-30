@@ -458,6 +458,7 @@ TEST_F(SVFGMemorySSATest, InterproceduralMemoryNodesUseExitAndReturnSite) {
   SVFGBuilderConfig cfg;
   cfg.usePointerAnalysis = false;
   cfg.buildMSSA = true;
+  cfg.pointerOnly = false;
 
   SVFGBuilder builder(cfg);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -517,6 +518,7 @@ TEST_F(SVFGMemorySSATest, GlobalEntryFallbackCoversAllDirectUsersWithoutMain) {
   cfg.usePointerAnalysis = false;
   cfg.buildMSSA = true;
   cfg.includeGlobals = true;
+  cfg.pointerOnly = false;
 
   SVFGBuilder builder(cfg);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -585,6 +587,7 @@ TEST_F(SVFGMemorySSATest, MixedArgumentAndGlobalAccessKeepsBothSummaries) {
   SVFGBuilderConfig config;
   config.usePointerAnalysis = true;
   config.buildMSSA = true;
+  config.pointerOnly = false;
   SVFGBuilder builder(config);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
   ASSERT_NE(svfg, nullptr);
@@ -901,6 +904,7 @@ TEST_F(SVFGMemorySSATest, HeapReachableFromGlobalRemainsVisibleInSummaries) {
   SVFGBuilderConfig cfg;
   cfg.usePointerAnalysis = true;
   cfg.buildMSSA = true;
+  cfg.pointerOnly = false;
 
   SVFGBuilder builder(cfg);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -1006,6 +1010,7 @@ TEST_F(SVFGMemorySSATest, NoReturnFunctionMemorySummaryUsesDedicatedExitNode) {
   SVFGBuilderConfig cfg;
   cfg.usePointerAnalysis = false;
   cfg.buildMSSA = true;
+  cfg.pointerOnly = false;
 
   SVFGBuilder builder(cfg);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -1058,4 +1063,41 @@ TEST_F(SVFGMemorySSATest, UntouchedPointerFormalsDoNotCreateMemoryNodes) {
   EXPECT_TRUE(svfg->getFormalOuts(noopFn).empty());
   EXPECT_TRUE(svfg->getActualIns(call).empty());
   EXPECT_TRUE(svfg->getActualOuts(call).empty());
+}
+
+TEST_F(SVFGMemorySSATest, PointerOnlyConfigSkipsScalarFlowAndMemoryNodes) {
+  const char *source = R"(
+    define i32 @main(i1 %cond) {
+    entry:
+      %x = alloca i32
+      %a = add i32 1, 2
+      %cmp = icmp eq i32 %a, 3
+      br i1 %cmp, label %then, label %join
+
+    then:
+      store i32 %a, i32* %x
+      br label %join
+
+    join:
+      %v = load i32, i32* %x
+      ret i32 %v
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  std::unique_ptr<SVFG> svfg =
+      buildSVFG(module.get(), icfg, /*pointerOnly=*/true);
+  ASSERT_NE(svfg, nullptr);
+
+  for (const auto &pair : *svfg) {
+    EXPECT_FALSE(isa<BinaryOpSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<CmpSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<BranchSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<StoreSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<LoadSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<IntraMSSAPhiSVFGNode>(pair.second));
+  }
 }

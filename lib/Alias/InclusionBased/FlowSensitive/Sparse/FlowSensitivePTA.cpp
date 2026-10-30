@@ -981,8 +981,18 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       }
     }
   }
-  if (!hasIndirectPredecessor)
-    mergeState(incoming, initialMemory_);
+  if (!hasIndirectPredecessor) {
+    const auto *actualOut = dyn_cast<ActualOutSVFGNode>(&node);
+    const CallBase *call = actualOut ? actualOut->getCallSite() : nullptr;
+    const bool pendingIndirectReturn =
+        call && !call->getCalledFunction() &&
+        graph_->getConnectedCallees(call).empty();
+    // An unresolved call return is not a memory root. Publishing global
+    // initializers here would make later loads retain a killed value when a
+    // writing callee is connected. No-op callees get explicit bypass edges.
+    if (!pendingIndirectReturn)
+      mergeState(incoming, initialMemory_);
+  }
   changed |= assignState(dfIn_[node.getId()], incoming);
 
   // Materialise the memory-OUT state lazily: most nodes (addresses, copies,

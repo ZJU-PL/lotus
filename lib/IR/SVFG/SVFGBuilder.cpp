@@ -36,6 +36,7 @@
 #include <queue>
 #include <set>
 
+#include <llvm/ADT/ScopeExit.h>
 #include <llvm/ADT/Statistic.h>
 #include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/Analysis/MemoryBuiltins.h>
@@ -322,8 +323,6 @@ SVFG *SVFGBuilder::build(const ICFG *icfg, const SVFGBuilderConfig &cfg) {
     runPointerAnalysis();
   }
 
-  prepareMemoryRegionPartitioning();
-
   initializeIndirectCallReverseIndex();
   buildNodes();
   buildEdges();
@@ -363,6 +362,8 @@ void SVFGBuilder::initialize(const ICFG *cfg) {
   ptaSolverWrapper.reset();
 
   valueToNode.clear();
+  objectQueryStack.clear();
+  objectQueryResults.clear();
   valueToValueId.clear();
   formalRetValueIds.clear();
   varArgValueIds.clear();
@@ -380,6 +381,8 @@ void SVFGBuilder::initialize(const ICFG *cfg) {
   callToMuNodes.clear();
   callToChiNodes.clear();
   ptaObjectToObjId.clear();
+  objIdToPTAObject.clear();
+  baseObjToFIObjId.clear();
   unknownObjId = 0;
   nextObjId = kObjIdBase;
   objIdToMemReg.clear();
@@ -444,6 +447,18 @@ void SVFGBuilder::runPointerAnalysis() {
 }
 
 void SVFGBuilder::prepareMemoryRegionPartitioning() {
+  // Address/GEP construction can refine AserPTA's objects. No MemorySSA nodes
+  // exist yet, so discard provisional region IDs and freeze a partition over
+  // the final canonical addresses rather than the auxiliary IDs alone.
+  nextMemRegId = 1;
+  allocaToMemReg.clear();
+  globalToMemReg.clear();
+  heapAllocToMemReg.clear();
+  ptrValToMemReg.clear();
+  objIdToMemReg.clear();
+  memRegToObjId.clear();
+  memRegToPts.clear();
+  ptsToMemReg.clear();
   const Module *module = getModuleFromICFG(icfg);
   if (!module) {
     memoryRegionPartitioner.freeze();
@@ -782,19 +797,15 @@ uint32_t SVFGBuilder::getCanonicalBaseObjId(uint32_t objId) const {
   return objId;
 }
 
-SVFGNodeBS SVFGBuilder::getPreAnalysisPointsTo(const Value *ptr) {
+SVFGNodeBS SVFGBuilder::getPreAnalysisPointsTo(const Value *ptr) const {
   if (!ptr || !ptr->getType()->isPointerTy() || !config.usePointerAnalysis ||
       !ptaSolverWrapper || !ptaSolverWrapper->solver)
     return {};
-  // GEP objects may have been refined beyond AserPTA's collapsed array
-  // object. Use the builder's canonical offsets for these static addresses.
-  if (SVFG *graph = getActiveSVFG())
-    if (isa<GEPOperator>(ptr) || isa<ConstantExpr>(ptr)) {
-      const SVFGNodeBS &known = graph->getObjectIds(ptr);
-      if (!known.empty())
-        return known;
-    }
-  return convertPTAObjectsToObjIDs(getPointsToSet(ptr), true);
+  // Version labelling invokes the provider concurrently. All pointer values
+  // of interest were observed while constructing the graph, so return that
+  // immutable canonical snapshot rather than rerunning mutable normalization.
+  const SVFG *graph = getActiveSVFG();
+  return graph ? graph->getObjectIds(ptr) : SVFGNodeBS{};
 }
 
 SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
@@ -802,10 +813,51 @@ SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
   SVFG *graph = getActiveSVFG();
   if (!ptr)
     return result;
-  if (graph && isa<GetElementPtrInst>(ptr)) {
+  if (graph && isa<GetElementPtrInst, ConstantExpr>(ptr)) {
     const SVFGNodeBS &mapped = graph->getObjectIds(ptr);
     if (!mapped.empty())
       return mapped;
+  }
+  // Memoize within one recursive query: shared select/phi operands must not
+  // turn a linear pointer-expression DAG into an exponential traversal.
+  // Start fresh on the next query because address construction can refine
+  // the graph between queries.
+  if (objectQueryStack.empty())
+    objectQueryResults.clear();
+  const auto previous = objectQueryResults.find(ptr);
+  if (previous != objectQueryResults.end())
+    return previous->second;
+  const bool normalize = objectQueryStack.insert(ptr).second;
+  auto cleanup = make_scope_exit([&] {
+    if (normalize)
+      objectQueryStack.erase(ptr);
+  });
+  if (normalize && graph) {
+    auto addOperand = [&](const Value *operand) {
+      if (operand && operand->getType()->isPointerTy()) {
+        const SVFGNodeBS targets = getObjectIdsForValue(operand);
+        result.insert(targets.begin(), targets.end());
+      }
+    };
+    bool merge = false;
+    if (const auto *select = dyn_cast<SelectInst>(ptr)) {
+      merge = true;
+      addOperand(select->getTrueValue());
+      addOperand(select->getFalseValue());
+    } else if (const auto *phi = dyn_cast<PHINode>(ptr)) {
+      merge = true;
+      for (const Value *incoming : phi->incoming_values())
+        addOperand(incoming);
+    } else if (const auto *cast = dyn_cast<CastInst>(ptr)) {
+      merge = cast->getOperand(0)->getType()->isPointerTy();
+      if (merge)
+        addOperand(cast->getOperand(0));
+    }
+    if (merge && !result.empty()) {
+      graph->setObjectsForValue(ptr, result);
+      objectQueryResults[ptr] = result;
+      return result;
+    }
   }
   if (config.usePointerAnalysis && ptaSolverWrapper &&
       ptaSolverWrapper->solver && ptr->getType()->isPointerTy()) {
@@ -834,6 +886,8 @@ SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
   if (graph)
     for (uint32_t objId : result)
       graph->addObjectForValue(ptr, objId);
+  if (normalize)
+    objectQueryResults[ptr] = result;
   return result;
 }
 

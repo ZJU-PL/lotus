@@ -3,12 +3,14 @@
  * @brief Driver for Lotus flow-sensitive pointer analyses.
  */
 #include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/FlowSensitive/Support/ComparisonSampling.h"
 #include "Alias/InclusionBased/FlowSensitive/Support/PointerOnlyView.h"
 #include "Alias/InclusionBased/FlowSensitive/ValueFlow/ValueFlowPTA.h"
 #include "Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/CLIUtils.h"
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/SVFGBuilder.h"
+#include "IR/SVFG/SVFGStats.h"
 
 #include <algorithm>
 #include <exception>
@@ -18,6 +20,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/InitLLVM.h>
+#include <llvm/Support/JSON.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -107,6 +110,18 @@ cl::opt<PartitionOption> MemoryPartition(
 cl::opt<bool> PrintPointsTo("print-pts",
                             cl::desc("Print top-level points-to results"),
                             cl::init(false), cl::cat(FsptaCategory));
+cl::opt<bool> ComparisonJSON(
+    "comparison-json",
+    cl::desc("Emit named-value alias answers for differential testing"),
+    cl::init(false), cl::cat(FsptaCategory));
+cl::opt<unsigned>
+    ComparisonLimit("comparison-limit",
+                    cl::desc("Maximum pointer values in comparison JSON"),
+                    cl::init(512), cl::cat(FsptaCategory));
+cl::opt<unsigned> ComparisonSampleSeed(
+    "comparison-sample-seed",
+    cl::desc("Stable hash query sample seed (0: lexical prefix)"),
+    cl::init(0), cl::cat(FsptaCategory));
 cl::opt<bool> PrintMemory("print-memory",
                           cl::desc("Print non-empty sparse memory facts"),
                           cl::init(false), cl::cat(FsptaCategory));
@@ -400,10 +415,16 @@ int main(int argc, char **argv) {
   SVFGBuilderConfig graphConfig;
   graphConfig.usePointerAnalysis = true;
   graphConfig.buildMSSA = true;
+  graphConfig.pointerOnly = PointerOnly;
   graphConfig.resolveIndirectCalls = false;
   graphConfig.memoryPartition = partitionStrategy();
   auto graphBuilder = std::make_unique<SVFGBuilder>(graphConfig);
   std::unique_ptr<SVFG> graph(graphBuilder->build(&icfg));
+  if (StatsReport) {
+    SVFGStats svfgStats(graph.get());
+    svfgStats.performStat();
+    svfgStats.printStat("SVFG");
+  }
   if (!DumpSVFG.empty())
     graph->dump(DumpSVFG);
 
@@ -548,6 +569,56 @@ int main(int argc, char **argv) {
                  : versionedSolver->getConsume(node->getId(), object);
     return SVFGNodeBS(versionedSolver->versionedPointsTo(object, version));
   };
+
+  if (ComparisonJSON) {
+    std::map<std::string, const Value *> values;
+    for (const auto &[value, nodeID] : graph->getValueNodeMap()) {
+      if (!value || !value->getType()->isPointerTy())
+        continue;
+      const Function *function = nullptr;
+      if (const auto *instruction = dyn_cast<Instruction>(value))
+        function = instruction->getFunction();
+      else if (const auto *argument = dyn_cast<Argument>(value))
+        function = argument->getParent();
+      std::string key = function ? function->getName().str() : "@";
+      key += "::";
+      if (value->hasName())
+        key += value->getName().str();
+      else {
+        raw_string_ostream stream(key);
+        value->printAsOperand(stream, false);
+      }
+      values.emplace(std::move(key), value);
+    }
+    const std::size_t total = values.size();
+    flow_sensitive::sampleComparisonValues(values, ComparisonLimit,
+                                            ComparisonSampleSeed);
+    json::Array observations, aliases;
+    for (auto left = values.begin(); left != values.end(); ++left) {
+      const auto pointsTo = queryPointsTo(left->second);
+      if (!pointsTo)
+        continue;
+      observations.push_back(json::Object{
+          {"key", left->first},
+          {"points_to_size", static_cast<int64_t>(pointsTo->size())}});
+      for (auto right = std::next(left); right != values.end(); ++right) {
+        const auto alias =
+            versionedSolver
+                ? versionedSolver->mayAlias(left->second, right->second)
+                : solver->mayAlias(left->second, right->second);
+        if (alias && *alias)
+          aliases.push_back(json::Array{left->first, right->first});
+      }
+    }
+    outs() << "PTA_COMPARISON_JSON "
+           << json::Value(
+                  json::Object{{"schema", 1},
+                               {"total_values", static_cast<int64_t>(total)},
+                               {"truncated", total != values.size()},
+                               {"values", std::move(observations)},
+                               {"may_alias", std::move(aliases)}})
+           << "\n";
+  }
 
   if (PrintPointsTo) {
     for (const auto &[value, nodeID] : graph->getValueNodeMap()) {

@@ -333,6 +333,137 @@ TEST_P(FlowSensitiveMigrationTest,
   EXPECT_TRUE(graph->hasConnectedCallee(call, module->getFunction("new")));
 }
 
+TEST_P(FlowSensitiveMigrationTest, SelectedStructStoreReachesBothMembers) {
+  build(R"(
+    @a = global i8 0
+    @b = global i8 0
+    @record = global {i8*, i8*} {i8* @a, i8* @b}
+    define i8* @main(i1 %condition) {
+      %first = getelementptr {i8*, i8*}, {i8*, i8*}* @record, i32 0, i32 0
+      %second = getelementptr {i8*, i8*}, {i8*, i8*}* @record, i32 0, i32 1
+      %destination = select i1 %condition, i8** %first, i8** %second
+      store i8* @a, i8** %destination
+      %r = load i8*, i8** %second
+      ret i8* %r
+    }
+  )");
+  solve();
+  const auto result = pointsTo(value("r"));
+  std::set<const Value *> targets;
+  for (uint32_t object : result)
+    targets.insert(graph->getObjectValue(object));
+  EXPECT_EQ(targets, (std::set<const Value *>{module->getGlobalVariable("a"),
+                                              module->getGlobalVariable("b")}));
+}
+
+TEST_P(FlowSensitiveMigrationTest, IndirectNoopPreservesGlobalMemory) {
+  build(R"(
+    @old = global i8 0
+    @new = global i8 0
+    @slot = global i8* @old
+    @fp = global void ()* @write
+    define void @write() {
+      store i8* @new, i8** @slot
+      ret void
+    }
+    define void @noop() { ret void }
+    define i8* @main() {
+      store void ()* @noop, void ()** @fp
+      %f = load void ()*, void ()** @fp
+      call void %f()
+      %r = load i8*, i8** @slot
+      ret i8* %r
+    }
+  )");
+  solve();
+  expectOnly("r", module->getGlobalVariable("old"));
+}
+
+TEST_P(FlowSensitiveMigrationTest, IndirectWriterDoesNotBypassStrongUpdate) {
+  build(R"(
+    @old = global i8 0
+    @new = global i8 0
+    @slot = global i8* @old
+    @fp = global void ()* @noop
+    define void @write() {
+      store i8* @new, i8** @slot
+      ret void
+    }
+    define void @noop() { ret void }
+    define i8* @main() {
+      store void ()* @write, void ()** @fp
+      %f = load void ()*, void ()** @fp
+      call void %f()
+      %r = load i8*, i8** @slot
+      ret i8* %r
+    }
+  )");
+  solve();
+  expectOnly("r", module->getGlobalVariable("new"));
+}
+
+TEST_P(FlowSensitiveMigrationTest,
+       IndirectAlternativesPreserveUntouchedObjects) {
+  build(R"(
+    @a = global i8 0
+    @b = global i8 0
+    @c = global i8 0
+    @d = global i8 0
+    @g0 = global i8* @a
+    @g1 = global i8* @c
+    @fp = global void ()* @left
+    define void @left() {
+      store i8* @b, i8** @g0
+      ret void
+    }
+    define void @right() {
+      store i8* @d, i8** @g1
+      ret void
+    }
+    define i8* @main(i1 %condition) {
+      %target = select i1 %condition, void ()* @left, void ()* @right
+      store void ()* %target, void ()** @fp
+      %f = load void ()*, void ()** @fp
+      call void %f()
+      %r0 = load i8*, i8** @g0
+      %r1 = load i8*, i8** @g1
+      ret i8* %r0
+    }
+  )");
+  solve();
+  auto targetsOf = [&](StringRef name) {
+    std::set<const Value *> targets;
+    for (uint32_t object : pointsTo(value(name)))
+      targets.insert(graph->getObjectValue(object));
+    return targets;
+  };
+  EXPECT_EQ(targetsOf("r0"),
+            (std::set<const Value *>{module->getGlobalVariable("a"),
+                                     module->getGlobalVariable("b")}));
+  EXPECT_EQ(targetsOf("r1"),
+            (std::set<const Value *>{module->getGlobalVariable("c"),
+                                     module->getGlobalVariable("d")}));
+}
+
+TEST_P(FlowSensitiveMigrationTest, MemcpyInitializesPreviouslyUnstoredLocal) {
+  build(R"(
+    @x = global i8 0
+    declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)
+    define i8* @main() {
+      %source = alloca i8*
+      %destination = alloca i8*
+      store i8* @x, i8** %source
+      %src = bitcast i8** %source to i8*
+      %dst = bitcast i8** %destination to i8*
+      call void @llvm.memcpy.p0i8.p0i8.i64(i8* %dst, i8* %src, i64 8, i1 false)
+      %r = load i8*, i8** %destination
+      ret i8* %r
+    }
+  )");
+  solve();
+  expectOnly("r", module->getGlobalVariable("x"));
+}
+
 INSTANTIATE_TEST_SUITE_P(SparseAndVersioned, FlowSensitiveMigrationTest,
                          testing::Bool());
 

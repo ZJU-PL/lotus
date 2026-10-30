@@ -25,6 +25,10 @@ namespace lotus::alias::flow_sensitive {
 inline bool isPointerSVFGNode(const analysis::SVFGNode *node) {
   if (!node)
     return false;
+  if (llvm::isa<analysis::BinaryOpSVFGNode>(node) ||
+      llvm::isa<analysis::CmpSVFGNode>(node) ||
+      llvm::isa<analysis::BranchSVFGNode>(node))
+    return false;
   if (const auto *load = llvm::dyn_cast<analysis::LoadSVFGNode>(node)) {
     const llvm::Instruction *inst = load->getInstruction();
     return !inst || inst->getType()->isPointerTy();
@@ -36,6 +40,15 @@ inline bool isPointerSVFGNode(const analysis::SVFGNode *node) {
     if (const auto *storeInst = llvm::dyn_cast<llvm::StoreInst>(inst))
       return storeInst->getValueOperand()->getType()->isPointerTy();
     return true;
+  }
+  if (const auto *phi = llvm::dyn_cast<analysis::IntraPhiSVFGNode>(node)) {
+    const llvm::Instruction *inst = phi->getInstruction();
+    return !inst || inst->getType()->isPointerTy();
+  }
+  if (const auto *stmt = llvm::dyn_cast<analysis::StmtSVFGNode>(node)) {
+    const llvm::Value *val = stmt->getValue();
+    if (val && !val->getType()->isVoidTy())
+      return val->getType()->isPointerTy();
   }
   return true;
 }

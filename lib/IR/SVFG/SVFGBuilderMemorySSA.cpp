@@ -322,8 +322,7 @@ void SVFGBuilder::buildMemorySSA() {
                 canonical == memRegToPts.end() ? mapped : canonical->second};
       }
     }
-    std::vector<const void *> ptsVoid = getPointsToSet(ptr);
-    SVFGNodeBS objIds = convertPTAObjectsToObjIDs(ptsVoid);
+    SVFGNodeBS objIds = getObjectIdsForValue(ptr);
     if (!objIds.empty()) {
       const uint32_t memRegId =
           getOrCreateMemRegForPointsTo(objIds, getMemoryRegionScope(ptr));
@@ -647,24 +646,35 @@ void SVFGBuilder::buildMemorySSA() {
     for (const BasicBlock &bb : F) {
       for (const Instruction &inst : bb) {
         if (const auto *load = dyn_cast<LoadInst>(&inst)) {
+          if (config.pointerOnly && !load->getType()->isPointerTy())
+            continue;
           if (isAddressTakenPointer(load->getPointerOperand()))
             recordVisibleAccess(&F, load->getPointerOperand(), summary, true,
                                 false);
           continue;
         }
         if (const auto *store = dyn_cast<StoreInst>(&inst)) {
+          if (config.pointerOnly &&
+              !store->getValueOperand()->getType()->isPointerTy())
+            continue;
           if (isAddressTakenPointer(store->getPointerOperand()))
             recordVisibleAccess(&F, store->getPointerOperand(), summary, false,
                                 true);
           continue;
         }
         if (const auto *rmw = dyn_cast<AtomicRMWInst>(&inst)) {
+          if (config.pointerOnly &&
+              !rmw->getValOperand()->getType()->isPointerTy())
+            continue;
           if (isAddressTakenPointer(rmw->getPointerOperand()))
             recordVisibleAccess(&F, rmw->getPointerOperand(), summary, true,
                                 true);
           continue;
         }
         if (const auto *cmpxchg = dyn_cast<AtomicCmpXchgInst>(&inst)) {
+          if (config.pointerOnly &&
+              !cmpxchg->getNewValOperand()->getType()->isPointerTy())
+            continue;
           if (isAddressTakenPointer(cmpxchg->getPointerOperand()))
             recordVisibleAccess(&F, cmpxchg->getPointerOperand(), summary, true,
                                 true);
@@ -922,6 +932,8 @@ void SVFGBuilder::buildMemorySSA() {
     for (const BasicBlock &bb : F) {
       for (const Instruction &inst : bb) {
         if (const LoadInst *load = dyn_cast<LoadInst>(&inst)) {
+          if (config.pointerOnly && !load->getType()->isPointerTy())
+            continue;
           const Value *ptr = load->getPointerOperand();
           if (!isAddressTakenPointer(ptr))
             continue;
@@ -943,6 +955,9 @@ void SVFGBuilder::buildMemorySSA() {
         }
 
         if (const StoreInst *store = dyn_cast<StoreInst>(&inst)) {
+          if (config.pointerOnly &&
+              !store->getValueOperand()->getType()->isPointerTy())
+            continue;
           const Value *ptr = store->getPointerOperand();
           if (!isAddressTakenPointer(ptr))
             continue;
@@ -1221,6 +1236,9 @@ void SVFGBuilder::buildMemoryPHINodes() {
       auto &blockDefs = localDefs[&bb];
       for (const Instruction &inst : bb) {
         if (const auto *store = dyn_cast<StoreInst>(&inst)) {
+          if (config.pointerOnly &&
+              !store->getValueOperand()->getType()->isPointerTy())
+            continue;
           auto storeIt = storeToStoreNode.find(store);
           if (storeIt == storeToStoreNode.end())
             continue;
@@ -1566,6 +1584,8 @@ void SVFGBuilder::connectMemorySSAEdges() {
 
       for (const Instruction &inst : *bb) {
         if (const LoadInst *load = dyn_cast<LoadInst>(&inst)) {
+          if (config.pointerOnly && !load->getType()->isPointerTy())
+            continue;
           auto *loadNode =
               dyn_cast_or_null<LoadSVFGNode>(getLoadStmtNode(load));
           if (!loadNode || loadNode->getMemoryUseReg() == 0)
@@ -1601,6 +1621,9 @@ void SVFGBuilder::connectMemorySSAEdges() {
         }
 
         if (const StoreInst *store = dyn_cast<StoreInst>(&inst)) {
+          if (config.pointerOnly &&
+              !store->getValueOperand()->getType()->isPointerTy())
+            continue;
           auto *storeNode = dyn_cast<StoreSVFGNode>(getStoreStmtNode(store));
           if (!storeNode || storeNode->getMemoryDefReg() == 0)
             continue;
@@ -1984,6 +2007,45 @@ void SVFGBuilder::buildReturnEdges() {
           }
         }
       }
+      for (const Function *callee : callees) {
+        std::vector<SVFGEdge *> edges;
+        connectUnmodifiedCallMemory(svfg.get(), call, callee, edges);
+      }
+    }
+  }
+}
+
+void SVFGBuilder::connectUnmodifiedCallMemory(SVFG *graph, const CallBase *call,
+                                              const Function *callee,
+                                              std::vector<SVFGEdge *> &edges) {
+  if (!graph || !call || !callee || callee->isDeclaration())
+    return;
+  SVFGNodeBS modified;
+  for (const SVFGNode *formal : graph->getFormalOuts(callee)) {
+    const SVFGNodeBS objects = formal->getDefSVFVars();
+    modified.insert(objects.begin(), objects.end());
+  }
+  for (uint32_t object : modified)
+    if (graph->isUnknownObject(object))
+      return;
+  for (SVFGNode *actualOut : graph->getActualOuts(call)) {
+    SVFGNodeBS preserved;
+    for (uint32_t object : actualOut->getDefSVFVars())
+      if (modified.count(object) == 0)
+        preserved.insert(object);
+    if (preserved.empty())
+      continue;
+    // Actual-out regions describe all auxiliary callees. A selected callee
+    // which does not modify a region still returns that region's input state.
+    // An unconditional bypass would defeat strong updates in writing callees.
+    for (SVFGNode *actualIn : graph->getActualIns(call)) {
+      SVFGNodeBS guard = intersectPointsToSets(
+          preserved, actualIn->getDefSVFVars(), unknownObjId);
+      if (guard.empty())
+        continue;
+      if (SVFGEdge *edge = graph->addEdge(
+              actualIn, actualOut, SVFGEdgeK::IntraIndirect, call, guard))
+        edges.push_back(edge);
     }
   }
 }
@@ -2132,7 +2194,9 @@ bool SVFGBuilder::connectCallSiteToCalleeOnTheFly(
     }
   }
 
-  return created;
+  const std::size_t previousSize = newEdges.size();
+  connectUnmodifiedCallMemory(g, cs, callee, newEdges);
+  return created || newEdges.size() != previousSize;
 }
 
 void SVFGBuilder::connectFromGlobalToProgEntry() {

@@ -196,6 +196,7 @@ void SVFGBuilder::buildNodes() {
             registerConstantFields(dyn_cast<Constant>(operand.get()));
   }
   buildTopLevelNodes();
+  prepareMemoryRegionPartitioning();
   buildAddressTakenNodes();
   buildFormalParmNodes();
   buildActualParmNodes();
@@ -298,9 +299,17 @@ void SVFGBuilder::buildTopLevelNodes() {
       // etc.  Both can carry pointer-type results, so they must be considered.
       const bool isUnary = isa<UnaryOperator>(&inst) || isa<CastInst>(&inst);
       const bool hasPointerResult = inst.getType()->isPointerTy();
-      if (!hasPointerResult && !isStore && !isCmp && !isBranch && !isBinary &&
-          !isUnary)
-        continue;
+      if (config.pointerOnly) {
+        const bool isPointerStore =
+            isStore &&
+            cast<StoreInst>(&inst)->getValueOperand()->getType()->isPointerTy();
+        if (!hasPointerResult && !isPointerStore)
+          continue;
+      } else {
+        if (!hasPointerResult && !isStore && !isCmp && !isBranch && !isBinary &&
+            !isUnary)
+          continue;
+      }
 
       if (isa<AllocaInst>(&inst)) {
         uint32_t nodeId = nextNode();
@@ -519,15 +528,28 @@ void SVFGBuilder::buildAddressTakenNodes() {
 
           bool addressTaken = false;
           for (const Use &use : alloca->uses()) {
-            if (!isa<LoadInst>(use.getUser())) {
-              addressTaken = true;
-              break;
+            const User *user = use.getUser();
+            if (config.pointerOnly) {
+              if (const auto *store = dyn_cast<StoreInst>(user)) {
+                if (store->getValueOperand() == alloca ||
+                    store->getValueOperand()->getType()->isPointerTy()) {
+                  addressTaken = true;
+                  break;
+                }
+              } else if (!isa<LoadInst>(user)) {
+                addressTaken = true;
+                break;
+              }
+            } else {
+              if (!isa<LoadInst>(user)) {
+                addressTaken = true;
+                break;
+              }
             }
           }
 
           if (addressTaken) {
-            std::vector<const void *> ptsVoid = getPointsToSet(alloca);
-            SVFGNodeBS objIds = convertPTAObjectsToObjIDs(ptsVoid);
+            SVFGNodeBS objIds = getObjectIdsForValue(alloca);
 
             const Function *entryFunc = alloca->getParent()->getParent();
             if (objIds.empty()) {
@@ -549,9 +571,27 @@ void SVFGBuilder::buildAddressTakenNodes() {
     for (const GlobalVariable &gv : M->globals()) {
       bool addressTaken = false;
       for (const User *user : gv.users()) {
-        if (isa<Instruction>(user)) {
-          addressTaken = true;
-          break;
+        if (config.pointerOnly) {
+          if (const auto *store = dyn_cast<StoreInst>(user)) {
+            if (store->getValueOperand() == &gv ||
+                store->getValueOperand()->getType()->isPointerTy()) {
+              addressTaken = true;
+              break;
+            }
+          } else if (isa<LoadInst>(user)) {
+            if (user->getType()->isPointerTy()) {
+              addressTaken = true;
+              break;
+            }
+          } else if (isa<Instruction>(user)) {
+            addressTaken = true;
+            break;
+          }
+        } else {
+          if (isa<Instruction>(user)) {
+            addressTaken = true;
+            break;
+          }
         }
         if (const ConstantExpr *ce = dyn_cast<ConstantExpr>(user)) {
           if (ce->getOpcode() == Instruction::GetElementPtr ||
@@ -564,8 +604,7 @@ void SVFGBuilder::buildAddressTakenNodes() {
       }
 
       if (addressTaken) {
-        std::vector<const void *> ptsVoid = getPointsToSet(&gv);
-        SVFGNodeBS objIds = convertPTAObjectsToObjIDs(ptsVoid);
+        SVFGNodeBS objIds = getObjectIdsForValue(&gv);
 
         if (objIds.empty()) {
           const uint32_t memReg = getOrCreateMemReg(&gv);

@@ -69,6 +69,9 @@ namespace analysis {
 
 /// @brief SVFGBuilder configuration
 struct SVFGBuilderConfig {
+  /// @brief Only include pointer-typed value flows (aligns with SVF PTROnlySVFG)
+  bool pointerOnly = true;
+
   /// @brief Enable Memory SSA construction
   bool buildMSSA = true;
 
@@ -210,6 +213,9 @@ private:
 
   /// @brief Value to SVFG node mapping
   std::unordered_map<const llvm::Value *, uint32_t> valueToNode;
+  /// Recursion guard while normalizing auxiliary targets of pointer merges.
+  std::unordered_set<const llvm::Value *> objectQueryStack;
+  std::unordered_map<const llvm::Value *, SVFGNodeBS> objectQueryResults;
   /// @brief LLVM value to canonical top-level value-symbol ID.
   std::unordered_map<const llvm::Value *, uint32_t> valueToValueId;
   /// @brief Synthetic value-symbol IDs for formal returns and varargs.
@@ -323,6 +329,9 @@ private:
   void connectExternalReturn(SVFG *graph, const llvm::CallBase *call,
                              const llvm::Function *callee,
                              std::vector<SVFGEdge *> &edges);
+  void connectUnmodifiedCallMemory(SVFG *graph, const llvm::CallBase *call,
+                                   const llvm::Function *callee,
+                                   std::vector<SVFGEdge *> &edges);
 
 protected:
   SVFG *getActiveSVFG() const { return svfg ? svfg.get() : lastBuiltSVFG; }
@@ -370,7 +379,9 @@ public:
   /// SVF's versioned analysis seeds its meld labels from the auxiliary
   /// Andersen result (`ander->getPts(store lhs)`); this exposes the same
   /// information in SVFG object-id space.
-  SVFGNodeBS getPreAnalysisPointsTo(const llvm::Value *ptr);
+  /// The completed build records these canonical targets in the graph. This
+  /// lookup is read-only and safe for concurrent version-label workers.
+  SVFGNodeBS getPreAnalysisPointsTo(const llvm::Value *ptr) const;
 
   /// @brief Map base object + GEP to field object ID (field-sensitive if possible).
   ///

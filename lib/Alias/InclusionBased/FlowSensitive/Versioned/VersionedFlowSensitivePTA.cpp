@@ -31,20 +31,20 @@ constexpr VersionedFlowSensitivePTA::NodeID InitialMeldToken = 1;
 
 // Collect the edges incident to the actual nodes of \p callSite and the formal
 // nodes of \p callee.
-void collectCallsiteCalleeEdges(const SVFG &graph,
-                                const llvm::CallBase *callSite,
-                                const llvm::Function *callee,
-                                std::unordered_set<const SVFGEdge *> &edges) {
+void collectCallsiteCalleeEdges(
+    const SVFG &graph, const llvm::CallBase *callSite,
+    const llvm::Function *callee,
+    std::unordered_map<const SVFGEdge *, SVFGNodeBS> &edges) {
   auto collect = [&](const SVFGNodeSet &nodes) {
     for (const SVFGNode *node : nodes) {
       if (!node)
         continue;
       for (const SVFGEdge *edge : node->getInEdges())
         if (edge)
-          edges.insert(edge);
+          edges.emplace(edge, edge->getPointsTo());
       for (const SVFGEdge *edge : node->getOutEdges())
         if (edge)
-          edges.insert(edge);
+          edges.emplace(edge, edge->getPointsTo());
     }
   };
   collect(graph.getActualParms(callSite));
@@ -468,6 +468,24 @@ VersionedFlowSensitivePTA::relevantObjects() const {
     if (const auto *store = dyn_cast<StoreSVFGNode>(node)) {
       PointsToSet targets = storeTargetObjects(*store);
       objects.insert(targets.begin(), targets.end());
+    }
+    if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node)) {
+      const auto *intrinsic =
+          dyn_cast_or_null<IntrinsicInst>(actualOut->getCallSite());
+      if (intrinsic && intrinsic->arg_size() != 0 &&
+          (intrinsic->getIntrinsicID() == Intrinsic::memcpy ||
+           intrinsic->getIntrinsicID() == Intrinsic::memmove ||
+           intrinsic->getIntrinsicID() == Intrinsic::memset)) {
+        // Intrinsics can be the first definition of a local object. Those
+        // destinations have no Store node or global initializer to prelabel
+        // them, but still need consume/yield versions for their written data.
+        const PointsToSet destinations =
+            objectsWithFields(intrinsic->getArgOperand(0));
+        objects.insert(destinations.begin(), destinations.end());
+        const PointsToSet definitions =
+            expandIndirectObjects(actualOut->getDefSVFVars());
+        objects.insert(definitions.begin(), definitions.end());
+      }
     }
     if (!isDeltaNode(nodeID))
       continue;
@@ -1663,17 +1681,19 @@ void VersionedFlowSensitivePTA::reconnectIndirectCallsAfterRead() {
   for (const auto &[callSite, target] : connections) {
     if (graph_->hasConnectedCallee(callSite, target))
       continue;
-    std::unordered_set<const SVFGEdge *> oldEdges;
+    std::unordered_map<const SVFGEdge *, SVFGNodeBS> oldEdges;
     collectCallsiteCalleeEdges(*graph_, callSite, target, oldEdges);
     if (!config_.connectIndirectCall(callSite, target))
       continue;
     connectedAny = true;
-    std::unordered_set<const SVFGEdge *> currentEdges;
+    std::unordered_map<const SVFGEdge *, SVFGNodeBS> currentEdges;
     collectCallsiteCalleeEdges(*graph_, callSite, target, currentEdges);
     std::vector<const SVFGEdge *> newEdges;
-    for (const SVFGEdge *edge : currentEdges)
-      if (oldEdges.count(edge) == 0)
+    for (const auto &[edge, guard] : currentEdges) {
+      const auto previous = oldEdges.find(edge);
+      if (previous == oldEdges.end() || previous->second != guard)
         newEdges.push_back(edge);
+    }
     updateConnectedNodes(newEdges);
   }
   if (connectedAny)
@@ -1709,7 +1729,7 @@ bool VersionedFlowSensitivePTA::resolveIndirectCalls(
       }
       // Snapshot only the edges incident to this callsite/callee's actual and
       // formal nodes.
-      std::unordered_set<const SVFGEdge *> oldEdges;
+      std::unordered_map<const SVFGEdge *, SVFGNodeBS> oldEdges;
       collectCallsiteCalleeEdges(*graph_, callSite, target, oldEdges);
       const auto oldRecursiveFunctions = recursiveFunctions_;
       const bool wasConnected =
@@ -1724,13 +1744,15 @@ bool VersionedFlowSensitivePTA::resolveIndirectCalls(
         if (!config_.isIndirectCallTargetAllowed)
           ++stats_.unboundedIndirectCalls;
         changed = true;
-        std::unordered_set<const SVFGEdge *> currentEdges;
+        std::unordered_map<const SVFGEdge *, SVFGNodeBS> currentEdges;
         collectCallsiteCalleeEdges(*graph_, callSite, target, currentEdges);
         std::vector<const SVFGEdge *> newEdges;
         newEdges.reserve(currentEdges.size());
-        for (const SVFGEdge *edge : currentEdges)
-          if (oldEdges.count(edge) == 0)
+        for (const auto &[edge, guard] : currentEdges) {
+          const auto previous = oldEdges.find(edge);
+          if (previous == oldEdges.end() || previous->second != guard)
             newEdges.push_back(edge);
+        }
         updateConnectedNodes(newEdges);
         initializeRecursiveFunctions();
         if (recursionChangeAffectsStrongUpdates(oldRecursiveFunctions)) {

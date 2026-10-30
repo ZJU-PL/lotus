@@ -169,6 +169,19 @@ LHS before forwarding memory, so an early load cannot retain a fact from before
 a later strong update. Version propagation seeded by global initializers stays
 queued when the statement solver starts.
 
+MemorySSA regions are frozen after canonical field objects have been created.
+Select, phi and pointer-cast targets use those canonical objects too, so a store
+through a merged pointer remains connected to loads of its individual targets.
+The builder's pre-analysis provider reads the completed graph snapshot during
+parallel version labelling.
+
+When a resolved indirect callee does not modify an actual-out region, explicit
+actual-in to actual-out edges preserve that region. These edges are specific
+to the connected callee: writing callees retain their strong updates. An
+unresolved indirect return does not seed memory from global initializers.
+Version labelling also seeds intrinsic destinations, including local objects
+whose first definition is a memcpy, memmove or memset.
+
 ### Statistics
 
 `FlowSensitivePTA::statisticsReport()` additionally reports
