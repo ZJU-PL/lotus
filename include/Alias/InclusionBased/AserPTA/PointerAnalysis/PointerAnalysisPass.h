@@ -22,7 +22,7 @@ private:
 
 public:
   static char ID;
-  PointerAnalysisPass() : solver(nullptr), llvm::ModulePass(ID) {}
+  PointerAnalysisPass() : llvm::ModulePass(ID), solver(nullptr) {}
 
   /// @brief Runs pointer analysis on the given module.
   /// @param M The LLVM module to analyze.

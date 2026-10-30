@@ -26,7 +26,7 @@ public:
     eId = other->eId;
   }
 
-  RegEx(ll _eId) : eId(_eId), L(nullptr), R(nullptr) {}
+  RegEx(ll _eId) : L(nullptr), R(nullptr), eId(_eId) {}
 
   RegEx(ll type, RegEx *_L, RegEx *_R) {
     eId = type;

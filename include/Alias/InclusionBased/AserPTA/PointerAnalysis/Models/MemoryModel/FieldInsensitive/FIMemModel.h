@@ -51,7 +51,7 @@ class FIMemModel : public SingleInstanceOwner<FIObject<ctx>> {
 
 public:
   FIMemModel(ConsGraphTy &consGraph, const PtrOwner &owner)
-      : consGraph(consGraph), ptrOwner(owner) {}
+      : ptrOwner(owner), consGraph(consGraph) {}
 
   template <typename PT>
   inline ObjNode *allocNullObj(const llvm::Module *module) {

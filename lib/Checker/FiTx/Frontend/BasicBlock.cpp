@@ -51,8 +51,8 @@ BasicBlockInformation::BasicBlockInformation(
     std::shared_ptr<fitx::BasicBlock> basic_block,
     const std::set<State> &states)
     : basic_block_(basic_block), is_partial_states_(false),
-      predecessor_partial_(false), states_(states),
-      arg_value_states_(0, states), status_(NONE) {
+      predecessor_partial_(false), arg_value_states_(0, states),
+      states_(states), status_(NONE) {
   uint64_t arg_size = 0;
   if (auto function = basic_block_->Parent().lock()) {
     arg_size = function->ArgSize();
@@ -66,14 +66,15 @@ BasicBlockInformation::BasicBlockInformation(
 }
 
 BasicBlockInformation::BasicBlockInformation(const BasicBlockInformation &info)
-    : basic_block_(info.basic_block_), value_states_(info.value_states_),
-      arg_value_states_(info.arg_value_states_),
-      return_values_(info.return_values_), alias_info_(info.alias_info_),
-      pending_values_(info.pending_values_), states_(info.states_),
+    : basic_block_(info.basic_block_), time_to_live_(info.time_to_live_),
       is_partial_states_(info.is_partial_states_),
       predecessor_partial_(info.predecessor_partial_),
-      time_to_live_(info.time_to_live_), status_(info.status_),
-      same_line_predecessors_(info.same_line_predecessors_) {}
+      same_line_predecessors_(info.same_line_predecessors_),
+      return_values_(info.return_values_), alias_info_(info.alias_info_),
+      pending_values_(info.pending_values_),
+      arg_value_states_(info.arg_value_states_),
+      value_states_(info.value_states_), states_(info.states_),
+      status_(info.status_) {}
 
 // Apply transitions to value (and optionally its alias set). Caller (Analyzer)
 // already expands to related + aliased values before calling; here we only
@@ -140,7 +141,7 @@ void BasicBlockInformation::setPendingValueStates(
     fitx::ArgValueStates arg_value_state) {
   if (pending_values_.find(basic_block) == pending_values_.end()) {
     pending_values_[basic_block] = {
-        ArgValueStates(arg_value_state.Size(), states_)};
+        ArgValueStates(arg_value_state.Size(), states_), {}};
   }
   pending_values_[basic_block].arg_states.addArgValueState(arg_value_state);
 }
@@ -193,7 +194,7 @@ BasicBlockInformation::ValueStatesForSuccessor(
     return states;
 
   auto operands = call_inst->Arguments();
-  for (int i = 0; i < operands.size(); i++) {
+  for (size_t i = 0; i < operands.size(); i++) {
     auto operand = operands[i];
     for (auto value :
          pending_values_[successor].arg_states.getValueStateForArg(i)) {
@@ -423,7 +424,7 @@ ArgValueStates::operator=(const ArgValueStates &arg_value_states) {
 }
 
 const std::map<std::shared_ptr<fitx::Value>, std::vector<Transition>>
-ArgValueStates::getValueStateForArg(int64_t index) const {
+ArgValueStates::getValueStateForArg(uint64_t index) const {
   std::map<std::shared_ptr<fitx::Value>, std::vector<Transition>> new_map;
 
   if (value_states_.size() <= index)
@@ -453,7 +454,7 @@ ArgValueStates::getValueStateForArg(int64_t index) const {
 /* } */
 
 const std::map<std::shared_ptr<fitx::Value>, ArgTransitions>
-ArgValueStates::getArgTransitions(int64_t index) const {
+ArgValueStates::getArgTransitions(uint64_t index) const {
   if (value_states_.size() <= index)
     return std::map<std::shared_ptr<fitx::Value>, ArgTransitions>();
   return value_states_[index];
@@ -501,8 +502,9 @@ bool ArgValueStates::ValueExistsInArg(uint64_t arg,
 }
 
 void ArgValueStates::addArgValueState(const ArgValueStates &states) {
-  for (auto arg_idx = 0; arg_idx < std::min(value_states_.size(),
-                                            static_cast<size_t>(states.Size()));
+  for (size_t arg_idx = 0;
+       arg_idx < std::min(value_states_.size(),
+                          static_cast<size_t>(states.Size()));
        arg_idx++) {
     for (auto &value_transitions : states.getArgTransitions(arg_idx)) {
       const std::shared_ptr<Value> value = value_transitions.first;

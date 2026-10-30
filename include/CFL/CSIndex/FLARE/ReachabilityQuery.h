@@ -14,6 +14,8 @@ namespace lotus::cfl::cs_index::flare {
  */
 class ReachabilityQuery {
 public:
+  virtual ~ReachabilityQuery() = default;
+
   /**
    * @brief Check if there is a path from source to destination.
    * @param src Source vertex ID

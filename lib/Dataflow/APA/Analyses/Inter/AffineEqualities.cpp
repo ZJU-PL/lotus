@@ -329,7 +329,6 @@ InterAffineEqualitiesResult runInterElimAffineEqualities(llvm::Module &M,
       InterEliminationSolver<AffineInterAnalysisTypes,
                              kDefaultInterAffineEqualitiesCallStringLength>;
   using ResultT = Solver::result_t;
-  using ContextKey = typename ResultT::ContextKey;
 
   std::unique_ptr<dataflow::controlflow::LLVMInterCFG> ICF =
       std::make_unique<dataflow::controlflow::LLVMInterCFG>(&M);

@@ -718,7 +718,7 @@ void Index::mergeVector(vector<int> &v1, vector<int> &v2) {
 
   int vid;
   vector<bool> mark = vector<bool>(vb.size(), true);
-  int i;
+  size_t i;
   for (vit1 = vb.begin(), i = 0; vit1 != vb.end(); vit1++, i++) {
     if (visitstack.empty())
       visitstack.push_back(*vit1);
@@ -955,7 +955,7 @@ bool Index::test_reach_dc(int src, int trg) {
 void Index::save_labels(ofstream &label_file) {
   label_file << g.num_vertices() << " " << 1 << " " << 1 << " " << '\n';
 
-  for (int vid = 0; vid < out_uncover.size(); vid++) {
+  for (size_t vid = 0; vid < out_uncover.size(); vid++) {
     vector<int> &si = out_uncover[vid];
     label_file << vid << ": ";
     for (auto sit = si.begin(); sit != si.end(); sit++) {

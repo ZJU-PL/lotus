@@ -798,7 +798,7 @@ void Analyzer::copyFunctionValues(std::shared_ptr<fitx::Function> called_func,
   // operand: new_value = operand (caller) extended with value.first (callee
   // arg).
   generateWarning(call_inst.get(), "Call Inst Here");
-  for (int i = 0; i < operands.size(); i++) {
+  for (size_t i = 0; i < operands.size(); i++) {
     auto operand = operands[i];
     for (auto value : pending_states.getValueStateForArg(i)) {
       auto new_value = Value::CreateAppend(operand, value.first);
@@ -948,7 +948,7 @@ bool Analyzer::analyzeFunctionCall(std::shared_ptr<fitx::CallInst> call_inst) {
     return false;
 
   bool changed = false;
-  for (int arg = 0; arg < call_inst->Arguments().size(); arg++) {
+  for (unsigned int arg = 0; arg < call_inst->Arguments().size(); arg++) {
     const std::pair<FunctionArgTransitionRule::FunctionArg,
                     std::vector<fitx::Transition>>
         transitions =

@@ -469,7 +469,7 @@ int32_t main() {
     } else if (my_type == "if") {
       cout << ifn[i].expressions.size() << " ";
       bool is_fi = 0;
-      for (int j = 0; j < ifn[i].expressions.size(); j++) {
+      for (size_t j = 0; j < ifn[i].expressions.size(); j++) {
         cout << ifn[i].expressions[j] << " " << ifn[i].fv[j] << " ";
       }
     }

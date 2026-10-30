@@ -83,17 +83,18 @@ public:
   Value(std::shared_ptr<fitx::Value> value, std::vector<Fields> fields,
         long array_element_num);
   Value(const Value &value);
+  Value &operator=(const Value &value) = default;
 
   Value(unsigned value_type = 0)
-      : value_(nullptr), array_element_num_(kNonArrayElement),
-        fields_(std::vector<Fields>()), is_global_var_(false),
-        is_return_value_(false), value_type_(value_type) {};
+      : value_(nullptr), value_type_(value_type),
+        array_element_num_(kNonArrayElement), is_global_var_(false),
+        is_return_value_(false), fields_(std::vector<Fields>()) {}
 
   Value(llvm::Value *value)
-      : value_(value), array_element_num_(kNonArrayElement),
-        fields_(std::vector<Fields>()),
+      : value_(value), value_type_(value->getValueID()),
+        array_element_num_(kNonArrayElement),
         is_global_var_(llvm::isa<llvm::GlobalValue>(value)),
-        value_type_(value->getValueID()) {};
+        is_return_value_(false), fields_(std::vector<Fields>()) {}
 
   Value(std::shared_ptr<Value> value);
 
@@ -123,9 +124,9 @@ public:
   // The function name is left as getValueID to be compatible with LLVM,
   // but should be renamed tr o getValueType(), as it is very confusing
   // with the actual ID of this value.
-  const unsigned getValueID() const { return value_type_; };
+  unsigned getValueID() const { return value_type_; }
 
-  const bool isRoot() const { return fields_.empty(); }
+  bool isRoot() const { return fields_.empty(); }
 
   void addUser(std::shared_ptr<fitx::Value> user) {
     users_.push_back(user);

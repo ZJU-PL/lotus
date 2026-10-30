@@ -37,7 +37,7 @@ class CompareInst : public Instruction {
   std::shared_ptr<fitx::Value> find_if(
       std::function<bool(std::shared_ptr<fitx::Value>)> lambda);
 
-  const llvm::CmpInst::Predicate GetPredicate() const { return predicate_; }
+  llvm::CmpInst::Predicate GetPredicate() const { return predicate_; }
 
   /// Methods for support type inquiry through isa, cast, and dyn_cast:
   static bool classof(const fitx::Instruction* I) {

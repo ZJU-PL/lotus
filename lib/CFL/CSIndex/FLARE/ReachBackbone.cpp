@@ -43,7 +43,7 @@ namespace lotus::cfl::cs_index::flare {
  * @param _level Hierarchy level (for multi-level indexing)
  */
 ReachBackbone::ReachBackbone(Graph &graph, int r, double ratio, int _level)
-    : g(graph), epsilon(r), preselectratio(ratio), level(_level) {
+    : g(graph), epsilon(r), level(_level), preselectratio(ratio) {
   gsize = g.num_vertices();
   ref = 0;   // Reference value for marking visited vertices in BFS
   opCnt = 0; // Operation counter for visited tracking
@@ -260,8 +260,9 @@ bool ReachBackbone::backboneByNode(int vid) {
 
   bool updated = false, touch = false; // touch is used to check wheather there
                                        // is epsilon+1 local neighbors
-  int begin = 0, end = 0, begin2 = 0, end2 = 0, u, val, lifeval, nid, index,
+  int begin = 0, end = 0, begin2 = 0, end2 = 0, u, val, lifeval, nid,
       liveneighbors = 0;
+  size_t index;
   vector<int> localneis, hubnodes;
   que[end++] = vid;
   opCnt++;
@@ -499,7 +500,7 @@ bool ReachBackbone::backboneByNode(int vid) {
 #ifdef RBDEBUG
   cout << "local neighbors: ";
 #endif
-  for (int i = 0; i < localneis.size(); i++) {
+  for (size_t i = 0; i < localneis.size(); i++) {
 #ifdef RBDEBUG
     cout << localneis[i] << "|life" << life[localneis[i]] << "|dist"
          << dist[localneis[i]] << " ";
@@ -735,7 +736,8 @@ int ReachBackbone::genGateGraphByNode(int vid, int radius, ostream &out,
 #endif
 
   bool updated = false, valid = false;
-  int begin = 0, end = 0, begin2 = 0, end2 = 0, u, val, lifeval, nid, index;
+  int begin = 0, end = 0, begin2 = 0, end2 = 0, u, val, lifeval, nid;
+  size_t index;
   vector<int> localneis, hubnodes;
   que[end++] = vid;
   opCnt++;
@@ -963,13 +965,13 @@ int ReachBackbone::genGateGraphByNode(int vid, int radius, ostream &out,
   cout << "local neighbors: ";
 #endif
   // insert hubnodes into local neighbors
-  for (int i = 0; i < hubnodes.size(); i++)
+  for (size_t i = 0; i < hubnodes.size(); i++)
     localneis.push_back(hubnodes[i]);
   sort(localneis.begin(), localneis.end());
 
   int edgenum = 0;
   out << gateindex[vid] << ": ";
-  for (int i = 0; i < localneis.size(); i++) {
+  for (size_t i = 0; i < localneis.size(); i++) {
 #ifdef RBDEBUG1
     cout << localneis[i] << "|life" << life[localneis[i]] << "|dist"
          << dist[localneis[i]] << " ";

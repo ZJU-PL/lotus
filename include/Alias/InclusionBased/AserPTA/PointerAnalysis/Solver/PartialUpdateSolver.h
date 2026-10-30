@@ -44,7 +44,7 @@ private:
     Self &solver;
 
   public:
-    CallBack(Self &solver, size_t nodeNum) : solver(solver), nodeNum(nodeNum) {}
+    CallBack(Self &solver, size_t nodeNum) : nodeNum(nodeNum), solver(solver) {}
 
     void onNewConstraint(CGNodeTy *src, CGNodeTy *dst,
                          Constraints constraint) override {
@@ -162,8 +162,8 @@ private:
 
 public:
   PartialUpdateSolver()
-      : requiredEdge(HASH_EDGE_LIMIT), copyWorkList(), lsWorkList(),
-        targetList() {}
+      : copyWorkList(), lsWorkList(), targetList(),
+        requiredEdge(HASH_EDGE_LIMIT) {}
 
 protected:
   inline size_t hashEdge(CGNodeTy *src, CGNodeTy *dst) {

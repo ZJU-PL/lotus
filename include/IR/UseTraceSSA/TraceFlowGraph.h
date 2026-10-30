@@ -82,7 +82,7 @@ struct FlowNode {
   NativeID native = NoNativeID;
   Event events = Event::None;
   Certainty certainty = Certainty::Must;
-  std::vector<GuardedEventEffect> effects;
+  std::vector<GuardedEventEffect> effects = {};
 };
 
 struct FlowEdge {

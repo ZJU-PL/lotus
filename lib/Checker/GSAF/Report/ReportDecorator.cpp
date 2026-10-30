@@ -44,20 +44,20 @@ DiagnosticText DefaultReportDecorator::getOrdinalEventDescription(int idx) {
 
   // Numbers from 11 to 13 don't have st, nd, rd
   if (10 < idx && idx < 14)
-    return std::move(getDefaultNumTHEvent(idx_str));
+    return getDefaultNumTHEvent(idx_str);
 
   switch (idx % 10) {
   case 1:
-    return std::move(getDefaultNumSTEvent(idx_str));
+    return getDefaultNumSTEvent(idx_str);
 
   case 2:
-    return std::move(getDefaultNumNDEvent(idx_str));
+    return getDefaultNumNDEvent(idx_str);
 
   case 3:
-    return std::move(getDefaultNumRDEvent(idx_str));
+    return getDefaultNumRDEvent(idx_str);
 
   default:
-    return std::move(getDefaultNumTHEvent(idx_str));
+    return getDefaultNumTHEvent(idx_str);
   }
 }
 
@@ -782,51 +782,49 @@ LLVMValueReportDecorator::procPhiAction(PHINode *phi, Value *val,
     if (DIA->hasVariableDebugName(phi)) {
       if (val_line <= 0 || new_step) {
         if (isa<UndefValue>(val)) {
-          return std::move(getDefaultPhiActionUndefEvent(
-              decorator_emph_str(DIA->getVariableName(phi))));
+          return getDefaultPhiActionUndefEvent(
+              decorator_emph_str(DIA->getVariableName(phi)));
         }
 
-        return std::move(getDefaultPhiActionConstantEvent(
+        return getDefaultPhiActionConstantEvent(
             decorator_emph_str(inst_resolver->restore_value_expr(val)),
-            decorator_emph_str(DIA->getVariableName(phi))));
+            decorator_emph_str(DIA->getVariableName(phi)));
       } else {
         if (isa<UndefValue>(val)) {
-          return std::move(getDefaultPhiActionWithInitLineOnUndefEvent(
+          return getDefaultPhiActionWithInitLineOnUndefEvent(
               format_str("%d", val_line),
-              decorator_emph_str(DIA->getVariableName(phi))));
+              decorator_emph_str(DIA->getVariableName(phi)));
         }
 
-        return std::move(getDefaultPhiActionWithInitLineEvent(
+        return getDefaultPhiActionWithInitLineEvent(
             decorator_emph_str(inst_resolver->restore_value_expr(val)),
             format_str("%d", val_line),
-            decorator_emph_str(DIA->getVariableName(phi))));
+            decorator_emph_str(DIA->getVariableName(phi)));
       }
     } else {
       if (val_line <= 0 || new_step) {
         if (isa<UndefValue>(val)) {
-          return std::move(getDefaultPhiReachableOnUndefEvent());
+          return getDefaultPhiReachableOnUndefEvent();
         }
 
-        return std::move(
-            getDefaultPhiReachableEvent(getValueEvent(val, dbg_loc)));
+        return getDefaultPhiReachableEvent(getValueEvent(val, dbg_loc));
       } else {
         if (isa<UndefValue>(val)) {
-          return std::move(getDefaultPhiNoNameWithLineOnUndefEvent(
-              format_str("%d", val_line)));
+          return getDefaultPhiNoNameWithLineOnUndefEvent(
+              format_str("%d", val_line));
         }
 
-        return std::move(getDefaultPhiNoNameWithLineEvent(
+        return getDefaultPhiNoNameWithLineEvent(
             decorator_emph_str(inst_resolver->restore_value_expr(val)),
-            format_str("%d", val_line)));
+            format_str("%d", val_line));
       }
     }
   } else {
     if (!dbg_loc) {
-      return std::move(getDefaultPhiActionNonConstantEvent(
-          getValueEvent(val), format_str("%d", val_line)));
+      return getDefaultPhiActionNonConstantEvent(getValueEvent(val),
+                                                 format_str("%d", val_line));
     } else {
-      return std::move(
-          getDefaultPhiReachableEvent(getValueEvent(val, dbg_loc)));
+      return getDefaultPhiReachableEvent(getValueEvent(val, dbg_loc));
     }
   }
 }
@@ -981,7 +979,7 @@ void LLVMValueReportDecorator::procPhiInst(const DiagnosticLocation &dbg_loc,
         }
 
         if (!br_info.empty()) {
-          for (int index = 0; index < br_info.size(); ++index) {
+          for (size_t index = 0; index < br_info.size(); ++index) {
             const char *br_label = br_info[index].first;
             int br_line = br_info[index].second;
             if (index == 0)
@@ -997,7 +995,7 @@ void LLVMValueReportDecorator::procPhiInst(const DiagnosticLocation &dbg_loc,
       }
     }
 
-    return std::move(ret);
+    return ret;
     // end of the lambda
   };
 
@@ -1064,9 +1062,9 @@ void LLVMValueReportDecorator::procPhiInst(const DiagnosticLocation &dbg_loc,
               }
             }
 
-            return std::move(getDefaultEmptyPhiPathEvent());
+            return getDefaultEmptyPhiPathEvent();
           }
-          return std::move(getDefaultPhiPathListEvent(path_choice_list));
+          return getDefaultPhiPathListEvent(path_choice_list);
 
         } else if (path_choices.size() == 1) {
           BasicBlock *incoming_BB = *path_choices.begin();
@@ -1102,11 +1100,11 @@ void LLVMValueReportDecorator::procPhiInst(const DiagnosticLocation &dbg_loc,
               }
             }
 
-            return std::move(getDefaultEmptyPhiPathEvent());
+            return getDefaultEmptyPhiPathEvent();
           }
-          return std::move((const DiagnosticText)PathChoice);
+          return (const DiagnosticText)PathChoice;
         } else {
-          return std::move(getDefaultEmptyPhiPathEvent());
+          return getDefaultEmptyPhiPathEvent();
         }
       };
 
@@ -1330,7 +1328,7 @@ DiagnosticText LLVMValueReportDecorator::getValueEvent(
     }
 
     if (isa<UndefValue>(val)) {
-      return std::move(getDefaultUndefValueEvent());
+      return getDefaultUndefValueEvent();
     } else if (isa<CallInst>(val)) {
       CallInst *ci = cast<CallInst>(val);
       Function *func = ci->getCalledFunction();
@@ -1344,12 +1342,10 @@ DiagnosticText LLVMValueReportDecorator::getValueEvent(
           // But under current architecture, we don't know which function was
           // in.
           string VirtualCallName = "";
-          return std::move(
-              getDefaultVirtualFunctionRetAsNounEvent(VirtualCallName));
+          return getDefaultVirtualFunctionRetAsNounEvent(VirtualCallName);
         } else {
-          return std::move(
-              getDefaultIndirectFunctionRetAsNounEvent(decorator_emph_str(
-                  inst_resolver->restore_value_expr(ci->getCalledOperand()))));
+          return getDefaultIndirectFunctionRetAsNounEvent(decorator_emph_str(
+              inst_resolver->restore_value_expr(ci->getCalledOperand())));
         }
       }
     } else if (SelectInst *select = dyn_cast<SelectInst>(val)) {
@@ -1408,7 +1404,7 @@ DiagnosticText LLVMValueReportDecorator::getValueEvent(
 
   string ret = inst_resolver->restore_value_expr(val, &phi_select_record);
 
-  return std::move(DiagnosticTextUnit(decorator_emph_str(ret)));
+  return DiagnosticTextUnit(decorator_emph_str(ret));
 }
 } // namespace lotus::gsaf
 

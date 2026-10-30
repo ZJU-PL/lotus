@@ -55,7 +55,7 @@ FunctionArgTransitionRule::FunctionArgTransitionRule(
 
 FunctionArgTransitionRule::FunctionArgTransitionRule(
     std::vector<FunctionArg> args)
-    : function_args_(args), TransitionRule(TransitionTrigger::FUNCTION_ARG) {}
+    : TransitionRule(TransitionTrigger::FUNCTION_ARG), function_args_(args) {}
 
 FunctionArgTransitionRule::FunctionArgTransitionRule(std::string name)
     : TransitionRule(TransitionTrigger::FUNCTION_ARG) {
@@ -70,9 +70,8 @@ FunctionArgTransitionRule::FunctionArgTransitionRule(
 
 StoreValueTransitionRule::StoreValueTransitionRule(
     StoreValueType type, std::vector<std::string> funcs)
-    : TransitionRule(TransitionTrigger::STORE_VALUE), type_(type),
-      function_names_(funcs),
-      consider_null_branch_(false) {}
+    : TransitionRule(TransitionTrigger::STORE_VALUE), consider_null_branch_(false),
+      function_names_(funcs), type_(type) {}
 
 UseValueTransitionRule::UseValueTransitionRule()
     : TransitionRule(TransitionTrigger::USE_VALUE) {}

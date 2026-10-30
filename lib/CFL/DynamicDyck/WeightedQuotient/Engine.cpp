@@ -890,7 +890,7 @@ void Engine::split_further(
   }
   // get the groups
   unordered_map<unsigned, list<unsigned>> resp2groups;
-  for (int i = 0; i < n2groups.arr.size(); i++) {
+  for (size_t i = 0; i < n2groups.arr.size(); i++) {
     unsigned groupid = n2groups.find(i);
     resp2groups[groupid].push_back(id2n[i]);
   }

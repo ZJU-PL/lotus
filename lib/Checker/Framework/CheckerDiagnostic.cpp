@@ -58,10 +58,11 @@ bool DiagnosticTransformations::ReportEventMergingRule::applyRule(
   DiagnosticLocation loc;
   if (merge_action(to_merge, loc) && arg_mapping.size() % 2 == 0) {
     DiagnosticText event_desc(result_event_ID);
-    for (int i = 0; i < arg_mapping.size(); i += 2) {
+    for (size_t i = 0; i < arg_mapping.size(); i += 2) {
       int source_event_idx = arg_mapping[i];
       int arg_idx = arg_mapping[i + 1];
-      if (to_merge.size() >= source_event_idx || source_event_idx < 0) {
+      if (source_event_idx < 0 ||
+          static_cast<size_t>(source_event_idx) >= to_merge.size()) {
         return false;
       }
 

@@ -128,11 +128,11 @@ public:
     for (int I = StartIndex, E = get_length(); I < E; ++I) {
       auto *O = at(I);
       if (P(O)) {
-        return std::move(std::make_pair(O, I));
+        return std::make_pair(O, I);
       }
     }
 
-    return std::move(std::make_pair(nullptr, get_length()));
+    return std::make_pair(nullptr, get_length());
   }
 
   virtual void print(raw_ostream &O) override;

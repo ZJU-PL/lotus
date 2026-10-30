@@ -169,7 +169,7 @@ protected:
 
 // Specialization of LangModelTrait<DefaultModel>
 template <typename ctx, typename MemModel, typename PtsTy>
-class LangModelTrait<DefaultLangModel<ctx, MemModel, PtsTy>>
+struct LangModelTrait<DefaultLangModel<ctx, MemModel, PtsTy>>
     : public LangModelTrait<LangModelBase<
           ctx, MemModel, PtsTy, DefaultLangModel<ctx, MemModel, PtsTy>>> {};
 

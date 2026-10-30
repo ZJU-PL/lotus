@@ -54,7 +54,7 @@ bool InsertGlobalCtorCallPass::runOnModule(llvm::Module &M) {
 
     // traverse the init array
     auto *initArray = llvm::cast<llvm::ConstantArray>(initializer);
-    for (int i = 0; i < initArray->getNumOperands(); i++) {
+    for (unsigned i = 0; i < initArray->getNumOperands(); i++) {
       llvm::Constant *curCtor = initArray->getOperand(i);
       // the ctor is a structure of type { i32, void ()*, i8* }
       llvm::Constant *init =

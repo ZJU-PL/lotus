@@ -129,7 +129,7 @@ template <typename ctx> class FSMemModel {
 
 public:
   FSMemModel(ConsGraphTy &consGraph, const PtrOwner &owner)
-      : consGraph(consGraph), ptrOwner(owner) {}
+      : ptrOwner(owner), consGraph(consGraph) {}
 
 private:
   template <typename PT>
@@ -231,7 +231,7 @@ private:
     auto *structTy = llvm::cast<llvm::StructType>(T);
     const auto *layout = DL.getStructLayout(structTy);
 
-    for (int i = 0; i < structTy->getNumElements(); i++) {
+    for (unsigned i = 0; i < structTy->getNumElements(); i++) {
       auto *elemTy = structTy->getElementType(i);
 
       if (llvm::isa<llvm::ArrayType>(elemTy)) {

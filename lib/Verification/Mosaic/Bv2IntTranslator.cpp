@@ -9,7 +9,7 @@ Bv2IntTranslator::Bv2IntTranslator(z3::context &c, bool is_signed,
                                    bool simplify, bool no_overflow,
                                    const VarMap &bv2int_var_map)
     : ctx(c), m_is_signed(is_signed), m_simplify(simplify),
-      m_no_overflow(no_overflow), m_bv2int_var_map(bv2int_var_map), m_vars(c) {}
+      m_no_overflow(no_overflow), m_vars(c), m_bv2int_var_map(bv2int_var_map) {}
 
 void Bv2IntTranslator::reset() {
   m_translate.clear();

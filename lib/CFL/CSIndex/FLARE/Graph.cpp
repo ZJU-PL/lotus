@@ -108,7 +108,7 @@ void Graph::clear() {
  */
 void Graph::strTrimRight(string &str) {
   string whitespaces(" \t");
-  int index = str.find_last_not_of(whitespaces);
+  size_t index = str.find_last_not_of(whitespaces);
   if (index != string::npos)
     str.erase(index + 1);
   else
@@ -201,7 +201,7 @@ void Graph::writeGraph(ostream &out) {
   GRA::iterator git;
   EdgeList el;
   EdgeList::iterator eit;
-  for (int i = 0; i < vl.size(); i++) {
+  for (size_t i = 0; i < vl.size(); i++) {
     out << i << ": ";
     el = graph[i].outList;
     for (eit = el.begin(); eit != el.end(); eit++)
@@ -211,8 +211,8 @@ void Graph::writeGraph(ostream &out) {
 }
 
 void Graph::addVertex(int vid) {
-  if (vid >= vl.size()) {
-    int size = vl.size();
+  if (static_cast<size_t>(vid) >= vl.size()) {
+    int size = static_cast<int>(vl.size());
     for (int i = 0; i < (vid - size + 1); i++) {
       graph.push_back(In_OutList());
       vl.push_back(Vertex(vid + i));
@@ -262,9 +262,9 @@ void Graph::addEdge(int sid, int tid) {
     return;
   }
 
-  if (sid >= vl.size())
+  if (static_cast<size_t>(sid) >= vl.size())
     addVertex(sid);
-  if (tid >= vl.size())
+  if (static_cast<size_t>(tid) >= vl.size())
     addVertex(tid);
   // update edge list
   graph[tid].inList.push_back(sid);
@@ -273,9 +273,9 @@ void Graph::addEdge(int sid, int tid) {
 }
 
 void Graph::addEdge(int sid, int tid, int label) {
-  if (sid >= vl.size())
+  if (static_cast<size_t>(sid) >= vl.size())
     addVertex(sid);
-  if (tid >= vl.size())
+  if (static_cast<size_t>(tid) >= vl.size())
     addVertex(tid);
   // update edge list
   graph[tid].inList.push_back(sid);
@@ -323,7 +323,7 @@ vector<int> Graph::getRoots() {
       roots.push_back(i);
   }
 
-  return std::move(roots);
+  return roots;
 }
 
 // check whether the edge from src to trg is in the graph
@@ -382,9 +382,9 @@ Graph::Graph(unordered_map<int, vector<int>> &inlist,
 
 void Graph::extract(unordered_map<int, vector<int>> &inlist,
                     unordered_map<int, vector<int>> &outlist) {
-  for (int i = 0; i < vl.size(); i++) {
-    inlist[i] = graph[i].inList;
-    outlist[i] = graph[i].outList;
+  for (size_t i = 0; i < vl.size(); i++) {
+    inlist[static_cast<int>(i)] = graph[i].inList;
+    outlist[static_cast<int>(i)] = graph[i].outList;
   }
   //	printMap(inlist,outlist);
 }
@@ -662,7 +662,7 @@ void Graph::to_indexing_graph() {
 void Graph::removeEdge(int s, int t) {
   // update edge list
   auto &inList = graph[t].inList;
-  for (int i = 0; i < inList.size(); ++i) {
+  for (int i = 0; i < static_cast<int>(inList.size()); ++i) {
     if (inList[i] == s) {
       inList[i] = inList.back();
       inList.pop_back();
@@ -671,7 +671,7 @@ void Graph::removeEdge(int s, int t) {
   }
 
   auto &outList = graph[s].outList;
-  for (int i = 0; i < outList.size(); ++i) {
+  for (int i = 0; i < static_cast<int>(outList.size()); ++i) {
     if (outList[i] == t) {
       outList[i] = outList.back();
       outList.pop_back();

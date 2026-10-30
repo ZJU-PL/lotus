@@ -76,7 +76,7 @@ struct LocatedSVFGNode {
   Event definitionEvents = Event::None;
   Certainty certainty = Certainty::Must;
   /// Authoritative allocation/resource facts, independent of adjacent edges.
-  std::vector<LocatedEventEffect> definitionEffects;
+  std::vector<LocatedEventEffect> definitionEffects = {};
 };
 struct LocatedSVFGEdge {
   NativeID id = NoNativeID, from = NoNativeID, to = NoNativeID;

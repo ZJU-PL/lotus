@@ -22,11 +22,11 @@ Instruction::Create(std::shared_ptr<Instruction> inst,
 }
 
 Instruction::Instruction()
-    : llvm_instruction_(nullptr), module_(nullptr), opcode_(0), line_(0),
-      Value() {}
+    : Value(), llvm_instruction_(nullptr), module_(nullptr), opcode_(0),
+      column_(0), line_(0) {}
 
 Instruction::Instruction(llvm::Instruction *instruction)
-    : llvm_instruction_(instruction), Value(instruction) {
+    : Value(instruction), llvm_instruction_(instruction) {
   module_ = llvm_instruction_->getFunction()->getParent();
   opcode_ = llvm_instruction_->getOpcode();
   if (const llvm::DebugLoc &Loc = llvm_instruction_->getDebugLoc()) {
@@ -37,7 +37,7 @@ Instruction::Instruction(llvm::Instruction *instruction)
 }
 
 Instruction::Instruction(unsigned int opcode, llvm::Instruction *instruction)
-    : opcode_(opcode), llvm_instruction_(instruction), Value(instruction) {
+    : Value(instruction), llvm_instruction_(instruction), opcode_(opcode) {
   module_ = llvm_instruction_->getFunction()->getParent();
   if (const llvm::DebugLoc &Loc = llvm_instruction_->getDebugLoc()) {
     debug_loc_ = Loc;
@@ -81,7 +81,7 @@ bool Instruction::operator<=(const fitx::Instruction &instruction) const {
   if (llvm_instruction_ == instruction.llvm_instruction_)
     return true;
 
-  return module_ == instruction.module_ && line_ == instruction.line_ ||
+  return (module_ == instruction.module_ && line_ == instruction.line_) ||
          *this < instruction;
 }
 

@@ -22,7 +22,7 @@ struct mycomp {
     if (_a.size() < _b.size())
       return true;
     else if (_a.size() == _b.size()) {
-      for (int i = 0; i < _a.size(); i++) {
+      for (size_t i = 0; i < _a.size(); i++) {
         if (_a[i] < _b[i])
           return true;
         else if (_a[i] > _b[i])

@@ -395,7 +395,7 @@ public:
   static DECORATOR_EVENT_DESCRIPTION_CLASS_NAME                                \
   INTERNAL_DECORATOR_EVENT_DESCRIPTION_CREATION_FUNCTION_NAME(event_id)() {    \
     DECORATOR_EVENT_DESCRIPTION_CLASS_NAME ret(event_id);                      \
-    return std::move(ret);                                                     \
+    return ret;                                                                \
   }                                                                            \
   }                                                                            \
   INTERNAL_REGISTER_DECORATOR_EVENT_ID(event_id, 0, pattern, description)
@@ -409,7 +409,7 @@ public:
       const T1 &arg1) {                                                        \
     DECORATOR_EVENT_DESCRIPTION_CLASS_NAME ret(event_id);                      \
     ret.pushArg(arg1);                                                         \
-    return std::move(ret);                                                     \
+    return ret;                                                                \
   }                                                                            \
   }                                                                            \
   INTERNAL_REGISTER_DECORATOR_EVENT_ID(event_id, 1, pattern, description)
@@ -424,7 +424,7 @@ public:
     DECORATOR_EVENT_DESCRIPTION_CLASS_NAME ret(event_id);                      \
     ret.pushArg(arg1);                                                         \
     ret.pushArg(arg2);                                                         \
-    return std::move(ret);                                                     \
+    return ret;                                                                \
   }                                                                            \
   }                                                                            \
   INTERNAL_REGISTER_DECORATOR_EVENT_ID(event_id, 2, pattern, description)
@@ -441,7 +441,7 @@ public:
     ret.pushArg(arg1);                                                         \
     ret.pushArg(arg2);                                                         \
     ret.pushArg(arg3);                                                         \
-    return std::move(ret);                                                     \
+    return ret;                                                                \
   }                                                                            \
   }                                                                            \
   INTERNAL_REGISTER_DECORATOR_EVENT_ID(event_id, 3, pattern, description)
@@ -459,7 +459,7 @@ public:
     ret.pushArg(arg2);                                                         \
     ret.pushArg(arg3);                                                         \
     ret.pushArg(arg4);                                                         \
-    return std::move(ret);                                                     \
+    return ret;                                                                \
   }                                                                            \
   }                                                                            \
   INTERNAL_REGISTER_DECORATOR_EVENT_ID(event_id, 4, pattern, description)
@@ -479,7 +479,7 @@ public:
     ret.pushArg(arg3);                                                         \
     ret.pushArg(arg4);                                                         \
     ret.pushArg(arg5);                                                         \
-    return std::move(ret);                                                     \
+    return ret;                                                                \
   }                                                                            \
   }                                                                            \
   INTERNAL_REGISTER_DECORATOR_EVENT_ID(event_id, 5, pattern, description)

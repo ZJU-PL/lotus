@@ -71,7 +71,7 @@ void WeightedGraph::clear() {
  */
 void WeightedGraph::strTrim(string &str) {
   string whitespaces(" \t");
-  int index = str.find_last_not_of(whitespaces);
+  size_t index = str.find_last_not_of(whitespaces);
   if (index != string::npos)
     str.erase(index + 1);
   else

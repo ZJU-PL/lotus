@@ -82,7 +82,7 @@ public:
   using edge_iterator = typename EdgeSet::iterator;
   using const_edge_iterator = typename EdgeSet::const_iterator;
 
-  inline explicit NodeBase(NodeID id) : id(id), graph(nullptr) {}
+  inline explicit NodeBase(NodeID id) : graph(nullptr), id(id) {}
 
   friend class GraphBase<NodeTy, EdgeKind>;
   friend bool operator<(Edge &e1, Edge &e2) {

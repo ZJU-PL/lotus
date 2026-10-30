@@ -61,7 +61,7 @@ class PointedByPts {
     assert(src < pointsTo.size() && dst < pointsTo.size());
     auto result = pointsTo[src] & pointsTo[dst];
 
-    for (int i = 0; i < NORMAL_NODE_START_ID; i++) {
+    for (NodeID i = 0; i < NORMAL_NODE_START_ID; i++) {
       // remove special node
       result.reset(i);
     }
@@ -131,7 +131,7 @@ class PointedByPts {
 
   static inline constexpr bool supportPointedBy() { return true; }
 
-  friend class PTSTrait<PointedByPts>;
+  friend struct PTSTrait<PointedByPts>;
 };
 
 } // namespace aser

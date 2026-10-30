@@ -497,12 +497,11 @@ protected:
 
 public:
   ConsGraphBuilder(llvm::Module *M, llvm::StringRef entry)
-      : beforeNewNode{.self = *this}, onNewDirect{.self = *this},
-        onNewInDirect{.self = *this}, onNewEdge{.self = *this}, // callbacks
+      : module(new CtxModule<ctx>(M, entry)),
         consGraph(new ConsGraphTy()), // the constraint graph
         memModel(*consGraph.get(), *this),
-        module(
-            new CtxModule<ctx>(M, entry)) { // the module represent the programs
+        beforeNewNode{.self = *this}, onNewDirect{.self = *this},
+        onNewInDirect{.self = *this}, onNewEdge{.self = *this} { // callbacks
 
     // create null ptr node
     const llvm::Value *nullValue = llvm::ConstantPointerNull::get(

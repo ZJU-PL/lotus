@@ -17,7 +17,7 @@ struct NativeHistoryOptions {
   /// the whole LLVM module. Exact instruction text remains the API default.
   bool instructionText = true;
   /// Optional phase observer, in milliseconds; it never times upstream SVFG.
-  std::function<void(const char *, double)> phaseTiming;
+  std::function<void(const char *, double)> phaseTiming = {};
 };
 
 /// Construct ordered histories from this revision's SVFG and the LLVM CFG.

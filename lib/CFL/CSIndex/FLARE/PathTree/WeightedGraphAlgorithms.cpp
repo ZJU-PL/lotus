@@ -698,7 +698,7 @@ bool WeightedGraphAlgorithms::checkBranching(WeightedGraph &graph, WeightedGraph
   }
 
   int prev = -1;
-  if (sccmap.size() != gsize) {
+  if (sccmap.size() != static_cast<size_t>(gsize)) {
     cout << "scc_num = " << scc_num << '\n';
     cout << "error: loop exists!" << '\n';
     map<int, vector<int>>::iterator mit = sccmap.begin();
@@ -789,7 +789,7 @@ bool WeightedGraphAlgorithms::checkBranching1(WeightedGraph &graph, WeightedGrap
   }
 
   int prev = -1;
-  if (sccmap.size() != gsize) {
+  if (sccmap.size() != static_cast<size_t>(gsize)) {
     cout << "scc_num = " << scc_num << '\n';
     cout << "error: loop exists!" << '\n';
     map<int, vector<int>>::iterator mit = sccmap.begin();

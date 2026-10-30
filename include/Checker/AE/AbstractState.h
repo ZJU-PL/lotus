@@ -95,10 +95,10 @@ public:
 
   /// Copy constructor - performs deep copy of all state components
   AbstractState(const AbstractState &rhs)
-      : _freedAddrs(rhs._freedAddrs), _varToAbsVal(rhs._varToAbsVal),
+      : _freedAddrs(rhs._freedAddrs),
         _pendingFreedAddrs(rhs._pendingFreedAddrs), _heapObjs(rhs._heapObjs),
-        _addrToAbsVal(rhs._addrToAbsVal), svfir_(rhs.svfir_),
-        _objToSize(rhs._objToSize),
+        _varToAbsVal(rhs._varToAbsVal), _addrToAbsVal(rhs._addrToAbsVal),
+        svfir_(rhs.svfir_), _objToSize(rhs._objToSize),
         _gepObjOffsetFromBase(rhs._gepObjOffsetFromBase),
         _gepFieldObjMap(rhs._gepFieldObjMap),
         _nextGepFieldId(rhs._nextGepFieldId) {}

@@ -61,8 +61,8 @@ CallInst::CallInst(llvm::CallInst *call_inst, std::vector<Fields> fields,
 CallInst::CallInst(std::shared_ptr<CallInst> instruction,
                    std::vector<Fields> fields, long array_element_num)
     : Instruction(instruction, fields, array_element_num),
-      called_function_(instruction->CalledFunction()),
-      arguments_(instruction->Arguments()) {}
+      arguments_(instruction->Arguments()),
+      called_function_(instruction->CalledFunction()) {}
 
 void CallInst::setArguments(
     std::vector<std::shared_ptr<fitx::Value>> arguments) {

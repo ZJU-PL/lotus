@@ -2794,7 +2794,7 @@ Instruction *IntegrationAttempt::emitCompositeCheck(Value *realInst, Value *CV,
   release_assert(realInst->getType() == CV->getType());
 
   Type *CT = CV->getType();
-  unsigned numElements;
+  unsigned numElements = 0;
   if (StructType *ST = dyn_cast<StructType>(CT))
     numElements = ST->getNumElements();
   else if (ArrayType *AT = dyn_cast<ArrayType>(CT))

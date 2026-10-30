@@ -69,16 +69,16 @@ private:
   // use with care!!!!
   CallGraphNode(const ctx *C, const llvm::Function *F,
                 const llvm::Instruction *I, NodeID id)
-      : super(id), target(C, F, I, this), kind(CallKind::Direct) {}
+      : super(id), kind(CallKind::Direct), target(C, F, I, this) {}
 
   CallGraphNode(const ctx *C, const llvm::Instruction *I, const llvm::Value *V,
                 NodeID id)
-      : super(id), target(C, I, V, this), kind(CallKind::Indirect) {
+      : super(id), kind(CallKind::Indirect), target(C, I, V, this) {
     // V is not neccessarily be the called value of I, as it can be intercepted!
   }
 
   CallGraphNode(const ctx *C, const llvm::Instruction *I, NodeID id)
-      : super(id), target(C, I, nullptr, this), kind(CallKind::Indirect) {}
+      : super(id), kind(CallKind::Indirect), target(C, I, nullptr, this) {}
 
 public:
   ~CallGraphNode() {
