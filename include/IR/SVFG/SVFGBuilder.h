@@ -614,6 +614,7 @@ private:
   bool callArgMayReadMemory(const llvm::CallBase *call, unsigned argNo) const;
   bool callArgMayModifyMemory(const llvm::CallBase *call,
                               unsigned argNo) const;
+  static bool canTypeContainPointer(const llvm::Type *T);
   std::vector<const llvm::Function *> getRootFunctionsFromICFG() const;
   uint32_t getOrCreateCanonicalObjectIdForValue(const llvm::Value *v,
                                                 SVFG::ObjectInfo info);

@@ -142,13 +142,13 @@ getInstructionGepOffset(const GetElementPtrInst *gep) {
 
 static SVFGNodeBS intersectPointsToSets(const SVFGNodeBS &lhs,
                                         const SVFGNodeBS &rhs,
-                                        uint32_t unknownObjId) {
-  // Empty means "no objects" (not "unknown"). Unknown is represented explicitly
-  // via a wildcard object ID.
+                                        uint32_t unknownObjId,
+                                        bool wildcardUnknown = false) {
+  // Empty means "no objects".
   if (lhs.empty() || rhs.empty())
     return SVFGNodeBS{};
 
-  if (unknownObjId != 0 &&
+  if (wildcardUnknown && unknownObjId != 0 &&
       (lhs.count(unknownObjId) != 0 || rhs.count(unknownObjId) != 0)) {
     return SVFGNodeBS{unknownObjId};
   }
@@ -473,8 +473,12 @@ void SVFGBuilder::prepareMemoryRegionPartitioning() {
       memoryRegionPartitioner.observe(scope, objects);
   };
 
-  for (const GlobalVariable &global : module->globals())
+  for (const GlobalVariable &global : module->globals()) {
+    if (config.pointerOnly &&
+        (!canTypeContainPointer(global.getValueType()) || global.isConstant()))
+      continue;
     observe(&global, nullptr);
+  }
 
   for (const Function &function : *module) {
     if (function.isDeclaration())
@@ -483,10 +487,21 @@ void SVFGBuilder::prepareMemoryRegionPartitioning() {
       observe(&argument, &function);
     for (const BasicBlock &block : function) {
       for (const Instruction &instruction : block) {
-        if (const auto *load = dyn_cast<LoadInst>(&instruction))
+        if (const auto *load = dyn_cast<LoadInst>(&instruction)) {
+          if (config.pointerOnly && !load->getType()->isPointerTy())
+            continue;
           observe(load->getPointerOperand(), &function);
-        else if (const auto *store = dyn_cast<StoreInst>(&instruction))
+        } else if (const auto *store = dyn_cast<StoreInst>(&instruction)) {
+          if (config.pointerOnly &&
+              !store->getValueOperand()->getType()->isPointerTy())
+            continue;
           observe(store->getPointerOperand(), &function);
+        } else if (const auto *alloca = dyn_cast<AllocaInst>(&instruction)) {
+          if (config.pointerOnly &&
+              !canTypeContainPointer(alloca->getAllocatedType()))
+            continue;
+          observe(alloca, &function);
+        }
 
         if (instruction.getType()->isPointerTy())
           observe(&instruction, &function);
@@ -1492,17 +1507,23 @@ bool SVFGBuilder::mayAliasMemoryNodes(const MSSASVFGNode *lhs,
   if (!lhs || !rhs)
     return false;
 
+  if (lhs->getMemReg() != 0 && rhs->getMemReg() != 0 &&
+      lhs->getMemReg() == rhs->getMemReg())
+    return true;
+
   const SVFGNodeBS lhsPts = lhs->getDefSVFVars();
   const SVFGNodeBS rhsPts = rhs->getDefSVFVars();
 
-  // Conservative: if either set is unknown/empty, keep the edge.
-  if (lhsPts.empty() || rhsPts.empty())
-    return true;
+  if (!config.usePointerAnalysis) {
+    if (lhsPts.empty() || rhsPts.empty())
+      return true;
+    if (unknownObjId != 0 &&
+        (lhsPts.count(unknownObjId) != 0 || rhsPts.count(unknownObjId) != 0))
+      return true;
+  }
 
-  // Unknown object is a wildcard and may alias anything.
-  if (unknownObjId != 0 &&
-      (lhsPts.count(unknownObjId) != 0 || rhsPts.count(unknownObjId) != 0))
-    return true;
+  if (lhsPts.empty() || rhsPts.empty())
+    return false;
 
   for (uint32_t id : lhsPts) {
     if (rhsPts.count(id))
@@ -1842,6 +1863,29 @@ bool SVFGBuilder::callMayModifyMemory(const CallBase *call) {
   return true;
 }
 
+// A pointer specification describes memory effects separately from passing
+// pointer values. Unknown declarations retain the conservative fallback.
+static bool specAccessesArgument(const lotus::FunctionSpec &spec,
+                                 unsigned argument, bool write) {
+  auto matches = [&](const lotus::ValueSelector &selector) {
+    return (selector.kind == lotus::SelectorKind::Arg &&
+            selector.index == static_cast<int>(argument)) ||
+           (selector.kind == lotus::SelectorKind::AfterArg &&
+            static_cast<int>(argument) > selector.index);
+  };
+  for (const auto &effect : spec.modref)
+    if (effect.op == (write ? lotus::SpecOpKind::Mod : lotus::SpecOpKind::Ref) &&
+        matches(effect.target))
+      return true;
+  for (const auto &effect : spec.copies) {
+    const auto &selector = write ? effect.dst : effect.src;
+    const auto qualifier = write ? effect.dstQualifier : effect.srcQualifier;
+    if (qualifier != lotus::QualifierKind::Value && matches(selector))
+      return true;
+  }
+  return false;
+}
+
 bool SVFGBuilder::callArgMayReadMemory(const CallBase *call,
                                        unsigned argNo) const {
   if (!call)
@@ -1849,6 +1893,14 @@ bool SVFGBuilder::callArgMayReadMemory(const CallBase *call,
   if (call->paramHasAttr(argNo, Attribute::ReadNone) ||
       call->paramHasAttr(argNo, Attribute::WriteOnly)) {
     return false;
+  }
+  if (config.pointerOnly && externalSpecs) {
+    const Function *callee = call->getCalledFunction();
+    if (callee && callee->isDeclaration()) {
+      if (const auto *spec =
+              externalSpecs->getAPISpec().get(callee->getName().str()))
+        return specAccessesArgument(*spec, argNo, false);
+    }
   }
   return true;
 }
@@ -1861,7 +1913,32 @@ bool SVFGBuilder::callArgMayModifyMemory(const CallBase *call,
       call->paramHasAttr(argNo, Attribute::ReadOnly)) {
     return false;
   }
+  if (config.pointerOnly && externalSpecs) {
+    const Function *callee = call->getCalledFunction();
+    if (callee && callee->isDeclaration()) {
+      if (const auto *spec =
+              externalSpecs->getAPISpec().get(callee->getName().str()))
+        return specAccessesArgument(*spec, argNo, true);
+    }
+  }
   return true;
+}
+
+bool SVFGBuilder::canTypeContainPointer(const Type *T) {
+  if (!T)
+    return false;
+  if (T->isPointerTy())
+    return true;
+  if (const auto *AT = dyn_cast<ArrayType>(T))
+    return canTypeContainPointer(AT->getElementType());
+  if (const auto *ST = dyn_cast<StructType>(T)) {
+    for (const auto *elem : ST->elements()) {
+      if (canTypeContainPointer(elem))
+        return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 uint32_t SVFGBuilder::nextVersion(const Function *F, uint32_t memReg) {

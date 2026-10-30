@@ -226,6 +226,48 @@ public:
     return {find(id), true};
   }
 
+  /// Union sorted words in linear time instead of inserting individual bits.
+  bool unite(const SVFGNodeBS &other) {
+    if (other.empty() || *this == other)
+      return false;
+    if (empty()) {
+      *this = other;
+      return true;
+    }
+    // Tiny updates are cheaper in place and avoid allocating a merge buffer.
+    if (other.size_ <= 4) {
+      const size_type oldSize = size_;
+      insert(other.begin(), other.end());
+      return size_ != oldSize;
+    }
+    std::vector<Word> merged;
+    merged.reserve(chunks_.size() + other.chunks_.size());
+    size_type left = 0, right = 0, count = 0;
+    while (left < chunks_.size() || right < other.chunks_.size()) {
+      Word word;
+      if (right == other.chunks_.size() ||
+          (left < chunks_.size() &&
+           chunks_[left].base < other.chunks_[right].base)) {
+        word = chunks_[left++];
+      } else if (left == chunks_.size() ||
+                 other.chunks_[right].base < chunks_[left].base) {
+        word = other.chunks_[right++];
+      } else {
+        word = {chunks_[left].base,
+                chunks_[left].bits | other.chunks_[right].bits};
+        ++left;
+        ++right;
+      }
+      count += __builtin_popcountll(word.bits);
+      merged.push_back(word);
+    }
+    if (count == size_)
+      return false;
+    chunks_ = std::move(merged);
+    size_ = count;
+    return true;
+  }
+
   /// Hint overload required by std::insert_iterator (std::inserter).
   iterator insert(iterator, std::uint32_t id) { return insert(id).first; }
 

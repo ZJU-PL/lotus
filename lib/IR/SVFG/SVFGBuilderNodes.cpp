@@ -525,6 +525,9 @@ void SVFGBuilder::buildAddressTakenNodes() {
         if (const AllocaInst *alloca = dyn_cast<AllocaInst>(opVal)) {
           if (!processedAllocas.insert(alloca).second)
             continue;
+          if (config.pointerOnly &&
+              !canTypeContainPointer(alloca->getAllocatedType()))
+            continue;
 
           bool addressTaken = false;
           for (const Use &use : alloca->uses()) {
@@ -569,6 +572,9 @@ void SVFGBuilder::buildAddressTakenNodes() {
   const Module *M = getModuleFromICFG(icfg);
   if (M && config.includeGlobals) {
     for (const GlobalVariable &gv : M->globals()) {
+      if (config.pointerOnly &&
+          (!canTypeContainPointer(gv.getValueType()) || gv.isConstant()))
+        continue;
       bool addressTaken = false;
       for (const User *user : gv.users()) {
         if (config.pointerOnly) {

@@ -341,7 +341,7 @@ bool FlowSensitivePTA::merge(StoredSet &destination, const StoredSet &source) {
       return true;
     }
     auto result = std::make_shared<PointsToSet>(left);
-    result->insert(right.begin(), right.end());
+    result->unite(right);
     destination.mutableSet.clear();
     destination.sharedSet = std::move(result);
     return true;
@@ -351,10 +351,7 @@ bool FlowSensitivePTA::merge(StoredSet &destination, const StoredSet &source) {
     destination.interned = arena_.unite(old, source.interned);
     return old != destination.interned;
   }
-  const std::size_t oldSize = destination.mutableSet.size();
-  destination.mutableSet.insert(source.mutableSet.begin(),
-                                source.mutableSet.end());
-  return oldSize != destination.mutableSet.size();
+  return destination.mutableSet.unite(source.mutableSet);
 }
 
 bool FlowSensitivePTA::assign(StoredSet &destination, const StoredSet &source) {
@@ -966,6 +963,9 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       mergeState(incoming, sourceState);
       continue;
     }
+    StoredSet wildcardValue;
+    bool wildcardScanned = false;
+    bool hasWildcardFact = false;
     for (ObjectID object : guarded) {
       auto value = sourceState.find(object);
       if (value != sourceState.end()) {
@@ -975,9 +975,19 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
         // available for the precise guarded object. Unconditionally joining
         // it would collapse unrelated memory regions after one imprecise
         // access (for example a global function-pointer field and stack data).
-        for (const auto &[sourceObject, sourceValue] : sourceState)
-          if (graph_->isUnknownObject(sourceObject))
-            merge(incoming[object], sourceValue);
+        // Scan once per edge, not once per missing guarded object. Large
+        // regions commonly have many objects with no stored pointer fact.
+        if (!wildcardScanned) {
+          for (const auto &[sourceObject, sourceValue] : sourceState) {
+            if (graph_->isUnknownObject(sourceObject)) {
+              hasWildcardFact = true;
+              merge(wildcardValue, sourceValue);
+            }
+          }
+          wildcardScanned = true;
+        }
+        if (hasWildcardFact)
+          merge(incoming[object], wildcardValue);
       }
     }
   }

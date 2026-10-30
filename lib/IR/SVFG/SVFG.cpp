@@ -851,6 +851,7 @@ void SVFG::swapWith(SVFG &other) {
   swap(baseOffsetToFieldObject, other.baseOffsetToFieldObject);
   swap(gepAccessInfo, other.gepAccessInfo);
   swap(objIdToInfo, other.objIdToInfo);
+  swap(baseToFieldObjects, other.baseToFieldObjects);
   swap(nodeFunctionDebug, other.nodeFunctionDebug);
   swap(nodeCallSiteDebug, other.nodeCallSiteDebug);
   swap(nodesForUpdate, other.nodesForUpdate);

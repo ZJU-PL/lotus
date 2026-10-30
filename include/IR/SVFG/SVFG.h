@@ -285,6 +285,21 @@ private:
   std::unordered_map<const llvm::GetElementPtrInst *, GepAccessInfo>
       gepAccessInfo;
   std::unordered_map<uint32_t, ObjectInfo> objIdToInfo;
+  std::unordered_map<uint32_t, SVFGNodeBS> baseToFieldObjects;
+
+  void indexObjectBase(uint32_t object, uint32_t oldBase, uint32_t newBase) {
+    oldBase = oldBase ? oldBase : object;
+    newBase = newBase ? newBase : object;
+    if (oldBase != newBase) {
+      auto old = baseToFieldObjects.find(oldBase);
+      if (old != baseToFieldObjects.end()) {
+        old->second.erase(object);
+        if (old->second.empty())
+          baseToFieldObjects.erase(old);
+      }
+    }
+    baseToFieldObjects[newBase].insert(object);
+  }
   std::unordered_map<uint32_t, std::string> nodeFunctionDebug;
   std::unordered_map<uint32_t, std::string> nodeCallSiteDebug;
 
@@ -728,6 +743,8 @@ public:
   inline void setObjectInfo(uint32_t objId, const ObjectInfo &info) {
     if (objId == 0)
       return;
+    const auto *old = getObjectInfo(objId);
+    indexObjectBase(objId, old ? old->baseObjId : 0, info.baseObjId);
     objIdToInfo[objId] = info;
   }
 
@@ -736,6 +753,7 @@ public:
     if (objId == 0)
       return;
     auto &dst = objIdToInfo[objId];
+    const uint32_t oldBase = dst.baseObjId;
     dst.isHeap = dst.isHeap || info.isHeap;
     dst.isConcreteHeap = dst.isConcreteHeap || info.isConcreteHeap;
     dst.isStack = dst.isStack || info.isStack;
@@ -748,6 +766,7 @@ public:
     dst.isSingleton = dst.isSingleton || info.isSingleton;
     if (dst.baseObjId == 0)
       dst.baseObjId = info.baseObjId;
+    indexObjectBase(objId, oldBase, dst.baseObjId);
     if (!dst.hasFieldOffset && info.hasFieldOffset) {
       dst.fieldOffset = info.fieldOffset;
       dst.hasFieldOffset = true;
@@ -761,13 +780,18 @@ public:
   }
 
   inline void setObjectBase(uint32_t objId, uint32_t baseObjId) {
-    if (objId != 0 && baseObjId != 0)
-      objIdToInfo[objId].baseObjId = baseObjId;
+    if (objId != 0 && baseObjId != 0) {
+      auto &info = objIdToInfo[objId];
+      indexObjectBase(objId, info.baseObjId, baseObjId);
+      info.baseObjId = baseObjId;
+    }
   }
   inline void setObjectOffset(uint32_t objId, uint64_t offset) {
     if (objId == 0)
       return;
-    objIdToInfo[objId].fieldOffset = offset;
+    auto &info = objIdToInfo[objId];
+    indexObjectBase(objId, info.baseObjId, info.baseObjId);
+    info.fieldOffset = offset;
     objIdToInfo[objId].hasFieldOffset = true;
   }
   inline uint32_t getOffsetObject(uint32_t baseObjId, uint64_t offset) const {
@@ -886,14 +910,10 @@ public:
     if (const ObjectInfo *info = getObjectInfo(objId))
       if (info->baseObjId != 0)
         base = info->baseObjId;
-    for (const auto &entry : objIdToInfo) {
-      const uint32_t candidateBase =
-          entry.second.baseObjId != 0 ? entry.second.baseObjId : entry.first;
-      if (candidateBase == base)
-        fields.insert(entry.first);
-    }
-    if (fields.empty())
-      fields.insert(objId);
+    auto it = baseToFieldObjects.find(base);
+    if (it != baseToFieldObjects.end())
+      return it->second;
+    fields.insert(objId);
     return fields;
   }
 

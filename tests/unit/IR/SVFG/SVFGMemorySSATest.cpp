@@ -1101,3 +1101,106 @@ TEST_F(SVFGMemorySSATest, PointerOnlyConfigSkipsScalarFlowAndMemoryNodes) {
     EXPECT_FALSE(isa<IntraMSSAPhiSVFGNode>(pair.second));
   }
 }
+
+TEST_F(SVFGMemorySSATest, PointerOnlyPrunesDeadJoinButKeepsLiveJoin) {
+  for (bool live : {false, true}) {
+    std::string source = R"(
+      @object = global i8 0
+      define void @main(i1 %condition) {
+      entry:
+        %slot = alloca i8*
+        br i1 %condition, label %write, label %join
+      write:
+        store i8* @object, i8** %slot
+        br label %join
+      join:
+    )";
+    if (live)
+      source += " %value = load i8*, i8** %slot\n";
+    source += " ret void\n}";
+    auto module = parseModule(source.c_str());
+    ASSERT_NE(module, nullptr);
+    ICFG icfg;
+    auto graph = buildSVFG(module.get(), icfg, true);
+    unsigned phis = 0;
+    for (const auto &entry : *graph)
+      phis += isa<IntraMSSAPhiSVFGNode>(entry.second);
+    if (live)
+      EXPECT_GT(phis, 0u);
+    else
+      EXPECT_EQ(phis, 0u);
+  }
+}
+
+TEST_F(SVFGMemorySSATest, PointerOnlyExternalSpecsPreserveUnknownWrites) {
+  auto module = parseModule(R"(
+    declare void @free(i8*)
+    declare void @unknown(i8*)
+    declare i8* @memcpy(i8*, i8*, i64)
+    define void @main() {
+      %slot = alloca i8*
+      %other = alloca i8*
+      %p = bitcast i8** %slot to i8*
+      %q = bitcast i8** %other to i8*
+      call void @free(i8* %p)
+      call void @unknown(i8* %p)
+      %r = call i8* @memcpy(i8* %q, i8* %p, i64 8)
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  ICFG icfg;
+  auto graph = buildSVFG(module.get(), icfg, true);
+  const Function *main = module->getFunction("main");
+  EXPECT_TRUE(graph->getActualOuts(findCallTo(main, "free")).empty());
+  EXPECT_FALSE(graph->getActualOuts(findCallTo(main, "unknown")).empty());
+  EXPECT_FALSE(graph->getActualOuts(findCallTo(main, "memcpy")).empty());
+}
+
+TEST(SVFGObjectIndexTest, TracksMetadataRefinementReplacementAndSwap) {
+  SVFG graph;
+  SVFG::ObjectInfo info;
+  graph.setObjectInfo(1, info);
+  info.baseObjId = 1;
+  graph.setObjectInfo(2, info);
+  EXPECT_EQ(graph.getFieldObjects(1), (SVFGNodeBS{1, 2}));
+  graph.setObjectBase(2, 3);
+  EXPECT_EQ(graph.getFieldObjects(1), (SVFGNodeBS{1}));
+  EXPECT_EQ(graph.getFieldObjects(3), (SVFGNodeBS{2}));
+  graph.setObjectInfo(2, SVFG::ObjectInfo{});
+  EXPECT_EQ(graph.getFieldObjects(2), (SVFGNodeBS{2}));
+  info.baseObjId = 1;
+  graph.updateObjectInfo(2, info);
+  EXPECT_EQ(graph.getFieldObjects(1), (SVFGNodeBS{1, 2}));
+  graph.setObjectOffset(4, 8);
+  EXPECT_EQ(graph.getFieldObjects(4), (SVFGNodeBS{4}));
+  graph.setObjectBase(4, 1);
+  EXPECT_EQ(graph.getFieldObjects(2), (SVFGNodeBS{1, 2, 4}));
+  SVFG other;
+  graph.swapWith(other);
+  EXPECT_EQ(other.getFieldObjects(1), (SVFGNodeBS{1, 2, 4}));
+  EXPECT_EQ(graph.getFieldObjects(1), (SVFGNodeBS{1}));
+}
+
+TEST(SVFGNodeBSTest, WordUnionMatchesIndividualInsertion) {
+  for (unsigned seed = 0; seed < 32; ++seed) {
+    SVFGNodeBS left, right;
+    for (uint32_t i = 0; i < 4096; ++i) {
+      if ((i * 17 + seed) % 23 < 5)
+        left.insert(i);
+      if ((i * 13 + seed) % 19 < 4)
+        right.insert(i);
+    }
+    SVFGNodeBS expected = left;
+    expected.insert(right.begin(), right.end());
+    const bool changed = expected != left;
+    EXPECT_EQ(left.unite(right), changed);
+    EXPECT_EQ(left, expected);
+    EXPECT_FALSE(left.unite(right));
+    EXPECT_FALSE(left.unite(left));
+    EXPECT_FALSE(left.unite(SVFGNodeBS{}));
+    SVFGNodeBS empty;
+    EXPECT_TRUE(empty.unite(left));
+    EXPECT_EQ(empty, expected);
+  }
+}
