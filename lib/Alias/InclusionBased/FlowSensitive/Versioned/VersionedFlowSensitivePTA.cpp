@@ -255,8 +255,8 @@ void VersionedFlowSensitivePTA::buildObjectClustering(
   case Config::ClusterMethod::Footprint: {
     // The versioned solver already computes this partition for label sharing
     // (objects whose access footprints are identical).  Promote it into the
-    // object map so memory facts are keyed by one representative, matching
-    // SVF's cluster() + versioned solve.
+    // object map so memory facts are keyed by one representative. This
+    // coarsens the analysis, unlike SVF's identity-preserving ID clustering.
     //
     // Group first, merge afterwards: while footprints are being computed the
     // partition is still empty, so storeMayTarget()/intrinsicMayDefine() see
@@ -307,21 +307,10 @@ VersionedFlowSensitivePTA::storeTargetObjects(
   const Value *pointer = accessPointer(store.getInstruction());
   PointsToSet targets;
   if (config_.preAnalysisTargets && pointer) {
-    PointsToSet pre = config_.preAnalysisTargets(pointer);
-    const PointsToSet &mem = store.getMemoryPointsTo();
-    if (!mem.empty() && !pre.empty()) {
-      PointsToSet intersected;
-      for (ObjectID obj : pre) {
-        if (mem.count(obj) != 0 || graph_->isUnknownObject(obj))
-          intersected.insert(obj);
-      }
-      if (!intersected.empty())
-        targets = std::move(intersected);
-      else
-        targets = std::move(pre);
-    } else {
-      targets = std::move(pre);
-    }
+    // MemorySSA regions can use a coarser/different object partition. An
+    // intersection can silently remove a feasible auxiliary-analysis target
+    // and leave it without a yielded version at this store.
+    targets = config_.preAnalysisTargets(pointer);
   }
   if (targets.empty())
     targets = store.getMemoryPointsTo();
@@ -1559,7 +1548,7 @@ bool VersionedFlowSensitivePTA::isStrongUpdate(
   if (targets.size() != 1)
     return false;
   const ObjectID object = *targets.begin();
-  // SVF disables strong updates on any class produced by cluster(): assigning
+  // A Lotus merged object class cannot support strong updates: assigning
   // to one member must not kill the other members' contents.
   if (objectClustering_.clusterSize(object) > 1)
     return false;
@@ -1595,6 +1584,10 @@ void VersionedFlowSensitivePTA::updateConnectedNodes(
       // Direct inter-procedural edge: the destination gained a predecessor and
       // must be re-evaluated.
       enqueueStatement(destination->getId());
+      // External summaries can introduce a fresh address node for an
+      // allocation or an unknown return after the initial worklist seed.
+      if (isa<AddrSVFGNode>(source))
+        enqueueStatement(source->getId());
       continue;
     }
     PointsToSet objects = expandIndirectObjects(edge->getPointsTo());
@@ -1660,7 +1653,7 @@ void VersionedFlowSensitivePTA::reconnectIndirectCallsAfterRead() {
       for (ObjectID object : pointsTo(node)) {
         const auto *target =
             dyn_cast_or_null<Function>(graph_->getObjectValue(object));
-        if (target && !target->isDeclaration())
+        if (target)
           connections.emplace_back(callSite, target);
       }
     }
@@ -1704,7 +1697,7 @@ bool VersionedFlowSensitivePTA::resolveIndirectCalls(
     for (ObjectID object : pointsToSet) {
       const auto *target =
           dyn_cast_or_null<Function>(graph_->getObjectValue(object));
-      if (!target || target->isDeclaration())
+      if (!target)
         continue;
       // SVF bounds every on-the-fly edge with the auxiliary Andersen call
       // graph; apply the same bound so a non-bounding connector cannot widen
@@ -1758,7 +1751,7 @@ VersionedFlowSensitivePTA::PointsToSet
 VersionedFlowSensitivePTA::gepTransfer(const GepSVFGNode &gep) {
   const auto *instruction = dyn_cast_or_null<GetElementPtrInst>(gep.getValue());
   PointsToSet bases = directInput(gep);
-  if (!instruction || instruction->getSourceElementType()->isArrayTy())
+  if (!instruction)
     return bases;
   PointsToSet result;
   for (ObjectID base : bases) {
@@ -1806,7 +1799,7 @@ VersionedFlowSensitivePTA::gepTransfer(const GepSVFGNode &gep) {
     if (ObjectID mapped = graph_->getGepObject(instruction, base))
       result.insert(mapped);
   }
-  if (result.empty()) {
+  if (result.empty() && !bases.empty()) {
     const PointsToSet &known = graph_->getObjectIds(gep.getValue());
     result.insert(known.begin(), known.end());
   }
@@ -2109,6 +2102,10 @@ bool VersionedFlowSensitivePTA::processNode(const SVFGNode &node) {
     next.clear();
     if (object != 0)
       next.insert(mapObject(object));
+    if (isa_and_nonnull<CallBase>(address->getValue())) {
+      const PointsToSet aliases = directInput(node);
+      next.insert(aliases.begin(), aliases.end());
+    }
   } else if (const auto *load = dyn_cast<LoadSVFGNode>(&node)) {
     next.clear();
     // SVF's pointer-only SVFG has no node for a non-pointer load.
@@ -2192,10 +2189,13 @@ bool VersionedFlowSensitivePTA::processNode(const SVFGNode &node) {
       }
     }
 
-    if (strong)
+    if (strong) {
+      weakUpdateSites_.erase(node.getId());
       strongUpdateSites_.insert(node.getId());
-    else
+    } else {
+      strongUpdateSites_.erase(node.getId());
       weakUpdateSites_.insert(node.getId());
+    }
     if (updated) {
       // Changed objects must be propagated to the versions relying on the
       // store's yielded version, and the statements consuming them must be
@@ -2219,9 +2219,10 @@ bool VersionedFlowSensitivePTA::processNode(const SVFGNode &node) {
   }
 
   PointsToSet &current = topLevelPointsTo_[node.getId()];
-  if (current == next)
+  const std::size_t oldSize = current.size();
+  current.insert(next.begin(), next.end());
+  if (current.size() == oldSize)
     return false;
-  current = std::move(next);
   resolveIndirectCalls(node, current);
   return true;
 }
@@ -2291,8 +2292,8 @@ bool VersionedFlowSensitivePTA::solveCurrentTopology() {
   // consume a changed version (stmtReliance / dummy propagation nodes).
   statementWorklist_ = {};
   queuedStatements_.clear();
-  versionPropagationQueue_ = {};
-  queuedVersionPropagations_.clear();
+  // Keep propagations seeded from global initializers before this call.
+  // buildVersionLabels() clears these queues at the beginning of an epoch.
   // Same decomposition as the sparse solver / SVF's WPAFSSolver: components
   // are emitted in reverse topological order (Tarjan order, consumers before
   // producers) and the priority queue keeps each sweep in that order; a
@@ -2483,6 +2484,12 @@ VersionedFlowSensitivePTA::mayAlias(const Value *lhs, const Value *rhs) const {
   auto right = pointsTo(rhs);
   if (!left || !right)
     return std::nullopt;
+  for (const PointsToSet *set : {&*left, &*right})
+    for (ObjectID object : *set)
+      if (graph_->isUnknownObject(object))
+        return true;
+  *left = expandIndirectObjects(*left);
+  *right = expandIndirectObjects(*right);
   const PointsToSet *small = &*left;
   const PointsToSet *large = &*right;
   if (large->size() < small->size())

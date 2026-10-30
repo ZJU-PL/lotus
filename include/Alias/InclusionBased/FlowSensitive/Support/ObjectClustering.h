@@ -2,21 +2,17 @@
  * @file ObjectClustering.h
  * @brief Object merging for the flow-sensitive pointer analyses.
  *
- * SVF's `fspta`/`vfspta` run `FlowSensitive::cluster()` before solving: a
- * partition of abstract objects into equivalence classes replaces every object
- * with its class representative, which shrinks the IN/OUT and version maps at
- * the cost of must-alias precision.  SVF then disables strong updates on any
- * class with more than one member, because assigning to one member must not
- * kill the others.
+ * These are Lotus-specific abstraction policies. SVF's
+ * `FlowSensitive::cluster()` instead permutes IDs for bitvector locality,
+ * preserving object identity and strong-update eligibility.
  *
- * Lotus exposes the same layer as an opt-in policy.  Merging is sound for a
+ * Lotus exposes object merging as an opt-in policy. Merging is sound for a
  * may-points-to analysis: coarsening the object partition only unions the
  * contents of the merged objects, and `clusterSize()` gates strong updates.
  * The policies differ in how aggressively they merge:
  *
- *  - `Footprint`: objects accessed at exactly the same graph locations (the
- *    analogue of SVF's regioned clustering, and of the versioned solver's
- *    existing label sharing).
+ *  - `Footprint`: objects accessed at exactly the same graph locations. This
+ *    also merges their contents, unlike the versioned solver's label sharing.
  *  - `Type`: objects with the same LLVM type and the same object kind. This is
  *    a coarse, Lotus-specific policy; it is not one of SVF's `ClusterMethod`
  *    values.

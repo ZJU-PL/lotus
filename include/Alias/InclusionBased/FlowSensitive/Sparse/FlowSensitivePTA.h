@@ -65,7 +65,8 @@ public:
     // the solver stops at a worklist boundary, keeps the partial solution
     // queryable, and sets timedOut().
     double timeLimitSeconds = 0;
-    // Object clustering (SVF's FlowSensitive::cluster()). `None` is the
+    // Lotus object merging (not SVF's identity-preserving ID clustering).
+    // `None` is the
     // identity mapping and corresponds to SVF's plainMap(); `Type` merges
     // base objects with the same LLVM type and kind. Merging is sound for a
     // may-points-to analysis and disables strong updates on merged classes.
@@ -130,7 +131,7 @@ public:
     std::size_t maxAddrTakenPtsSize = 0;
     double averageAddrTakenPtsSize = 0.0;
     // Objects merged into a cluster representative, and the number of
-    // non-singleton classes (SVF: cluster() statistics).
+    // non-singleton classes (Lotus object-merging statistics).
     std::size_t clusteredObjects = 0;
     std::size_t mergedObjectClusters = 0;
     std::size_t hashConsedUniqueSets = 0;
@@ -255,7 +256,7 @@ private:
   /// Fill the SVF-named population / points-to statistics from the solved
   /// state. Called by both the sequential and parallel solve paths.
   void collectStatistics();
-  // Object clustering support (SVF's FlowSensitive::cluster()).
+  // Optional Lotus object merging.
   ObjectID mapObject(ObjectID object) const;
   PointsToSet mapObjects(const PointsToSet &objects) const;
   StoredSet buildStored(const PointsToSet &set);

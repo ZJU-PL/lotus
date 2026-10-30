@@ -165,10 +165,11 @@ cl::opt<PrelabelOption> VfsptaPrelabel(
     cl::values(
         clEnumValN(PrelabelOption::Builder, "builder",
                    "MemorySSA access regions recorded by the SVFG builder "
-                   "(default)"),
+                   "(builder-region ablation)"),
         clEnumValN(PrelabelOption::PreAnalysis, "pre-analysis",
-                   "Points-to sets from the pre-analysis (SVF's prelabel())")),
-    cl::init(PrelabelOption::Builder), cl::cat(FsptaCategory));
+                   "Points-to sets from the pre-analysis (SVF's prelabel(); "
+                   "default)")),
+    cl::init(PrelabelOption::PreAnalysis), cl::cat(FsptaCategory));
 
 MemoryRegionPartitionStrategy partitionStrategy() {
   switch (MemoryPartition) {
@@ -403,7 +404,6 @@ int main(int argc, char **argv) {
   graphConfig.memoryPartition = partitionStrategy();
   auto graphBuilder = std::make_unique<SVFGBuilder>(graphConfig);
   std::unique_ptr<SVFG> graph(graphBuilder->build(&icfg));
-  graphBuilder->connectPreAnalysisIndirectCalls(graph.get());
   if (!DumpSVFG.empty())
     graph->dump(DumpSVFG);
 

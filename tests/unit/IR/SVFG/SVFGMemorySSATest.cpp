@@ -240,7 +240,7 @@ TEST_F(SVFGMemorySSATest, GlobalOnlyCalleeCreatesInterproceduralMemoryNodes) {
   const ICFGNode *globalInitNode = icfg.getGlobalInitICFGNode();
   ASSERT_NE(globalInitNode, nullptr);
   bool sawGlobalEntryChi = false;
-  bool sawStoreSeedIntoMain = false;
+  bool sawInitializerSeedIntoMain = false;
   for (const auto &pair : *svfg) {
     EXPECT_NE(pair.second->getNodeKind(), SVFGK::CallMu);
     EXPECT_NE(pair.second->getNodeKind(), SVFGK::CallChi);
@@ -250,18 +250,21 @@ TEST_F(SVFGMemorySSATest, GlobalOnlyCalleeCreatesInterproceduralMemoryNodes) {
       sawGlobalEntryChi = true;
     }
   }
-  EXPECT_FALSE(sawGlobalEntryChi);
+  EXPECT_TRUE(sawGlobalEntryChi);
 
   for (SVFGNode *formalInNode : svfg->getFormalIns(mainFn)) {
     for (SVFGEdge *edge : formalInNode->getInEdges()) {
-      if (edge && edge->getEdgeKind() == SVFGEdgeK::IntraIndirect &&
-          isa<StoreSVFGNode>(edge->getSrcNode())) {
-        sawStoreSeedIntoMain = true;
-        break;
+      if (edge && edge->getEdgeKind() == SVFGEdgeK::IntraIndirect) {
+        // The store in writer executes after main's entry. It must not be
+        // mistaken for a synthetic initializer and wired back into main.
+        EXPECT_FALSE(isa<StoreSVFGNode>(edge->getSrcNode()));
+        if (isa<EntryChiSVFGNode>(edge->getSrcNode()) &&
+            edge->getSrcNode()->getICFGNode() == globalInitNode)
+          sawInitializerSeedIntoMain = true;
       }
     }
   }
-  EXPECT_TRUE(sawStoreSeedIntoMain);
+  EXPECT_TRUE(sawInitializerSeedIntoMain);
 }
 TEST_F(SVFGMemorySSATest, CallsiteMemoryNodesTrackOnlyTouchedArguments) {
   const char *source = R"(

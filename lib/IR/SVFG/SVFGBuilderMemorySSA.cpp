@@ -1324,7 +1324,6 @@ void SVFGBuilder::buildMemoryPHINodes() {
           if (bbToMemPhi[&bb].count(memReg))
             continue;
 
-          std::vector<SVFGNode *> perPredDefs;
           std::set<SVFGNode *> distinctDefs;
           for (const BasicBlock *pred : predecessors(&bb)) {
             ReachingDefSet incomingDefs;
@@ -1339,11 +1338,6 @@ void SVFGBuilder::buildMemoryPHINodes() {
               if (entryIt != formalInByReg.end())
                 incomingDefs.insert(entryIt->second);
             }
-            SVFGNode *incomingDef = nullptr;
-            for (SVFGNode *candidate : incomingDefs)
-              if (!incomingDef || candidate->getId() < incomingDef->getId())
-                incomingDef = candidate;
-            perPredDefs.push_back(incomingDef);
             distinctDefs.insert(incomingDefs.begin(), incomingDefs.end());
           }
 
@@ -1367,34 +1361,51 @@ void SVFGBuilder::buildMemoryPHINodes() {
             }
           }
 
-          uint32_t predIdx = 0;
-          for (SVFGNode *incomingDef : perPredDefs) {
-            if (!incomingDef) {
-              ++predIdx;
-              continue;
-            }
-            uint32_t defReg = 0;
-            uint32_t defVersion = 0;
-            SVFGNodeBS defPts;
-            if (!getDefInfo(incomingDef, defReg, defVersion, defPts)) {
-              ++predIdx;
-              continue;
-            }
-            SVFGNodeBS edgePts = intersectPointsToSets(
-                defPts, phiNode->getDefSVFVars(), getOrCreateUnknownObjId());
-            if (edgePts.empty())
-              edgePts = phiNode->getDefSVFVars();
-            if (edgePts.empty())
-              edgePts = defPts;
-            if (edgePts.empty())
-              edgePts.insert(getOrCreateUnknownObjId());
-            svfg->addEdge(incomingDef, phiNode, SVFGEdgeK::IntraIndirect,
-                          nullptr, edgePts);
-            phiNode->setOpVer(predIdx, defReg, defVersion);
-            ++predIdx;
-          }
-
           changed = true;
+        }
+      }
+    }
+
+    // Phi placement changes the definitions which leave earlier joins. Wire
+    // operands only after placement reaches a fixed point; using the first
+    // round's flattened store sets can lose an initializer/bypass path at a
+    // later join (and can leave a loop phi pointing at the wrong definition).
+    BlockReachingDefs exitDefs;
+    computeExitDefs(exitDefs);
+    for (const BasicBlock &bb : F) {
+      const auto phiIt = bbToMemPhi.find(&bb);
+      if (phiIt == bbToMemPhi.end())
+        continue;
+      for (const auto &[memReg, phiId] : phiIt->second) {
+        auto *phi = dyn_cast<IntraMSSAPhiSVFGNode>(svfg->getNode(phiId));
+        if (!phi)
+          continue;
+        uint32_t position = 0;
+        for (const BasicBlock *pred : predecessors(&bb)) {
+          ReachingDefSet incoming = exitDefs[pred][memReg];
+          if (incoming.empty()) {
+            const auto entryIt = formalInByReg.find(memReg);
+            if (entryIt != formalInByReg.end())
+              incoming.insert(entryIt->second);
+          }
+          for (SVFGNode *definition : incoming) {
+            uint32_t defReg = 0, version = 0;
+            SVFGNodeBS objects;
+            if (!getDefInfo(definition, defReg, version, objects))
+              continue;
+            SVFGNodeBS guard = intersectPointsToSets(
+                objects, phi->getDefSVFVars(), getOrCreateUnknownObjId());
+            if (guard.empty())
+              guard = phi->getDefSVFVars();
+            if (guard.empty())
+              guard = objects;
+            if (guard.empty())
+              guard.insert(getOrCreateUnknownObjId());
+            svfg->addEdge(definition, phi, SVFGEdgeK::IntraIndirect, nullptr,
+                          guard);
+            phi->setOpVer(position, defReg, version);
+          }
+          ++position;
         }
       }
     }
@@ -1982,8 +1993,12 @@ bool SVFGBuilder::connectCallSiteToCalleeOnTheFly(
     std::vector<SVFGEdge *> &newEdges) {
   if (!g || !cs || !callee)
     return false;
-  if (callee->isDeclaration())
-    return false;
+  if (callee->isDeclaration()) {
+    if (!g->markConnectedCallee(cs, callee))
+      return false;
+    connectExternalReturn(g, cs, callee, newEdges);
+    return true;
+  }
 
   ensureICFGInterEdges(icfg, cs, callee);
 
@@ -2137,10 +2152,16 @@ void SVFGBuilder::connectFromGlobalToProgEntry() {
   if (const Function *progEntry = getProgramEntryFunction(icfg)) {
     const auto &formalIns = svfg->getFormalIns(progEntry);
     if (!formalIns.empty() && !svfg->getGlobalStoreNodes().empty()) {
+      bool hasInitializerStore = false;
       for (SVFGNode *storeNode : svfg->getGlobalStoreNodes()) {
         auto *store = dyn_cast<StoreSVFGNode>(storeNode);
-        if (!store)
+        // The global-store index also tracks ordinary program stores for
+        // checker clients. Only synthetic global-initialization stores may
+        // feed program entry; a store inside main must not flow backwards
+        // into its entry and into an unrelated branch.
+        if (!store || store->getICFGNode() != globalInitNode)
           continue;
+        hasInitializerStore = true;
         SVFGNodeBS storePts = store->getMemoryPointsTo();
         if (storePts.empty())
           storePts.insert(getOrCreateUnknownObjId());
@@ -2156,7 +2177,8 @@ void SVFGBuilder::connectFromGlobalToProgEntry() {
           }
         }
       }
-      return;
+      if (hasInitializerStore)
+        return;
     }
   }
 

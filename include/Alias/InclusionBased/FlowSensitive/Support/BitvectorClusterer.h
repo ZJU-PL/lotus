@@ -39,23 +39,27 @@ public:
   }
 
   template <typename PtsSetContainer>
-  void build(const PtsSetContainer &sets, ObjectID maxObjectId = 0) {
+  void build(const PtsSetContainer &sets, ObjectID /*maxObjectId*/ = 0) {
     std::unordered_map<ObjectID, std::unordered_set<ObjectID>> coGraph;
-    ObjectID highestSeen = maxObjectId;
 
     for (const auto &pts : sets) {
       if (pts.empty())
         continue;
       std::vector<ObjectID> elements;
       for (ObjectID obj : pts) {
+        if (obj == 0)
+          continue;
         elements.push_back(obj);
-        if (obj > highestSeen)
-          highestSeen = obj;
+        coGraph[obj]; // Keep singleton sets in the permutation too.
       }
       for (std::size_t i = 0; i < elements.size(); ++i) {
         for (std::size_t j = i + 1; j < elements.size(); ++j) {
           coGraph[elements[i]].insert(elements[j]);
           coGraph[elements[j]].insert(elements[i]);
+          // A spanning path keeps large sets together without constructing
+          // a quadratic clique for each large points-to set.
+          if (elements.size() > 64)
+            break;
         }
       }
     }
@@ -72,10 +76,11 @@ public:
       allNodes.push_back(entry.first);
 
     // Cuthill-McKee heuristic: process vertices by ascending degree
-    std::sort(allNodes.begin(), allNodes.end(),
-              [&](ObjectID a, ObjectID b) {
-                return coGraph[a].size() < coGraph[b].size();
-              });
+    std::sort(allNodes.begin(), allNodes.end(), [&](ObjectID a, ObjectID b) {
+      return coGraph[a].size() == coGraph[b].size()
+                 ? a < b
+                 : coGraph[a].size() < coGraph[b].size();
+    });
 
     for (ObjectID start : allNodes) {
       if (visited.count(start))
@@ -99,7 +104,9 @@ public:
         }
         std::sort(neighbors.begin(), neighbors.end(),
                   [&](ObjectID a, ObjectID b) {
-                    return coGraph[a].size() < coGraph[b].size();
+                    return coGraph[a].size() == coGraph[b].size()
+                               ? a < b
+                               : coGraph[a].size() < coGraph[b].size();
                   });
         for (ObjectID nbr : neighbors) {
           if (visited.insert(nbr).second)
@@ -108,12 +115,21 @@ public:
       }
     }
 
-    for (ObjectID id = 1; id <= highestSeen; ++id) {
-      if (!visited.count(id)) {
-        originalToClustered_[id] = nextId;
-        clusteredToOriginal_[nextId] = id;
-        ++nextId;
+    // Complete each open permutation path into a cycle. IDs outside these
+    // paths retain their identity without colliding with a dense destination.
+    // This uses space proportional to the observed objects, not the largest ID
+    // (Lotus's object IDs commonly start near 1 << 30).
+    for (ObjectID start : allNodes) {
+      if (clusteredToOriginal_.count(start) != 0)
+        continue;
+      ObjectID end = start;
+      auto found = originalToClustered_.find(end);
+      while (found != originalToClustered_.end()) {
+        end = found->second;
+        found = originalToClustered_.find(end);
       }
+      originalToClustered_[end] = start;
+      clusteredToOriginal_[start] = end;
     }
   }
 

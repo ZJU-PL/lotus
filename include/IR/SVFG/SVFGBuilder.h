@@ -50,6 +50,7 @@
 
 #pragma once
 
+#include "Alias/Infrastructure/Spec/AliasSpecManager.h"
 #include "IR/ICFG/CallGraph.h"
 #include "IR/ICFG/ICFG.h"
 #include "IR/SVFG/MemoryRegionPartitioner.h"
@@ -315,6 +316,13 @@ private:
 
   /// @brief Last graph returned by build(); used for compatibility accessors.
   SVFG *lastBuiltSVFG = nullptr;
+  std::unique_ptr<lotus::alias::AliasSpecManager> externalSpecs;
+
+  // Materialize library return summaries as ordinary address/copy edges so
+  // sparse, versioned and demand solvers share the same external semantics.
+  void connectExternalReturn(SVFG *graph, const llvm::CallBase *call,
+                             const llvm::Function *callee,
+                             std::vector<SVFGEdge *> &edges);
 
 protected:
   SVFG *getActiveSVFG() const { return svfg ? svfg.get() : lastBuiltSVFG; }

@@ -57,8 +57,8 @@ representative as its base object.
 
 ### Clustering, pointer-only SVFG, and prelabel seeds
 
-These options correspond to SVF knobs that were previously unconditional or
-fixed here:
+The pointer-only and prelabel options follow SVF. Object merging is a separate
+Lotus abstraction policy:
 
 | Driver flag | Config | Effect |
 | --- | --- | --- |
@@ -66,13 +66,16 @@ fixed here:
 | `--cluster-objects=type` | `ClusterMethod::Type` | Merge base objects with the same LLVM type and stack/heap/global/singleton kind (both solvers) |
 | `--cluster-objects=footprint` | `ClusterMethod::Footprint` | Merge objects with identical access footprints (`vfspta` only) |
 | `--pointer-only[=false]` | `pointerOnlySVFG` | Model only pointer-typed loads/stores, like SVF's `memSSA.buildPTROnlySVFG`; default enabled |
-| `--vfspta-prelabel=builder` | `preAnalysisTargets` empty | Seed meld labels from the builder's MemorySSA region sets (default) |
-| `--vfspta-prelabel=pre-analysis` | `preAnalysisTargets` set | Seed meld labels from the auxiliary points-to result (SVF's `prelabel()` reading Andersen) |
+| `--vfspta-prelabel=builder` | `preAnalysisTargets` empty | Seed meld labels from the builder's MemorySSA region sets (ablation) |
+| `--vfspta-prelabel=pre-analysis` | `preAnalysisTargets` set | Seed meld labels from the auxiliary points-to result (default, following SVF's `prelabel()`) |
 
 Clustering is a sound coarsening for a may-points-to analysis: the object map
 replaces each object with its class representative and every memory/version
 fact is keyed by that representative. Strong updates are disabled on any class
-with more than one member, exactly like SVF's `cluster()` + `isStrongUpdate`.
+with more than one member. SVF's `cluster()` instead permutes IDs for bitvector
+locality and preserves object identity and strong updates. The standalone
+`BitvectorClusterer` helper supplies a sparse permutation, but is not wired into
+the solvers' set storage.
 `Statistics::clusteredObjects` / `mergedObjectClusters` report the size of the
 partition. A written result file stores post-clustering object IDs, so reload
 it with the same `clusterObjects` setting that produced it.
@@ -103,7 +106,9 @@ counters report the outcome:
   means the call graph is unbounded, unlike SVF's auxiliary-Andersen bound;
   both reports print a `WARNING` line in that case.
 
-`lotus-alias-fspta` installs the pre-analysis target list for both roles.
+`lotus-alias-fspta` installs the pre-analysis target list for both roles. It
+connects a callee only after the flow-sensitive function-pointer result reaches
+it; it does not eagerly connect every auxiliary-analysis candidate.
 
 ### Dynamic field-insensitive collapse
 
@@ -137,12 +142,32 @@ first. Object merging is selected separately through `Config::clusterObjects`
 (see above).
 
 Both solvers order their statement worklist by the SVFG's strongly connected
-components (shared helper in `Support/SVFGOrder.h`), matching SVF's
-`WPAFSSolver`: components are emitted in reverse topological order and only the
+components (shared helper in `Support/SVFGOrder.h`): components are emitted
+in reverse topological order and only the
 consumers of a changed statement are revisited. The versioned solver keeps a
 priority queue keyed by `(SCC index, NodeID)`, so the order is deterministic.
 `Statistics::sccs` / `maxSccSize` / `solveIterations` report the decomposition
 and the number of completed sweeps.
+
+### Address and external-call modeling
+
+Constant-expression GEP operands and GEP instructions share normalized member
+offsets: array indices collapse while struct members remain distinct. An empty
+flow-sensitive base set stays empty; it does not import auxiliary targets.
+Alias queries expand field-insensitive objects and treat unknown pointees as
+may-alias, following SVF.
+
+The shared SVFG builder uses `AliasSpecManager` return rules for direct and
+resolved indirect external calls. Argument aliases and fresh allocations are
+represented by ordinary copy/address edges. Unmodeled pointer returns and
+unsupported static/dereferenced return alternatives use an unknown object.
+This does not supply complete external memory-write summaries; external
+side-effect modeling remains a separate limitation.
+
+Top-level propagation accumulates facts. A pointer store waits for a non-empty
+LHS before forwarding memory, so an early load cannot retain a fact from before
+a later strong update. Version propagation seeded by global initializers stays
+queued when the statement solver starts.
 
 ### Statistics
 
@@ -198,8 +223,8 @@ This module contains three flow-sensitive analyses:
 - `VersionedFlowSensitivePTA` implements the `vfspta` analysis, which versions
   each abstract object and keys memory facts by that version instead of by
   SVFG location. Its mechanisms are:
-  - object prelabeling and meld versions (region seeds by default, auxiliary
-    points-to seeds with `--vfspta-prelabel=pre-analysis`)
+  - object prelabeling and meld versions (auxiliary points-to seeds by default;
+    region seeds with `--vfspta-prelabel=builder`)
   - consume/yield maps
   - version and statement reliance
   - strong and weak updates, disabled on multi-object clusters

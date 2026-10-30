@@ -2012,7 +2012,7 @@ TEST_F(VersionedFlowSensitivePTATest,
 }
 
 TEST_F(VersionedFlowSensitivePTATest,
-       StaticTargetPruningIntersectsPreAnalysisWithMemoryDefs) {
+       StoreWithoutPointerOperandUsesMemoryDefs) {
   constexpr uint32_t realObj = 100;
   constexpr uint32_t spuriousObj = 101;
   SVFG graph;
@@ -2025,14 +2025,14 @@ TEST_F(VersionedFlowSensitivePTATest,
   graph.setObjectInfo(spuriousObj, info);
 
   VersionedFlowSensitivePTA::Config config;
-  // Pre-analysis returns both realObj and spuriousObj
+  // A synthetic store without an LLVM pointer operand cannot query this
+  // callback, so it uses its recorded MemorySSA objects instead.
   config.preAnalysisTargets = [](const Value *) {
     return PointsToSet{realObj, spuriousObj};
   };
 
   VersionedFlowSensitivePTA solver(graph, config);
   solver.solve();
-  // The store's target objects intersect with memory defs, pruning spuriousObj
   EXPECT_NE(solver.getYield(1, realObj),
             VersionedFlowSensitivePTA::InvalidVersion);
   EXPECT_EQ(solver.getYield(1, spuriousObj),

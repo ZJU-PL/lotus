@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <queue>
 #include <string>
@@ -69,12 +70,12 @@ public:
     // Wall-clock budget for solve() in seconds. Zero disables it. On expiry
     // the solver keeps the current partial solution and sets timedOut().
     double timeLimitSeconds = 0;
-    // Object clustering (SVF's FlowSensitive::cluster()). `None` is the
+    // Lotus object merging (not SVF's identity-preserving ID clustering).
+    // `None` is the
     // identity mapping (SVF plainMap()). `Footprint` merges objects with
     // identical access footprints, which is exactly the partition the solver
-    // already computes for label sharing (an analogue of SVF's regioned
-    // clustering). `Type` is a coarser Lotus-specific policy that merges base
-    // objects with the same LLVM type and kind. Merging is sound for a
+    // already computes for label sharing. `Type` is a coarser policy merging
+    // base objects with the same LLVM type and kind. Merging is sound for a
     // may-points-to analysis and disables strong updates on merged classes.
     enum class ClusterMethod { None, Footprint, Type };
     ClusterMethod clusterObjects = ClusterMethod::None;
@@ -259,6 +260,7 @@ private:
   /// solver state so several objects can be labelled concurrently.
   struct ObjectLabels {
     std::vector<MeldSet> melds;
+    std::map<MeldSet, Version> internedMelds;
     Version initialVersion = InvalidVersion;
     std::unordered_map<NodeID, Version> consume;
     std::unordered_map<NodeID, Version> yield;
@@ -267,11 +269,13 @@ private:
     std::unordered_set<NodeID> intrinsicDependents;
 
     Version intern(const MeldSet &meld) {
-      for (std::size_t i = 0; i < melds.size(); ++i)
-        if (melds[i] == meld)
-          return static_cast<Version>(i + 1);
+      auto found = internedMelds.lower_bound(meld);
+      if (found != internedMelds.end() && found->first == meld)
+        return found->second;
       melds.push_back(meld);
-      return static_cast<Version>(melds.size());
+      const Version version = static_cast<Version>(melds.size());
+      internedMelds.emplace_hint(found, meld, version);
+      return version;
     }
     Version consumeAt(NodeID location) const {
       auto it = consume.find(location);
@@ -306,7 +310,7 @@ private:
                          ObjectID object) const;
   bool storeMayTarget(const lotus::analysis::StoreSVFGNode &store,
                       ObjectID object) const;
-  // Object clustering support (SVF's FlowSensitive::cluster()).
+  // Optional Lotus object merging.
   ObjectID mapObject(ObjectID object) const;
   PointsToSet mapObjects(const PointsToSet &objects) const;
   void buildObjectClustering(const PointsToSet &objects);

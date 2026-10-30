@@ -4,6 +4,11 @@ if(bootstrap_selected)
     add_subdirectory(Alias/BootstrapAA)
 endif()
 
+lotus_test_group_enabled(alias flowsensitive flowsensitive_selected)
+if(flowsensitive_selected AND TARGET lotus-alias-fspta)
+    add_subdirectory(Alias/FlowSensitive)
+endif()
+
 if("checker" IN_LIST LOTUS_SELECTED_TEST_SUBSYSTEMS AND TARGET lotus-check)
     add_subdirectory(Checker/CLI)
 endif()

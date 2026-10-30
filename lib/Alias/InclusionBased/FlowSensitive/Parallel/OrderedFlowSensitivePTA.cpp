@@ -629,10 +629,14 @@ public:
             } else {
               slots[task].memo.reset();
             }
-            if (draft->strong)
+            if (draft->strong) {
+              owner.weakUpdateSites_.erase(node->getId());
               owner.strongUpdateSites_.insert(node->getId());
-            if (draft->weak)
+            }
+            if (draft->weak) {
+              owner.strongUpdateSites_.erase(node->getId());
               owner.weakUpdateSites_.insert(node->getId());
+            }
             owner.stats_.strongUpdateExecutions += draft->strongExecutions;
             owner.stats_.weakUpdateExecutions += draft->weakExecutions;
           }

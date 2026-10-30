@@ -22,6 +22,7 @@ add_library(SVFG STATIC ${SVFG_SOURCES} ${SVFG_HEADERS})
 target_link_libraries(SVFG PUBLIC
     CanaryICFG
     AserPTA
+    AliasSpecManager
     LLVMCore
     LLVMSupport
 )

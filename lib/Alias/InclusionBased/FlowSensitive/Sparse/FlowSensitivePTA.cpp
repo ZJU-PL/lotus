@@ -838,7 +838,7 @@ bool FlowSensitivePTA::isStrongUpdate(const PointsToSet &targets) const {
   if (targets.size() != 1)
     return false;
   const ObjectID object = *targets.begin();
-  // SVF disables strong updates on any class produced by cluster(): assigning
+  // A Lotus merged object class cannot support strong updates: assigning
   // to one member must not kill the other members' contents.
   if (objectClustering_.clusterSize(object) > 1)
     return false;
@@ -876,7 +876,7 @@ bool FlowSensitivePTA::resolveIndirectCalls(const SVFGNode &node,
     for (ObjectID object : materialize(pointsTo)) {
       const auto *target =
           dyn_cast_or_null<Function>(graph_->getObjectValue(object));
-      if (!target || target->isDeclaration())
+      if (!target)
         continue;
       // SVF bounds every on-the-fly edge with the auxiliary Andersen call
       // graph (FlowSensitive::updateCallGraph). Apply the same bound here so a
@@ -923,7 +923,7 @@ void FlowSensitivePTA::reconnectIndirectCallsAfterRead() {
       for (ObjectID object : materialize(topSet(node))) {
         const auto *target =
             dyn_cast_or_null<Function>(graph_->getObjectValue(object));
-        if (target && !target->isDeclaration())
+        if (target)
           connections.emplace_back(callSite, target);
       }
     }
@@ -1005,6 +1005,8 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       object = graph_->getObjectId(address->getValue());
     if (object != 0)
       top = singleton(object);
+    if (isa_and_nonnull<CallBase>(address->getValue()))
+      merge(top, directInput(node));
   } else if (const auto *load = dyn_cast<LoadSVFGNode>(&node)) {
     ++stats_.processedLoad;
     top = {};
@@ -1044,6 +1046,17 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       const PointsToSet targetSet =
           ptrOp ? accessTargets(ptrOp, store->getMemoryPointsTo())
                 : expandIndirectObjects(store->getMemoryPointsTo());
+      // Do not publish IN as OUT before the LHS has a target. Otherwise a
+      // load can observe the old value before a later strong update, and
+      // monotone top-level propagation cannot retract that speculative fact.
+      if (targetSet.empty()) {
+        // Evaluators in the parallel solvers expect all three result
+        // channels to be materialized, including a suspended store's OUT.
+        merge(topLevelPointsTo_[node.getId()], top);
+        const MemoryState previous = outState(&node);
+        assignState(dfOut_[node.getId()], previous);
+        return changed;
+      }
       const bool strong = isStrongUpdate(targetSet);
       bool updatedAny = false;
       for (ObjectID object : targetSet) {
@@ -1058,9 +1071,11 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       }
       if (updatedAny) {
         if (strong) {
+          weakUpdateSites_.erase(node.getId());
           strongUpdateSites_.insert(node.getId());
           ++stats_.strongUpdateExecutions;
         } else {
+          strongUpdateSites_.erase(node.getId());
           weakUpdateSites_.insert(node.getId());
           ++stats_.weakUpdateExecutions;
         }
@@ -1276,9 +1291,7 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
         dyn_cast_or_null<GetElementPtrInst>(gep->getValue());
     StoredSet bases = directInput(node);
     top = {};
-    if (instruction && instruction->getSourceElementType()->isArrayTy()) {
-      top = bases;
-    } else if (instruction) {
+    if (instruction) {
       for (ObjectID base : materialize(bases)) {
         if (graph_->isUnknownObject(base)) {
           merge(top, singleton(base));
@@ -1342,7 +1355,7 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
             merge(top, singleton(candidate));
       }
     }
-    if (materialize(top).empty()) {
+    if (materialize(top).empty() && !materialize(bases).empty()) {
       const PointsToSet &fields = gep->getValue()
                                       ? graph_->getObjectIds(gep->getValue())
                                       : PointsToSet{};
@@ -1364,9 +1377,14 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
   }
 
   mapStoredInPlace(top);
-  const bool topChanged = assign(topLevelPointsTo_[node.getId()], top);
+  StoredSet &currentTop = topLevelPointsTo_[node.getId()];
+  // Parallel evaluators read their previous result through the snapshot
+  // accessor; their local output map starts empty. Seed it before unioning
+  // the new facts so sequential and speculative transfers both accumulate.
+  merge(currentTop, topSet(&node));
+  const bool topChanged = merge(currentTop, top);
   changed |= topChanged;
-  if (topChanged && resolveIndirectCalls(node, top))
+  if (topChanged && resolveIndirectCalls(node, topLevelPointsTo_[node.getId()]))
     topologyChanged_ = true;
   changed |=
       assignState(dfOut_[node.getId()], outgoingWritten ? outgoing : incoming);
@@ -1603,6 +1621,13 @@ std::optional<bool> FlowSensitivePTA::mayAlias(const Value *lhs,
   auto right = pointsTo(rhs);
   if (!left || !right)
     return std::nullopt;
+  for (const PointsToSet *set : {&*left, &*right})
+    for (ObjectID object : *set)
+      if (graph_->isUnknownObject(object))
+        return true;
+  // A field-insensitive pointee overlaps each field of its base object.
+  *left = expandIndirectObjects(*left);
+  *right = expandIndirectObjects(*right);
   const PointsToSet *small = &*left, *large = &*right;
   if (large->size() < small->size())
     std::swap(small, large);

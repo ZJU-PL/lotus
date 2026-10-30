@@ -24,6 +24,7 @@
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Models/MemoryModel/FieldSensitive/FSMemModel.h"
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Solver/DeepPropagation.h"
 #include "IR/ICFG/ICFG.h"
+#include "IR/SVFG/NormalizedGep.h"
 #include "IR/SVFG/SVFG.h"
 #include "IR/SVFG/SVFGEdge.h"
 #include "IR/SVFG/SVFGNode.h"
@@ -128,72 +129,8 @@ static SVFG::ObjectInfo inferObjectInfoFromValue(const Value *val) {
   return info;
 }
 
-struct NormalizedGepOffset {
-  uint64_t offset = 0;
-  bool traversesArray = false;
-  bool valid = false;
-};
-
-static NormalizedGepOffset getNormalizedGepOffset(const GEPOperator *gep,
-                                                  const DataLayout &layout) {
-  NormalizedGepOffset result;
-  if (!gep)
-    return result;
-
-  Type *current = gep->getSourceElementType();
-  bool firstIndex = true;
-  for (const Use &indexUse : gep->indices()) {
-    const auto *index = dyn_cast<ConstantInt>(indexUse.get());
-    if (firstIndex) {
-      firstIndex = false;
-      if (!index) {
-        result.traversesArray = true;
-      } else if (!current->isArrayTy() && !index->isZero()) {
-        if (index->isNegative())
-          return result;
-        const uint64_t elementSize = layout.getTypeAllocSize(current);
-        const uint64_t element = index->getZExtValue();
-        if (elementSize != 0 &&
-            element > std::numeric_limits<uint64_t>::max() / elementSize)
-          return result;
-        const uint64_t increment = element * elementSize;
-        if (increment >
-            std::numeric_limits<uint64_t>::max() - result.offset)
-          return result;
-        result.offset += increment;
-      }
-      continue;
-    }
-    if (auto *structure = dyn_cast<StructType>(current)) {
-      if (!index || index->getZExtValue() >= structure->getNumElements())
-        return result;
-      const unsigned field = static_cast<unsigned>(index->getZExtValue());
-      const uint64_t increment =
-          layout.getStructLayout(structure)->getElementOffset(field);
-      if (increment > std::numeric_limits<uint64_t>::max() - result.offset)
-        return result;
-      result.offset += increment;
-      current = structure->getElementType(field);
-      continue;
-    }
-    if (auto *array = dyn_cast<ArrayType>(current)) {
-      result.traversesArray = true;
-      current = array->getElementType();
-      continue;
-    }
-    if (auto *vector = dyn_cast<VectorType>(current)) {
-      result.traversesArray = true;
-      current = vector->getElementType();
-      continue;
-    }
-    return result;
-  }
-  result.valid = true;
-  return result;
-}
-
-static NormalizedGepOffset getNormalizedGepOffset(
-    const GetElementPtrInst *gep) {
+static NormalizedGepOffset
+getInstructionGepOffset(const GetElementPtrInst *gep) {
   if (!gep || !gep->getModule())
     return {};
   return getNormalizedGepOffset(cast<GEPOperator>(gep),
@@ -413,6 +350,9 @@ void SVFGBuilder::initialize(const ICFG *cfg) {
   svfg = std::make_unique<SVFG>();
   svfg->setICFG(icfg);
   const Module *M = getModuleFromICFG(icfg);
+  externalSpecs = std::make_unique<lotus::alias::AliasSpecManager>();
+  if (M)
+    externalSpecs->initialize(*M);
   if (M)
     svfg->initializeRefinedCallGraph(*const_cast<Module *>(M));
   lastBuiltSVFG = nullptr;
@@ -846,6 +786,14 @@ SVFGNodeBS SVFGBuilder::getPreAnalysisPointsTo(const Value *ptr) {
   if (!ptr || !ptr->getType()->isPointerTy() || !config.usePointerAnalysis ||
       !ptaSolverWrapper || !ptaSolverWrapper->solver)
     return {};
+  // GEP objects may have been refined beyond AserPTA's collapsed array
+  // object. Use the builder's canonical offsets for these static addresses.
+  if (SVFG *graph = getActiveSVFG())
+    if (isa<GEPOperator>(ptr) || isa<ConstantExpr>(ptr)) {
+      const SVFGNodeBS &known = graph->getObjectIds(ptr);
+      if (!known.empty())
+        return known;
+    }
   return convertPTAObjectsToObjIDs(getPointsToSet(ptr), true);
 }
 
@@ -952,7 +900,7 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
     return ids.empty() ? 0 : *ids.begin();
   };
 
-  const NormalizedGepOffset normalized = getNormalizedGepOffset(gep);
+  const NormalizedGepOffset normalized = getInstructionGepOffset(gep);
   if (graph && normalized.valid) {
     graph->setGepAccess(gep, normalized.offset, normalized.traversesArray);
     uint64_t baseOffset = 0;
@@ -982,6 +930,16 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
     }
 
     uint32_t fieldObjId = queryAserFieldObject();
+    // The auxiliary analysis may collapse an array to its base. Reusing
+    // that ID here would overwrite the base's metadata with a member offset
+    // and conflate every member's initializer with that field.
+    if (fieldObjId == canonicalBaseObjId)
+      fieldObjId = 0;
+    if (const auto *existing = graph->getObjectInfo(fieldObjId))
+      if ((existing->baseObjId != 0 &&
+           existing->baseObjId != canonicalBaseObjId) ||
+          (existing->hasFieldOffset && existing->fieldOffset != totalOffset))
+        fieldObjId = 0;
     if (fieldObjId == 0)
       fieldObjId = allocateObjectId();
     SVFG::ObjectInfo info;
