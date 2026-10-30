@@ -283,6 +283,10 @@ int runValueFlowAnalysis(const Module &module) {
            << "\n"
            << "vfpta.indirect-flow-computations="
            << stats.solver.indirectFlowComputations << "\n"
+           << "vfpta.indirect-flow-cache-hits="
+           << stats.solver.indirectFlowCacheHits << "\n"
+           << "vfpta.value-flow-join-nodes="
+           << stats.solver.valueFlowJoinNodes << "\n"
            << "vfpta.indirect-edges=" << stats.solver.indirectEdges << "\n"
            << "vfpta.strong-update-sites=" << stats.solver.strongUpdateSites
            << "\n"

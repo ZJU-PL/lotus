@@ -1000,7 +1000,15 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
     // An unresolved call return is not a memory root. Publishing global
     // initializers here would make later loads retain a killed value when a
     // writing callee is connected. No-op callees get explicit bypass edges.
-    if (!pendingIndirectReturn)
+    // Top-level value nodes without memory successors do not consume or
+    // publish memory. Copying all global initializers into each such node
+    // creates a dense memory state unrelated to sparse value flow.
+    const bool needsMemory = isa<LoadSVFGNode, StoreSVFGNode, MSSASVFGNode>(&node) ||
+        std::any_of(node.getOutEdges().begin(), node.getOutEdges().end(),
+                    [](const SVFGEdge *edge) {
+                      return edge && isIndirectVFGEdge(edge->getEdgeKind());
+                    });
+    if (!pendingIndirectReturn && needsMemory)
       mergeState(incoming, initialMemory_);
   }
   changed |= assignState(dfIn_[node.getId()], incoming);

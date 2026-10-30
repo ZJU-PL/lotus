@@ -289,3 +289,52 @@ TEST(ValueFlowPTATest, LLVMAdapterRegressions) {
     ASSERT_NO_THROW(test.check(analysis, *module));
   }
 }
+
+TEST(ValueFlowPTATest, DirectCallClosureNeedsOneSolveAndSkipsDeadCallers) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    declare void @opaque()
+    define i8* @leaf() { ret i8* @A }
+    define i8* @middle() { %r = call i8* @leaf() ret i8* %r }
+    define i8* @main() { %r = call i8* @middle() ret i8* %r }
+    define void @dead() { call void @opaque() ret void }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "r", {"A"});
+  EXPECT_EQ(analysis.getStatistics().callGraphIterations, 1u);
+  EXPECT_EQ(analysis.getStatistics().conservativeExternalCalls, 0u);
+}
+
+TEST(ValueFlowPTATest, NoCallbackAttributeSuppressesOnlyCallbackPaths) {
+  for (bool noCallback : {false, true}) {
+    LLVMContext context;
+    SMDiagnostic diagnostic;
+    std::string ir = R"(
+      @A = global i8 0
+      @B = global i8 0
+      @slot = global i8* @A
+      define void @callback() { store i8* @B, i8** @slot ret void }
+      define i8* @main() {
+        call void @opaque(void ()* @callback)
+        %r = load i8*, i8** @slot
+        ret i8* %r
+      }
+      declare void @opaque(void ()*)
+    )";
+    if (noCallback)
+      ir += " nocallback";
+    auto module = parseAssemblyString(ir, diagnostic, context);
+    ASSERT_NE(module, nullptr);
+    ASSERT_FALSE(verifyModule(*module, &errs()));
+    ValueFlowPTA analysis(*module);
+    analysis.analyze();
+    const auto &result = analysis.getPointsTo(value(*module, "r"));
+    EXPECT_EQ(result.count(analysis.getObjectId(module->getNamedValue("B"))),
+              noCallback ? 0u : 1u);
+    EXPECT_TRUE(result.count(analysis.getUnknownObjectId()));
+  }
+}

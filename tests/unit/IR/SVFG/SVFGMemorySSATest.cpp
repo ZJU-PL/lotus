@@ -1204,3 +1204,27 @@ TEST(SVFGNodeBSTest, WordUnionMatchesIndividualInsertion) {
     EXPECT_EQ(empty, expected);
   }
 }
+
+TEST(SVFGNodeBSTest, WordSubtractionMatchesIndividualErasure) {
+  for (unsigned seed = 0; seed < 32; ++seed) {
+    SVFGNodeBS left, right;
+    for (uint32_t i = 0; i < 4096; ++i) {
+      if ((i + seed) % 5 != 0)
+        left.insert(i * 17);
+      if ((i + seed) % 3 == 0)
+        right.insert(i * 17);
+    }
+    SVFGNodeBS expected = left;
+    for (uint32_t object : right)
+      expected.erase(object);
+    const bool changed = expected != left;
+    EXPECT_EQ(left.subtract(right), changed);
+    EXPECT_EQ(left, expected);
+    EXPECT_FALSE(left.subtract(right));
+    EXPECT_FALSE(left.subtract(SVFGNodeBS{}));
+    EXPECT_TRUE(left.subtract(left));
+    EXPECT_TRUE(left.empty());
+    EXPECT_FALSE(left.subtract(left));
+    EXPECT_FALSE(left.subtract(right));
+  }
+}

@@ -454,3 +454,106 @@ TEST(ValueFlowGraphTest, MatchesDenseReference) {
     ASSERT_NO_THROW(differential(seed, false));
   }
 }
+
+TEST(ValueFlowGraphTest, SharedProjectionKeepsDistinctInitialDefinitions) {
+  Program p;
+  const auto a = p.addObject(false, false, "a");
+  const auto b = p.addObject(false, false, "b");
+  const auto x = p.addObject(false, true, "x");
+  const auto y = p.addObject(false, true, "y");
+  p.setInitializer(x, p.address(a));
+  p.setInitializer(y, p.address(b));
+  const auto entry = p.addBlock();
+  p.addRoot(entry);
+  const auto pointer = p.addNode();
+  p.addCopy(p.address(x), pointer);
+  p.addCopy(p.address(y), pointer);
+  const auto result = load(p, entry, pointer);
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(result), (PointsToSet{a, b}));
+  EXPECT_GT(solver.statistics().indirectFlowCacheHits, 0u);
+}
+
+TEST(ValueFlowGraphTest, CondensesWeakCyclesWithoutCrossingStrongKills) {
+  for (bool strong : {false, true}) {
+    Program p;
+    const auto cell = p.addObject(strong, true, "cell");
+    const auto loop = p.addBlock();
+    p.addRoot(loop);
+    p.addControlEdge(loop, loop);
+    PointsToSet expected;
+    ObjectID last = 0;
+    for (unsigned index = 0; index < 40; ++index) {
+      last = p.addObject(false, false, "value");
+      expected.insert(last);
+      if (index == 0)
+        p.setInitializer(cell, p.address(last));
+      p.addStore(loop, p.address(cell), p.address(last));
+    }
+    const auto result = load(p, loop, p.address(cell));
+    Solver solver(p);
+    solver.analyze();
+    EXPECT_EQ(solver.pointsTo(result), strong ? PointsToSet{last} : expected);
+    if (!strong) {
+      EXPECT_GT(solver.statistics().projectedEvents, 40u);
+      EXPECT_LT(solver.statistics().valueFlowJoinNodes, 8u);
+    }
+    for (ObjectID object = 1; object <= p.objectCount(); ++object)
+      for (NodeID node : solver.pointedToBy(object))
+        EXPECT_LE(node, p.nodeCount());
+  }
+}
+
+TEST(ValueFlowGraphTest, MemoryFlowDoesNotExpandStoreLoadCrossProduct) {
+  Program p;
+  const auto cell = p.addObject(false, true, "cell");
+  const auto loop = p.addBlock();
+  p.addRoot(loop);
+  p.addControlEdge(loop, loop);
+  PointsToSet expected;
+  std::vector<NodeID> loads;
+  constexpr unsigned count = 64;
+  for (unsigned index = 0; index < count; ++index) {
+    const auto object = p.addObject(false, false, "value");
+    expected.insert(object);
+    if (index == 0)
+      p.setInitializer(cell, p.address(object));
+    p.addStore(loop, p.address(cell), p.address(object));
+    loads.push_back(load(p, loop, p.address(cell)));
+  }
+  Solver solver(p);
+  solver.analyze();
+  for (NodeID result : loads)
+    EXPECT_EQ(solver.pointsTo(result), expected);
+  EXPECT_LT(solver.statistics().indirectEdges, count * 8u);
+}
+
+TEST(ValueFlowGraphTest, WeakProjectionPreservesOrderAndBranchReachability) {
+  Program p;
+  const auto a = p.addObject(false, false, "a");
+  const auto b = p.addObject(false, false, "b");
+  const auto dead = p.addObject(false, false, "dead");
+  const auto cell = p.addObject(false, true, "cell");
+  p.setInitializer(cell, p.address(a));
+  const auto entry = p.addBlock(), left = p.addBlock(), right = p.addBlock();
+  const auto join = p.addBlock();
+  p.addRoot(entry);
+  p.addControlEdge(entry, left);
+  p.addControlEdge(entry, right);
+  p.addControlEdge(left, join);
+  p.addControlEdge(right, join);
+  const auto before = load(p, entry, p.address(cell));
+  p.addStore(left, p.address(cell), p.address(b));
+  const auto onLeft = load(p, left, p.address(cell));
+  const auto onRight = load(p, right, p.address(cell));
+  const auto after = load(p, join, p.address(cell));
+  p.addStore(join, p.address(cell), p.address(dead));
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(before), (PointsToSet{a}));
+  EXPECT_EQ(solver.pointsTo(onLeft), (PointsToSet{a, b}));
+  EXPECT_EQ(solver.pointsTo(onRight), (PointsToSet{a}));
+  EXPECT_EQ(solver.pointsTo(after), (PointsToSet{a, b}));
+  EXPECT_EQ(solver.statistics().iteratedDominanceFrontierNodes, 0u);
+}

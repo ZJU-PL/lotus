@@ -474,6 +474,8 @@ public:
     if (!call.doesNotAccessMemory() && !call.onlyReadsMemory())
       program->addStore(stub, program->unknownValue(), program->unknownValue(),
                         false);
+    if (call.hasFnAttr(Attribute::NoCallback))
+      return;
     // Opaque external code may invoke escaping callbacks. Model arbitrary
     // callback arguments and repeated invocations, with the external effects
     // both before and after each callback. Symbol-name discovery/dlopen is not
@@ -571,6 +573,29 @@ public:
     vfg::Solver::Config solverConfig;
     solverConfig.enableStrongUpdates = config.enableStrongUpdates;
     while (true) {
+      // Direct calls require no points-to solution. Close their reachable
+      // call graph before solving, including direct calls exposed by a newly
+      // resolved indirect target. Do not let unreachable callers contribute
+      // return paths or external effects.
+      bool connectedDirect;
+      do {
+        connectedDirect = false;
+        const auto reachable = reachableBlocks();
+        for (auto &site : calls) {
+          const Function *callee = directCallee(*site.instruction);
+          if (!callee || !reachable.count(site.dispatch))
+            continue;
+          if (callee->isDeclaration()) {
+            if (!site.external) {
+              connectExternal(site);
+              connectedDirect = true;
+            }
+          } else if (!site.targets.count(callee)) {
+            connectFunction(site, callee);
+            connectedDirect = true;
+          }
+        }
+      } while (connectedDirect);
       updateSingletons();
       solver = std::make_unique<vfg::Solver>(*program, solverConfig);
       solver->analyze();

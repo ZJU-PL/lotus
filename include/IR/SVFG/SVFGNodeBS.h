@@ -268,6 +268,32 @@ public:
     return true;
   }
 
+  /// Remove a set in word-linear time, retaining sorted nonempty chunks.
+  bool subtract(const SVFGNodeBS &other) {
+    if (this == &other) {
+      const bool changed = !empty();
+      clear();
+      return changed;
+    }
+    size_type right = 0, output = 0, removed = 0;
+    for (size_type left = 0; left < chunks_.size(); ++left) {
+      Word word = chunks_[left];
+      while (right < other.chunks_.size() &&
+             other.chunks_[right].base < word.base)
+        ++right;
+      if (right < other.chunks_.size() &&
+          other.chunks_[right].base == word.base) {
+        removed += __builtin_popcountll(word.bits & other.chunks_[right].bits);
+        word.bits &= ~other.chunks_[right].bits;
+      }
+      if (word.bits)
+        chunks_[output++] = word;
+    }
+    chunks_.resize(output);
+    size_ -= removed;
+    return removed != 0;
+  }
+
   /// Hint overload required by std::insert_iterator (std::inserter).
   iterator insert(iterator, std::uint32_t id) { return insert(id).first; }
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <deque>
 #include <limits>
+#include <unordered_map>
 #include <stdexcept>
 #include <utility>
 
@@ -12,11 +13,56 @@ template <typename T> void appendUnique(std::vector<T> &values, T value) {
   if (std::find(values.begin(), values.end(), value) == values.end())
     values.push_back(value);
 }
-template <typename T> bool unite(std::set<T> &to, const std::set<T> &from) {
-  const auto before = to.size();
-  to.insert(from.begin(), from.end());
-  return before != to.size();
+// Kosaraju components in source-to-sink order, without recursive DFS.
+template <typename ID>
+std::pair<std::vector<std::size_t>, std::size_t>
+controlComponents(const std::vector<std::vector<ID>> &successors,
+                  const std::vector<std::vector<ID>> &predecessors) {
+  const std::size_t count = successors.size();
+  std::vector<bool> seen(count, false);
+  std::vector<std::size_t> postorder;
+  for (std::size_t start = 0; start < count; ++start) {
+    if (seen[start])
+      continue;
+    std::vector<std::pair<std::size_t, std::size_t>> dfs{{start, 0}};
+    seen[start] = true;
+    while (!dfs.empty()) {
+      auto &frame = dfs.back();
+      if (frame.second < successors[frame.first].size()) {
+        const auto next = successors[frame.first][frame.second++];
+        if (!seen[next]) {
+          seen[next] = true;
+          dfs.emplace_back(next, 0);
+        }
+      } else {
+        postorder.push_back(frame.first);
+        dfs.pop_back();
+      }
+    }
+  }
+  const auto invalid = std::numeric_limits<std::size_t>::max();
+  std::vector<std::size_t> component(count, invalid);
+  std::size_t components = 0;
+  for (auto it = postorder.rbegin(); it != postorder.rend(); ++it) {
+    if (component[*it] != invalid)
+      continue;
+    std::vector<std::size_t> work{*it};
+    component[*it] = components;
+    while (!work.empty()) {
+      const auto node = work.back();
+      work.pop_back();
+      for (auto pred : predecessors[node]) {
+        if (component[pred] == invalid) {
+          component[pred] = components;
+          work.push_back(pred);
+        }
+      }
+    }
+    ++components;
+  }
+  return {std::move(component), components};
 }
+
 std::uint32_t nextID(std::size_t size) {
   if (size >= std::numeric_limits<std::uint32_t>::max())
     throw std::length_error("ValueFlowPTA: ID space exhausted");
@@ -120,9 +166,16 @@ public:
   Statistics stats;
   bool weak = false;
   bool analyzed = false;
-  std::vector<std::vector<NodeID>> edges;
+  std::vector<NodeSet> edges;
   std::vector<PointsToSet> pts;
   std::vector<NodeSet> pted;
+  std::vector<NodeSet> reachSeeds;
+  NodeSet dirtySignatures;
+  std::vector<NodeSet> activeAccesses;
+  std::vector<NodeSet> escapePointers;
+  std::vector<NodeSet> initialEscapeObjects;
+  std::vector<ObjectID> blockedWitness;
+
   std::vector<bool> reachable;
   std::vector<std::vector<AccessID>> uses;
   std::vector<NodeID> storedThrough;
@@ -141,15 +194,33 @@ public:
   std::vector<CFGNode> immediateDominator;
   std::vector<CFGNode> accessLocation;
   std::vector<AccessID> locationAccess;
+  std::vector<std::size_t> weakComponent;
+  std::vector<NodeSet> weakPredecessors;
 
   struct Signature {
-    std::set<AccessID> accesses;
-    std::set<AccessID> strong;
+    NodeSet accesses;
+    NodeSet strong;
     bool operator==(const Signature &other) const {
       return accesses == other.accesses && strong == other.strong;
     }
   };
   std::vector<Signature> previous;
+  std::vector<Signature> current;
+  // Equal access/kill signatures have equal sparse transfer relations. Share
+  // their topology and feed each object's own initializer into its root.
+  struct SignatureHash {
+    std::size_t operator()(const std::pair<NodeSet, NodeSet> &key) const {
+      std::uint64_t hash = 14695981039346656037ULL;
+      for (NodeID id : key.first)
+        hash = (hash ^ id) * 1099511628211ULL;
+      hash = (hash ^ key.first.size()) * 1099511628211ULL;
+      for (NodeID id : key.second)
+        hash = (hash ^ id) * 1099511628211ULL;
+      return static_cast<std::size_t>(hash);
+    }
+  };
+  std::unordered_map<std::pair<NodeSet, NodeSet>, NodeID, SignatureHash>
+      flowTemplates;
 
   void buildDominanceInfo() {
     cfgSuccessors.assign(1, {});
@@ -271,9 +342,21 @@ public:
 
   void reset(bool weakMode) {
     weak = weakMode;
-    edges = p.edges_;
+    flowTemplates.clear();
+    weakComponent.clear();
+    weakPredecessors.clear();
+    edges.assign(p.edges_.size(), {});
+    for (NodeID node = 1; node < p.edges_.size(); ++node)
+      edges[node].insert(p.edges_[node].begin(), p.edges_[node].end());
     pts.assign(p.edges_.size(), {});
     pted.assign(p.objects_.size(), {});
+    reachSeeds.assign(p.objects_.size(), {});
+    dirtySignatures.clear();
+    activeAccesses.assign(p.objects_.size(), {});
+    escapePointers.assign(p.objects_.size(), {});
+    initialEscapeObjects.assign(p.objects_.size(), {});
+    blockedWitness.assign(p.objects_.size(), 0);
+    current.assign(p.objects_.size(), {});
     uses.assign(p.edges_.size(), {});
     storedThrough.assign(p.edges_.size(), 0);
     initializedObject.assign(p.edges_.size(), 0);
@@ -307,6 +390,8 @@ public:
     buildDominanceInfo();
     for (ObjectID object = 1; object < p.objects_.size(); ++object) {
       dirtyReach.insert(object);
+      reachSeeds[object].insert(p.objects_[object].address);
+      dirtySignatures.insert(object);
       if (!p.objects_[object].memory)
         continue;
       pending.insert(object);
@@ -314,7 +399,7 @@ public:
       // escape ordering, including global pointer initializers.
       const NodeID initializer =
           p.initializers_[object] ? p.initializers_[object] : p.unknownValue();
-      appendUnique(edges[initializer], p.objects_[object].initialStore);
+      edges[initializer].insert(p.objects_[object].initialStore);
       initializedObject[p.objects_[object].initialStore] = object;
     }
   }
@@ -326,83 +411,173 @@ public:
       const ObjectID object = *dirtyReach.begin();
       dirtyReach.erase(dirtyReach.begin());
       ++stats.objectTraversals;
-      NodeSet visited;
-      std::vector<NodeID> work{p.objects_[object].address};
+      NodeSet seeds;
+      seeds.swap(reachSeeds[object]);
+      seeds.subtract(pted[object]);
+      pted[object].unite(seeds);
+      std::vector<NodeID> work(seeds.begin(), seeds.end());
       while (!work.empty()) {
         const NodeID node = work.back();
         work.pop_back();
-        if (!visited.insert(node).second)
-          continue;
-        pted[object].insert(node);
         pts[node].insert(object);
-        work.insert(work.end(), edges[node].begin(), edges[node].end());
+        if (initializedObject[node])
+          initialEscapeObjects[object].insert(initializedObject[node]);
+        else if (storedThrough[node])
+          escapePointers[object].insert(storedThrough[node]);
+        if (!uses[node].empty()) {
+          activeAccesses[object].insert(uses[node].begin(), uses[node].end());
+          dirtySignatures.insert(object);
+          // Existing non-singleton targets cannot lose a strong update.
+          for (ObjectID target : pts[node])
+            if (p.objects_[target].singleton)
+              dirtySignatures.insert(target);
+          if (object == p.unknownObject())
+            for (ObjectID target = 1; target < p.objects_.size(); ++target)
+              if (p.objects_[target].memory)
+                dirtySignatures.insert(target);
+        }
+        // Mark at discovery and subtract whole words. In a dense VFG,
+        // enqueueing every successor and checking on pop revisits the same
+        // facts once per incoming edge, even after reachability saturates.
+        NodeSet unseen = edges[node];
+        unseen.subtract(pted[object]);
+        pted[object].unite(unseen);
+        work.insert(work.end(), unseen.begin(), unseen.end());
       }
     }
   }
 
   Signature signature(ObjectID object) const {
     Signature result;
-    auto collect = [&](ObjectID from) {
-      for (NodeID pointer : pted[from]) {
-        for (AccessID id : uses[pointer]) {
-          result.accesses.insert(id);
-          const auto &access = p.accesses_[id];
-          if (!weak && p.objects_[object].singleton && access.allowStrong &&
-              access.kind == Program::AccessKind::Store &&
-              pts[pointer].size() == 1 && pts[pointer].count(object))
-            result.strong.insert(id);
-        }
-      }
-    };
-    collect(object);
+    result.accesses = activeAccesses[object];
     // Unknown is a wildcard address, not a disjoint allocation site.
     if (object != p.unknownObject())
-      collect(p.unknownObject());
-    return result;
-  }
-
-  struct EscapeSet {
-    PointsToSet objects;
-    bool unresolved = false;
-  };
-  EscapeSet escapes(ObjectID object) const {
-    EscapeSet result;
-    // Examine only stores reached by this object, not every store in the
-    // module. The store node holds the stored value; its pointer names the
-    // destination. Reversing the two reverses the escape order.
-    for (NodeID node : pted[object]) {
-      if (initializedObject[node]) {
-        result.objects.insert(initializedObject[node]);
-        continue;
-      }
-      const NodeID pointer = storedThrough[node];
-      if (!pointer)
-        continue;
-      const auto &targets = pts[pointer];
-      if (targets.empty()) {
-        result.unresolved = true;
-      } else if (targets.count(p.unknownObject())) {
-        for (ObjectID target = 1; target < p.objects_.size(); ++target)
-          if (p.objects_[target].memory)
-            result.objects.insert(target);
-      } else {
-        for (ObjectID target : targets)
-          if (p.objects_[target].memory)
-            result.objects.insert(target);
+      result.accesses.unite(activeAccesses[p.unknownObject()]);
+    if (!weak && p.objects_[object].singleton) {
+      for (AccessID id : result.accesses) {
+        const auto &access = p.accesses_[id];
+        if (access.allowStrong && access.kind == Program::AccessKind::Store &&
+            pts[access.pointer].size() == 1 && pts[access.pointer].count(object))
+          result.strong.insert(id);
       }
     }
     return result;
   }
 
+  bool escapeBlocked(ObjectID object) {
+    // A positive dependency stays valid as points-to sets grow. Recheck only
+    // after its witness has left the pending set; newly requeued witnesses
+    // are dependencies again. Never cache an unresolved pointer as a fact.
+    if (blockedWitness[object] && pending.count(blockedWitness[object]))
+      return true;
+    auto blockedBy = [&](ObjectID dependency) {
+      blockedWitness[object] = dependency;
+      return true;
+    };
+    for (ObjectID dependency : initialEscapeObjects[object])
+      if (pending.count(dependency))
+        return blockedBy(dependency);
+    for (NodeID pointer : escapePointers[object]) {
+      const auto &targets = pts[pointer];
+      if (targets.empty())
+        return true;
+      if (targets.count(p.unknownObject()))
+        return blockedBy(object); // Wildcard includes the object itself.
+      for (ObjectID target : targets)
+        if (p.objects_[target].memory && pending.count(target))
+          return blockedBy(target);
+    }
+    return false;
+  }
+
   bool addIndirect(NodeID from, NodeID to) {
     auto &successors = edges[from];
-    if (std::find(successors.begin(), successors.end(), to) != successors.end())
+    if (!successors.insert(to).second)
       return false;
-    successors.push_back(to);
     ++stats.indirectEdges;
     // Algorithm 3, UpdateVFG: only objects reaching the source need traversal.
-    dirtyReach.insert(pts[from].begin(), pts[from].end());
+    for (ObjectID object : pts[from]) {
+      if (!pted[object].count(to)) {
+        reachSeeds[object].insert(to);
+        dirtyReach.insert(object);
+      }
+    }
     return true;
+  }
+
+  NodeID addJoin() {
+    const NodeID node = nextID(edges.size());
+    edges.emplace_back();
+    pts.emplace_back();
+    uses.emplace_back();
+    storedThrough.push_back(0);
+    initializedObject.push_back(0);
+    ++stats.valueFlowJoinNodes;
+    return node;
+  }
+
+  // Without kills, control reachability is the complete memory transfer
+  // relation. Its SCCs are independent of the object and need computing only
+  // once. Project each weak signature onto that DAG, retaining only ancestors
+  // of loads and bypassing nodes with a single input.
+  NodeID computeWeakFlow(const Signature &sig) {
+    if (weakComponent.empty()) {
+      auto partition = controlComponents(cfgSuccessors, cfgPredecessors);
+      weakComponent = std::move(partition.first);
+      weakPredecessors.resize(partition.second);
+      for (CFGNode node = 0; node < cfgSuccessors.size(); ++node)
+        for (CFGNode next : cfgSuccessors[node])
+          if (weakComponent[node] != weakComponent[next])
+            weakPredecessors[weakComponent[next]].insert(
+                nextID(weakComponent[node]));
+    }
+    const std::size_t count = weakPredecessors.size();
+    std::vector<NodeSet> generated(count);
+    std::vector<std::vector<NodeID>> loads(count);
+    std::vector<bool> needed(count, false);
+    std::vector<std::size_t> work;
+    for (AccessID id : sig.accesses) {
+      const auto component = weakComponent[accessLocation[id]];
+      const auto &access = p.accesses_[id];
+      if (access.kind == Program::AccessKind::Store) {
+        generated[component].insert(access.value);
+      } else {
+        loads[component].push_back(access.value);
+        if (!needed[component]) {
+          needed[component] = true;
+          work.push_back(component);
+        }
+      }
+    }
+    while (!work.empty()) {
+      const auto component = work.back();
+      work.pop_back();
+      for (auto pred : weakPredecessors[component])
+        if (!needed[pred]) {
+          needed[pred] = true;
+          work.push_back(pred);
+        }
+    }
+    std::vector<NodeID> flow(count, 0);
+    const auto root = weakComponent[0];
+    for (std::size_t component = 0; component < count; ++component) {
+      if (!needed[component])
+        continue;
+      NodeSet inputs = std::move(generated[component]);
+      for (auto pred : weakPredecessors[component])
+        if (flow[pred])
+          inputs.insert(flow[pred]);
+      if (inputs.size() == 1 && component != root) {
+        flow[component] = *inputs.begin();
+      } else {
+        flow[component] = addJoin();
+        for (NodeID input : inputs)
+          addIndirect(input, flow[component]);
+      }
+      for (NodeID load : loads[component])
+        addIndirect(flow[component], load);
+    }
+    return flow[root];
   }
 
   // Algorithm 2's store-plus-IDF construction, applied to the expanded
@@ -413,6 +588,26 @@ public:
     stats.projectedEvents += sig.accesses.size();
     if (sig.accesses.empty())
       return;
+    const auto key = std::make_pair(sig.accesses, sig.strong);
+    auto cached = flowTemplates.find(key);
+    if (cached != flowTemplates.end()) {
+      ++stats.indirectFlowCacheHits;
+      addIndirect(p.objects_[object].initialStore, cached->second);
+      return;
+    }
+
+    const bool hasLoad = std::any_of(sig.accesses.begin(), sig.accesses.end(),
+                                     [&](AccessID id) {
+      return p.accesses_[id].kind == Program::AccessKind::Load;
+    });
+    if (!hasLoad)
+      return;
+    if (sig.strong.empty()) {
+      const NodeID root = computeWeakFlow(sig);
+      addIndirect(p.objects_[object].initialStore, root);
+      flowTemplates.emplace(key, root);
+      return;
+    }
 
     std::vector<bool> storeLocation(cfgSuccessors.size(), false);
     std::deque<CFGNode> idfWork;
@@ -440,16 +635,18 @@ public:
       }
     }
 
-    using SparseNode = std::size_t;
+    using SparseNode = NodeID;
     const SparseNode invalidSparse = std::numeric_limits<SparseNode>::max();
     std::vector<std::vector<SparseNode>> sparseSuccessors(1);
+    std::vector<NodeSet> sparseEdgeIndex(1);
     std::vector<std::vector<SparseNode>> sparsePredecessors(1);
     std::vector<AccessID> sparseStore(1, 0);
     std::vector<SparseNode> phiNode(cfgSuccessors.size(), invalidSparse);
     std::vector<SparseNode> storeNode(p.accesses_.size(), invalidSparse);
     auto addSparseNode = [&](AccessID store = 0) {
-      const SparseNode node = sparseSuccessors.size();
+      const SparseNode node = nextID(sparseSuccessors.size());
       sparseSuccessors.emplace_back();
+      sparseEdgeIndex.emplace_back();
       sparsePredecessors.emplace_back();
       sparseStore.push_back(store);
       return node;
@@ -464,9 +661,7 @@ public:
         storeNode[access] = addSparseNode(access);
 
     auto addSparseEdge = [&](SparseNode from, SparseNode to) {
-      if (std::find(sparseSuccessors[from].begin(),
-                    sparseSuccessors[from].end(),
-                    to) != sparseSuccessors[from].end())
+      if (!sparseEdgeIndex[from].insert(to).second)
         return;
       sparseSuccessors[from].push_back(to);
       sparsePredecessors[to].push_back(from);
@@ -519,36 +714,84 @@ public:
 
     stats.sparseGraphNodes += sparseSuccessors.size();
 
-    // Solve Algorithm 2's GEN/KILL equations over stores plus IDF joins. Only
-    // reaching store-node IDs are carried; no points-to maps flow through the
-    // sparse graph.
-    std::vector<NodeSet> out(sparseSuccessors.size());
-    out[0].insert(p.objects_[object].initialStore);
-    std::deque<SparseNode> work;
-    std::vector<bool> queued(sparseSuccessors.size(), true);
-    for (SparseNode node = 1; node < sparseSuccessors.size(); ++node)
-      work.push_back(node);
-    while (!work.empty()) {
-      const SparseNode node = work.front();
-      work.pop_front();
-      queued[node] = false;
-      NodeSet next;
-      for (SparseNode predecessor : sparsePredecessors[node])
-        unite(next, out[predecessor]);
-      const AccessID store = sparseStore[node];
-      if (store) {
-        if (sig.strong.count(store))
-          next.clear();
-        next.insert(p.accesses_[store].value);
-      }
-      if (next == out[node])
+    // Factor the GEN/KILL relation into copy edges instead of materializing
+    // every reaching-store/load pair. A weak store joins its generated value
+    // with its predecessors; a strong store has no predecessor input. Thus
+    // reachability through these internal nodes is exactly the GEN/KILL
+    // fixed point, including loops, without repeatedly unioning definition
+    // sets at every sparse node.
+    // Condense copy cycles after removing the inputs killed by strong
+    // stores. Every node in such an SCC has the same reaching values.
+    const std::size_t count = sparseSuccessors.size();
+    auto killsInput = [&](SparseNode node) {
+      return sparseStore[node] && sig.strong.count(sparseStore[node]);
+    };
+    std::vector<bool> seen(count, false);
+    std::vector<SparseNode> postorder;
+    for (SparseNode start = 0; start < count; ++start) {
+      if (seen[start])
         continue;
-      out[node] = std::move(next);
-      for (SparseNode successor : sparseSuccessors[node])
-        if (!queued[successor]) {
-          queued[successor] = true;
-          work.push_back(successor);
+      std::vector<std::pair<SparseNode, std::size_t>> dfs{{start, 0}};
+      seen[start] = true;
+      while (!dfs.empty()) {
+        auto &frame = dfs.back();
+        const auto &next = sparseSuccessors[frame.first];
+        if (frame.second < next.size()) {
+          const SparseNode successor = next[frame.second++];
+          if (!killsInput(successor) && !seen[successor]) {
+            seen[successor] = true;
+            dfs.emplace_back(successor, 0);
+          }
+        } else {
+          postorder.push_back(frame.first);
+          dfs.pop_back();
         }
+      }
+    }
+    std::vector<SparseNode> component(count, invalidSparse);
+    SparseNode components = 0;
+    for (auto it = postorder.rbegin(); it != postorder.rend(); ++it) {
+      if (component[*it] != invalidSparse)
+        continue;
+      std::vector<SparseNode> work{*it};
+      component[*it] = components;
+      while (!work.empty()) {
+        const SparseNode node = work.back();
+        work.pop_back();
+        if (killsInput(node))
+          continue;
+        for (SparseNode predecessor : sparsePredecessors[node]) {
+          if (component[predecessor] == invalidSparse) {
+            component[predecessor] = components;
+            work.push_back(predecessor);
+          }
+        }
+      }
+      ++components;
+    }
+    std::vector<NodeID> componentNodes;
+    componentNodes.reserve(components);
+    for (SparseNode i = 0; i < components; ++i) {
+      const NodeID node = nextID(edges.size());
+      edges.emplace_back();
+      pts.emplace_back();
+      uses.emplace_back();
+      storedThrough.push_back(0);
+      initializedObject.push_back(0);
+      componentNodes.push_back(node);
+      ++stats.valueFlowJoinNodes;
+    }
+    std::vector<NodeID> flowNodes(count);
+    for (SparseNode node = 0; node < count; ++node)
+      flowNodes[node] = componentNodes[component[node]];
+    for (SparseNode node = 1; node < count; ++node) {
+      const AccessID store = sparseStore[node];
+      if (store)
+        addIndirect(p.accesses_[store].value, flowNodes[node]);
+      if (!killsInput(node))
+        for (SparseNode predecessor : sparsePredecessors[node])
+          if (component[predecessor] != component[node])
+            addIndirect(flowNodes[predecessor], flowNodes[node]);
     }
     for (AccessID access : sig.accesses) {
       if (p.accesses_[access].kind != Program::AccessKind::Load)
@@ -557,9 +800,10 @@ public:
       if (source == invalidSparse)
         throw std::logic_error(
             "ValueFlowPTA: relevant load has no sparse definition");
-      for (NodeID definition : out[source])
-        addIndirect(definition, p.accesses_[access].value);
+      addIndirect(flowNodes[source], p.accesses_[access].value);
     }
+    addIndirect(p.objects_[object].initialStore, flowNodes[0]);
+    flowTemplates.emplace(key, flowNodes[0]);
   }
 
   void fallback(const char *reason) {
@@ -575,9 +819,8 @@ public:
     reset(!config.enableStrongUpdates);
     while (true) {
       computePointedToBy();
-      std::vector<Signature> current(p.objects_.size());
       bool restart = false;
-      for (ObjectID object = 1; object < p.objects_.size(); ++object) {
+      for (ObjectID object : dirtySignatures) {
         if (!p.objects_[object].memory)
           continue;
         current[object] = signature(object);
@@ -593,6 +836,7 @@ public:
         }
         pending.insert(object);
       }
+      dirtySignatures.clear();
       if (restart) {
         fallback("a new strong store invalidated the escape schedule");
         continue;
@@ -605,11 +849,7 @@ public:
         chosen = *pending.begin();
       } else {
         for (ObjectID object : pending) {
-          const auto escape = escapes(object);
-          bool blocked = escape.unresolved;
-          for (ObjectID dependency : escape.objects)
-            blocked |= pending.count(dependency) != 0;
-          if (!blocked) {
+          if (!escapeBlocked(object)) {
             chosen = object;
             break;
           }
@@ -637,6 +877,16 @@ public:
     for (const auto &sig : previous)
       finalStrong.insert(sig.strong.begin(), sig.strong.end());
     stats.strongUpdateSites = finalStrong.size();
+    // Internal join IDs are implementation details, not Program node IDs.
+    for (NodeSet &nodes : pted) {
+      NodeSet publicNodes;
+      for (NodeID node : nodes) {
+        if (node >= p.edges_.size())
+          break;
+        publicNodes.insert(node);
+      }
+      nodes = std::move(publicNodes);
+    }
     analyzed = true;
   }
   void requireAnalyzed() const {

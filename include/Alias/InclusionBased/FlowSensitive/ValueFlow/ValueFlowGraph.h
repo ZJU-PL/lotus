@@ -8,6 +8,8 @@
 // nodes, never destinations of value-flow edges. Null and unknown are distinct
 // objects; an empty points-to set is bottom, NOT an unknown pointer.
 
+#include "IR/SVFG/SVFGNodeBS.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -21,8 +23,8 @@ using NodeID = std::uint32_t;
 using ObjectID = std::uint32_t;
 using BlockID = std::uint32_t;
 using AccessID = std::uint32_t;
-using PointsToSet = std::set<ObjectID>;
-using NodeSet = std::set<NodeID>;
+using PointsToSet = lotus::analysis::SVFGNodeBS;
+using NodeSet = lotus::analysis::SVFGNodeBS;
 
 class Program {
 public:
@@ -96,6 +98,12 @@ public:
   struct Statistics {
     std::size_t objectTraversals = 0;
     std::size_t indirectFlowComputations = 0;
+    std::size_t indirectFlowCacheHits = 0;
+    // Internal nodes factoring memory flow after SCC condensation. These
+    // are not Program NodeIDs and are omitted from pointedToBy() queries.
+    std::size_t valueFlowJoinNodes = 0;
+    // Includes edges through internal joins, not the transitive store/load
+    // relation (which may be quadratic in the size of the sparse graph).
     std::size_t indirectEdges = 0;
     std::size_t strongUpdateSites = 0;
     std::size_t projectedEvents = 0;
