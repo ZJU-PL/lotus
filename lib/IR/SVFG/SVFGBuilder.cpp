@@ -912,6 +912,21 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
     return 0;
   SVFG *graph = getActiveSVFG();
   const uint32_t canonicalBaseObjId = getCanonicalBaseObjId(baseObjId);
+  if (::getenv("LOTUS_SVFG_DEBUG")) {
+    auto label = [&](uint32_t id) -> std::string {
+      if (!graph)
+        return "<no-graph>";
+      auto it = graph->getObjectDebugMap().find(id);
+      return it == graph->getObjectDebugMap().end() ? std::string("<none>")
+                                                    : it->second;
+    };
+    const auto dbgNorm = getInstructionGepOffset(gep);
+    llvm::errs() << "[svfg] gep-entry ";
+    gep->printAsOperand(llvm::errs(), false);
+    llvm::errs() << " base=" << baseObjId << "[" << label(baseObjId)
+                 << "] canon=" << canonicalBaseObjId
+                 << " off=" << dbgNorm.offset << "\n";
+  }
 
   if (graph && graph->isUnknownObject(baseObjId))
     return baseObjId;
@@ -962,6 +977,11 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
         fieldObjectNode ? fieldObjectNode->getObject() : nullptr;
     if (!fieldObject)
       return 0;
+    // Field-insensitive/collapsed models can answer with the base object
+    // itself. Do not adopt that object as a distinct field: doing so would
+    // overwrite the base's metadata with a member offset.
+    if (fieldObject == baseObject)
+      return 0;
     auto cached = ptaObjectToObjId.find(fieldObject);
     if (cached != ptaObjectToObjId.end())
       return cached->second;
@@ -999,16 +1019,35 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
     }
 
     uint32_t fieldObjId = queryAserFieldObject();
+    if (::getenv("LOTUS_SVFG_DEBUG")) {
+      auto label = [&](uint32_t id) -> std::string {
+        auto it = graph->getObjectDebugMap().find(id);
+        return it == graph->getObjectDebugMap().end() ? std::string("<none>")
+                                                      : it->second;
+      };
+      llvm::errs() << "  [svfg] query=" << fieldObjId << "[" << label(fieldObjId)
+                   << "] base=" << canonicalBaseObjId << " off=" << totalOffset
+                   << "\n";
+    }
     // The auxiliary analysis may collapse an array to its base. Reusing
     // that ID here would overwrite the base's metadata with a member offset
     // and conflate every member's initializer with that field.
     if (fieldObjId == canonicalBaseObjId)
       fieldObjId = 0;
-    if (const auto *existing = graph->getObjectInfo(fieldObjId))
-      if ((existing->baseObjId != 0 &&
-           existing->baseObjId != canonicalBaseObjId) ||
-          (existing->hasFieldOffset && existing->fieldOffset != totalOffset))
+    // Objects materialized directly from PTA points-to sets become their own
+    // base (baseObjId == objId) because their allocation-site value alone does
+    // not say which field they represent.  When the GEP query above identifies
+    // such an object as the field at `totalOffset`, adopt it instead of
+    // synthesizing a second object for the same location.  Reject objects that
+    // are already bound to another base/offset, or that are field-insensitive.
+    if (const auto *existing = graph->getObjectInfo(fieldObjId)) {
+      const bool isUnbound =
+          existing->baseObjId == 0 || existing->baseObjId == fieldObjId;
+      if ((!isUnbound && existing->baseObjId != canonicalBaseObjId) ||
+          (existing->hasFieldOffset && existing->fieldOffset != totalOffset) ||
+          existing->isFieldInsensitive)
         fieldObjId = 0;
+    }
     if (fieldObjId == 0)
       fieldObjId = allocateObjectId();
     SVFG::ObjectInfo info;

@@ -220,6 +220,87 @@ TEST_F(FlowSensitivePTATest, SolvesBuilderProducedSVFG) {
   EXPECT_TRUE(pointsToY) << observedStream.str();
 }
 
+TEST_F(FlowSensitivePTATest, PropagatesStructPointerFieldsAcrossCalls) {
+  // A pointer field at a non-zero offset must cross the call boundary in both
+  // directions.  The interprocedural memory summary used to be argument
+  // granular, so only the argument's base region received a FormalIn/FormalOut
+  // and these loads silently observed an empty memory state.
+  auto module = parseModule(R"(
+    %struct.Reg = type { i32, i8* }
+    @x = global i8 0
+    @y = global i8 0
+
+    define internal i8* @read_field(%struct.Reg* %reg) {
+    entry:
+      %hash = getelementptr inbounds %struct.Reg, %struct.Reg* %reg, i32 0, i32 1
+      %value = load i8*, i8** %hash
+      ret i8* %value
+    }
+
+    define internal void @write_field(%struct.Reg* %reg) {
+    entry:
+      %hash = getelementptr inbounds %struct.Reg, %struct.Reg* %reg, i32 0, i32 1
+      store i8* @y, i8** %hash
+      ret void
+    }
+
+    define i8* @main() {
+    entry:
+      %reg = alloca %struct.Reg
+      %hash = getelementptr inbounds %struct.Reg, %struct.Reg* %reg, i32 0, i32 1
+      store i8* @x, i8** %hash
+      %read = call i8* @read_field(%struct.Reg* %reg)
+      call void @write_field(%struct.Reg* %reg)
+      %after = load i8*, i8** %hash
+      ret i8* %after
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  graphConfig.memoryPartition = MemoryRegionPartitionStrategy::IntraDisjoint;
+  SVFGBuilder graphBuilder(graphConfig);
+  std::unique_ptr<SVFG> graph(graphBuilder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *calleeLoad = nullptr;
+  for (const Instruction &instruction :
+       instructions(module->getFunction("read_field")))
+    if (const auto *candidate = dyn_cast<LoadInst>(&instruction))
+      calleeLoad = candidate;
+  const LoadInst *callerLoad = nullptr;
+  for (const Instruction &instruction :
+       instructions(module->getFunction("main")))
+    if (const auto *candidate = dyn_cast<LoadInst>(&instruction))
+      callerLoad = candidate;
+  ASSERT_NE(calleeLoad, nullptr);
+  ASSERT_NE(callerLoad, nullptr);
+
+  FlowSensitivePTA solver(*graph);
+  solver.solve();
+
+  auto contains = [&](const FlowSensitivePTA::PointsToSet &set,
+                      const GlobalVariable *global) {
+    for (uint32_t object : set)
+      if (const Value *value = graph->getObjectValue(object))
+        if (value->stripPointerCasts() == global)
+          return true;
+    return false;
+  };
+
+  auto calleeResult = solver.pointsTo(calleeLoad);
+  ASSERT_TRUE(calleeResult.has_value());
+  EXPECT_TRUE(contains(*calleeResult, module->getGlobalVariable("x")));
+  auto callerResult = solver.pointsTo(callerLoad);
+  ASSERT_TRUE(callerResult.has_value());
+  EXPECT_TRUE(contains(*callerResult, module->getGlobalVariable("y")));
+}
+
 TEST_F(FlowSensitivePTATest, HashConsedBackendKeepsGlobalInitializerSets) {
   auto module = parseModule(R"(
     @x = global i8 0

@@ -122,6 +122,12 @@ cl::opt<unsigned> ComparisonSampleSeed(
     "comparison-sample-seed",
     cl::desc("Stable hash query sample seed (0: lexical prefix)"),
     cl::init(0), cl::cat(FsptaCategory));
+cl::opt<bool>
+    PrintObjectMap("print-object-map",
+                   cl::desc("Print abstract object metadata (base object, field "
+                            "offset, field sensitivity) for differential "
+                            "comparison with SVF"),
+                   cl::init(false), cl::cat(FsptaCategory));
 cl::opt<bool> PrintMemory("print-memory",
                           cl::desc("Print non-empty sparse memory facts"),
                           cl::init(false), cl::cat(FsptaCategory));
@@ -199,16 +205,21 @@ MemoryRegionPartitionStrategy partitionStrategy() {
 }
 
 void printValue(const Value *value, raw_ostream &os) {
-  if (!value)
+  if (!value) {
     os << "<unknown>";
-  else if (const auto *instruction = dyn_cast<Instruction>(value)) {
+    return;
+  }
+  // Function-qualify both instructions and arguments: bare argument names
+  // collide with globals and with same-named arguments of other functions,
+  // which makes differential output ambiguous.
+  if (const auto *instruction = dyn_cast<Instruction>(value)) {
     if (instruction->getFunction())
       os << instruction->getFunction()->getName() << "::";
-    if (value->hasName())
-      os << value->getName();
-    else
-      value->printAsOperand(os, false);
-  } else if (value->hasName())
+  } else if (const auto *argument = dyn_cast<Argument>(value)) {
+    if (argument->getParent())
+      os << argument->getParent()->getName() << "::";
+  }
+  if (value->hasName())
     os << value->getName();
   else
     value->printAsOperand(os, false);
@@ -643,6 +654,24 @@ int main(int argc, char **argv) {
         printValue(graph->getObjectValue(object), outs());
       }
       outs() << "}\n";
+    }
+  }
+  if (PrintObjectMap) {
+    auto objectIds = graph->getAllObjectIds();
+    std::sort(objectIds.begin(), objectIds.end());
+    for (uint32_t objectId : objectIds) {
+      const auto *info = graph->getObjectInfo(objectId);
+      const uint32_t base =
+          info && info->baseObjId != 0 ? info->baseObjId : objectId;
+      const uint64_t offset =
+          info && info->hasFieldOffset ? info->fieldOffset : 0;
+      outs() << "OBJ " << objectId << ' ' << base << ' ' << offset << ' '
+             << ((info && info->isFieldInsensitive) ? "fi" : "fs") << ' ';
+      if (const Value *value = graph->getObjectValue(objectId))
+        printValue(value, outs());
+      else
+        outs() << "<anon>";
+      outs() << '\n';
     }
   }
   if (PrintMemory) {

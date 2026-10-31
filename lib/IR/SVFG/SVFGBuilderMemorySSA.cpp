@@ -293,6 +293,12 @@ void SVFGBuilder::buildMemorySSA() {
       }
       if (const auto *load = dyn_cast<LoadInst>(current)) {
         visit(getDominatingStoredValue(load));
+        // A value loaded through a formally derived pointer is memory
+        // reachable from that formal even when the defining store lives in a
+        // different function (e.g. `o->in->arr` after `o->in` was assigned by
+        // the caller or a callee).  Keep the origin so nested field accesses
+        // are summarized instead of being treated as local to the callee.
+        visit(load->getPointerOperand());
         return;
       }
       if (const auto *phi = dyn_cast<PHINode>(current)) {
@@ -572,6 +578,12 @@ void SVFGBuilder::buildMemorySSA() {
       }
       if (const auto *load = dyn_cast<LoadInst>(current)) {
         visit(getDominatingStoredValue(load));
+        // A value loaded through a formally derived pointer is memory
+        // reachable from that formal even when the defining store lives in a
+        // different function (e.g. `o->in->arr` after `o->in` was assigned by
+        // the caller or a callee).  Keep the origin so nested field accesses
+        // are summarized instead of being treated as local to the callee.
+        visit(load->getPointerOperand());
         return;
       }
       if (const auto *phi = dyn_cast<PHINode>(current)) {
@@ -589,6 +601,94 @@ void SVFGBuilder::buildMemorySSA() {
     };
     visit(value);
     return origins;
+  };
+
+  // Object-graph facts used to attribute accesses that are only reachable
+  // through nested pointer fields.  Example: in
+  //   s = bzalloc(...); strm->state = s; s->arr1 = bzalloc(...);
+  // `s->arr1` is not syntactically derived from a formal, but it is memory
+  // reachable from `strm` through the store into `strm->state`.  Likewise for
+  // `o->in->arr` when `o->in` is loaded instead of stored locally.
+  struct EscapeFacts {
+    std::unordered_map<uint32_t, SVFGNodeBS> storedInto;
+    std::unordered_map<uint32_t, SVFGNodeBS> fieldsOfBase;
+    std::unordered_map<const Argument *, SVFGNodeBS> formalReach;
+  };
+  std::unordered_map<const Function *, std::unique_ptr<EscapeFacts>>
+      escapeFactsCache;
+  auto getEscapeFacts = [&](const Function *F) -> EscapeFacts * {
+    if (!F)
+      return nullptr;
+    auto cached = escapeFactsCache.find(F);
+    if (cached != escapeFactsCache.end())
+      return cached->second.get();
+
+    auto facts = std::make_unique<EscapeFacts>();
+    for (const BasicBlock &bb : *F) {
+      for (const Instruction &inst : bb) {
+        const auto *store = dyn_cast<StoreInst>(&inst);
+        if (!store)
+          continue;
+        if (config.pointerOnly &&
+            !store->getValueOperand()->getType()->isPointerTy())
+          continue;
+        const auto region =
+            getCanonicalRegionForPointer(store->getPointerOperand());
+        if (region.second.empty())
+          continue;
+        const SVFGNodeBS stored =
+            getObjectIdsForValue(store->getValueOperand());
+        if (stored.empty())
+          continue;
+        for (uint32_t object : region.second)
+          facts->storedInto[object].insert(stored.begin(), stored.end());
+      }
+    }
+    if (svfg) {
+      for (const auto &entry : svfg->getObjectDebugMap()) {
+        const uint32_t object = entry.first;
+        const auto *info = svfg->getObjectInfo(object);
+        if (!info || info->baseObjId == 0 || info->baseObjId == object)
+          continue;
+        facts->fieldsOfBase[info->baseObjId].insert(object);
+      }
+    }
+    EscapeFacts *raw = facts.get();
+    escapeFactsCache.emplace(F, std::move(facts));
+    return raw;
+  };
+  auto reachableFromFormal = [&](const Function *F,
+                                 const Argument *arg) -> const SVFGNodeBS & {
+    static const SVFGNodeBS kEmpty;
+    EscapeFacts *facts = getEscapeFacts(F);
+    if (!facts)
+      return kEmpty;
+    auto cached = facts->formalReach.find(arg);
+    if (cached != facts->formalReach.end())
+      return cached->second;
+
+    SVFGNodeBS reachable = convertPTAObjectsToObjIDs(getPointsToSet(arg));
+    std::vector<uint32_t> worklist(reachable.begin(), reachable.end());
+    // Bound the closure: pointer-heavy functions can have very large escape
+    // graphs, and this is only a summary-attribution aid.
+    size_t budget = 4096;
+    while (!worklist.empty() && budget-- > 0) {
+      const uint32_t object = worklist.back();
+      worklist.pop_back();
+      auto addAll = [&](const SVFGNodeBS &add) {
+        for (uint32_t id : add)
+          if (reachable.insert(id).second)
+            worklist.push_back(id);
+      };
+      auto fieldsIt = facts->fieldsOfBase.find(object);
+      if (fieldsIt != facts->fieldsOfBase.end())
+        addAll(fieldsIt->second);
+      auto storedIt = facts->storedInto.find(object);
+      if (storedIt != facts->storedInto.end())
+        addAll(storedIt->second);
+    }
+    return facts->formalReach.emplace(arg, std::move(reachable))
+        .first->second;
   };
 
   auto recordVisibleAccess = [&](const Function *context, const Value *ptr,
@@ -638,8 +738,8 @@ void SVFGBuilder::buildMemorySSA() {
       for (const Argument &argument : context->args()) {
         if (!argument.getType()->isPointerTy())
           continue;
-        const SVFGNodeBS argumentObjects =
-            convertPTAObjectsToObjIDs(getPointsToSet(&argument));
+        const SVFGNodeBS &argumentObjects =
+            reachableFromFormal(context, &argument);
         if (argumentObjects.empty())
           continue;
         if (intersectPointsToSets(accessObjects, argumentObjects,
@@ -658,6 +758,37 @@ void SVFGBuilder::buildMemorySSA() {
       mergeRegions(summary.readGlobals, visibleRegs);
     if (isWrite)
       mergeRegions(summary.writeGlobals, visibleRegs);
+
+    // `readArgs`/`writeArgs` are region-agnostic: they only remember the
+    // argument index, and FormalIn/FormalOut creation later maps that index to
+    // the argument's *base* region.  An access through a field of a formal
+    // (e.g. `arg->field`) therefore used to have no formal-in/out node for the
+    // field region, so a callee load saw an empty memory state and a callee
+    // store was invisible to its caller.  Record the concrete region of every
+    // argument-derived access next to the argument index.
+    if (matchedArgument) {
+      const auto region = getCanonicalRegionForPointer(ptr);
+      if (::getenv("LOTUS_SVFG_DEBUG")) {
+        auto label = [&](uint32_t id) -> std::string {
+          auto it = svfg->getObjectDebugMap().find(id);
+          return it == svfg->getObjectDebugMap().end() ? std::string("<none>")
+                                                      : it->second;
+        };
+        llvm::errs() << "[svfg] access F=" << (context ? context->getName() : "")
+                     << " ptr=";
+        ptr->printAsOperand(llvm::errs(), false);
+        llvm::errs() << " region=" << region.first << " pts={";
+        for (uint32_t id : region.second)
+          llvm::errs() << id << "[" << label(id) << "],";
+        llvm::errs() << "}\n";
+      }
+      if (region.first != 0) {
+        if (isRead)
+          addRegion(summary.readGlobals, region.first, region.second);
+        if (isWrite)
+          addRegion(summary.writeGlobals, region.first, region.second);
+      }
+    }
   };
 
   auto getCallTargets = [&](const CallBase *call) {
@@ -686,6 +817,7 @@ void SVFGBuilder::buildMemorySSA() {
 
   auto collectDirectSummary = [&](const Function &F) {
     FunctionMemorySummary summary;
+
     for (const BasicBlock &bb : F) {
       for (const Instruction &inst : bb) {
         if (const auto *load = dyn_cast<LoadInst>(&inst)) {
