@@ -121,21 +121,21 @@ Understanding the code
 
 1. **Framework IR** (``FrameworkIR/Analyzer.cpp``): For each LLVM function, build a framework CFG (basic blocks, instructions as Call/Store/Load/Return). Collect possible return values per block (constants, call results) for building function summaries.
 
-2. **Main pass** (``frontend/Framework.cpp``): For each typestate checker (StateManager), create an Analyzer and run ``analyze()``. The analyzer iterates over all framework functions in the module.
+2. **Main pass** (``Frontend/Framework.cpp``): For each typestate checker (StateManager), create an Analyzer and run ``analyze()``. The analyzer iterates over all framework functions in the module.
 
-3. **Per-function analysis** (``frontend/Analyzer.cpp``, ``analyzeFunction``): Worklist over basic blocks. For each block: (a) ``createBasicBlockInfo`` merges states from all predecessors; (b) ``analyzePrevBlockBranch`` applies branch-dependent transitions (e.g. ptr==NULL on true path); (c) for each Call/Store/Load, apply the matching typestate transitions (Fun Arg, Store, Use, Alias); (d) if any state changed, re-queue the block; (e) at end of block, run bug-checking hooks (IMMEDIATE, END_OF_LIFE). After the worklist, ``analyzeReturnValue`` builds the function summary (return code → blocks), then report at FUNCTION_END and MODULE_END if applicable.
+3. **Per-function analysis** (``Frontend/Analyzer.cpp``, ``analyzeFunction``): Worklist over basic blocks. For each block: (a) ``createBasicBlockInfo`` merges states from all predecessors; (b) ``analyzePrevBlockBranch`` applies branch-dependent transitions (e.g. ptr==NULL on true path); (c) for each Call/Store/Load, apply the matching typestate transitions (Fun Arg, Store, Use, Alias); (d) if any state changed, re-queue the block; (e) at end of block, run bug-checking hooks (IMMEDIATE, END_OF_LIFE). After the worklist, ``analyzeReturnValue`` builds the function summary (return code → blocks), then report at FUNCTION_END and MODULE_END if applicable.
 
 4. **Call handling**: On a call, first apply **Fun Arg** transitions (e.g. kfree(ptr)). If the callee is defined in this TU, analyze it (bottom-up), then **copyFunctionValues** or **addPendingFunctionValues**: if the return value is used in a branch (e.g. ``if (err)``), only the callee states for the return codes that satisfy that branch are propagated (**return-code aware propagation**); otherwise merge states from all callee exit blocks.
 
 **Key data structures**
 
-* **FunctionInformation** (``frontend/Function.h``): Per-function summary: ``basic_block_info_`` (per-block value states), ``return_info_`` (return code → set of blocks), ``value_collection_`` (related/parent values for propagation).
+* **FunctionInformation** (``Frontend/Function.h``): Per-function summary: ``basic_block_info_`` (per-block value states), ``return_info_`` (return code → set of blocks), ``value_collection_`` (related/parent values for propagation).
 
-* **BasicBlockInformation** (``frontend/BasicBlock.h``): Per-block state: ``value_states_`` (value → TransitionLogs), ``arg_value_states_`` (for summary: arg index → (value, transitions)), ``pending_values_`` (per successor block: pending arg states and return value for return-code aware propagation).
+* **BasicBlockInformation** (``Frontend/BasicBlock.h``): Per-block state: ``value_states_`` (value → TransitionLogs), ``arg_value_states_`` (for summary: arg index → (value, transitions)), ``pending_values_`` (per successor block: pending arg states and return value for return-code aware propagation).
 
-* **TransitionLogs** (``frontend/State.h``): History of (transition, instruction) for one value; ``LeastSignificantSource`` is used to filter reports (only report if the value reached the bug state from a “real” init).
+* **TransitionLogs** (``Frontend/State.h``): History of (transition, instruction) for one value; ``LeastSignificantSource`` is used to filter reports (only report if the value reached the bug state from a “real” init).
 
-* **StateTransitionManager** (``frontend/State.h``): Lookup transitions by trigger: Fun Arg (function name + arg index), Store (NULL/NON/ANY/CALL_FUNC), Use, Alias. Each detector registers its typestate transitions here.
+* **StateTransitionManager** (``Frontend/State.h``): Lookup transitions by trigger: Fun Arg (function name + arg index), Store (NULL/NON/ANY/CALL_FUNC), Use, Alias. Each detector registers its typestate transitions here.
 
 **Adding a new detector**
 

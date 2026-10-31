@@ -111,10 +111,10 @@ The solver constructs **path expressions** (regular-expression-like ASTs) over e
 
 This corresponds to a **meet-over-all-paths (MOP)** computation. For classic distributive frameworks, MOP equals the standard maximal fixed point (MFP) solution.
 
-## Relation to `Support/Algorithms/PathExpressions`
+## Relation to `Utils/Algorithms/PathExpressions`
 
 Lotus also ships a generic path-expression utility under
-`include/Support/Algorithms/PathExpressions/`. That component computes ordinary
+`include/Utils/Algorithms/PathExpressions/`. That component computes ordinary
 regular expressions over edge labels in arbitrary labeled graphs.
 
 The APA solver is different:

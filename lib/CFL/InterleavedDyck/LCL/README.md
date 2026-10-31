@@ -209,8 +209,8 @@ and options, then build:
 ```sh
 cmake -S . -B build -DLOTUS_BUILD_TESTS=ON
 cmake --build build --target CanaryInterleavedDyckLCL \
-  lotus-cfl-interleaved-dyck lcl interleaved_dyck_lcl_test
-ctest --test-dir build -R interleaved_dyck_lcl --output-on-failure
+  lotus-cfl-interleaved-dyck cfl_tests
+ctest --test-dir build -R 'cfl_tests.InterleavedDyckLCL' --output-on-failure
 ```
 
 Use `--help` for all CLI options. Queries print `may-reach` or `unreachable`;

@@ -19,11 +19,15 @@ lotus/
 │   ├── Checker/       # Bug checkers (AE, Concurrency, FiTx, KINT, Pulse, Saber etc.)
 │   ├── Concurrency/   # Concurrency analyses (MHP, lockset, MPI, OpenMP, kernel, CUDA, etc.)
 │   ├── Dataflow/      # APA, IFDS/IDE, Mono, NPA, VASCO, WPDS
+│   ├── Fuzzing/       # Directed fuzzing support
 │   ├── IR/            # GSA, GVFG, ICFG, PDG, SSI, SVFG, vSSA, etc.
+│   ├── Security/      # Side-channel & constant-time analyses
 │   ├── Solvers/       # Datalog, EGraph, SMT
+│   ├── SymbolicExecution/ # Symbolic execution engine
+│   ├── System/        # System models & OS abstractions
 │   ├── Transform/     # Bitcode transformations
 │   ├── Utils/         # LLVM utilities, ThreadPool, formats, etc.
-│   └── Verification/  # SIFA, CLAM, smarck, Seahorn, etc.
+│   └── Verification/  # SIFA, CLAM, SMACK, Seahorn, etc.
 ├── lib/               # Implementations (mirrors include)
 ├── tools/             # Command-line tools (alias, checker, verifier, ir, etc.)
 ├── tests/             # GTest-based tests (tests/unit/ mirrors subsystems)
@@ -42,9 +46,9 @@ lotus/
 
 ```bash
 mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake .. -DCMAKE_BUILD_TYPE=Release -DLOTUS_BUILD_TESTS=ON
 make -j$(nproc)
-make test
+ctest --output-on-failure  # or make test
 ```
 
 Custom LLVM path: `cmake .. -DLLVM_BUILD_PATH=/path/to/llvm/lib/cmake/llvm`

@@ -446,10 +446,13 @@ Usage
    mhp::MHPAnalysis mhp(M);
    mhp.enableLockSetAnalysis();
    mhp.analyze();
-   
+
+   mhp::LockSetAnalysis lsa(M);
+   lsa.analyze();
+
    lotus::EscapeAnalysis escape(M);
    escape.analyze();
-   
+
    // Check for data races
    for (auto &I1 : instructions) {
      for (auto &I2 : instructions) {
@@ -457,7 +460,7 @@ Usage
            isMemoryAccess(I1) && isMemoryAccess(I2) &&
            mayAlias(I1, I2) &&
            (isWrite(I1) || isWrite(I2)) &&
-           !isProtectedByCommonLock(I1, I2, lsa) &&
+           !lsa.mayHoldCommonLock(I1, I2) &&
            escape.isEscaped(getMemoryLocation(I1))) {
          // Potential data race detected
        }

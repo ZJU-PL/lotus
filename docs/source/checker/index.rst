@@ -213,8 +213,8 @@ Components
 
 **FiTx Bug Checkers** (``lib/Checker/FiTx/``):
 
-* ``frontend/Framework.cpp`` – Main FiTx pass; typestate-based daily development-friendly checkers (Suzuki et al., USENIX ATC 2024)
-* ``frontend/Analyzer.cpp`` – CFG-based typestate analysis with return-code aware state propagation
+* ``Frontend/Framework.cpp`` – Main FiTx pass; typestate-based daily development-friendly checkers (Suzuki et al., USENIX ATC 2024)
+* ``Frontend/Analyzer.cpp`` – CFG-based typestate analysis with return-code aware state propagation
 * ``FrameworkIR/Analyzer.cpp`` – IR builder; collects return values for function summaries
 * ``Detector/`` – Typestate definitions per bug pattern
 
@@ -238,9 +238,9 @@ Components
 * ``Domain/PulseOperations.cpp`` – Core memory operations (readDeref, writeDeref, etc.)
 * ``Domain/PulseDisjunctiveDomain.cpp`` – Disjunctive analysis for path-sensitive reasoning
 * ``Domain/PulseLoopAbstraction.cpp`` – Loop abstraction with widening
-* ``Domain/PulseSummary.cpp`` – Function summary representation and application
+* ``Interproc/PulseSummary.cpp`` – Function summary representation and application
 * ``Domain/PulseTaint.cpp`` – Taint analysis for security vulnerabilities
-* ``Models/PulseModels.cpp`` – Library function models
+* ``Interproc/PulseModels.cpp`` – Library function models
 * ``Report/PulseDiagnostic.cpp`` – Rich diagnostic reporting with traces
 
 **Saber Checker** (``lib/Checker/Saber/``):

@@ -22,5 +22,6 @@ The other rows remain reference/modeling differences to investigate.
 The memcpy and array findings concern this local SVF build/configuration,
 including its LLVM 14 frontend adapter. They must not be interpreted as general
 claims about every SVF version. Neither implementation is an unquestioned
-oracle. Compare using `scripts/compare_svf_fspta.py`; its JSON retains queried
-value names, exact arguments and binary/model hashes.
+oracle. When re-running a comparison, record the queried value names, exact
+arguments, and binary/model hashes alongside the results; there is no comparison
+driver checked into this repository.

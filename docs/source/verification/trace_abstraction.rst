@@ -37,7 +37,7 @@ invalid memory/poison-dependent replay, or resource exhaustion. Iterations count
 candidate traces checked, not emptiness queries.
 
 Unified transition formulas and integer arithmetic
--------------------------------------------------
+--------------------------------------------------
 
 ``TransitionFormulaBuilder`` owns one canonical vocabulary: input variables,
 output variables, and hierarchical input variables. Each immutable
@@ -166,7 +166,7 @@ solver strategy or frontend feature. Difficult quantified array proofs may
 still return ``Unknown``. There is no concurrency model in this engine.
 
 Tests and Ultimate references
-----------------------------
+-----------------------------
 
 .. code-block:: bash
 

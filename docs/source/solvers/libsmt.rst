@@ -23,12 +23,15 @@ Components
 SMTSolver
 ~~~~~~~~~
 
-Abstract base class defining the solver interface:
+Solver wrapper over the Z3 backend:
 
+- ``add(SMTExpr)`` / ``addAll(SMTExprVec)`` — Add a formula to the solver
+  context.
 - ``push()`` / ``pop()`` — Assertion stack management.
-- ``assertExpr(SMTExpr)`` — Add a formula to the solver context.
-- ``check()`` — Check satisfiability of the current context.
-- ``getModel()`` — Retrieve a satisfying model.
+- ``check()`` — Check satisfiability of the current context, returning an
+  ``SMTResultType`` (``SMTRT_Sat``, ``SMTRT_Unsat``, ``SMTRT_Unknown``, or
+  ``SMTRT_Uncheck``).
+- ``getSMTModel()`` — Retrieve a satisfying model as an ``SMTModel``.
 - ``reset()`` — Clear all assertions.
 
 SMTExpr and SMTObject
@@ -42,17 +45,22 @@ Expression tree representation used to build formulas:
 SMTFactory
 ~~~~~~~~~~
 
-Factory for creating SMT sorts, variables, and expressions:
+Factory for creating SMT constants, values, and expressions. A factory is a
+regular object; expressions it creates belong to its Z3 context:
 
 .. code-block:: cpp
 
    #include "Solvers/SMT/LIBSMT/SMTFactory.h"
 
-   auto &factory = SMTFactory::instance();
-   auto intSort  = factory.getSort("Int");
-   auto x        = factory.makeVariable(intSort, "x");
-   auto y        = factory.makeVariable(intSort, "y");
-   auto expr     = factory.makeEQ(x, y);
+   SMTFactory factory;
+
+   SMTExpr x = factory.createBitVecConst("x", 32);
+   SMTExpr y = factory.createBitVecConst("y", 32);
+   SMTExpr expr = x == y;
+
+   // Scalar and boolean constants are created the same way.
+   SMTExpr n = factory.createIntVal(0);
+   SMTExpr b = factory.createBoolConst("b");
 
 Z3Expr and Z3Plus
 ~~~~~~~~~~~~~~~~~
@@ -72,8 +80,10 @@ reasoning:
 SMTModel
 ~~~~~~~~
 
-Represents a satisfying assignment from a solver query, providing value lookup
-by variable name.
+Represents a satisfying assignment from a solver query. ``Eval`` returns the
+value of an expression under the model, while ``getIntValue`` and
+``getBoolValue`` return ``(value, is_known)`` pairs. ``getPartialModel``
+restricts a model to a chosen set of variables.
 
 SMTConfigure
 ~~~~~~~~~~~~
@@ -85,22 +95,20 @@ Usage
 
 .. code-block:: cpp
 
-   #include "Solvers/SMT/LIBSMT/SMTSolver.h"
    #include "Solvers/SMT/LIBSMT/SMTFactory.h"
+   #include "Solvers/SMT/LIBSMT/SMTSolver.h"
+   #include "Solvers/SMT/LIBSMT/SMTModel.h"
 
-   auto &factory = SMTFactory::instance();
-   auto solver   = factory.createSolver();
+   SMTFactory factory;
+   SMTSolver solver = factory.createSMTSolver();
 
-   auto intSort = factory.getSort("Int");
-   auto x       = factory.makeVariable(intSort, "x");
-   auto gt      = factory.makeGT(x, factory.makeIntVal(0));
+   SMTExpr x    = factory.createBitVecConst("x", 32);
+   SMTExpr zero = factory.createBitVecVal(0, 32);
 
-   solver->assertExpr(gt);
-   auto result = solver->check();
-
-   if (result == SmtResult::Sat) {
-     auto model = solver->getModel();
-     auto val   = model->getValue(x);
+   solver.add(x > zero);
+   if (solver.check() == SMTSolver::SMTRT_Sat) {
+     SMTModel model = solver.getSMTModel();
+     auto value = model.getIntValue(x);   // (value, is_known)
      // ...
    }
 

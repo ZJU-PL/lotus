@@ -53,7 +53,7 @@ all of them at once and `run_unit_tests` builds them before running
 Examples:
 
 - build one target: `cmake --build build --target analysis_tests`
-- run one case: `ctest --test-dir build -R CFGUtilitiesTest --output-on-failure`
+- run one case: `ctest --test-dir build -R 'analysis_tests.CFGReachabilityTest' --output-on-failure`
 
 Every gtest case is discovered individually. Tests also carry a cost/dependency
 label:

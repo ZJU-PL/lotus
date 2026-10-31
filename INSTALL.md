@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - LLVM 14.x
-- Z3 4.11
+- Z3 4.8.1+ (4.11 is the tested/recommended version)
 - CMake 3.18+
 - C++17 compatible compiler
 
@@ -12,14 +12,14 @@
 ```bash
 git clone https://github.com/ZJU-PL/lotus
 cd lotus
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DLOTUS_BUILD_TESTS=ON
 cmake --build build -j
 ```
 
-Run tests:
+Run tests (requires `-DLOTUS_BUILD_TESTS=ON` during CMake configuration):
 
 ```bash
-ctest --output-on-failure
+ctest --test-dir build --output-on-failure
 ```
 
 ## Build Configuration
@@ -41,7 +41,10 @@ Lotus exposes its build options through `cmake/LotusOptions.cmake` with a consis
 | `LOTUS_ENABLE_CFL` | ON | CFL reachability |
 | `LOTUS_ENABLE_CSR` | OFF | CSR tools |
 | `LOTUS_ENABLE_OWL` | OFF | OWL integration |
-| `LOTUS_DOWNLOAD_BOOST` | OFF | Auto-download Boost |
+| `LOTUS_ENABLE_CCLYZER` | OFF | CclyzerAA Datalog alias analysis backend |
+| `LOTUS_ENABLE_SMT_STABILIZER` | OFF | SMTStabilizer SMT-LIB normalization library and tool |
+| `LOTUS_ENABLE_FPSOLVE` | OFF | FPsolve fixed-point solver |
+| `LOTUS_DOWNLOAD_BOOST` | ON | Auto-download Boost |
 | `LOTUS_DOWNLOAD_CRAB` | OFF | Auto-download Crab |
 
 ### Example Configurations
@@ -89,11 +92,12 @@ Boost is optional and only required when certain modules are enabled:
 - **FPsolve** (`LOTUS_ENABLE_FPSOLVE`) — fixed-point solver; also requires GMP
 - **PDAAAL** (`LOTUS_ENABLE_PDAAAL`) — weighted PDS reachability; requires Boost headers (≥ 1.70)
 
-If all four are disabled, Boost will not be configured. Example:
+If all five are disabled, Boost will not be configured. Example:
 
 ```bash
 cmake -S . -B build -DLOTUS_ENABLE_CLAM=OFF -DLOTUS_ENABLE_SEAHORN=OFF \
-  -DLOTUS_ENABLE_FPSOLVE=OFF -DLOTUS_ENABLE_CCLYZER=OFF
+  -DLOTUS_ENABLE_FPSOLVE=OFF -DLOTUS_ENABLE_CCLYZER=OFF \
+  -DLOTUS_ENABLE_PDAAAL=OFF
 ```
 
 When Boost is needed, the build will download and build it if not found. You can specify a custom path with `-DLOTUS_CUSTOM_BOOST_ROOT=/path/to/boost`.

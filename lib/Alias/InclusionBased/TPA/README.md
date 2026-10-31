@@ -126,9 +126,9 @@ canonical objects, contexts, layouts, and points-to sets are synchronized.
 
 This implementation preserves the serial solver's behavior but keeps retirement
 and propagation serial. The local SPEC2006 checks currently show overhead,
-without a speedup. Serial execution remains the default. The reusable
-`scripts/benchmark_parallel_tpa.py` runner records phase timings, CPU time,
-peak memory, full-solution verification, and timeout results.
+without a speedup. Serial execution remains the default. `--dump-stats` reports
+phase timings and execution counters, which is how those measurements were
+collected.
 
 ### Programmatic Usage
 

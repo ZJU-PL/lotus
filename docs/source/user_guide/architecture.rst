@@ -51,7 +51,7 @@ The ``lib/`` directory is divided into 16 CMake subdirectories, each of which co
      - ``DyckAA``, ``AserPTA``, ``SparrowAA``, ``SeaDsaAnalysis``, ``LotusAA``, ``AllocAA``, ``UnderApproxAA``, ``TPA``, ``DemandDriven``, ``InclusionBased``
      - Pointer and alias analysis engines
    * - ``lib/IR/``
-     - ``ICFG``, ``PDG``, ``SVFG``, ``MemorySSA``, ``DyckVFG``, ``GSA``
+     - ``ICFG``, ``PDG``, ``SVFG`` (MemorySSA), ``ShadowMemSSA``, ``GSA``, ``SSI``, ``vSSA``, ``UFG``, ``UseTraceSSA``
      - Graph-based intermediate representations
    * - ``lib/Dataflow/``
      - ``IFDSSolver``, ``IDESolver``, ``IntraMonoSolver``, ``InterMonoSolver``, ``WPDS engine``, ``NPA``
@@ -116,7 +116,7 @@ Each subdirectory under ``tools/`` contains the ``main()`` entry points that lin
    * - ``tools/optimization/``
      - ``lotus-opt-ipo``, ``lotus-opt-prefetch``, ``lotus-opt-purity``
    * - ``tools/verifier/``
-     - ``lotus-verify-symabs-ai``, ``lotus-verify-sifa``, ``lotus-verify-mosaic``, ``clam``, ``seahorn``, ``smack``
+     - ``lotus-verify-symabs-ai``, ``lotus-verify-sifa``, ``lotus-verify-mosaic``, ``clam``, ``seahorn``, ``llvm2bpl`` (SMACK)
    * - ``tools/ir/``
      - ``lotus-ir-pdg-query``, ``lotus-ir-control-dependence``, ``lotus-ir-usetracessa``, ``lotus-ir-ufg``
    * - ``tools/solver/``
@@ -147,7 +147,7 @@ Lotus constructs several graph-based IRs on top of LLVM IR. These IRs are typica
      - Sparse value-flow graph with Memory SSA integration
    * - DyckVFG
      - ``DyckVFG``
-     - Value-flow graph used by DyckAA
+     - Value-flow graph used by DyckAA (located in ``lib/Alias/UnificationBased/DyckAA/``)
    * - GSA
      - ``GateAnalysisPass``, ``GateAnalysis``
      - Gated SSA with gamma/mu/eta nodes

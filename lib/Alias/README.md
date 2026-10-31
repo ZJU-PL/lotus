@@ -11,9 +11,9 @@ Lotus.
 | **AserPTA** | `lotus-alias-aser-aa` | Inclusion-based | ❌ No | ✅ Yes (CI, 1-CFA, 2-CFA, Origin) | ✅ Yes | ✅ Adapted from AserPTA | On-the-fly callgraph construction; supports both field-insensitive and field-sensitive modes |
 | **CFL (LLVM)** | - | CFL-reachability | ❌ No | ❌ No | - | ✅ Yes (LLVM) | Via alias wrapper (libLLVMAnalysis) |
 | **DDA** | - (library only, `DDAPass`) | Demand-driven value-flow | ✅ Yes | Optional (`FlowDDA` / `ContextDDA`) | ✅ Yes | ❌ No | SVF-style demand-driven value-flow solver implemented natively in Lotus |
-| **DyckAA** | - | Unification-based | ❌ No | ❌ No | - | ❌ No | - |
-| **Dynamic** | - | Dynamic | - | - | - | ❌ No | Runtime analysis |
-| **FPA** | `lotus-alias-fpa` | Type-based | - | - | - | ❌ No | Function pointer analysis |
+| **DyckAA** | `lotus-alias-dyck-aa` | Unification-based | ❌ No | ❌ No | - | ❌ No | - |
+| **Dynamic** | `dynaa` (optional) | Dynamic | - | - | - | ❌ No | Runtime analysis (`LOTUS_ENABLE_DYNAA`) |
+| **FPA** | `lotus-alias-call-graph` (`-cg-type=fpa-*`) | Type-based | - | - | - | ❌ No | Function pointer analysis |
 | **LotusAA** | `lotus-alias-lotus-aa` | Inclusion-based | ✅ Yes | ✅ Yes | - | ❌ No | Native Lotus analysis; flow- and context-sensitive |
 | **seadsa** | `lotus-alias-sea-dsa-dg`, `lotus-alias-seadsa-tool` | Unification-based | ❌ No | ✅ Yes | - | ✅ Yes (SeaDsa) | Context-sensitive heap (heap cloning) |
 | **SRAA** | - | Range-based | ❌ No | ❌ No | - | ❌ No (based on CGO'17 paper) | Flow- and context-insensitive |
@@ -62,8 +62,8 @@ Lotus.
 - `UnificationBased/`: unification/CFL-style analyses such as `DyckAA` and
   `seadsa`.
 - `DemandDriven/`: on-demand query-driven analyses such as `DDA`.
-- `Specialized/`: targeted analyses such as `AllocAA`, `FPA`, `SRAA`,
-  `TypeQualifier`, and `UnderApproxAA`.
+- `Specialized/`: targeted analyses such as `AllocAA`, `SRAA`, and
+  `UnderApproxAA`.
 - `Infrastructure/`: shared support layers such as `AliasAnalysisWrapper`,
   `PtsSet`, `Metrics`, and `Spec`.
 - `Dynamic/`: runtime-based alias instrumentation and validation support; it

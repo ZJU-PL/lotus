@@ -165,7 +165,7 @@ Command-Line Options
 
 **Logging Options**:
 
-* ``--log-level=<debug|info|warning|error|none>`` – Set logging level (default: warning)
+* ``--log-level=<none|error|warning|info|debug|trace>`` – Set logging level (default: warning)
 
 **Robust reachability options**:
 

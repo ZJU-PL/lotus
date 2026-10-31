@@ -76,7 +76,7 @@ Supported Platforms
 * x86/ARM Linux
 * ARM macOS
 * LLVM 14.x
-* Z3 4.11
+* Z3 4.8.1+ (4.11 tested)
 * CMake 3.18+
 * C++17
 

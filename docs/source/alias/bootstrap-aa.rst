@@ -36,8 +36,8 @@ remain available for reproducibility. ``precomputeAll()`` and the
 disjoint clusters; ``--all-contexts`` uses eager evaluation automatically.
 
 Build targets are ``CanaryBootstrapCore``, ``CanaryBootstrapAA``, and
-``lotus-alias-bootstrap``. The integrated GTest target is
-``bootstrap_aa_tests``.
+``lotus-alias-bootstrap``. The integrated GTest cases live in ``alias_tests``
+(``BootstrapAATest.*`` and ``BootstrapEngineTest.*``).
 
 The adapter is field-insensitive, models sequential closed-world execution, and
 uses conservative unknown effects for unsupported pointer operations, external

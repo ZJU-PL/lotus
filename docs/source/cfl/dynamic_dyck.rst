@@ -146,10 +146,10 @@ Benchmark workflow
 
 .. code-block:: bash
 
-   cmake --build build --target lotus-cfl-dynamic-dyck dynamic_dyck_test
+   cmake --build build --target lotus-cfl-dynamic-dyck cfl_tests
    build/bin/lotus-cfl-dynamic-dyck 1 initial.dot updates.seq
    build/bin/lotus-cfl-dynamic-dyck 0 initial.dot updates.seq
-   ctest --test-dir build -R dynamic_dyck --output-on-failure
+   ctest --test-dir build -R 'cfl_tests.(DynamicDyckTest|PrimaryComponent)' --output-on-failure
 
 ``0`` selects recomputation after every input record, including no-ops;
 ``1`` selects dynamic updates. The CLI accepts original

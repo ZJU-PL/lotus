@@ -188,8 +188,8 @@ refinement:
 
    cmake --build build --target lotus-cfl-interleaved-dyck
    build/bin/lotus-cfl-interleaved-dyck staged-bounds input.dot
-   cmake --build build --target interleaved_dyck_staged_bounds_test
-   ctest --test-dir build -R interleaved_dyck_staged_bounds_test --output-on-failure
+   cmake --build build --target cfl_tests
+   ctest --test-dir build -R 'cfl_tests.InterleavedDyckStagedBounds' --output-on-failure
 
 The CLI exposes ``--method NAME`` for selecting ``regularization``,
 ``intersection``, ``underapproximation``, ``mutual-refinement``,

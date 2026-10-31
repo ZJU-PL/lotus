@@ -45,6 +45,7 @@ Use `build/bin/<tool> --help` to see the full option set for a specific tool.
 | `lotus-alias-dyck-aa` | Run DyckAA | Implemented by `tools/alias/lotus-alias-dyck-aa.cpp`; unification-based analysis that can print call-graph statistics with `--print-cg`. |
 | `lotus-alias-tpa` | Run TPA | Implemented by `tools/alias/lotus-alias-tpa.cpp`; semi-sparse, flow- and context-sensitive pointer analysis with optional prepass dumping and CFG `.dot` output. |
 | `lotus-alias-call-graph` | Build a call graph with a selected backend | Implemented by `tools/alias/lotus-alias-call-graph.cpp`; supports `dyck`, `lotus`, several `fpa-*` modes (FLTA, MLTA, MLTA+DF, KELP), and `aserpta-*` modes. |
+| `lotus-alias-cclyzer-aa` | Run CclyzerAA Datalog-based pointer analysis | Implemented by `tools/alias/lotus-alias-cclyzer-aa.cpp`; Datalog-backed pointer analysis, built when `LOTUS_ENABLE_CCLYZER=ON`. |
 | `lotus-alias-sea-dsa-dg` | Dump Sea-DSA memory graphs | Implemented by `tools/alias/lotus-alias-sea-dsa-dg.cpp`; useful for inspecting per-function memory graphs and enabling graph emission with `--sea-dsa-dot`. |
 | `lotus-alias-seadsa-tool` | Run extended Sea-DSA utilities | Implemented by `tools/alias/lotus-alias-seadsa-tool.cpp`; includes memory-graph dumping and other Sea-DSA related driver options. |
 | `dynaa-instrument` | Instrument a program for dynamic alias logging | Built only with `LOTUS_ENABLE_DYNAA=ON`. |

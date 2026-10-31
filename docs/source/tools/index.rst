@@ -23,7 +23,7 @@ The table below summarizes the major tool subdirectories and the binaries they p
    * - ``tools/checker/``
      - ``lotus-check`` (unified binary with ``--engine=generic|kint|taint|ae|saber|pulse|concur|fitx|gsaf|symex``)
    * - ``tools/dataflow/``
-     - ``lotus-dfa``, ``lotus-dfa-apa``, ``lotus-dfa-mono``, ``lotus-dfa-ifds``, ``lotus-dfa-npa``, ``lotus-dfa-wpds``
+     - ``lotus-dfa``, ``lotus-dfa-apa``, ``lotus-dfa-mono``, ``lotus-dfa-ifds``, ``lotus-dfa-npa``, ``lotus-dfa-wpds``; optional ``lotus-demand-apa`` (``LOTUS_ENABLE_DEMAND_APA``)
    * - ``tools/optimization/``
      - ``lotus-opt-ipo``, ``lotus-opt-prefetch``, ``lotus-opt-purity``
    * - ``tools/verifier/``

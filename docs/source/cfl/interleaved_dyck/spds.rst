@@ -124,7 +124,7 @@ Build and test
 
 .. code-block:: console
 
-   cmake --build build --target interleaved_dyck_spds_test
-   ctest --test-dir build -R interleaved_dyck_spds --output-on-failure
+   cmake --build build --target cfl_tests
+   ctest --test-dir build -R 'cfl_tests.InterleavedDyckSPDS' --output-on-failure
 
 See also :doc:`/cfl/interleaved_dyck/affine_spds` and :doc:`/cfl/interleaved_dyck/lcl`.

@@ -7,7 +7,7 @@
 [![Documentation](https://img.shields.io/badge/docs-zju--pl.github.io-blue.svg)](https://zju-pl.github.io/lotus)
 [![DeepWiki Docs](https://img.shields.io/badge/deepwiki-ZJU--PL%2Flotus-blueviolet)](https://deepwiki.com/ZJU-PL/lotus)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![C++](https://img.shields.io/badge/c++-14%2F17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![C++](https://img.shields.io/badge/c++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![LLVM](https://img.shields.io/badge/LLVM-14.x-purple.svg)](https://llvm.org/)
 
 **Lotus** is an LLVM-based program analysis and verification framework. It provides a comprehensive set of toolkits for alias analysis, dataflow analysis, concurrency analysis, abstract interpretation, and model checking. The framework is designed for high modularity, allowing components to be used independently or in combination.
@@ -26,7 +26,7 @@
 ### System Requirements
 - **OS**: x86/ARM Linux, ARM macOS
 - **Compiler**: C++17 compatible (GCC 7+ or Clang 5+)
-- **Dependencies**: LLVM 14.x, Z3 4.11, CMake 3.18+, (Optional: Boost 1.80+)
+- **Dependencies**: LLVM 14.x, Z3 4.8.1+ (4.11 tested), CMake 3.18+, (Optional: Boost 1.80+)
 
 ### Building from Source
 

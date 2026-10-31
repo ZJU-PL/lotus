@@ -7,7 +7,7 @@ Prerequisites
 -------------
 
 * LLVM 14.0.0
-* Z3 4.11
+* Z3 4.8.1+ (4.11 is the tested/recommended version)
 * CMake 3.18+
 * C++17 compatible compiler
 * Boost 1.65+ (optional — needed when CLAM, SeaHorn, Cclyzer++, SMACK, or PDAAAL are enabled;

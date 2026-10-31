@@ -180,8 +180,10 @@ Query function nodes:
    FunctionWrapper *fw = pdg->getFuncWrapper(*F);
    if (fw) {
        Node *entryNode = fw->getEntryNode();
-       Tree *formalInTree = fw->getFormalInTree();
-       Tree *formalOutTree = fw->getFormalOutTree();
+       // Return-value trees; per-argument trees are available through
+       // getArgFormalInTree(Argument &) / getArgFormalOutTree(Argument &).
+       Tree *formalInTree = fw->getRetFormalInTree();
+       Tree *formalOutTree = fw->getRetFormalOutTree();
    }
 
 Check reachability:
@@ -190,7 +192,11 @@ Check reachability:
 
    bool hasPath = pdg->canReach(*srcNode, *dstNode);
    
-   std::set<EdgeType> exclude = {EdgeType::CONTROLDEP_OTHER};
+   std::set<EdgeType> exclude = {EdgeType::CONTROLDEP_CALLINV,
+                                 EdgeType::CONTROLDEP_CALLRET,
+                                 EdgeType::CONTROLDEP_ENTRY,
+                                 EdgeType::CONTROLDEP_BR,
+                                 EdgeType::CONTROLDEP_IND_BR};
    bool hasDataPath = pdg->canReach(*srcNode, *dstNode, exclude);
 
 PDG Cypher Query API

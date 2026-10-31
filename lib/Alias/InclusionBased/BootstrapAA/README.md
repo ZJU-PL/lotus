@@ -114,8 +114,8 @@ From a Lotus checkout:
 cmake -S . -B build -DLOTUS_BUILD_TESTS=ON \
   -DLLVM_BUILD_PATH=/path/to/llvm-14/lib/cmake/llvm
 cmake --build build --target CanaryBootstrapAA lotus-alias-bootstrap \
-  bootstrap_aa_tests
-ctest --test-dir build -R '^bootstrap_aa_tests\.' --output-on-failure
+  alias_tests
+ctest --test-dir build -R '^alias_tests\.Bootstrap' --output-on-failure
 ```
 
 ## Program-point and context queries

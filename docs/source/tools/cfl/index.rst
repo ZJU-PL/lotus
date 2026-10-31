@@ -16,7 +16,7 @@ context-free grammars for precise interprocedural analysis.
 ``lotus-cfl-interleaved-dyck mcfl``, ``lotus-cfl-interleaved-dyck staged-bounds``,
 ``lotus-cfl-interleaved-dyck unary``, ``lotus-cfl-interleaved-dyck spds``,
 ``lotus-cfl-interleaved-dyck lcl``, ``lotus-cfl-interleaved-dyck affine-spds``,
-``lotus-cfl-interleaved-dyck-graph-reduction``, ``lotus-cfl-dynamic-dyck``, and ``csr``.
+``lotus-cfl-interleaved-dyck-graph-reduction.py``, ``lotus-cfl-dynamic-dyck``, and ``csr``.
 
 Classical CFL solving and clients
 ---------------------------------

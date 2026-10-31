@@ -20,10 +20,11 @@ use those definitions rather than redeclaring them. The baseline comparison
 timeout is per algorithm instance and is passed as the optional fourth argument
 of `Algorithm::work` (default 20 seconds).
 
-The `demand_apa_tests` target compiles every header in a separate translation unit,
-links them together with a reverse-include-order consumer, and tests shared
-projection and algebra state. Select it with `LOTUS_TEST_SUBSYSTEMS=dataflow/demandapa`
-when DemandAPA and unit tests are enabled.
+The `dataflow_tests` suite (cases `DemandAPAHeadersTest.*`) compiles every header
+in a separate translation unit, links them together with a reverse-include-order
+consumer, and tests shared projection and algebra state. Select it with
+`LOTUS_TEST_SUBSYSTEMS=dataflow/demandapa` when DemandAPA and unit tests are
+enabled.
 
 Enable it with `-DLOTUS_ENABLE_DEMAND_APA=ON`. BuDDy 2.4 is built from the
 vendored source in `third-party/buddy-2.4`. OpenMP is used when available;

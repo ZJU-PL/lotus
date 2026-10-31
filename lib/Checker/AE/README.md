@@ -219,7 +219,7 @@ UNSAFE_BUFACCESS(arr, 15); // Should detect overflow
 
 ### Test Cases
 
-See `tests/AE/` for example test cases covering:
+See `tests/unit/Checker/AE/` for example test cases covering:
 - Buffer overflows (stack, heap, global)
 - Null pointer dereferences
 - Use-after-free

@@ -49,11 +49,11 @@ with the first stop reason and counter, and makes the CLI exit with code 2.
 external timeouts remain process failures.
 
 ```sh
-cmake --build build --target lotus-ir-ufg ufg_test
+cmake --build build --target lotus-ir-ufg ir_tests
 build/bin/lotus-ir-ufg input.bc --check=double-free --timing
 build/bin/lotus-ir-ufg input.bc --check=use-after-free --quiet
 build/bin/lotus-ir-ufg input.bc --format=json
-ctest --test-dir build -R ufg_test --output-on-failure
+ctest --test-dir build -R 'ir_tests.UFG' --output-on-failure
 ```
 
 The CLI accepts the same `--check`, `--source-node`, `--sink-node`, `--format`,
