@@ -264,14 +264,23 @@ Components
 Build Targets
 -------------
 
+* ``CheckerFramework`` – Core checker framework, registry, and diagnostic library
+* ``AE`` – Abstract-execution checker library
+* ``CanaryKint`` – KINT numerical bug checker library
+* ``ConcurrencyChecker`` – Concurrency bug checker library
 * ``FiTxChecker`` – FiTx typestate-based bug checker library
+* ``GSAF`` – Guarded value-flow analysis checker library
 * ``PulseChecker`` – Pulse biabductive analysis checker library
+* ``Saber`` – Saber source-sink checker library
+* ``TypeQualifier`` – Type qualifier checker library
 * ``CanarySymbolicExecution`` – Symbolic-execution engine library used by ``symex``
 * ``lotus-check`` – Unified checker frontend
+* ``tools/checker/lotus-check-generic.cpp`` – Declarative generic engine runner
 * ``tools/checker/lotus-check-ae.cpp`` – AE engine runner
-* ``tools/checker/lotus-check-fitx.cpp`` – FiTx engine runner
-* ``tools/checker/lotus-check-kint.cpp`` – KINT engine runner
 * ``tools/checker/lotus-check-concur.cpp`` – Concurrency engine runner
+* ``tools/checker/lotus-check-fitx.cpp`` – FiTx engine runner
+* ``tools/checker/lotus-check-gsaf.cpp`` – GSAF engine runner
+* ``tools/checker/lotus-check-kint.cpp`` – KINT engine runner
 * ``tools/checker/lotus-check-pulse.cpp`` – Pulse engine runner
 * ``tools/checker/lotus-check-saber.cpp`` – Saber engine runner
 * ``tools/checker/lotus-check-symex.cpp`` – Symbolic-execution engine runner

@@ -158,7 +158,8 @@ Command-Line Options
 
 **Performance Options**:
 
-* ``--kint.function-timeout-seconds=<seconds>`` – Timeout per function for SMT solving (0 = no limit, default: varies)
+* ``--kint.function-timeout-seconds=<seconds>`` – Timeout per function for SMT solving (0 = no limit, default: 10)
+* ``--kint.max-paths-per-function=<N>`` – Maximum path expansions per function (0 = no limit, default: 20000)
 * ``--kint.summary-mode=<off|on|required>`` – Control inter-procedural summary building (default: on)
 * ``--kint.summary-timeout-seconds=<seconds>`` – Per-summary timeout (default: 5)
 * ``--kint.summary-max-paths=<N>`` – Path budget for summary construction (default: 64)

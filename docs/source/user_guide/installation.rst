@@ -162,12 +162,12 @@ Supported groups:
 
 * ``alias``: ``dda``, ``aserpta``, ``bootstrapaa``, ``flowsensitive``,
   ``lotusaa``, ``sparrowaa``, ``tpa``, ``cclyzeraa``, ``dyckaa``, ``seadsa``,
-  ``allocaa``, ``typequalifier``, ``underapproxaa``, ``ptsset``, ``aliaswrapper``.
-* ``analysis``: ``cfg``, ``controldependence``, ``debuginfo``, ``general``,
+  ``allocaa``, ``underapproxaa``, ``ptsset``, ``aliaswrapper``.
+* ``analysis``: ``cfg``, ``controldependence``, ``debuginfo``,
   ``multiplicity``, ``nullpointer``, ``parametersummary``, ``profile``,
   ``purity``, ``sccp``, ``typehierarchy``, ``loop``.
 * ``checker``: ``ae``, ``concurrency``, ``framework``, ``gsaf``, ``kint``,
-  ``pulse``, ``saber``, ``reports``.
+  ``pulse``, ``saber``, ``reports``, ``typequalifier``.
 * ``concurrency``: ``mhp``, ``lockset``, ``valueflow``, ``thread``, ``clocks``,
   ``threadapi``, ``threadlocal``, ``openmp``, ``mpi``, ``cuda``, ``linuxkernel``.
 * ``dataflow``: ``ifdside``, ``mono``, ``wpds``, ``apa``, ``demandapa``, ``npa``,

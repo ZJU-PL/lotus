@@ -169,7 +169,7 @@ Once bitcode is generated, pass it to any Lotus binary under `build/bin/`:
 # Bug detection with Saber
 ./build/bin/lotus-check --engine=saber default.elf.bc
 
-# Interprocedural control-flow graph construction
+# Program dependence graph query and slicing
 ./build/bin/lotus-ir-pdg-query default.elf.bc
 ```
 

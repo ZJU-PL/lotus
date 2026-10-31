@@ -19,6 +19,20 @@ context-insensitive and k-CFA variants).
 
    ./build/bin/lotus-alias-sparrow-aa [options] input.bc
 
+**Key Options**:
+
+- ``--andersen-k-cs=<k>`` – Select call-site sensitivity (0 <= k <= 32; 0 = context-insensitive, default)
+- ``--andersen-adaptive-cs`` – Enable adaptive context sensitivity via HVN feedback
+- ``--andersen-adaptive-cs-threshold=<score>`` – Context-need score threshold in [0,1] (default: 0.5)
+- ``--print-pts`` – Print points-to information for all pointers
+- ``--print-globals-only`` – Print points-to information for global variables only
+- ``--print-alloc-sites`` – Print all allocation sites identified
+- ``--print-alias-queries`` – Perform and print alias queries between pointers
+- ``--print-context-need`` – Print per-function adaptive-CS context-need scores
+- ``--enable-hvn``, ``--enable-hu``, ``--enable-hcd``, ``--enable-lcd`` – Constraint optimizations
+- ``-v`` – Verbose output
+- ``-s`` – Only output statistics
+
 **Notes**:
 
 - Flow-insensitive, field-sensitive pointer analysis
@@ -268,6 +282,9 @@ Unification-based alias analysis using Dyck-CFL reachability.
 
 **Key Options**:
 
+- ``-print-cg`` – Print call graph statistics
+- ``-v`` – Verbose output
+- ``-s`` – Only output statistics
 - ``-print-alias-set-info`` – Print alias sets and relations (DOT)
 - ``-count-fp`` – Count possible targets for each function pointer
 - ``-dot-dyck-callgraph`` – Generate call graph from alias results
@@ -294,6 +311,18 @@ on-the-fly call graph construction.
 .. code-block:: bash
 
    ./build/bin/lotus-alias-lotus-aa [options] input.bc
+
+**Key Options**:
+
+- ``-o <file>`` – Override output filename
+- ``-S`` – Write LLVM assembly instead of bitcode
+- ``-v`` – Verbose output
+- ``-s`` – Only output statistics
+- ``-lotus-print-pts`` – Print points-to results
+- ``-lotus-print-cg`` – Print call graph results
+- ``-lotus-cg`` – Use LotusAA to build call graph
+- ``-lotus-restrict-cg-iter=<int>`` – Maximum iterations for call graph construction
+- ``-lotus-enable-must-kill`` – Enable must-kill store pruning (default: true)
 
 **Characteristics**:
 

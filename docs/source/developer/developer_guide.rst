@@ -62,16 +62,20 @@ Directory Structure
    ├── include/           # Public headers (mirrors lib structure)
    │   ├── Alias/         # Alias analysis (DyckAA, AserPTA, LotusAA, SparrowAA, etc.)
    │   ├── Analysis/      # Analysis utilities (NullPointer, CFG, etc.)
+   │   ├── Annotation/    # Source-level annotations & API specifications
    │   ├── CFL/           # CFL reachability
    │   ├── Checker/       # Bug checkers (AE, Concurrency, FiTx, KINT, Pulse, Saber, etc.)
    │   ├── Concurrency/   # Concurrency analyses (MHP, lockset, OpenMP, CUDA, etc.)
    │   ├── Dataflow/      # APA, IFDS/IDE, Mono, NPA, VASCO, WPDS
+   │   ├── Fuzzing/       # Directed fuzzing support
    │   ├── IR/            # GSA, GVFG, ICFG, PDG, SSI, SVFG, vSSA, etc.
+   │   ├── Optimization/  # Program optimizations (IPO, prefetch, etc.)
+   │   ├── Security/      # Side-channel & constant-time analyses
    │   ├── Solvers/       # Datalog, EGraph, SMT
-   │   ├── SymbolicExecution/ # Symbolic execution
+   │   ├── SymbolicExecution/ # Symbolic execution engine
    │   ├── Transform/     # LLVM bitcode transformations
    │   ├── Utils/         # LLVM utilities, ThreadPool, formats, etc.
-   │   └── Verification/  # SIFA, CLAM, smarck, Seahorn, etc.
+   │   └── Verification/  # SIFA, CLAM, SMACK, Seahorn, etc.
    ├── lib/               # Implementations (mirrors include)
    ├── tools/             # Command-line tools (alias, checker, verifier, ir, cfl, etc.)
    ├── tests/             # GTest-based tests (tests/unit/ mirrors subsystems)

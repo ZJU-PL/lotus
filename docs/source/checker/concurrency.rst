@@ -135,9 +135,15 @@ Command-Line Options
 * ``--checks=<id[,id...]>`` – Select ``data-race``, ``deadlock``, ``atomicity``,
   ``condvar``, ``lock-mismatch``, ``starvation``, ``openmp``, ``mpi``, or ``cuda``. Omitting
   this option, or passing ``--checks=all``, enables all checks.
-* ``--concur.mode=analysis`` – Run analyses and dump facts without emitting bug reports
+* ``--concur.mode=<check|analysis>`` – Run analyses and bug checkers (default: ``check``) or emit analysis facts (``analysis``)
 * ``--concur.output=<file>`` – Write analysis facts to a file in analysis mode
-* ``--concur.output-format=<text|json>`` – Select the analysis-fact format
+* ``--concur.output-format=<text|json>`` – Select the analysis-fact format (default: ``text``)
+* ``--concur.sparse-flow-sensitive`` – Refine data-race alias pairs with a thread-aware sparse flow-sensitive solve
+* ``--concur.msli`` – Run multi-stage synchronization and points-to slicing before sparse race refinement
+* ``--concur.memory-partition=<distinct|intra-disjoint|inter-disjoint>`` – Sparse MemorySSA region policy (default: ``inter-disjoint``)
+* ``--concur.thread-context=<depth>`` – Maximum call-string depth in thread creation tree (default: 2)
+* ``--concur.points-to-sets=<mutable|hash-consed>`` – Sparse solver points-to set backend (default: ``mutable``)
+* ``--concur.starvation-blocking-functions=<fn1,fn2...>`` – Additional blocking function names for starvation checking
 * ``--report-json=<file>`` – Output JSON report to file
 * ``--report-sarif=<file>`` – Output SARIF report to file
 * ``--report-min-score=<n>`` – Minimum confidence score for reporting (0-100)

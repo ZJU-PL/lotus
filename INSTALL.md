@@ -88,16 +88,17 @@ Boost is optional and only required when certain modules are enabled:
 
 - **SeaHorn** (`LOTUS_ENABLE_SEAHORN`) — expression handling, Horn clause DB
 - **CLAM** (`LOTUS_ENABLE_CLAM`) — abstract interpretation, JSON parsing (Boost 1.80+)
+- **SMACK** (`LOTUS_ENABLE_SMACK`) — LLVM-to-Boogie verifier frontend
 - **CclyzerAA** (`LOTUS_ENABLE_CCLYZER`) — alias analysis
-- **FPsolve** (`LOTUS_ENABLE_FPSOLVE`) — fixed-point solver; also requires GMP
 - **PDAAAL** (`LOTUS_ENABLE_PDAAAL`) — weighted PDS reachability; requires Boost headers (≥ 1.70)
+- **FPsolve** (`LOTUS_ENABLE_FPSOLVE`) — fixed-point solver; requires Boost and GMP
 
-If all five are disabled, Boost will not be configured. Example:
+If these are disabled, Boost will not be configured. Example:
 
 ```bash
 cmake -S . -B build -DLOTUS_ENABLE_CLAM=OFF -DLOTUS_ENABLE_SEAHORN=OFF \
-  -DLOTUS_ENABLE_FPSOLVE=OFF -DLOTUS_ENABLE_CCLYZER=OFF \
-  -DLOTUS_ENABLE_PDAAAL=OFF
+  -DLOTUS_ENABLE_SMACK=OFF -DLOTUS_ENABLE_CCLYZER=OFF \
+  -DLOTUS_ENABLE_PDAAAL=OFF -DLOTUS_ENABLE_FPSOLVE=OFF
 ```
 
 When Boost is needed, the build will download and build it if not found. You can specify a custom path with `-DLOTUS_CUSTOM_BOOST_ROOT=/path/to/boost`.

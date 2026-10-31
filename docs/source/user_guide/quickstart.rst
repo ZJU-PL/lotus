@@ -95,6 +95,9 @@ Lotus exposes its internal libraries through standalone executable drivers in ``
    * - Tool Binary
      - Source Directory
      - Typical Invocation
+   * - ``lotus-check --engine=kint``
+     - ``tools/checker/``
+     - ``lotus-check --engine=kint target.bc``
    * - ``lotus-check --engine=gsaf``
      - ``tools/checker/``
      - ``lotus-check --engine=gsaf target.bc``

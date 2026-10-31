@@ -53,9 +53,22 @@ See :doc:`../alias/alias_analysis` for detailed instructions and command example
 * **Metrics** – Pointer analysis metrics for measuring precision and
   soundness-related properties (``lib/Alias/Infrastructure/Metrics``).
   See :doc:`../alias/metrics`.
-* **TypeQualifier** – Qualifier-based analysis infrastructure that models
-  qualifier-style properties over program values
-  (``lib/Checker/TypeQualifier``). See :doc:`../checker/typequalifier`.
+
+Bug Detection and Checkers
+--------------------------
+
+See :doc:`bug_detection` and :doc:`../checker/index` for engine details and selection guides.
+
+* **KINT** – Numerical bug detection (integer overflow, division by zero, bad shift, array bounds).
+* **AE** – Abstract execution for memory safety (buffer overflow, null dereference, use-after-free).
+* **Pulse** – Witness-oriented biabductive memory-safety analysis.
+* **Saber** – Source-sink resource checking over sparse value-flow graphs (leaks, double frees).
+* **FiTx** – Fast typestate-based feedback for routine development.
+* **Concurrency** – Thread safety, data races, deadlocks, OpenMP, and MPI protocol verification.
+* **Taint** – Interprocedural IFDS-based information flow and injection checking.
+* **GSAF** – Path-sensitive checks over guarded value-flow graphs.
+* **SymEx** – Symbolic-execution bug checks backed by the ``SymbolicExecution`` engine.
+* **TypeQualifier** – Qualifier-based analysis infrastructure modeling qualifier-style properties over program values (``lib/Checker/TypeQualifier``). See :doc:`../checker/typequalifier`.
 
 Intermediate Representations
 ----------------------------

@@ -106,6 +106,18 @@ The ``symex`` engine runner is implemented in ``tools/checker/lotus-check-symex.
 and links the top-level ``CanarySymbolicExecution`` library from
 ``lib/SymbolicExecution``.
 
+GSAF:
+
+.. code-block:: bash
+
+   ./build/bin/lotus-check --engine=gsaf input.bc --checks=taint,use-after-free
+
+Generic (Declarative):
+
+.. code-block:: bash
+
+   ./build/bin/lotus-check --engine=generic input.bc --checks=forbidden.system
+
 See Also
 --------
 

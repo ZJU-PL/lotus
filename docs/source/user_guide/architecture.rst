@@ -29,7 +29,7 @@ The repository is organized into a small number of top-level directories. Every 
    * - ``examples/``
      - Optional example programs (controlled by ``LOTUS_BUILD_EXAMPLES``)
    * - ``scripts/``
-     - Python helper scripts (``clam.py``, ``clam-yaml.py``, etc.)
+     - Python helper scripts (organized by subsystem under ``scripts/``)
    * - ``cmake/``
      - CMake helper modules for finding LLVM, Z3, Boost, GTest
    * - ``docs/``
@@ -66,7 +66,7 @@ The ``lib/`` directory is divided into 16 CMake subdirectories, each of which co
      - Z3 SMT wrapper, CUDD BDD wrapper, WPDS weights
      - Constraint and reachability solvers
    * - ``lib/Verification/``
-     - CLAM abstract interpreter, SeaHorn, ``SymbolicAbstraction``
+     - ``SymAbsAI``, ``Sifa``, ``Mosaic``, CLAM abstract interpreter, SeaHorn
      - Formal verification backends
    * - ``lib/CFL/``
      - CFL-reachability graph engines (CSR)
@@ -116,7 +116,7 @@ Each subdirectory under ``tools/`` contains the ``main()`` entry points that lin
    * - ``tools/optimization/``
      - ``lotus-opt-ipo``, ``lotus-opt-prefetch``, ``lotus-opt-purity``
    * - ``tools/verifier/``
-     - ``lotus-verify-symabs-ai``, ``lotus-verify-sifa``, ``lotus-verify-mosaic``, ``clam``, ``seahorn``, ``llvm2bpl`` (SMACK)
+     - ``lotus-verify-symabs-ai``, ``lotus-verify-sifa``, ``lotus-verify-mosaic``, ``clam`` (``clam``, ``clam-pp``, ``clam-diff``), ``seahorn`` (``seahorn``, ``seapp``, ``seainspect``), ``llvm2bpl`` and ``extern-statics`` (SMACK)
    * - ``tools/ir/``
      - ``lotus-ir-pdg-query``, ``lotus-ir-control-dependence``, ``lotus-ir-usetracessa``, ``lotus-ir-ufg``
    * - ``tools/solver/``

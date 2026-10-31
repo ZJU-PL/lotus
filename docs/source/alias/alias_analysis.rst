@@ -54,3 +54,6 @@ For detailed information about each analysis, see the corresponding documentatio
 * :doc:`sraa` - Strict Relations Alias Analysis built on interprocedural range analysis
 * :doc:`flowsensitive` - Sparse flow-sensitive inclusion-based pointer analysis
 * :doc:`valueflowpta` - Direct value-flow-based flow-sensitive pointer analysis
+* :doc:`tpa` - Flow- and context-sensitive pointer analysis with semi-sparse representation
+* :doc:`cclyzeraa` - Datalog-based pointer analysis powered by cclyzer++
+* :doc:`dda` - Demand-driven alias-analysis infrastructure on SVFG
