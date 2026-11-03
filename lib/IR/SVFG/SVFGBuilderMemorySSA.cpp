@@ -164,14 +164,20 @@ filterCalleesByICFG(const ICFG *icfg, const CallBase *call,
 static SVFGNodeBS intersectPointsToSets(const SVFGNodeBS &lhs,
                                         const SVFGNodeBS &rhs,
                                         uint32_t unknownObjId,
-                                        bool wildcardUnknown = false) {
+                                        bool wildcardUnknown = true) {
   // Empty means "no objects".
   if (lhs.empty() || rhs.empty())
     return SVFGNodeBS{};
 
-  if (wildcardUnknown && unknownObjId != 0 &&
-      (lhs.count(unknownObjId) != 0 || rhs.count(unknownObjId) != 0)) {
-    return SVFGNodeBS{unknownObjId};
+  if (wildcardUnknown && unknownObjId != 0) {
+    const bool lhsHasUnknown = lhs.count(unknownObjId) != 0;
+    const bool rhsHasUnknown = rhs.count(unknownObjId) != 0;
+    if (lhsHasUnknown && rhsHasUnknown)
+      return SVFGNodeBS{unknownObjId};
+    if (lhsHasUnknown)
+      return rhs;
+    if (rhsHasUnknown)
+      return lhs;
   }
 
   SVFGNodeBS out;
@@ -325,20 +331,34 @@ void SVFGBuilder::buildMemorySSA() {
     if (isa<GetElementPtrInst>(ptr)) {
       const SVFGNodeBS &mapped = svfg->getObjectIds(ptr);
       if (!mapped.empty()) {
+        SVFGNodeBS expanded = mapped;
+        for (uint32_t obj : mapped) {
+          if (svfg && svfg->isFieldInsensitiveObject(obj)) {
+            const SVFGNodeBS fields = svfg->getFieldObjects(obj);
+            expanded.insert(fields.begin(), fields.end());
+          }
+        }
         const uint32_t memRegId =
-            getOrCreateMemRegForPointsTo(mapped, getMemoryRegionScope(ptr));
+            getOrCreateMemRegForPointsTo(expanded, getMemoryRegionScope(ptr));
         auto canonical = memRegToPts.find(memRegId);
         return {memRegId,
-                canonical == memRegToPts.end() ? mapped : canonical->second};
+                canonical == memRegToPts.end() ? expanded : canonical->second};
       }
     }
     SVFGNodeBS objIds = getObjectIdsForValue(ptr);
     if (!objIds.empty()) {
+      SVFGNodeBS expanded = objIds;
+      for (uint32_t obj : objIds) {
+        if (svfg && svfg->isFieldInsensitiveObject(obj)) {
+          const SVFGNodeBS fields = svfg->getFieldObjects(obj);
+          expanded.insert(fields.begin(), fields.end());
+        }
+      }
       const uint32_t memRegId =
-          getOrCreateMemRegForPointsTo(objIds, getMemoryRegionScope(ptr));
+          getOrCreateMemRegForPointsTo(expanded, getMemoryRegionScope(ptr));
       auto canonical = memRegToPts.find(memRegId);
       return {memRegId,
-              canonical == memRegToPts.end() ? objIds : canonical->second};
+              canonical == memRegToPts.end() ? expanded : canonical->second};
     }
     if (const Argument *origin = getSpilledFormalOrigin(ptr)) {
       SVFGNodeBS originObjects =
@@ -512,7 +532,7 @@ void SVFGBuilder::buildMemorySSA() {
     }
   }
 
-  auto collectVisibleRegions = [&](const Value *ptr) -> MemRegPtsMap {
+  auto collectVisibleRegions = [&](const Value *ptr, uint64_t accessLen = 0) -> MemRegPtsMap {
     MemRegPtsMap regions;
     if (!ptr || !ptr->getType()->isPointerTy())
       return regions;
@@ -537,14 +557,39 @@ void SVFGBuilder::buildMemorySSA() {
         }
       }
     }
+    if (!globallyVisiblePointees && svfg) {
+      for (uint32_t objId : objIds) {
+        const auto *info = svfg->getObjectInfo(objId);
+        const uint32_t b = info && info->baseObjId != 0 ? info->baseObjId : objId;
+        if (svfg->isHeapObject(b)) {
+          globallyVisiblePointees = true;
+          break;
+        }
+      }
+    }
 
     if (globallyVisiblePointees) {
       if (!objIds.empty()) {
-        const uint32_t region =
-            getOrCreateMemRegForPointsTo(objIds, getMemoryRegionScope(ptr));
-        // Summaries track accessed objects, not every object sharing their
-        // region. Expand to the full partition only when creating SSA nodes.
-        addRegion(regions, region, objIds);
+        SVFGNodeBS allAccessed = objIds;
+        if (svfg && accessLen > 0) {
+          for (uint32_t obj : objIds) {
+            const auto *info = svfg->getObjectInfo(obj);
+            const uint32_t b = info && info->baseObjId != 0 ? info->baseObjId : obj;
+            const uint64_t startOffset = info && info->hasFieldOffset ? info->fieldOffset : 0;
+            const SVFGNodeBS allFields = svfg->getFieldObjects(b);
+            for (uint32_t fObj : allFields) {
+              const auto *fInfo = svfg->getObjectInfo(fObj);
+              const uint64_t fOffset = fInfo && fInfo->hasFieldOffset ? fInfo->fieldOffset : 0;
+              if (fOffset >= startOffset && fOffset < startOffset + accessLen)
+                allAccessed.insert(fObj);
+            }
+          }
+        }
+        for (uint32_t obj : allAccessed) {
+          const uint32_t region =
+              getOrCreateMemRegForPointsTo(SVFGNodeBS{obj}, getMemoryRegionScope(ptr));
+          addRegion(regions, region, SVFGNodeBS{obj});
+        }
       } else {
         const auto region = getCanonicalRegionForPointer(ptr);
         if (region.first != 0)
@@ -693,7 +738,7 @@ void SVFGBuilder::buildMemorySSA() {
 
   auto recordVisibleAccess = [&](const Function *context, const Value *ptr,
                                  FunctionMemorySummary &summary, bool isRead,
-                                 bool isWrite) {
+                                 bool isWrite, uint64_t accessLen = 0) {
     if (!ptr || !ptr->getType()->isPointerTy())
       return;
 
@@ -753,7 +798,7 @@ void SVFGBuilder::buildMemorySSA() {
         matchedArgument = true;
       }
     }
-    MemRegPtsMap visibleRegs = collectVisibleRegions(ptr);
+    MemRegPtsMap visibleRegs = collectVisibleRegions(ptr, accessLen);
     if (isRead)
       mergeRegions(summary.readGlobals, visibleRegs);
     if (isWrite)
@@ -863,25 +908,37 @@ void SVFGBuilder::buildMemorySSA() {
           continue;
         switch (intrinsic->getIntrinsicID()) {
         case Intrinsic::memcpy:
-        case Intrinsic::memmove:
+        case Intrinsic::memmove: {
+          const auto *lenConst =
+              call->arg_size() >= 3
+                  ? dyn_cast<ConstantInt>(call->getArgOperand(2))
+                  : nullptr;
+          const uint64_t copyLen = lenConst ? lenConst->getZExtValue() : 0;
           if (call->arg_size() >= 1 &&
               call->getArgOperand(0)->getType()->isPointerTy()) {
             recordVisibleAccess(&F, call->getArgOperand(0), summary, false,
-                                true);
+                                true, copyLen);
           }
           if (call->arg_size() >= 2 &&
               call->getArgOperand(1)->getType()->isPointerTy()) {
             recordVisibleAccess(&F, call->getArgOperand(1), summary, true,
-                                false);
+                                false, copyLen);
           }
           break;
-        case Intrinsic::memset:
+        }
+        case Intrinsic::memset: {
+          const auto *lenConst =
+              call->arg_size() >= 3
+                  ? dyn_cast<ConstantInt>(call->getArgOperand(2))
+                  : nullptr;
+          const uint64_t copyLen = lenConst ? lenConst->getZExtValue() : 0;
           if (call->arg_size() >= 1 &&
               call->getArgOperand(0)->getType()->isPointerTy()) {
             recordVisibleAccess(&F, call->getArgOperand(0), summary, false,
-                                true);
+                                true, copyLen);
           }
           break;
+        }
         default:
           break;
         }
@@ -1001,6 +1058,12 @@ void SVFGBuilder::buildMemorySSA() {
         MemRegPtsMap writeRegs;
         const auto *intrinsic = dyn_cast<IntrinsicInst>(call);
         if (intrinsic) {
+          const auto *lenConst =
+              call->arg_size() >= 3
+                  ? dyn_cast<ConstantInt>(call->getArgOperand(2))
+                  : nullptr;
+          const uint64_t copyLen = lenConst ? lenConst->getZExtValue() : 0;
+
           auto addIntrinsicRegion = [&](unsigned argument, bool read,
                                         bool write) {
             if (argument >= call->arg_size())
@@ -1015,6 +1078,31 @@ void SVFGBuilder::buildMemorySSA() {
               addRegion(readRegs, region.first, region.second);
             if (write)
               addRegion(writeRegs, region.first, region.second);
+
+            if (svfg && copyLen > 0) {
+              for (uint32_t obj : region.second) {
+                const auto *info = svfg->getObjectInfo(obj);
+                const uint32_t base = info && info->baseObjId != 0 ? info->baseObjId : obj;
+                const uint64_t startOffset = info && info->hasFieldOffset ? info->fieldOffset : 0;
+                const SVFGNodeBS allFields = svfg->getFieldObjects(base);
+                for (uint32_t fObj : allFields) {
+                  if (fObj == obj)
+                    continue;
+                  const auto *fInfo = svfg->getObjectInfo(fObj);
+                  const uint64_t fOffset = fInfo && fInfo->hasFieldOffset ? fInfo->fieldOffset : 0;
+                  if (fOffset >= startOffset && fOffset < startOffset + copyLen) {
+                    const uint32_t fReg = getOrCreateMemRegForPointsTo(
+                        SVFGNodeBS{fObj}, getMemoryRegionScope(pointer));
+                    if (fReg != 0) {
+                      if (read)
+                        addRegion(readRegs, fReg, SVFGNodeBS{fObj});
+                      if (write)
+                        addRegion(writeRegs, fReg, SVFGNodeBS{fObj});
+                    }
+                  }
+                }
+              }
+            }
           };
           switch (intrinsic->getIntrinsicID()) {
           case Intrinsic::memcpy:
@@ -1232,10 +1320,15 @@ void SVFGBuilder::buildMemorySSA() {
           if (const auto *intrinsic = dyn_cast<IntrinsicInst>(call)) {
             if (intrinsic->getIntrinsicID() == Intrinsic::memcpy ||
                 intrinsic->getIntrinsicID() == Intrinsic::memmove) {
-              for (uint32_t muId : muVec)
+              for (uint32_t muId : muVec) {
+                SVFGNode *muNode = svfg->getNode(muId);
+                SVFGNodeBS muGuard = muNode && muNode->getPointsTo() ? *muNode->getPointsTo() : SVFGNodeBS{};
+                if (muGuard.empty())
+                  muGuard.insert(getOrCreateUnknownObjId());
                 for (uint32_t chiId : chiVec)
-                  svfg->addEdge(svfg->getNode(muId), svfg->getNode(chiId),
-                                SVFGEdgeK::IntraIndirect);
+                  svfg->addEdge(muNode, svfg->getNode(chiId),
+                                SVFGEdgeK::IntraIndirect, call, muGuard);
+              }
 
               auto underlyingBase = [](const Value *value) {
                 const Value *current = value;
@@ -1278,9 +1371,14 @@ void SVFGBuilder::buildMemorySSA() {
                 if ((!sameSourceBase && !sameSourceObject) ||
                     !dominance.dominates(store, intrinsic))
                   continue;
+                SVFGNode *storeNode = svfg->getNode(storeNodeId);
+                auto *st = dyn_cast_or_null<StoreSVFGNode>(storeNode);
+                SVFGNodeBS stGuard = st ? st->getMemoryPointsTo() : SVFGNodeBS{};
+                if (stGuard.empty())
+                  stGuard.insert(getOrCreateUnknownObjId());
                 for (uint32_t chiId : chiVec)
-                  svfg->addEdge(svfg->getNode(storeNodeId),
-                                svfg->getNode(chiId), SVFGEdgeK::IntraIndirect);
+                  svfg->addEdge(storeNode,
+                                svfg->getNode(chiId), SVFGEdgeK::IntraIndirect, call, stGuard);
               }
               for (const auto &[load, loadNodeId] : loadToLoadNode) {
                 if (underlyingBase(load->getPointerOperand()) !=
@@ -2298,8 +2396,7 @@ void SVFGBuilder::buildCallEdges() {
               continue;
             SVFGNodeBS edgePts =
                 intersectPointsToSets(actualIn->getDefSVFVars(),
-                                      formalIn->getDefSVFVars(), unknownObjId,
-                                      !config.usePointerAnalysis);
+                                      formalIn->getDefSVFVars(), unknownObjId);
             if (edgePts.empty() && actualIn->getMemReg() != 0 &&
                 actualIn->getMemReg() == formalIn->getMemReg()) {
               edgePts = actualIn->getDefSVFVars().empty()
@@ -2386,8 +2483,7 @@ void SVFGBuilder::buildReturnEdges() {
               continue;
             SVFGNodeBS edgePts =
                 intersectPointsToSets(formalOut->getDefSVFVars(),
-                                      actualOut->getDefSVFVars(), unknownObjId,
-                                      !config.usePointerAnalysis);
+                                      actualOut->getDefSVFVars(), unknownObjId);
             if (edgePts.empty() && formalOut->getMemReg() != 0 &&
                 formalOut->getMemReg() == actualOut->getMemReg()) {
               edgePts = formalOut->getDefSVFVars().empty()
@@ -2543,8 +2639,7 @@ bool SVFGBuilder::connectCallSiteToCalleeOnTheFly(
       if (!mayAliasMemoryNodes(actualIn, formalIn))
         continue;
       SVFGNodeBS edgePts = intersectPointsToSets(
-          actualIn->getDefSVFVars(), formalIn->getDefSVFVars(), unknownObjId,
-          !config.usePointerAnalysis);
+          actualIn->getDefSVFVars(), formalIn->getDefSVFVars(), unknownObjId);
       if (edgePts.empty() && actualIn->getMemReg() != 0 &&
           actualIn->getMemReg() == formalIn->getMemReg()) {
         edgePts = actualIn->getDefSVFVars().empty()
@@ -2597,8 +2692,7 @@ bool SVFGBuilder::connectCallSiteToCalleeOnTheFly(
       if (!mayAliasMemoryNodes(formalOut, actualOut))
         continue;
       SVFGNodeBS edgePts = intersectPointsToSets(
-          formalOut->getDefSVFVars(), actualOut->getDefSVFVars(), unknownObjId,
-          !config.usePointerAnalysis);
+          formalOut->getDefSVFVars(), actualOut->getDefSVFVars(), unknownObjId);
       if (edgePts.empty() && formalOut->getMemReg() != 0 &&
           formalOut->getMemReg() == actualOut->getMemReg()) {
         edgePts = formalOut->getDefSVFVars().empty()

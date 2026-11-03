@@ -143,14 +143,20 @@ getInstructionGepOffset(const GetElementPtrInst *gep) {
 static SVFGNodeBS intersectPointsToSets(const SVFGNodeBS &lhs,
                                         const SVFGNodeBS &rhs,
                                         uint32_t unknownObjId,
-                                        bool wildcardUnknown = false) {
+                                        bool wildcardUnknown = true) {
   // Empty means "no objects".
   if (lhs.empty() || rhs.empty())
     return SVFGNodeBS{};
 
-  if (wildcardUnknown && unknownObjId != 0 &&
-      (lhs.count(unknownObjId) != 0 || rhs.count(unknownObjId) != 0)) {
-    return SVFGNodeBS{unknownObjId};
+  if (wildcardUnknown && unknownObjId != 0) {
+    const bool lhsHasUnknown = lhs.count(unknownObjId) != 0;
+    const bool rhsHasUnknown = rhs.count(unknownObjId) != 0;
+    if (lhsHasUnknown && rhsHasUnknown)
+      return SVFGNodeBS{unknownObjId};
+    if (lhsHasUnknown)
+      return rhs;
+    if (rhsHasUnknown)
+      return lhs;
   }
 
   SVFGNodeBS out;
@@ -469,13 +475,22 @@ void SVFGBuilder::prepareMemoryRegionPartitioning() {
     if (!pointer || !pointer->getType()->isPointerTy())
       return;
     const SVFGNodeBS objects = getObjectIdsForValue(pointer);
-    if (!objects.empty())
-      memoryRegionPartitioner.observe(scope, objects);
+    if (!objects.empty()) {
+      SVFGNodeBS expanded = objects;
+      if (svfg) {
+        for (uint32_t obj : objects) {
+          if (svfg->isFieldInsensitiveObject(obj)) {
+            const SVFGNodeBS fields = svfg->getFieldObjects(obj);
+            expanded.insert(fields.begin(), fields.end());
+          }
+        }
+      }
+      memoryRegionPartitioner.observe(scope, expanded);
+    }
   };
 
   for (const GlobalVariable &global : module->globals()) {
-    if (config.pointerOnly &&
-        (!canTypeContainPointer(global.getValueType()) || global.isConstant()))
+    if (config.pointerOnly && !canTypeContainPointer(global.getValueType()))
       continue;
     observe(&global, nullptr);
   }
@@ -1553,16 +1568,12 @@ bool SVFGBuilder::mayAliasMemoryNodes(const MSSASVFGNode *lhs,
   const SVFGNodeBS lhsPts = lhs->getDefSVFVars();
   const SVFGNodeBS rhsPts = rhs->getDefSVFVars();
 
-  if (!config.usePointerAnalysis) {
-    if (lhsPts.empty() || rhsPts.empty())
-      return true;
-    if (unknownObjId != 0 &&
-        (lhsPts.count(unknownObjId) != 0 || rhsPts.count(unknownObjId) != 0))
-      return true;
-  }
-
   if (lhsPts.empty() || rhsPts.empty())
-    return false;
+    return !config.usePointerAnalysis;
+
+  if (unknownObjId != 0 &&
+      (lhsPts.count(unknownObjId) != 0 || rhsPts.count(unknownObjId) != 0))
+    return true;
 
   for (uint32_t id : lhsPts) {
     if (rhsPts.count(id))

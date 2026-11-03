@@ -573,7 +573,7 @@ void SVFGBuilder::buildAddressTakenNodes() {
   if (M && config.includeGlobals) {
     for (const GlobalVariable &gv : M->globals()) {
       if (config.pointerOnly &&
-          (!canTypeContainPointer(gv.getValueType()) || gv.isConstant()))
+          !canTypeContainPointer(gv.getValueType()))
         continue;
       bool addressTaken = false;
       for (const User *user : gv.users()) {

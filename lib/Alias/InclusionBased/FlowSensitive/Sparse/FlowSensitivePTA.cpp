@@ -1046,7 +1046,9 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
       PointsToSet targetSet = accessTargets(
           accessPointer(load->getInstruction()), load->getMemoryPointsTo());
       for (ObjectID object : targetSet) {
-        if (graph_->isConstantObject(object))
+        const auto *info = graph_->getObjectInfo(object);
+        const uint32_t base = info && info->baseObjId != 0 ? info->baseObjId : object;
+        if (graph_->isConstantObject(object) && !graph_->isGlobalObject(base))
           continue;
         auto value = incoming.find(object);
         if (value != incoming.end()) {

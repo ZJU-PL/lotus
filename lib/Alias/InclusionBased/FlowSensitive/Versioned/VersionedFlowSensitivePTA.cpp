@@ -2136,7 +2136,9 @@ bool VersionedFlowSensitivePTA::processNode(const SVFGNode &node) {
       const PointsToSet targets = accessTargets(
           accessPointer(load->getInstruction()), load->getMemoryPointsTo());
       for (ObjectID object : targets) {
-        if (graph_->isConstantObject(object))
+        const auto *info = graph_->getObjectInfo(object);
+        const uint32_t base = info && info->baseObjId != 0 ? info->baseObjId : object;
+        if (graph_->isConstantObject(object) && !graph_->isGlobalObject(base))
           continue;
         const Version consumed = getConsume(node.getId(), object);
         // SVF's VFS skips objects without a consume label at this location.
