@@ -60,6 +60,10 @@ protected:
   std::unique_ptr<CtxModule<ctx>> module; // owner of the ctx module
   std::unique_ptr<ConsGraphTy> consGraph; // owner of the constraint callgraph
 
+  // A newly reached call site needs resolution even if its pointer's
+  // points-to set was already stable before the caller became reachable.
+  llvm::SparseBitVector<> newIndirectCallPtrs;
+
   MemModel memModel;
   // return map does not managed by singleinstanceowner as it may conflict
   // with function pointers (when initialCtx and globalCtx are the same)
@@ -252,8 +256,10 @@ protected:
         getPtrNodeOrNull(indirect->getContext(), indirect->getValue());
     if (!funPtrNode)
       return; // Unresolvable (e.g. inline asm) - skip conservatively
-    // mark the ptr node as a indirect function pointer node
-    funPtrNode->setIndirectCallNode(indirect->getCallNode());
+    // Value mappings retain the original node after SCC merging.
+    CGNodeTy *representative = funPtrNode->getSuperNode();
+    representative->setIndirectCallNode(indirect->getCallNode());
+    newIndirectCallPtrs.set(representative->getNodeID());
   }
 
   struct Noop {
@@ -266,15 +272,17 @@ protected:
   bool updateFunPtrs(const llvm::SparseBitVector<> &funPtrs
                               /*,BeforeNewNodeHook beforeNewNodeHook, OnNewDirectHook onNewDirectHook,
                                  OnNewInDirectHook onNewInDirectHook, OnNewEdgeHook onNewEdgeHook*/) {
-    // TODO: static assert here to ensure the callback accept the parameters
-    if (funPtrs.empty()) {
+    llvm::SparseBitVector<> work(funPtrs);
+    work |= newIndirectCallPtrs;
+    newIndirectCallPtrs.clear();
+    if (work.empty()) {
       return false;
     }
 
     bool changed = false;
     size_t beforeResolve = this->getConsGraph()->getNodeNum();
 
-    for (NodeID id : funPtrs) {
+    for (NodeID id : work) {
       // in case the node is collapsed
       auto funPtrNode = (*consGraph)[id]->getSuperNode();
       assert(funPtrNode->isFunctionPtr());
@@ -284,14 +292,17 @@ protected:
       // and thus corrupt the iterator
       // TODO: is this a good idea?
       typename PT::PtsTy pointsTo(PT::getPointsTo(ptrID));
+      // Resolving a target may register more sites on this same pointer.
+      // Snapshot the set; new sites are handled in the next resolution round.
+      std::vector<CallNodeTy *> indirectNodes(funPtrNode->indirect_begin(),
+                                             funPtrNode->indirect_end());
       for (auto it = pointsTo.begin(), eit = pointsTo.end(); it != eit; it++) {
         auto node = (*consGraph)[*it];
         if (auto objNode = llvm::dyn_cast<ObjNode>(node)) {
           auto object = objNode->getObject();
           if (object->isFunction()) {
             // resolved to a function
-            for (CallGraphNode<ctx> *indirectNode :
-                 funPtrNode->getIndirectNodes()) {
+            for (CallGraphNode<ctx> *indirectNode : indirectNodes) {
               // auto indirectNode =
               // funPtrNode->getIndirectCallNode();
               const llvm::Function *target =

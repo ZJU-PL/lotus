@@ -11,13 +11,16 @@
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/PointerAnalysisPass.h"
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Program/CallSite.h"
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Program/CtxModule.h"
+#include "Alias/InclusionBased/AserPTA/PointerAnalysis/Solver/DeepPropagation.h"
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Solver/PartialUpdateSolver.h"
+#include "Alias/InclusionBased/AserPTA/PointerAnalysis/Solver/WavePropagation.h"
 #include "Alias/InclusionBased/AserPTA/PreProcessing/Passes/CanonicalizeGEPPass.h"
 #include "Alias/InclusionBased/AserPTA/PreProcessing/Passes/InsertGlobalCtorCallPass.h"
 #include "Alias/InclusionBased/AserPTA/PreProcessing/Passes/LoweringMemCpyPass.h"
 #include "Alias/InclusionBased/AserPTA/PreProcessing/Passes/RemoveExceptionHandlerPass.h"
 #include "TestUtils/LLVMHelpers.h"
 
+#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <gtest/gtest.h>
 
@@ -47,6 +50,64 @@ void addAserPTAPasses(llvm::legacy::PassManager &passes) {
   passes.add(new InsertGlobalCtorCallPass());
   passes.add(new PointerAnalysisPass<Solver>());
 }
+
+// @target already has its address seed before @late becomes reachable.
+// The cast's canonical pointer is @target, so visiting @late need not grow
+// that pointer's points-to set. The new call site still needs resolution.
+const char *lateCallIR = R"(
+  @payload = global i8 0
+  define i8* @target(i8* %p) { ret i8* %p }
+  define i8* @late(i8* %p) {
+    %cast = bitcast i8* (i8*)* @target to i8* (i32*)*
+    %arg = bitcast i8* %p to i32*
+    %inner = call i8* %cast(i32* %arg)
+    ret i8* %inner
+  }
+  define i32 @main() {
+    %fp = select i1 true, i8* (i8*)* @late, i8* (i8*)* @late
+    %outer = call i8* %fp(i8* @payload)
+    ret i32 0
+  }
+)";
+
+template <typename Solver> void checkLateCall() {
+  llvm::LLVMContext context;
+  auto module = lotus::unittest::parseModule(context, lateCallIR, "late-call");
+  ASSERT_NE(module, nullptr);
+  Solver solver;
+  solver.analyze(module.get());
+  for (const char *name : {"main", "late"}) {
+    for (auto &instruction : llvm::instructions(module->getFunction(name))) {
+      const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+      if (!call)
+        continue;
+      const auto *site = solver.getInDirectCallSite(nullptr, call);
+      ASSERT_NE(site, nullptr);
+      const auto *expected = module->getFunction(
+          llvm::StringRef(name) == "main" ? "late" : "target");
+      EXPECT_EQ(site->getResolvedTarget().size(), 1u);
+      EXPECT_EQ(site->getResolvedTarget().count(expected), 1u);
+
+      std::vector<const typename Solver::ObjTy *> points;
+      solver.getPointsTo(nullptr, call, points);
+      ASSERT_EQ(points.size(), 1u) << name;
+      EXPECT_EQ(points.front()->getValue(), module->getGlobalVariable("payload"));
+    }
+  }
+}
+
+class RegistrationModel : public FS_NoCtx_Model {
+public:
+  explicit RegistrationModel(llvm::Module *module) : FS_NoCtx_Model(module, "main") {}
+  using FS_NoCtx_Model::getConsGraph;
+  using FS_NoCtx_Model::getPtrNodeOrNull;
+  using FS_NoCtx_Model::initIndirectCall;
+  void buildBody(llvm::Function *function) {
+    addGlobals();
+    CtxFunction<NoCtx> instance(nullptr, function, nullptr, nullptr);
+    initFunction(&instance);
+  }
+};
 
 } // namespace
 
@@ -92,6 +153,108 @@ TEST(AserPTAInfrastructure, MissingIndirectCallNodeReturnsNull) {
 
   CtxModule<NoCtx> contextModule(module.get(), "main");
   EXPECT_EQ(contextModule.getInDirectNode(nullptr, call), nullptr);
+}
+
+// ============================================================================
+// Indirect Call Resolution Tests
+// ============================================================================
+
+TEST(AserPTAIndirectCalls, LateExistingPointerPartialUpdateFS) {
+  checkLateCall<PartialUpdateSolver<FS_NoCtx_Model>>();
+}
+TEST(AserPTAIndirectCalls, LateExistingPointerWaveFS) {
+  checkLateCall<WavePropagation<FS_NoCtx_Model>>();
+}
+TEST(AserPTAIndirectCalls, LateExistingPointerDeepFS) {
+  checkLateCall<DeepPropagation<FS_NoCtx_Model>>();
+}
+TEST(AserPTAIndirectCalls, LateExistingPointerPartialUpdateFI) {
+  checkLateCall<PartialUpdateSolver<FI_NoCtx_Model>>();
+}
+TEST(AserPTAIndirectCalls, LateExistingPointerWaveFI) {
+  checkLateCall<WavePropagation<FI_NoCtx_Model>>();
+}
+TEST(AserPTAIndirectCalls, LateExistingPointerDeepFI) {
+  checkLateCall<DeepPropagation<FI_NoCtx_Model>>();
+}
+
+TEST(AserPTAIndirectCalls, RegistrationUsesCurrentRepresentative) {
+  llvm::LLVMContext context;
+  auto module = lotus::unittest::parseModule(context, R"(
+    @payload = global i8 0
+    define i8* @target(i8* %p) { ret i8* %p }
+    define i32 @main() {
+    entry:
+      br label %loop
+    loop:
+      %left = phi i8* (i8*)* [@target, %entry], [%right, %loop]
+      %right = select i1 true, i8* (i8*)* %left, i8* (i8*)* %left
+      %result = call i8* %right(i8* @payload)
+      br label %loop
+    }
+  )", "merged-registration");
+  ASSERT_NE(module, nullptr);
+  using PT = PTSTrait<DefaultPtsTy>;
+  PT::clearAll();
+  {
+    RegistrationModel model(module.get());
+    auto *main = module->getFunction("main");
+    model.buildBody(main);
+    llvm::Instruction *left = nullptr;
+    llvm::CallBase *call = nullptr;
+    for (auto &instruction : llvm::instructions(main)) {
+      if (instruction.getName() == "left")
+        left = &instruction;
+      if (auto *candidate = llvm::dyn_cast<llvm::CallBase>(&instruction))
+        call = candidate;
+    }
+    ASSERT_NE(left, nullptr);
+    ASSERT_NE(call, nullptr);
+    auto *representative = model.getPtrNodeOrNull(nullptr, left);
+    auto *original = model.getPtrNodeOrNull(nullptr, call->getCalledOperand());
+    ASSERT_NE(representative, nullptr);
+    ASSERT_NE(original, nullptr);
+    ASSERT_NE(representative, original);
+    model.getConsGraph()->collapseSCCTo({representative, original}, representative);
+    ASSERT_EQ(original->getSuperNode(), representative);
+    CallGraph<NoCtx> calls;
+    auto *site = calls.addNewNode<CallGraphNode<NoCtx>>(nullptr, call);
+    model.initIndirectCall(site->getTargetFunPtr());
+    EXPECT_TRUE(representative->getIndirectNodes().count(site));
+    EXPECT_TRUE(original->getIndirectNodes().empty());
+  }
+  PT::clearAll();
+}
+
+TEST(AserPTAIndirectCalls, ResolvingTargetCanRegisterMoreSitesOnSamePointer) {
+  llvm::LLVMContext context;
+  std::string ir = "@payload = global i8 0\n"
+                   "define i8* @target(i8* %p) {\n"
+                   "  %cast = bitcast i8* (i8*)* @target to i8* (i32*)*\n"
+                   "  %arg = bitcast i8* %p to i32*\n";
+  // Exceed SmallPtrSet's inline capacity while its original site is resolved.
+  for (unsigned i = 0; i < 12; ++i)
+    ir += "  %r" + std::to_string(i) + " = call i8* %cast(i32* %arg)\n";
+  ir += "  ret i8* %p\n}\n"
+        "define i32 @main() {\n"
+        "  %cast = bitcast i8* (i8*)* @target to i8* (i32*)*\n"
+        "  %outer = call i8* %cast(i32* bitcast (i8* @payload to i32*))\n"
+        "  ret i32 0\n}\n";
+  auto module = lotus::unittest::parseModule(context, ir, "growing-sites");
+  ASSERT_NE(module, nullptr);
+  PartialUpdateSolver<FS_NoCtx_Model> solver;
+  solver.analyze(module.get());
+  unsigned sites = 0;
+  for (auto &function : *module)
+    for (auto &instruction : llvm::instructions(function))
+      if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+        const auto *site = solver.getInDirectCallSite(nullptr, call);
+        ASSERT_NE(site, nullptr);
+        EXPECT_EQ(site->getResolvedTarget().size(), 1u);
+        EXPECT_EQ(site->getResolvedTarget().count(module->getFunction("target")), 1u);
+        ++sites;
+      }
+  EXPECT_EQ(sites, 13u);
 }
 
 // ============================================================================
