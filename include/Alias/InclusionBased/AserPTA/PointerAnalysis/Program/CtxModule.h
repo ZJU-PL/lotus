@@ -316,6 +316,39 @@ public:
         }
       }
       if (entryFun == nullptr || entryFun->isDeclaration()) {
+        for (const char *candidate : {"test", "caller"}) {
+          if (auto *F = llvmModule->getFunction(candidate)) {
+            if (!F->isDeclaration()) {
+              entryFun = F;
+              this->entryName = F->getName();
+              break;
+            }
+          }
+        }
+      }
+      if (entryFun == nullptr || entryFun->isDeclaration()) {
+        std::set<const llvm::Function *> called;
+        for (const llvm::Function &F : *llvmModule) {
+          if (F.isDeclaration())
+            continue;
+          for (const auto &BB : F) {
+            for (const auto &I : BB) {
+              if (const auto *CB = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                if (const auto *callee = CB->getCalledFunction())
+                  called.insert(callee);
+              }
+            }
+          }
+        }
+        for (const llvm::Function &F : *llvmModule) {
+          if (!F.isDeclaration() && !F.isIntrinsic() && called.count(&F) == 0) {
+            entryFun = const_cast<llvm::Function *>(&F);
+            this->entryName = F.getName();
+            break;
+          }
+        }
+      }
+      if (entryFun == nullptr || entryFun->isDeclaration()) {
         for (const llvm::Function &F : *llvmModule) {
           if (!F.isDeclaration() && !F.isIntrinsic()) {
             entryFun = const_cast<llvm::Function *>(&F);

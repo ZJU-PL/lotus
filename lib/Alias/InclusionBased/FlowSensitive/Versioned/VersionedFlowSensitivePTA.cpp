@@ -314,6 +314,8 @@ VersionedFlowSensitivePTA::storeTargetObjects(
   }
   if (targets.empty())
     targets = store.getMemoryPointsTo();
+  if (targets.empty())
+    targets = store.getDefSVFVars();
   if (targets.empty() && pointer)
     targets = graph_->getObjectIds(pointer);
   return expandIndirectObjects(targets);

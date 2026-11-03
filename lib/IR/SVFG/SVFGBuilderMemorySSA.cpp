@@ -2083,13 +2083,13 @@ void SVFGBuilder::connectMemorySSAEdges() {
             continue;
           const uint32_t memReg = loadNode->getMemoryUseReg();
           SVFGNode *reachingDef = nullptr;
-          auto phiIt = bbToMemPhi[bb].find(memReg);
-          if (phiIt != bbToMemPhi[bb].end()) {
-            reachingDef = svfg->getNode(phiIt->second);
+          auto defIt = lastDef.find(memReg);
+          if (defIt != lastDef.end() && defIt->second) {
+            reachingDef = defIt->second;
           } else {
-            auto defIt = lastDef.find(memReg);
-            if (defIt != lastDef.end() && defIt->second) {
-              reachingDef = defIt->second;
+            auto phiIt = bbToMemPhi[bb].find(memReg);
+            if (phiIt != bbToMemPhi[bb].end()) {
+              reachingDef = svfg->getNode(phiIt->second);
             } else {
               auto entryIt = funcEntryChiMap[&F].find(memReg);
               if (entryIt != funcEntryChiMap[&F].end())
