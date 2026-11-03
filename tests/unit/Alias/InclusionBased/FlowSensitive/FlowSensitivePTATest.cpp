@@ -1734,3 +1734,98 @@ TEST_F(FlowSensitivePTATest, TypeClusteringOnlyAddsPointsToFacts) {
   for (FlowSensitivePTA::ObjectID object : mappedPlain)
     EXPECT_NE(clusteredResult->find(object), clusteredResult->end());
 }
+
+TEST_F(FlowSensitivePTATest, LoadsFromConstantGlobalStructPointers) {
+  auto module = parseModule(R"(
+    %struct.Pair = type { i8*, i8* }
+    @x = global i8 0
+    @y = global i8 0
+    @pair = constant %struct.Pair { i8* @x, i8* @y }
+
+    define i8* @main() {
+    entry:
+      %field0 = getelementptr inbounds %struct.Pair, %struct.Pair* @pair, i32 0, i32 0
+      %val0 = load i8*, i8** %field0
+      %field1 = getelementptr inbounds %struct.Pair, %struct.Pair* @pair, i32 0, i32 1
+      %val1 = load i8*, i8** %field1
+      ret i8* %val0
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  graphConfig.pointerOnly = true;
+  SVFGBuilder graphBuilder(graphConfig);
+  std::unique_ptr<SVFG> graph(graphBuilder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *val0 = nullptr;
+  const LoadInst *val1 = nullptr;
+  for (const Instruction &I : instructions(module->getFunction("main"))) {
+    if (const auto *LI = dyn_cast<LoadInst>(&I)) {
+      if (!val0) val0 = LI;
+      else if (!val1) val1 = LI;
+    }
+  }
+  ASSERT_NE(val0, nullptr);
+  ASSERT_NE(val1, nullptr);
+
+  FlowSensitivePTA solver(*graph);
+  solver.solve();
+
+  auto r0 = solver.pointsTo(val0);
+  ASSERT_TRUE(r0.has_value());
+  EXPECT_FALSE(r0->empty());
+
+  auto r1 = solver.pointsTo(val1);
+  ASSERT_TRUE(r1.has_value());
+  EXPECT_FALSE(r1->empty());
+}
+
+TEST_F(FlowSensitivePTATest, VariantGepObservesFieldStore) {
+  auto module = parseModule(R"(
+    %struct.Table = type { i8* }
+    @val = global i8 0
+
+    define i8* @test(i64 %idx) {
+    entry:
+      %tbl = alloca %struct.Table
+      %fld = getelementptr inbounds %struct.Table, %struct.Table* %tbl, i32 0, i32 0
+      store i8* @val, i8** %fld
+      %raw = bitcast %struct.Table* %tbl to i8**
+      %varGep = getelementptr inbounds i8*, i8** %raw, i64 %idx
+      %loaded = load i8*, i8** %varGep
+      ret i8* %loaded
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  ICFGBuilder icfgBuilder(&icfg);
+  icfgBuilder.build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.buildMSSA = true;
+  SVFGBuilder graphBuilder(graphConfig);
+  std::unique_ptr<SVFG> graph(graphBuilder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  const LoadInst *loaded = nullptr;
+  for (const Instruction &I : instructions(module->getFunction("test"))) {
+    if (const auto *LI = dyn_cast<LoadInst>(&I))
+      loaded = LI;
+  }
+  ASSERT_NE(loaded, nullptr);
+
+  FlowSensitivePTA solver(*graph);
+  solver.solve();
+
+  auto result = solver.pointsTo(loaded);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->empty());
+}

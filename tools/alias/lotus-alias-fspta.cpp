@@ -453,22 +453,11 @@ int main(int argc, char **argv) {
   };
   auto connectIndirectCall = [&](const CallBase *callSite,
                                  const Function *target) {
-    if (::getenv("LOTUS_OTF_DEBUG")) {
-      llvm::errs() << "[OTF] callsite: " << *callSite << " -> " << target->getName() << "\n";
-    }
-    if (!isAllowedIndirectCall(callSite, target)) {
-      if (::getenv("LOTUS_OTF_DEBUG")) {
-        llvm::errs() << "      REJECTED BY BOUND!\n";
-      }
+    if (!isAllowedIndirectCall(callSite, target))
       return false;
-    }
     std::vector<SVFGEdge *> edges;
-    bool res = graphBuilder->connectCallSiteToCalleeOnTheFly(graph.get(), callSite,
+    return graphBuilder->connectCallSiteToCalleeOnTheFly(graph.get(), callSite,
                                                          target, edges);
-    if (::getenv("LOTUS_OTF_DEBUG")) {
-      llvm::errs() << "      connected=" << res << " numEdges=" << edges.size() << "\n";
-    }
-    return res;
   };
   std::unique_ptr<lotus::analysis::FilteredSVFGView> pointerOnlyView;
   if (PointerOnly)

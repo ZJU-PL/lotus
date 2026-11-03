@@ -298,13 +298,16 @@ void SVFGBuilder::buildMemorySSA() {
         return;
       }
       if (const auto *load = dyn_cast<LoadInst>(current)) {
-        visit(getDominatingStoredValue(load));
-        // A value loaded through a formally derived pointer is memory
-        // reachable from that formal even when the defining store lives in a
-        // different function (e.g. `o->in->arr` after `o->in` was assigned by
-        // the caller or a callee).  Keep the origin so nested field accesses
-        // are summarized instead of being treated as local to the callee.
-        visit(load->getPointerOperand());
+        if (const Value *stored = getDominatingStoredValue(load)) {
+          visit(stored);
+        } else {
+          // A value loaded through a formally derived pointer is memory
+          // reachable from that formal even when the defining store lives in a
+          // different function (e.g. `o->in->arr` after `o->in` was assigned by
+          // the caller or a callee).  Keep the origin so nested field accesses
+          // are summarized instead of being treated as local to the callee.
+          visit(load->getPointerOperand());
+        }
         return;
       }
       if (const auto *phi = dyn_cast<PHINode>(current)) {
@@ -622,13 +625,16 @@ void SVFGBuilder::buildMemorySSA() {
         return;
       }
       if (const auto *load = dyn_cast<LoadInst>(current)) {
-        visit(getDominatingStoredValue(load));
-        // A value loaded through a formally derived pointer is memory
-        // reachable from that formal even when the defining store lives in a
-        // different function (e.g. `o->in->arr` after `o->in` was assigned by
-        // the caller or a callee).  Keep the origin so nested field accesses
-        // are summarized instead of being treated as local to the callee.
-        visit(load->getPointerOperand());
+        if (const Value *stored = getDominatingStoredValue(load)) {
+          visit(stored);
+        } else {
+          // A value loaded through a formally derived pointer is memory
+          // reachable from that formal even when the defining store lives in a
+          // different function (e.g. `o->in->arr` after `o->in` was assigned by
+          // the caller or a callee).  Keep the origin so nested field accesses
+          // are summarized instead of being treated as local to the callee.
+          visit(load->getPointerOperand());
+        }
         return;
       }
       if (const auto *phi = dyn_cast<PHINode>(current)) {
@@ -827,7 +833,11 @@ void SVFGBuilder::buildMemorySSA() {
           llvm::errs() << id << "[" << label(id) << "],";
         llvm::errs() << "}\n";
       }
-      if (region.first != 0) {
+      const uint32_t unknownId = getOrCreateUnknownObjId();
+      const bool isSpecificRegion =
+          region.first != 0 && !region.second.empty() &&
+          region.second.count(unknownId) == 0;
+      if (isSpecificRegion) {
         if (isRead)
           addRegion(summary.readGlobals, region.first, region.second);
         if (isWrite)
