@@ -1,4 +1,5 @@
 #include "CFL/InterleavedDyck/SPDS/Solver.h"
+#include "CFL/InterleavedDyck/SPDS/ValueFlow.h"
 
 #include <charconv>
 #include <fstream>
@@ -23,6 +24,7 @@ template <class T> T number(std::string_view text) {
 void usage() {
   std::cout
       << "Usage: lotus-cfl-interleaved-dyck spds [options] graph.dot\n"
+         "  --analysis NAME         dyck (default) or value-flow\n"
          "  --all-pairs             analyze every source/target pair\n"
          "  --query SOURCE TARGET   one balanced reachability query\n"
          "  --source V              candidate successors of V (post*)\n"
@@ -44,6 +46,8 @@ void usage() {
          "  --max-updates N         weight-update limit per projection\n"
          "  --help                  show this help\n"
          "A query scope is required. Results are a sound upper bound.\n"
+         "value-flow requires bracket-ended balanced paths, excludes self-pairs,\n"
+         "and rejects prefix flags. --direction also applies to its all-pairs scope.\n"
          "Exit codes: 0 = complete; 2 = input error; 3 = resource limit (no "
          "result).\n";
 }
@@ -110,7 +114,7 @@ int runInterleavedDyckSPDS(int argc, char **argv) {
     std::vector<dyck::Vertex> vertices;
     bool single_query = false, all_pairs = false, pairs = false,
          timings = false, positional = false;
-    std::string path, queries_path;
+    std::string path, queries_path, client = "dyck";
     spds::DemandDirection demand_direction = spds::DemandDirection::Auto;
     auto argument = [&](int &i) -> std::string_view {
       if (++i >= argc)
@@ -127,7 +131,12 @@ int runInterleavedDyckSPDS(int argc, char **argv) {
         usage();
         return 0;
       }
-      if (!positional && arg == "--all-pairs") {
+      if (!positional && arg == "--analysis") {
+        client = argument(i);
+        if (client != "dyck" && client != "value-flow")
+          throw std::invalid_argument(
+              "invalid --analysis; use dyck or value-flow");
+      } else if (!positional && arg == "--all-pairs") {
         if (all_pairs || source || target || !queries_path.empty())
           throw std::invalid_argument("multiple query scopes");
         all_pairs = true;
@@ -189,7 +198,8 @@ int runInterleavedDyckSPDS(int argc, char **argv) {
       throw std::invalid_argument(
           "missing query scope; use --all-pairs, --query, --source, "
           "--target, or --queries");
-    if (all_pairs && demand_direction != spds::DemandDirection::Auto)
+    if (all_pairs && client == "dyck" &&
+        demand_direction != spds::DemandDirection::Auto)
       throw std::invalid_argument(
           "--direction is only valid for demand queries");
     if (source && !target && demand_direction == spds::DemandDirection::Pre)
@@ -214,6 +224,44 @@ int runInterleavedDyckSPDS(int argc, char **argv) {
         (target && !graph.containsVertex(*target)))
       throw std::invalid_argument(
           "query vertex is not in graph; use --vertex for isolated vertices");
+    if (client == "value-flow") {
+      spds::ValueFlowAnalysis analysis(graph, options);
+      spds::Result result;
+      std::vector<dyck::Pair> demands;
+      if (!queries_path.empty()) {
+        demands = readDemands(queries_path);
+        result = analysis.analyzeDemands(demands, demand_direction);
+      } else if (single_query)
+        result =
+            analysis.analyzeDemands({{*source, *target}}, demand_direction);
+      else if (source)
+        result = analysis.analyzeFrom(*source);
+      else if (target)
+        result = analysis.analyzeTo(*target);
+      else
+        result = analysis.analyzeAll(demand_direction);
+      std::cout << "engine: spds\nanalysis: value-flow\n"
+                   "semantics: sound upper bound\ncall-stack: "
+                   "empty\nfield-stack: empty\n";
+      if (!queries_path.empty())
+        std::cout << "requested-pairs: " << demands.size() << '\n';
+      if (single_query) {
+        const dyck::Pair p{*source, *target};
+        std::cout << "query: "
+                  << (result.mayReach(*source, *target) ? "may-reach"
+                                                        : "unreachable")
+                  << "\ncall-projection: "
+                  << (result.parenthesis_pairs.count(p) ? "accept" : "reject")
+                  << "\nfield-projection: "
+                  << (result.bracket_pairs.count(p) ? "accept" : "reject")
+                  << '\n';
+      }
+      std::cout << "candidate-pairs: " << result.upper_bound.size() << '\n';
+      printStats(result.statistics, timings);
+      if (pairs)
+        printPairs(result.upper_bound);
+      return 0;
+    }
     spds::Solver solver(options);
     auto analysis = solver.prepare(graph);
     // Do not print result headers until saturation has completed successfully.

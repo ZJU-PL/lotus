@@ -69,6 +69,10 @@ public:
   Result analyzeFrom(Vertex source) const;
   Result analyzeTo(Vertex target) const;
   Result analyzeAll() const;
+  // Evaluate a Cartesian query scope without materializing all demands.
+  Result analyzeBetween(const std::vector<Vertex> &sources,
+                        const std::vector<Vertex> &targets,
+                        DemandDirection direction = DemandDirection::Auto) const;
   Result
   analyzeDemands(const std::vector<Pair> &demands,
                  DemandDirection direction = DemandDirection::Auto) const;
