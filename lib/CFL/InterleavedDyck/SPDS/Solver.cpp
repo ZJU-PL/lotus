@@ -267,6 +267,46 @@ Result PreparedAnalysis::analyzeAll() const {
   }
   return result;
 }
+Result PreparedAnalysis::analyzeBetween(const std::vector<Vertex> &sources,
+                                        const std::vector<Vertex> &targets,
+                                        DemandDirection direction) const {
+  std::set<Vertex> from(sources.begin(), sources.end());
+  std::set<Vertex> to(targets.begin(), targets.end());
+  for (const auto &endpoints : {&from, &to})
+    for (Vertex v : *endpoints)
+      if (!controls_->count(v))
+        throw std::invalid_argument("SPDS query vertex is not in graph");
+  const bool post =
+      direction == DemandDirection::Post ||
+      (direction == DemandDirection::Auto && from.size() <= to.size());
+  Result result;
+  result.statistics.projection_microseconds = projection_microseconds_;
+  if (from.empty() || to.empty())
+    return result;
+  for (Vertex anchor : post ? from : to) {
+    auto q = post ? queryFrom(anchor) : queryTo(anchor);
+    const auto calls = endpointWeights(q.callAutomaton(), options_.parentheses);
+    const auto fields = endpointWeights(q.fieldAutomaton(), options_.brackets);
+    accumulate(result.statistics, q.callAutomaton().statistics());
+    accumulate(result.statistics, q.fieldAutomaton().statistics());
+    result.statistics.projection_microseconds += q.projection_microseconds_;
+    for (Vertex endpoint : post ? to : from) {
+      const auto found = q.controls_->find(endpoint);
+      if (found == q.controls_->end())
+        continue;
+      const Pair pair = post ? Pair{anchor, endpoint} : Pair{endpoint, anchor};
+      const State state = found->second;
+      if (calls[state])
+        result.parenthesis_pairs.insert(pair);
+      if (fields[state])
+        result.bracket_pairs.insert(pair);
+      if (calls[state] && fields[state])
+        result.upper_bound.insert(pair);
+    }
+  }
+  return result;
+}
+
 Result PreparedAnalysis::analyzeDemands(const std::vector<Pair> &demands,
                                         DemandDirection direction) const {
   std::map<Vertex, std::vector<Vertex>> by_source, by_target;

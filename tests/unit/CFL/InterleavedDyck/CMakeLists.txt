@@ -6,6 +6,7 @@ lotus_collect_test_sources(cfl_tests
   MCFLTest.cpp
   SolverComparisonTest.cpp
   SPDSTest.cpp
+  SPDSValueFlowTest.cpp
   StagedBoundsEngineTest.cpp
   StagedBoundsTest.cpp
   UnaryAdaptiveTest.cpp

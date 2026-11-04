@@ -119,6 +119,41 @@ Exit codes are 0 for a completed computation (including an unreachable
 answer), 2 for invalid input, and 3 for a resource limit. Failure cases print
 no result relation.
 
+Value-flow client
+-----------------
+
+``--analysis value-flow`` selects the value-flow client; ``--analysis dyck``
+(the default) preserves the general balanced-graph queries. For example:
+
+.. code-block:: console
+
+   build/bin/lotus-cfl-interleaved-dyck spds --analysis value-flow --all-pairs --pairs input.dot
+   build/bin/lotus-cfl-interleaved-dyck spds --analysis value-flow --query 10 20 input.dot
+
+All five query scopes are supported. Each witness must begin with an opening
+bracket and end with a closing bracket, with empty call and field stacks at
+both endpoints. All bracket IDs are supported. Prefix flags are rejected.
+Returned pairs use original vertex IDs and exclude self-pairs, matching the
+staged-bounds value-flow client convention. A known vertex outside the client
+scope yields no candidate; an unknown query vertex is an input error.
+
+The adapter prunes vertices outside bracket source-to-sink paths and builds a
+three-layer product: opening brackets enter the middle layer, all original
+edges remain in the middle, and closing brackets exit to the final layer.
+It applies the endpoint constraint to each projection before intersecting
+their results. This still permits different witnesses for the two projections,
+so results are sound upper bounds, not certified reachable pairs.
+
+The C++ API is ``spds::ValueFlowAnalysis`` in ``SPDS/ValueFlow.h``. It exposes
+``analyzeAll``, ``analyzeFrom``, ``analyzeTo``, and ``analyzeDemands`` and returns
+the existing ``Result`` type. All-pairs evaluation iterates over valid sources
+or sinks (whichever set is smaller), without materializing their Cartesian
+product. ``--direction post|pre`` can also force the all-pairs direction in
+this client. The existing per-saturation resource limits apply; no partial
+relation is printed on failure. ``--timings`` reports the existing solver phase
+instrumentation, not end-to-end client time: DOT parsing, client graph
+transformation and result remapping are not included in these phase counters.
+
 Build and test
 --------------
 
