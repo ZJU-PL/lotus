@@ -254,7 +254,7 @@ protected:
         continue;
       if (!derived().isIndirectEdge(edge))
         continue;
-      const std::set<uint32_t> &guard = edge->getPointsTo();
+      const SVFGNodeBS &guard = edge->getPointsTo();
       // Edge guard is object-sensitive. If the current object is not listed,
       // only keep the path when a wildcard/unknown object is present.
       if (!guard.empty() && guard.count(obj) == 0) {
@@ -397,7 +397,7 @@ protected:
         if (!indirectCall && derived().isIndirectEdge(edge) &&
             !llvm::isa<LoadSVFGNode>(dst)) {
           // Check edge guard before deciding whether to re-evaluate.
-          const std::set<uint32_t> &guard = edge->getPointsTo();
+          const SVFGNodeBS &guard = edge->getPointsTo();
           bool guardAllows = guard.empty();
           if (!guardAllows) {
             if (guard.count(dpm.getCurNodeID()))

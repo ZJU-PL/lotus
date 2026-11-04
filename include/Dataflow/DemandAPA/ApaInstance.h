@@ -81,8 +81,8 @@ public:
               vector<ll> _weightCallsG)
       : n_G(_n_G), n_H(_n_H), edgeListG(_edgeListG), edgeListH(_edgeListH),
         vertexTypeG(_vertexTypeG), procOf(_procOf), TWD(_TWD),
-        TWD_root(_TWD_root), TWD_par(_TWD_par), TDD_root(_TDD_root),
-        TDD_par(_TDD_par), algebra(_algebra), weightSameBag(_weightSameBag),
+        TWD_root(_TWD_root), TWD_par(_TWD_par), TDD_par(_TDD_par),
+        TDD_root(_TDD_root), algebra(_algebra), weightSameBag(_weightSameBag),
         weightCentroid(_weightCentroid), weightCallsG(_weightCallsG) {}
 };
 

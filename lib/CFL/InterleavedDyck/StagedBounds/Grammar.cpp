@@ -233,50 +233,65 @@ runGrammar(EncodedGrammar encoded, bool trace, bool factorized_tracing = false,
     throw std::overflow_error("too many vertices for the CFL engine");
   }
 
-  mr::CnfGraph engine;
-  engine.reinit(static_cast<int>(encoded.dense_to_vertex.size()),
-                encoded.edges);
-  std::unordered_map<mr::Edge, std::unordered_set<int>, mr::EdgeHasher>
-      unary_record;
-  std::unordered_map<
-      mr::Edge,
-      std::unordered_set<std::tuple<int, int, int>, mr::IntTripleHasher>,
-      mr::EdgeHasher>
-      binary_record;
-  std::unordered_set<mr::Edge, mr::EdgeHasher> raw_result;
-  if (trace) {
-    if (factorized_tracing) {
-      raw_result = engine.runCFLReachability(encoded.grammar);
+  std::vector<mr::Edge> raw_result;
+  std::unordered_set<mr::Edge, mr::EdgeHasher> closure;
+  {
+    // Release the saturated graph (and eager records) before materializing
+    // the public PairSet and Graph. Otherwise both complete representations
+    // coexist at the conversion peak, including in the untraced stages.
+    mr::CnfGraph engine;
+    engine.reinit(static_cast<int>(encoded.dense_to_vertex.size()),
+                  encoded.edges);
+    std::unordered_map<mr::Edge, std::unordered_set<int>, mr::EdgeHasher>
+        unary_record;
+    std::unordered_map<
+        mr::Edge,
+        std::unordered_set<std::tuple<int, int, int>, mr::IntTripleHasher>,
+        mr::EdgeHasher>
+        binary_record;
+    if (trace && !factorized_tracing) {
+      raw_result = engine.runCFLReachabilityCompact(
+          encoded.grammar, unary_record, binary_record);
     } else {
-      raw_result = engine.runCFLReachability(encoded.grammar, unary_record,
-                                             binary_record);
+      raw_result = engine.runCFLReachabilityCompact(encoded.grammar);
     }
-  } else {
-    raw_result = engine.runCFLReachability(encoded.grammar);
+
+    raw_result.erase(std::remove_if(raw_result.begin(), raw_result.end(),
+                                    [](const mr::Edge &edge) {
+                                      return std::get<0>(edge) ==
+                                             std::get<2>(edge);
+                                    }),
+                     raw_result.end());
+    if (trace) {
+      // Reuse the start relation as the all-pairs roots. A targeted trace
+      // needs only a singleton; do not copy the entire relation for either.
+      std::vector<mr::Edge> target_roots;
+      if (trace_pair) {
+        const auto source = encoded.vertex_to_dense.find(trace_pair->source);
+        const auto target = encoded.vertex_to_dense.find(trace_pair->target);
+        if (source != encoded.vertex_to_dense.end() &&
+            target != encoded.vertex_to_dense.end()) {
+          const mr::Edge root{source->second, encoded.grammar.startSymbol,
+                              target->second};
+          if (source->second != target->second && engine.hasEdge(root)) {
+            target_roots.push_back(root);
+          }
+        }
+      }
+      const auto &roots = trace_pair ? target_roots : raw_result;
+      closure =
+          factorized_tracing
+              ? engine.getFactorizedEdgeClosureCompact(encoded.grammar, roots)
+              : engine.getEdgeClosureCompact(encoded.grammar, roots,
+                                             unary_record, binary_record);
+    }
   }
 
   ReachabilityRun result;
-  std::unordered_set<mr::Edge, mr::EdgeHasher> closure_roots;
   for (const mr::Edge &edge : raw_result) {
-    const Pair pair{encoded.dense_to_vertex.at(std::get<0>(edge)),
-                    encoded.dense_to_vertex.at(std::get<2>(edge))};
-    if (pair.source == pair.target) {
-      continue;
-    }
-    result.pairs.insert(pair);
-    if (trace && (!trace_pair || pair == *trace_pair)) {
-      closure_roots.insert(edge);
-    }
+    result.pairs.insert({encoded.dense_to_vertex.at(std::get<0>(edge)),
+                         encoded.dense_to_vertex.at(std::get<2>(edge))});
   }
-
-  if (!trace) {
-    return result;
-  }
-  const auto closure =
-      factorized_tracing
-          ? engine.getFactorizedEdgeClosure(encoded.grammar, closure_roots)
-          : engine.getEdgeClosure(encoded.grammar, closure_roots, unary_record,
-                                  binary_record);
   for (const mr::Edge &edge : closure) {
     const auto label = encoded.terminal_to_label.find(std::get<1>(edge));
     if (label == encoded.terminal_to_label.end()) {
@@ -299,6 +314,30 @@ ReachabilityRun runProjected(const Graph &graph, Alphabet balanced,
   }
   return runGrammar(buildClassicGrammar(graph, balanced), trace,
                     factorized_tracing, trace_pair);
+}
+
+PairSet runClassicProjectedMapped(
+    const Graph &graph, Alphabet balanced,
+    const std::function<std::optional<Pair>(const Pair &)> &map_pair) {
+  const auto encoded = buildClassicGrammar(graph, balanced);
+  if (encoded.dense_to_vertex.size() >
+      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("too many vertices for the CFL engine");
+  }
+  mr::CnfGraph engine;
+  engine.reinit(static_cast<int>(encoded.dense_to_vertex.size()),
+                encoded.edges);
+  PairSet result;
+  engine.runCFLReachabilityVisit(encoded.grammar, [&](const mr::Edge &edge) {
+    const Pair pair{encoded.dense_to_vertex.at(std::get<0>(edge)),
+                    encoded.dense_to_vertex.at(std::get<2>(edge))};
+    if (pair.source != pair.target) {
+      if (const auto mapped = map_pair(pair)) {
+        result.insert(*mapped);
+      }
+    }
+  });
+  return result;
 }
 
 PairSet runCombined(const Graph &graph) {

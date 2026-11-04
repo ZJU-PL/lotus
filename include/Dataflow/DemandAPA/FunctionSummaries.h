@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Dataflow/DemandAPA/Algorithm.h"
+
 /*
  * Computing summaries of functions
  * The call to preprocessFunctionSummaries should be that all edges (c, r) in

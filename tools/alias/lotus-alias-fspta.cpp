@@ -3,11 +3,14 @@
  * @brief Driver for Lotus flow-sensitive pointer analyses.
  */
 #include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/FlowSensitive/Support/ComparisonSampling.h"
+#include "Alias/InclusionBased/FlowSensitive/Support/PointerOnlyView.h"
 #include "Alias/InclusionBased/FlowSensitive/ValueFlow/ValueFlowPTA.h"
 #include "Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/CLIUtils.h"
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/SVFGBuilder.h"
+#include "IR/SVFG/SVFGStats.h"
 
 #include <algorithm>
 #include <exception>
@@ -17,6 +20,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/InitLLVM.h>
+#include <llvm/Support/JSON.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -30,6 +34,8 @@ enum class SetBackendOption { Mutable, HashConsed };
 enum class PartitionOption { Distinct, IntraDisjoint, InterDisjoint };
 enum class AnalysisOption { FlowSensitive, Versioned, ValueFlow };
 enum class ParallelOrderOption { Reference, Unordered };
+enum class ClusterOption { None, Type, Footprint };
+enum class PrelabelOption { Builder, PreAnalysis };
 
 cl::OptionCategory FsptaCategory("Lotus flow-sensitive pointer analyses");
 cl::opt<bool>
@@ -47,6 +53,11 @@ cl::opt<ParallelOrderOption> ParallelOrder(
 cl::opt<unsigned> Threads(
     "threads",
     cl::desc("Parallel workers including caller (0: hardware concurrency)"),
+    cl::init(0), cl::cat(FsptaCategory));
+cl::opt<unsigned> VersioningThreads(
+    "versioning-threads",
+    cl::desc("Threads computing vfspta version labels (0: hardware "
+             "concurrency, 1: sequential)"),
     cl::init(0), cl::cat(FsptaCategory));
 cl::opt<bool> VerifyParallel(
     "verify-parallel",
@@ -99,11 +110,48 @@ cl::opt<PartitionOption> MemoryPartition(
 cl::opt<bool> PrintPointsTo("print-pts",
                             cl::desc("Print top-level points-to results"),
                             cl::init(false), cl::cat(FsptaCategory));
+cl::opt<bool> ComparisonJSON(
+    "comparison-json",
+    cl::desc("Emit named-value alias answers for differential testing"),
+    cl::init(false), cl::cat(FsptaCategory));
+cl::opt<unsigned>
+    ComparisonLimit("comparison-limit",
+                    cl::desc("Maximum pointer values in comparison JSON"),
+                    cl::init(512), cl::cat(FsptaCategory));
+cl::opt<unsigned> ComparisonSampleSeed(
+    "comparison-sample-seed",
+    cl::desc("Stable hash query sample seed (0: lexical prefix)"),
+    cl::init(0), cl::cat(FsptaCategory));
+cl::opt<bool>
+    PrintObjectMap("print-object-map",
+                   cl::desc("Print abstract object metadata (base object, field "
+                            "offset, field sensitivity) for differential "
+                            "comparison with SVF"),
+                   cl::init(false), cl::cat(FsptaCategory));
 cl::opt<bool> PrintMemory("print-memory",
                           cl::desc("Print non-empty sparse memory facts"),
                           cl::init(false), cl::cat(FsptaCategory));
 cl::opt<bool> DumpStats("dump-stats", cl::desc("Print solver statistics"),
                         cl::init(true), cl::cat(FsptaCategory));
+cl::opt<double> TimeLimit(
+    "time-limit",
+    cl::desc("Wall-clock budget for the flow-sensitive solve in seconds "
+             "(0 disables the limit)"),
+    cl::init(0.0), cl::cat(FsptaCategory));
+cl::opt<bool> StatsReport(
+    "stats-report",
+    cl::desc("Print the solver's full statistics report (SVF PrintStat-like)"),
+    cl::init(false), cl::cat(FsptaCategory));
+cl::opt<std::string> ReadPtsFile(
+    "read-pts",
+    cl::desc("Read solved points-to facts from a Lotus result file instead of "
+             "solving"),
+    cl::init(""), cl::cat(FsptaCategory));
+cl::opt<std::string> WritePtsFile(
+    "write-pts",
+    cl::desc("Write solved points-to facts to a Lotus result file after "
+             "solving"),
+    cl::init(""), cl::cat(FsptaCategory));
 cl::opt<std::string>
     DumpSVFG("dump-svfg", cl::desc("Write the initialized SVFG as a DOT file"),
              cl::init(""), cl::cat(FsptaCategory));
@@ -111,6 +159,38 @@ cl::opt<bool> ValidateAnnotations(
     "validate-annotations",
     cl::desc("Validate __aser_alias__/__aser_no_alias__ calls"),
     cl::init(false), cl::cat(FsptaCategory));
+cl::opt<ClusterOption> ClusterObjects(
+    "cluster-objects", cl::desc("Object clustering applied before solving"),
+    cl::values(
+        clEnumValN(ClusterOption::None, "none",
+                   "Identity mapping (SVF's plainMap; default)"),
+        clEnumValN(ClusterOption::Type, "type",
+                   "Merge base objects with the same LLVM type and kind"),
+        clEnumValN(ClusterOption::Footprint, "footprint",
+                   "Merge objects with identical access footprints "
+                   "(vfspta only)")),
+    cl::init(ClusterOption::None), cl::cat(FsptaCategory));
+cl::opt<bool> PointerOnly(
+    "pointer-only",
+    cl::desc("Model only pointer-typed loads/stores, like SVF's pointer-only "
+             "SVFG (default: enabled)"),
+    cl::init(true), cl::cat(FsptaCategory));
+cl::opt<bool> VfsptaIncrementalRecursion(
+    "vfspta-incremental-recursion",
+    cl::desc("Demote strong updates to weak updates incrementally when an "
+             "indirect call creates recursion, avoiding a whole-graph relabel "
+             "(default: disabled)"),
+    cl::init(false), cl::cat(FsptaCategory));
+cl::opt<PrelabelOption> VfsptaPrelabel(
+    "vfspta-prelabel", cl::desc("Seed used for vfspta meld labels"),
+    cl::values(
+        clEnumValN(PrelabelOption::Builder, "builder",
+                   "MemorySSA access regions recorded by the SVFG builder "
+                   "(builder-region ablation)"),
+        clEnumValN(PrelabelOption::PreAnalysis, "pre-analysis",
+                   "Points-to sets from the pre-analysis (SVF's prelabel(); "
+                   "default)")),
+    cl::init(PrelabelOption::PreAnalysis), cl::cat(FsptaCategory));
 
 MemoryRegionPartitionStrategy partitionStrategy() {
   switch (MemoryPartition) {
@@ -125,16 +205,21 @@ MemoryRegionPartitionStrategy partitionStrategy() {
 }
 
 void printValue(const Value *value, raw_ostream &os) {
-  if (!value)
+  if (!value) {
     os << "<unknown>";
-  else if (const auto *instruction = dyn_cast<Instruction>(value)) {
+    return;
+  }
+  // Function-qualify both instructions and arguments: bare argument names
+  // collide with globals and with same-named arguments of other functions,
+  // which makes differential output ambiguous.
+  if (const auto *instruction = dyn_cast<Instruction>(value)) {
     if (instruction->getFunction())
       os << instruction->getFunction()->getName() << "::";
-    if (value->hasName())
-      os << value->getName();
-    else
-      value->printAsOperand(os, false);
-  } else if (value->hasName())
+  } else if (const auto *argument = dyn_cast<Argument>(value)) {
+    if (argument->getParent())
+      os << argument->getParent()->getName() << "::";
+  }
+  if (value->hasName())
     os << value->getName();
   else
     value->printAsOperand(os, false);
@@ -209,6 +294,10 @@ int runValueFlowAnalysis(const Module &module) {
            << "\n"
            << "vfpta.indirect-flow-computations="
            << stats.solver.indirectFlowComputations << "\n"
+           << "vfpta.indirect-flow-cache-hits="
+           << stats.solver.indirectFlowCacheHits << "\n"
+           << "vfpta.value-flow-join-nodes="
+           << stats.solver.valueFlowJoinNodes << "\n"
            << "vfpta.indirect-edges=" << stats.solver.indirectEdges << "\n"
            << "vfpta.strong-update-sites=" << stats.solver.strongUpdateSites
            << "\n"
@@ -293,6 +382,38 @@ int main(int argc, char **argv) {
     errs() << "--parallel-block-size must be positive\n";
     return 1;
   }
+  if (!ReadPtsFile.empty() && VerifyParallel) {
+    errs() << "--verify-parallel cannot be combined with --read-pts\n";
+    return 1;
+  }
+  if ((!ReadPtsFile.empty() || !WritePtsFile.empty()) &&
+      Analysis == AnalysisOption::ValueFlow) {
+    errs() << "--read-pts/--write-pts support --analysis=fspta and vfspta "
+              "only\n";
+    return 1;
+  }
+  if (ClusterObjects == ClusterOption::Footprint &&
+      Analysis != AnalysisOption::Versioned) {
+    errs() << "--cluster-objects=footprint is supported only for "
+              "--analysis=vfspta\n";
+    return 1;
+  }
+  if (VfsptaIncrementalRecursion && Analysis != AnalysisOption::Versioned) {
+    errs() << "--vfspta-incremental-recursion is supported only for "
+              "--analysis=vfspta\n";
+    return 1;
+  }
+  if (VfsptaPrelabel.getNumOccurrences() != 0 &&
+      Analysis != AnalysisOption::Versioned) {
+    errs() << "--vfspta-prelabel is supported only for --analysis=vfspta\n";
+    return 1;
+  }
+  if (Analysis == AnalysisOption::ValueFlow &&
+      (ClusterObjects.getNumOccurrences() != 0 ||
+       PointerOnly.getNumOccurrences() != 0)) {
+    errs() << "--cluster-objects/--pointer-only are unavailable for vfpta\n";
+    return 1;
+  }
   LLVMContext context;
   SMDiagnostic diagnostic;
   std::unique_ptr<Module> module =
@@ -309,34 +430,92 @@ int main(int argc, char **argv) {
   SVFGBuilderConfig graphConfig;
   graphConfig.usePointerAnalysis = true;
   graphConfig.buildMSSA = true;
+  graphConfig.pointerOnly = PointerOnly;
   graphConfig.resolveIndirectCalls = false;
   graphConfig.memoryPartition = partitionStrategy();
   auto graphBuilder = std::make_unique<SVFGBuilder>(graphConfig);
   std::unique_ptr<SVFG> graph(graphBuilder->build(&icfg));
-  graphBuilder->connectPreAnalysisIndirectCalls(graph.get());
+  if (StatsReport) {
+    SVFGStats svfgStats(graph.get());
+    svfgStats.performStat();
+    svfgStats.printStat("SVFG");
+  }
   if (!DumpSVFG.empty())
     graph->dump(DumpSVFG);
 
-  auto connectIndirectCall = [&](const CallBase *callSite,
-                                 const Function *target) {
+  auto isAllowedIndirectCall = [&](const CallBase *callSite,
+                                   const Function *target) {
     const std::vector<const Function *> allowed =
         graphBuilder->getIndirectCallTargets(callSite);
-    if (std::find(allowed.begin(), allowed.end(), target) == allowed.end())
+    if (allowed.empty())
+      return true;
+    return std::find(allowed.begin(), allowed.end(), target) != allowed.end();
+  };
+  auto connectIndirectCall = [&](const CallBase *callSite,
+                                 const Function *target) {
+    if (!isAllowedIndirectCall(callSite, target))
       return false;
     std::vector<SVFGEdge *> edges;
     return graphBuilder->connectCallSiteToCalleeOnTheFly(graph.get(), callSite,
                                                          target, edges);
   };
+  std::unique_ptr<lotus::analysis::FilteredSVFGView> pointerOnlyView;
+  if (PointerOnly)
+    pointerOnlyView =
+        lotus::alias::flow_sensitive::createPointerOnlySVFGView(*graph);
+
   std::unique_ptr<FlowSensitivePTA> solver;
   std::unique_ptr<VersionedFlowSensitivePTA> versionedSolver;
   if (Analysis == AnalysisOption::Versioned) {
     VersionedFlowSensitivePTA::Config solverConfig;
+    if (pointerOnlyView)
+      solverConfig.scope = pointerOnlyView.get();
     solverConfig.connectIndirectCall = connectIndirectCall;
+    solverConfig.isIndirectCallTargetAllowed = isAllowedIndirectCall;
+    solverConfig.versioningThreads = VersioningThreads;
+    solverConfig.timeLimitSeconds = TimeLimit;
+    solverConfig.pointerOnlySVFG = PointerOnly;
+    solverConfig.incrementalRecursionUpdate = VfsptaIncrementalRecursion;
+    switch (ClusterObjects) {
+    case ClusterOption::None:
+      solverConfig.clusterObjects =
+          VersionedFlowSensitivePTA::Config::ClusterMethod::None;
+      break;
+    case ClusterOption::Type:
+      solverConfig.clusterObjects =
+          VersionedFlowSensitivePTA::Config::ClusterMethod::Type;
+      break;
+    case ClusterOption::Footprint:
+      solverConfig.clusterObjects =
+          VersionedFlowSensitivePTA::Config::ClusterMethod::Footprint;
+      break;
+    }
+    if (VfsptaPrelabel == PrelabelOption::PreAnalysis) {
+      solverConfig.preAnalysisTargets = [&graphBuilder](const Value *value) {
+        return graphBuilder->getPreAnalysisPointsTo(value);
+      };
+    }
     versionedSolver = std::make_unique<VersionedFlowSensitivePTA>(
         *graph, std::move(solverConfig));
-    versionedSolver->solve();
+    if (!ReadPtsFile.empty()) {
+      if (!versionedSolver->readVersionedAnalysisResultFromFile(ReadPtsFile)) {
+        errs() << "failed to read points-to results from '" << ReadPtsFile
+               << "'\n";
+        return 1;
+      }
+    } else {
+      versionedSolver->solve();
+    }
+    if (!WritePtsFile.empty() &&
+        !versionedSolver->writeVersionedAnalysisResultToFile(WritePtsFile)) {
+      errs() << "failed to write points-to results to '" << WritePtsFile
+             << "'\n";
+      return 1;
+    }
   } else {
     FlowSensitivePTA::Config solverConfig;
+    if (pointerOnlyView)
+      solverConfig.scope = pointerOnlyView.get();
     solverConfig.parallel = Parallel;
     solverConfig.unorderedParallel =
         ParallelOrder == ParallelOrderOption::Unordered;
@@ -349,10 +528,30 @@ int main(int argc, char **argv) {
                                   ? PointsToSetBackend::HashConsed
                                   : PointsToSetBackend::Mutable;
     solverConfig.connectIndirectCall = connectIndirectCall;
+    solverConfig.isIndirectCallTargetAllowed = isAllowedIndirectCall;
+    solverConfig.timeLimitSeconds = TimeLimit;
+    solverConfig.pointerOnlySVFG = PointerOnly;
+    if (ClusterObjects == ClusterOption::Type)
+      solverConfig.clusterObjects =
+          FlowSensitivePTA::Config::ClusterMethod::Type;
     solver =
         std::make_unique<FlowSensitivePTA>(*graph, std::move(solverConfig));
-    solver->solve();
-    if (VerifyParallel) {
+    if (!ReadPtsFile.empty()) {
+      if (!solver->readAnalysisResultFromFile(ReadPtsFile)) {
+        errs() << "failed to read points-to results from '" << ReadPtsFile
+               << "'\n";
+        return 1;
+      }
+    } else {
+      solver->solve();
+    }
+    if (!WritePtsFile.empty() &&
+        !solver->writeAnalysisResultToFile(WritePtsFile)) {
+      errs() << "failed to write points-to results to '" << WritePtsFile
+             << "'\n";
+      return 1;
+    }
+    if (VerifyParallel && ReadPtsFile.empty()) {
       // Both solvers see the final graph after all parallel topology epochs.
       // No additional graph mutation is permitted during this comparison.
       FlowSensitivePTA reference(*graph);
@@ -388,6 +587,56 @@ int main(int argc, char **argv) {
     return SVFGNodeBS(versionedSolver->versionedPointsTo(object, version));
   };
 
+  if (ComparisonJSON) {
+    std::map<std::string, const Value *> values;
+    for (const auto &[value, nodeID] : graph->getValueNodeMap()) {
+      if (!value || !value->getType()->isPointerTy())
+        continue;
+      const Function *function = nullptr;
+      if (const auto *instruction = dyn_cast<Instruction>(value))
+        function = instruction->getFunction();
+      else if (const auto *argument = dyn_cast<Argument>(value))
+        function = argument->getParent();
+      std::string key = function ? function->getName().str() : "@";
+      key += "::";
+      if (value->hasName())
+        key += value->getName().str();
+      else {
+        raw_string_ostream stream(key);
+        value->printAsOperand(stream, false);
+      }
+      values.emplace(std::move(key), value);
+    }
+    const std::size_t total = values.size();
+    flow_sensitive::sampleComparisonValues(values, ComparisonLimit,
+                                            ComparisonSampleSeed);
+    json::Array observations, aliases;
+    for (auto left = values.begin(); left != values.end(); ++left) {
+      const auto pointsTo = queryPointsTo(left->second);
+      if (!pointsTo)
+        continue;
+      observations.push_back(json::Object{
+          {"key", left->first},
+          {"points_to_size", static_cast<int64_t>(pointsTo->size())}});
+      for (auto right = std::next(left); right != values.end(); ++right) {
+        const auto alias =
+            versionedSolver
+                ? versionedSolver->mayAlias(left->second, right->second)
+                : solver->mayAlias(left->second, right->second);
+        if (alias && *alias)
+          aliases.push_back(json::Array{left->first, right->first});
+      }
+    }
+    outs() << "PTA_COMPARISON_JSON "
+           << json::Value(
+                  json::Object{{"schema", 1},
+                               {"total_values", static_cast<int64_t>(total)},
+                               {"truncated", total != values.size()},
+                               {"values", std::move(observations)},
+                               {"may_alias", std::move(aliases)}})
+           << "\n";
+  }
+
   if (PrintPointsTo) {
     for (const auto &[value, nodeID] : graph->getValueNodeMap()) {
       if (!value || !value->getType()->isPointerTy())
@@ -407,6 +656,24 @@ int main(int argc, char **argv) {
         printValue(graph->getObjectValue(object), outs());
       }
       outs() << "}\n";
+    }
+  }
+  if (PrintObjectMap) {
+    auto objectIds = graph->getAllObjectIds();
+    std::sort(objectIds.begin(), objectIds.end());
+    for (uint32_t objectId : objectIds) {
+      const auto *info = graph->getObjectInfo(objectId);
+      const uint32_t base =
+          info && info->baseObjId != 0 ? info->baseObjId : objectId;
+      const uint64_t offset =
+          info && info->hasFieldOffset ? info->fieldOffset : 0;
+      outs() << "OBJ " << objectId << ' ' << base << ' ' << offset << ' '
+             << ((info && info->isFieldInsensitive) ? "fi" : "fs") << ' ';
+      if (const Value *value = graph->getObjectValue(objectId))
+        printValue(value, outs());
+      else
+        outs() << "<anon>";
+      outs() << '\n';
     }
   }
   if (PrintMemory) {
@@ -472,6 +739,12 @@ int main(int argc, char **argv) {
       }
     }
   }
+  if (StatsReport) {
+    outs() << (versionedSolver ? versionedSolver->statisticsReport()
+                               : solver->statisticsReport());
+    if (versionedSolver ? versionedSolver->timedOut() : solver->timedOut())
+      outs() << "warning: solve timed out; results are a partial fixed point\n";
+  }
   if (DumpStats) {
     if (versionedSolver) {
       const auto &stats = versionedSolver->statistics();
@@ -488,9 +761,17 @@ int main(int argc, char **argv) {
              << "vfspta.strong-updates=" << stats.strongUpdates << "\n"
              << "vfspta.weak-updates=" << stats.weakUpdates << "\n"
              << "vfspta.indirect-call-edges=" << stats.indirectCallEdges << "\n"
+             << "vfspta.delta-nodes=" << stats.deltaNodes << "\n"
+             << "vfspta.delta-source-nodes=" << stats.deltaSourceNodes << "\n"
              << "vfspta.delta-version-updates=" << stats.deltaVersionUpdates
              << "\n"
-             << "vfspta.relabelings=" << stats.relabelings << "\n";
+             << "vfspta.delta-relabelings=" << stats.deltaRelabelings << "\n"
+             << "vfspta.statement-worklist-pushes="
+             << stats.statementWorklistPushes << "\n"
+             << "vfspta.relabelings=" << stats.relabelings << "\n"
+             << "vfspta.clustered-objects=" << stats.clusteredObjects << "\n"
+             << "vfspta.merged-object-clusters=" << stats.mergedObjectClusters
+             << "\n";
     } else {
       const auto &stats = solver->statistics();
       outs() << "fspta.nodes=" << stats.nodes << "\n"
@@ -507,7 +788,10 @@ int main(int argc, char **argv) {
              << "fspta.weak-update-executions=" << stats.weakUpdateExecutions
              << "\n"
              << "fspta.indirect-call-edges=" << stats.indirectCallEdges << "\n"
-             << "fspta.hash-consed-sets=" << stats.hashConsedUniqueSets << "\n";
+             << "fspta.hash-consed-sets=" << stats.hashConsedUniqueSets << "\n"
+             << "fspta.clustered-objects=" << stats.clusteredObjects << "\n"
+             << "fspta.merged-object-clusters=" << stats.mergedObjectClusters
+             << "\n";
       outs() << "fspta.solve-seconds=" << stats.solveSeconds << "\n"
              << "fspta.parallel-order="
              << (!Parallel ? "sequential"

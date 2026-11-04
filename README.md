@@ -7,26 +7,26 @@
 [![Documentation](https://img.shields.io/badge/docs-zju--pl.github.io-blue.svg)](https://zju-pl.github.io/lotus)
 [![DeepWiki Docs](https://img.shields.io/badge/deepwiki-ZJU--PL%2Flotus-blueviolet)](https://deepwiki.com/ZJU-PL/lotus)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![C++](https://img.shields.io/badge/c++-14%2F17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![C++](https://img.shields.io/badge/c++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![LLVM](https://img.shields.io/badge/LLVM-14.x-purple.svg)](https://llvm.org/)
 
-**Lotus** is an advanced, LLVM-based program analysis and verification framework. It provides a comprehensive set of toolkits for alias analysis, bug detection, dataflow analysis, concurrency analysis, abstract interpretation, and model checking. The framework is designed for high modularity, allowing components to be used independently or in combination.
+**Lotus** is an LLVM-based program analysis and verification framework. It provides a comprehensive set of toolkits for alias analysis, dataflow analysis, concurrency analysis, abstract interpretation, and model checking. The framework is designed for high modularity, allowing components to be used independently or in combination.
 
 ## Features
 
 - **Alias Analysis** — Pointer analysis with flow-sensitive, context-sensitive, and context-insensitive variants (e.g., AserPTA, DyckAA, LotusAA, SeaDSA).
-- **Dataflow Analysis** — Distributive (IFDS/IDE), Monotone, Elimination-based (APA), and Weighted Pushdown Systems (WPDS).
+- **Dataflow Analysis** — Distributive (IFDS/IDE), Monotone, Elimination-based (APA), Weighted Pushdown Systems (WPDS), etc.
 - **Intermediate Representations** — Extends LLVM with specialized IRs like ICFG, PDG, SVFG (with sparse MemorySSA), SSI, and GSA.
-- **Bug Detection** — Detects memory safety issues, concurrency bugs (races/deadlocks), integer overflows, taint-style leaks, and typestate violations using engines like Kint, AE, Pulse, and Saber.
+- **Bug Detection** — Detects memory safety issues, concurrency bugs, integer overflows, taint-style issues, and typestate violations using engines like Kint, AE, Pulse, and Saber.
 - **Formal Verification** — Abstract interpretation using CLAM, SeaHorn, and custom symbolic execution backends.
-- **Program Optimization** — Dead store elimination, partial evaluation, and prefetching.
+- **Program Optimization** — Partial evaluation, prefetching, etc.
 
 ## Quick Start
 
 ### System Requirements
 - **OS**: x86/ARM Linux, ARM macOS
 - **Compiler**: C++17 compatible (GCC 7+ or Clang 5+)
-- **Dependencies**: LLVM 14.x, Z3 4.11, CMake 3.18+, (Optional: Boost 1.80+)
+- **Dependencies**: LLVM 14.x, Z3 4.8.1+ (4.11 tested), CMake 3.18+, (Optional: Boost 1.80+)
 
 ### Building from Source
 
@@ -80,6 +80,7 @@ If you use Lotus in your research or work, please cite the following:
 ```
 
 **Papers utilizing Lotus frameworks:**
+- **PPoPP 2027**: Cactus: GPU-Accelerated Alias Query Processing over Persistent Points-to Information. Zinan Gu, Zhaoyang Tan, Peisen Yao, and Kui Ren.
 - **SPLASH/ISSTA 2026 Demo**: Phoenix: A Modular and Versatile Framework for C/C++ Pointer Analysis. Peisen Yao, Zinan Gu, and Qingkai Shi.
 - **ASE 2026**: SIMD-Accelerated Sparse Bit-Vectors for Pointer Analysis. Zhaoyang Tan, Peisen Yao, and Kui Ren.
 - **FM 2026**: EUF-based Solving Dyck-Reachability with Applications to Static Analysis. Yide Du, Zhenbang Chen, Kunlin Liu, Guofeng Zhang, Xudong Wang, Ke Ma, Wei Dong, and Ji Wang.

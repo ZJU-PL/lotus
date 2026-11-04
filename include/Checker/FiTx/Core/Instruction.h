@@ -49,9 +49,9 @@ public:
   bool isInSameLine(fitx::Instruction inst);
   bool emptyInstruction();
 
-  const unsigned int Line() { return line_; };
-  const unsigned int Column() { return column_; };
-  const unsigned int Opcode() const { return opcode_; };
+  unsigned int Line() const { return line_; }
+  unsigned int Column() const { return column_; }
+  unsigned int Opcode() const { return opcode_; }
   const std::string OpcodeName() const {
     return llvm::Instruction::getOpcodeName(opcode_);
   }

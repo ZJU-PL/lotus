@@ -52,4 +52,9 @@ llvm::cl::SubCommand &symexSubCommand() {
   return sub;
 }
 
+llvm::cl::SubCommand &gsafSubCommand() {
+  static llvm::cl::SubCommand sub("gsaf", "Run the GSAF checker suite");
+  return sub;
+}
+
 } // namespace lotus::checker::tooling

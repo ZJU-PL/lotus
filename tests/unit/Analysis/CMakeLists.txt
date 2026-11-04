@@ -185,8 +185,6 @@ lotus_add_test_group(analysis cfg CFG analysis_tests LINK_LIBS CanaryCFG CanaryI
 lotus_add_test_group(analysis controldependence ControlDependence analysis_tests
   LINK_LIBS CanaryICFGControlDependence CanaryICFG)
 lotus_add_test_group(analysis debuginfo DebugInfo analysis_tests LINK_LIBS CanaryDebugInfo)
-lotus_add_test_group(analysis general General analysis_tests
-  LINK_LIBS Spectre ConstantTimeVerify CanaryNisse)
 lotus_add_test_group(analysis multiplicity Multiplicity analysis_tests LINK_LIBS CanaryMultiplicity)
 lotus_add_test_group(analysis nullpointer NullPointer analysis_tests
   LINK_LIBS CanaryNullPointer CanaryDyckAA)
@@ -199,13 +197,13 @@ lotus_add_test_group(analysis sccp SCCP analysis_tests LINK_LIBS CanarySCCP)
 
 if(type_hierarchy_selected)
 lotus_collect_test_sources(analysis_tests
-  ../TypeHierarchy/DIBasedTypeHierarchyTest.cpp
-  ../TypeHierarchy/DIBasedTypeHierarchyTransitiveReachabilityTest.cpp
-  ../TypeHierarchy/DIBasedTypeHierarchySerializationTest.cpp
-  ../TypeHierarchy/LLVMVFTableTest.cpp
-  ../TypeHierarchy/CallGraphAlgorithmsTest.cpp)
+  TypeHierarchy/DIBasedTypeHierarchyTest.cpp
+  TypeHierarchy/DIBasedTypeHierarchyTransitiveReachabilityTest.cpp
+  TypeHierarchy/DIBasedTypeHierarchySerializationTest.cpp
+  TypeHierarchy/LLVMVFTableTest.cpp
+  CallGraph/CallGraphAlgorithmsTest.cpp)
 set_property(GLOBAL APPEND PROPERTY LOTUS_TEST_SUITE_analysis_tests_LINK_LIBS
-  CanaryTypeHierarchy LLVMAnalysis)
+  CanaryCallGraph CanaryTypeHierarchy LLVMAnalysis)
 endif()
 if(loop_selected)
 lotus_collect_test_sources(analysis_tests
@@ -228,5 +226,7 @@ get_property(analysis_test_libs GLOBAL PROPERTY LOTUS_TEST_SUITE_analysis_tests_
 list(REMOVE_DUPLICATES analysis_test_libs)
 add_lotus_collected_test_suite(analysis_tests
   LINK_LIBS ${analysis_test_libs}
+  INTEGRATION_TEST_REGEX
+    "^analysis_tests\\.(DIBasedTypeHierarchyTest|CallGraphAlgorithmsTest|LoopParity[^.]+)\\."
   COMPILE_DEFINITIONS ${analysis_test_definitions}
   DEPENDS ${analysis_test_dependencies})

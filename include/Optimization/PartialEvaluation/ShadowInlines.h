@@ -840,6 +840,7 @@ struct LocStore {
   LocStore(ImprovedValSet *s) : store(s) {}
   LocStore() : store(0) {}
   LocStore(const LocStore &other) : store(other.store) {}
+  LocStore &operator=(const LocStore &other) = default;
 
   static LocStore &getEmptyStore() { return NormalEmptyMapPtr; }
 
@@ -1098,6 +1099,7 @@ struct DSEMapPointer {
   DSEMapPointer() : M(0), A(0) {}
   DSEMapPointer(DSEMapTy *_M, TrackedAlloc *_A) : M(_M), A(_A) {}
   DSEMapPointer(const DSEMapPointer &other) : M(other.M), A(other.A) {}
+  DSEMapPointer &operator=(const DSEMapPointer &other) = default;
 
   static DSEMapPointer &getEmptyStore() { return DSEEmptyMapPtr; }
 
@@ -1157,6 +1159,7 @@ struct TLMapPointer {
   TLMapPointer() : M(0) {}
   TLMapPointer(TLMapTy *_M) : M(_M) {}
   TLMapPointer(const TLMapPointer &other) : M(other.M) {}
+  TLMapPointer &operator=(const TLMapPointer &other) = default;
 
   static TLMapPointer &getEmptyStore() { return TLEmptyMapPtr; }
 
@@ -1211,6 +1214,7 @@ struct FDState {
   FDState(std::string fn) : filename(fn), pos(0), clean(false) {}
   FDState(const FDState &Other)
       : filename(Other.filename), pos(Other.pos), clean(Other.clean) {}
+  FDState &operator=(const FDState &Other) = default;
 };
 
 struct FDStore {

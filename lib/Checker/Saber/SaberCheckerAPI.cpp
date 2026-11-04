@@ -7,7 +7,7 @@
 
 #include "Checker/Saber/SaberCheckerAPI.h"
 
-#include "Alias/Specialized/TypeQualifier/Config.h"
+#include "Checker/TypeQualifier/Config.h"
 
 #include <array>
 #include <cassert>

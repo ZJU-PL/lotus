@@ -299,6 +299,58 @@ TEST_F(GuardedValueFlowSolverTest, EnforcesControlDependenciesForControlledBlock
   EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Unsat);
 }
 
+TEST_F(GuardedValueFlowSolverTest, TerminatesOnCyclicControlDependencies) {
+  auto module = parseModule(R"(
+    define void @test(i1 %cond) {
+    entry:
+      br label %first
+    first:
+      br label %second
+    second:
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  auto pipeline = runBuilder(*module);
+  auto *function = module->getFunction("test");
+  auto &graph = pipeline.builder->getGraph(*function);
+  auto *condition = graph.findNode(function->getArg(0));
+  ASSERT_NE(condition, nullptr);
+  auto *first = function->getEntryBlock().getNextNode();
+  auto *second = first->getNextNode();
+
+  // Exercise both a self-dependency and a cycle spanning two blocks. These
+  // shapes occur in loop control-dependence graphs, even for valid LLVM IR.
+  GuardedValueFlowGraph::BlockCondition guard;
+  guard.condition_node = condition;
+  guard.control_block = first;
+  graph.addBlockCondition(first, guard);
+  guard.control_block = second;
+  graph.addBlockCondition(first, guard);
+  guard.control_block = first;
+  graph.addBlockCondition(second, guard);
+
+  SMTFactory factory;
+  GuardedValueFlowSolver solver(factory, module->getDataLayout());
+  for (auto *block : {first, second, first}) {
+    solver.push();
+    solver.addAll(solver.getCtrlDeps(block, &graph));
+    solver.add(solver.getOrInsertExpr(condition) == 0);
+    EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Unsat);
+    solver.pop();
+
+    solver.push();
+    solver.addAll(solver.getCtrlDeps(block, &graph));
+    solver.add(solver.getOrInsertExpr(condition) == 1);
+    EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Sat);
+    solver.pop();
+  }
+  solver.reset();
+  solver.addAll(solver.getCtrlDeps(first, &graph));
+  solver.add(solver.getOrInsertExpr(condition) == 1);
+  EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Sat);
+}
+
 TEST_F(GuardedValueFlowSolverTest, EnforcesPhiIncomingGuards) {
   const char *source = R"(
     define i32 @test(i1 %cond, i32 %x) {

@@ -88,9 +88,9 @@ Usage
 
 .. code-block:: bash
 
-   ./build/bin/clam --crab-check=assert program.bc
-   ./build/bin/clam --crab-check=null program.bc
-   ./build/bin/clam --crab-check=bounds program.bc
+   ./build/bin/clam --crab-check program.bc
+   ./build/bin/clam --crab-check --crab-null-check program.bc
+   ./build/bin/clam --crab-check --crab-bounds-check program.bc
 
 **Interprocedural Analysis**:
 
@@ -102,8 +102,8 @@ Usage
 
 .. code-block:: bash
 
-   ./build/bin/clam-pp --crab-lower-unsigned-icmp \
-                       --crab-lower-select \
+   ./build/bin/clam-pp --clam-lower-unsigned-icmp \
+                       --clam-lower-select \
                        input.bc -o prep.bc
    ./build/bin/clam prep.bc
 

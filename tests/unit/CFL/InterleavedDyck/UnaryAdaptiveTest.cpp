@@ -177,6 +177,29 @@ TEST(InterleavedDyckUnaryAdaptiveTest, SwitchesBetweenBothShallowArms) {
   EXPECT_EQ(result.stats().horizontal_control_states, 22U);
 }
 
+TEST(InterleavedDyckUnaryAdaptiveTest,
+     PhaseTimingDoesNotChangeThePartition) {
+  const Graph graph =
+      bidirectedLinearGraph({"+1", "+2", "-1", "-2"});
+  AdaptiveOptions plain_options;
+  plain_options.sparsify = false;
+  AdaptiveOptions timed_options = plain_options;
+  timed_options.collect_phase_timing = true;
+
+  const auto plain = AdaptiveSolver{}.solve(graph, plain_options);
+  const auto timed = AdaptiveSolver{}.solve(graph, timed_options);
+
+  EXPECT_FALSE(plain.stats().phase_timing.enabled);
+  EXPECT_TRUE(timed.stats().phase_timing.enabled);
+  EXPECT_EQ(plain.stats().vertical_control_states,
+            timed.stats().vertical_control_states);
+  EXPECT_EQ(plain.stats().horizontal_control_states,
+            timed.stats().horizontal_control_states);
+  for (Vertex source : graph.vertices())
+    for (Vertex target : graph.vertices())
+      EXPECT_EQ(plain.connected(source, target), timed.connected(source, target));
+}
+
 TEST(InterleavedDyckUnaryAdaptiveTest, HandlesRepeatedArmAlternation) {
   const Graph graph = bidirectedLinearGraph(
       {"+2", "+2", "-2", "+1", "+1", "-1", "+2", "-2", "+1", "-1", "-1", "-2"});

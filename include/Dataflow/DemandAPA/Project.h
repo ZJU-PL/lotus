@@ -1,9 +1,18 @@
 #pragma once
 
+#include "Dataflow/DemandAPA/Algorithm.h"
+
+// The imported project callbacks share these analysis instances. Define them
+// once across translation units rather than requiring declarations in a driver.
+inline Algorithm<int> algSP;
+inline Algorithm<vi> algIfds;
+inline Algorithm<bdd> algBp;
+inline vvi indicesOflocalsNotInLHS;
+
 // The project operators for every algebra are defined here because they need to
 // access internal data
 
-vector<int> Ifdsproject(int c, vector<int> b) {
+inline vector<int> Ifdsproject(int c, vector<int> b) {
   assert(algIfds.vertexTypeG[c] == CALL_VERTEX);
   int r = algIfds.callNodeInfo[c].fs;
   int pp = algIfds.callNodeInfo[c].sc;
@@ -15,7 +24,7 @@ vector<int> Ifdsproject(int c, vector<int> b) {
                  Ifdsdot(b, algIfds.edgeListGInter[e_r]));
 }
 
-int SPproject(int c, int b) {
+inline int SPproject(int c, int b) {
   assert(algSP.vertexTypeG[c] == CALL_VERTEX);
   ll c_s = ((ll(c)) << 32) | algSP.s[algSP.callNodeInfo[c].sc];
   ll e_r = ((ll(algSP.e[algSP.callNodeInfo[c].sc])) << 32) |
@@ -25,7 +34,7 @@ int SPproject(int c, int b) {
   return algSP.edgeListGInter[c_s] + b + algSP.edgeListGInter[e_r];
 }
 
-bdd PAproject(int c, bdd Sigma) {
+inline bdd PAproject(int c, bdd Sigma) {
   //	cout << tabs << "Project: start" << endl;
   bdd ans;
   if (Sigma == PAzero)
@@ -66,4 +75,3 @@ bdd PAproject(int c, bdd Sigma) {
   //	cout << tabs << "Project: finish" << endl;
   return ans;
 }
-

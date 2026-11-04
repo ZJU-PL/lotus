@@ -7,7 +7,7 @@
 
 namespace fitx {
 BasicBlock::BasicBlock(llvm::BasicBlock *basic_block)
-    : llvm_basic_block_(basic_block), line_(0), id_(kNoId) {
+    : id_(kNoId), llvm_basic_block_(basic_block), line_(0) {
   name_ = basic_block->getName().str();
   line_ = getLine(basic_block->getFirstNonPHIOrDbgOrLifetime());
   parent_ =

@@ -14,12 +14,12 @@ The front ends in this directory cover three areas:
 - ``lotus-opt-purity`` drives function purity inference in
   ``lib/Analysis/Purity/`` via ``tools/optimization/lotus-opt-purity.cpp``
 
-Other optimization libraries, such as ``Scalar/``, ``Pipeline/``, and
+Other optimization libraries, such as ``Scalar/``, ``PassOrdering/``, and
 ``PartialEvaluation/``, exist in the source tree but are not documented here as
 standalone tools because they do not expose separate front-end binaries.
 
 **Location**: ``tools/optimization/``
-**Experimental frontends**: ``tools/optimization/lotus-opt-lif.cpp`` (not built by default)
+**Experimental frontends**: ``tools/optimization/lotus-opt-lif.cpp`` (source retained; target disabled in CMake)
 
 lotus-opt-purity — Purity Inference Driver
 -------------------------------------------

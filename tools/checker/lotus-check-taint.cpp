@@ -17,10 +17,6 @@
 #include <sstream>
 #include <string>
 
-#include <Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h>
-#include <Dataflow/IFDS/Analyses/IFDSTaintAnalysis.h>
-#include <Dataflow/IFDS/Core/IFDSFramework.h>
-#include <Dataflow/IFDS/Solver/IFDSSolver.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/LLVMContext.h>
@@ -34,6 +30,10 @@
 #include <llvm/Support/Path.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+#include <Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h>
+#include <Dataflow/IFDS/Analyses/IFDSTaintAnalysis.h>
+#include <Dataflow/IFDS/Core/IFDSFramework.h>
+#include <Dataflow/IFDS/Solver/IFDSSolver.h>
 
 // #include <iostream>
 // #include <thread>
@@ -254,7 +254,7 @@ static int emitTaintReports(const TaintAnalysis &analysis,
 
     auto *report = new BugReport(bugTypeId);
     SmallPtrSet<const Instruction *, 8> seenSources;
-    unsigned traceLevel = 0;
+    int traceLevel = 0;
     for (const TaintFact &fact : entry.second) {
       bool reachesArgument = false;
       for (const Use &argument : sinkCall->args()) {
@@ -312,10 +312,12 @@ static void evaluateMicroBenchmark(const std::set<TaintFlow> &expected,
   const size_t falseNegatives = expected.size() - truePositives;
   const double precision =
       detected.empty() ? (expected.empty() ? 1.0 : 0.0)
-                       : static_cast<double>(truePositives) / detected.size();
+                       : static_cast<double>(truePositives) /
+                             static_cast<double>(detected.size());
   const double recall =
       expected.empty() ? 1.0
-                       : static_cast<double>(truePositives) / expected.size();
+                       : static_cast<double>(truePositives) /
+                             static_cast<double>(expected.size());
   const double f1 = precision + recall == 0.0
                         ? 0.0
                         : 2.0 * precision * recall / (precision + recall);

@@ -125,5 +125,5 @@ Build and test
 
 .. code-block:: console
 
-   cmake --build build --target interleaved_dyck_unary_test
-   ctest --test-dir build -R interleaved_dyck_unary_test --output-on-failure
+   cmake --build build --target cfl_tests
+   ctest --test-dir build -R 'cfl_tests.InterleavedDyckUnary' --output-on-failure

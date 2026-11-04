@@ -3,6 +3,7 @@ add_library(CanaryGuardedValueFlow STATIC
   GuardedValueFlowNodes.cpp
   GuardedValueFlowSites.cpp
   GuardedValueFlowGraph.cpp
+  GuardedValueFlowTrace.cpp
   GuardedValueFlowBuilder.cpp
   GuardedValueFlowSerializer.cpp
   GuardedValueFlowSolver.cpp

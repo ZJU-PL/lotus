@@ -157,7 +157,7 @@ protected:
 };
 
 template <typename ctx, typename MemModel, typename PtsTy, typename SubClass>
-class LangModelTrait<LangModelBase<ctx, MemModel, PtsTy, SubClass>> {
+struct LangModelTrait<LangModelBase<ctx, MemModel, PtsTy, SubClass>> {
 private:
   using self = LangModelBase<ctx, MemModel, PtsTy, SubClass>;
 

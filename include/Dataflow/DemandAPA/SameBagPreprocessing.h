@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Dataflow/DemandAPA/Algorithm.h"
+
 template <class T> void Algorithm<T>::sameBagPreprocessing() {
   Time = omp_get_wtime();
 

@@ -129,6 +129,43 @@ static std::vector<NodeTag> inferNodeTags(Instruction *I) {
   return tags;
 }
 
+void BugDiagStep::populateDebugInfo(DebugInfoAnalysis &debugInfo) {
+  // Extract LLVM IR representation
+  if (inst) {
+    std::string ir_str;
+    raw_string_ostream ir_os(ir_str);
+    inst->print(ir_os);
+    llvm_ir = ir_os.str();
+
+    // Extract variable name using DebugInfoAnalysis
+    var_name = debugInfo.getVariableName(inst);
+
+    // Extract type information
+    type_name = debugInfo.getTypeName(inst);
+  }
+
+  // Extract debug information if available
+  if (auto *I = dyn_cast_or_null<Instruction>(inst)) {
+    // Get source location components using DebugInfoAnalysis
+    src_file = debugInfo.getSourceFile(I);
+    src_line = debugInfo.getSourceLine(I);
+    src_column = debugInfo.getSourceColumn(I);
+
+    // Get function name using DebugInfoAnalysis (includes demangling)
+    func_name = debugInfo.getFunctionName(I);
+
+    // Extract the actual source code statement using DebugInfoAnalysis
+    source_code = debugInfo.getSourceCodeStatement(I);
+
+    // Infer node tags from instruction type if not provided
+    if (node_tags.empty()) {
+      node_tags = inferNodeTags(I);
+    }
+  }
+
+  binary_addr = inst ? debugInfo.getBinaryAddress(inst) : 0;
+}
+
 void BugReport::append_step(Value *inst, const std::string &tip,
                             int trace_level, const std::vector<NodeTag> &tags,
                             const std::string &access) {
@@ -139,38 +176,7 @@ void BugReport::append_step(Value *inst, const std::string &tip,
   step->node_tags = tags;
   step->access = access;
 
-  // Extract LLVM IR representation
-  if (inst) {
-    std::string ir_str;
-    raw_string_ostream ir_os(ir_str);
-    inst->print(ir_os);
-    step->llvm_ir = ir_os.str();
-
-    // Extract variable name using DebugInfoAnalysis
-    step->var_name = debugInfo.getVariableName(inst);
-
-    // Extract type information
-    step->type_name = debugInfo.getTypeName(inst);
-  }
-
-  // Extract debug information if available
-  if (auto *I = dyn_cast_or_null<Instruction>(inst)) {
-    // Get source location components using DebugInfoAnalysis
-    step->src_file = debugInfo.getSourceFile(I);
-    step->src_line = debugInfo.getSourceLine(I);
-    step->src_column = debugInfo.getSourceColumn(I);
-
-    // Get function name using DebugInfoAnalysis (includes demangling)
-    step->func_name = debugInfo.getFunctionName(I);
-
-    // Extract the actual source code statement using DebugInfoAnalysis
-    step->source_code = debugInfo.getSourceCodeStatement(I);
-
-    // Infer node tags from instruction type if not provided
-    if (tags.empty()) {
-      step->node_tags = inferNodeTags(I);
-    }
-  }
+  step->populateDebugInfo(debugInfo);
 
   trigger_steps.push_back(step);
 }

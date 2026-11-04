@@ -61,14 +61,14 @@ From the repository root, the default configurations compare
 `pocr:cfg:count` with `skewed:ecfg:count` for all three analyses:
 
 ```bash
-python3 scripts/cfl/run_cfl_dataset.py --output results.jsonl
+python3 scripts/cfl/run_cfl_classical.py --output results.jsonl
 ```
 
 Configurations are independent triples, so the same inputs can exercise other
 engines:
 
 ```bash
-python3 scripts/cfl/run_cfl_dataset.py \
+python3 scripts/cfl/run_cfl_classical.py \
   --configuration sparse-bitvector:cfg:count \
   --configuration sqid:cfg:count \
   --configuration endpoint-quotient:cfg:count
@@ -80,16 +80,16 @@ support the same two forms:
 
 ```bash
 # One analysis, two solvers, two programs.
-python3 scripts/cfl/run_cfl_dataset.py \
+python3 scripts/cfl/run_cfl_classical.py \
   --analysis alias --case lbm,mcf --solver pocr,cert
 
 # Two analyses may also be given as repeated options.
-python3 scripts/cfl/run_cfl_dataset.py \
+python3 scripts/cfl/run_cfl_classical.py \
   --analysis alias --analysis taint \
   --solver sparse-bitvector --solver endpoint-quotient
 
 # All three analyses, four concurrent processes, one-hour timeout per run.
-python3 scripts/cfl/run_cfl_dataset.py \
+python3 scripts/cfl/run_cfl_classical.py \
   --analysis alias,value-flow,taint --solver pocr,cert \
   --workers 4 --timeout 3600 --memory-limit-mb 8192 \
   --output results.jsonl
@@ -116,7 +116,7 @@ resource pressure without rerunning completed or timed-out tasks.
 Run every generic backend, including ``cert``:
 
 ```bash
-python3 scripts/cfl/run_cfl_dataset.py --all-solvers --case lbm
+python3 scripts/cfl/run_cfl_classical.py --all-solvers --case lbm
 ```
 
 STG is not part of ``--all-solvers`` because it additionally requires a

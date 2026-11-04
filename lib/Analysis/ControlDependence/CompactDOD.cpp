@@ -144,7 +144,8 @@ OutsideSCCInfo computeOutsideSCCs(Graph &graph,
     for (unsigned target : successors)
       ++indegree[target];
   std::deque<unsigned> queue;
-  for (unsigned componentID = 0; componentID < componentCount; ++componentID)
+  for (unsigned componentID = 0;
+       componentID < static_cast<unsigned>(componentCount); ++componentID)
     if (indegree[componentID] == 0)
       queue.push_back(componentID);
   std::vector<unsigned> topologicalOrder;

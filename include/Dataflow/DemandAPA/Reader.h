@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Dataflow/DemandAPA/Support.h"
+
 class reader {
 public:
   int n_G, n_H, m_G, m_H;

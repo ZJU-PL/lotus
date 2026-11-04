@@ -29,7 +29,7 @@ private:
 public:
   CtxFunction(const ctx *C, const llvm::Function *F, const llvm::Instruction *I,
               CallGraphNode<ctx> *N)
-      : context(C), function(F), callSite(I), callNode(N) {}
+      : context(C), function(F), callNode(N), callSite(I) {}
   CtxFunction(const CtxFunction<ctx> &&cf) noexcept
       : context(cf.context), function(cf.function), callNode(cf.callNode) {}
 

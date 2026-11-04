@@ -114,7 +114,8 @@ AbstractValue evaluateConstantInitializer(AbstractState &state,
 
   if (const auto *cfp = llvm::dyn_cast<llvm::ConstantFP>(init)) {
     double val = cfp->getValueAPF().convertToDouble();
-    return AbstractValue(IntervalValue(val, val));
+    return AbstractValue(
+        IntervalValue(static_cast<int64_t>(val), static_cast<int64_t>(val)));
   }
 
   const llvm::Value *baseValue = nullptr;
@@ -185,7 +186,8 @@ void materializeGlobalInitializer(AbstractState &state, uint32_t baseValueId,
       if (const auto *arrayTy =
               llvm::dyn_cast<llvm::ArrayType>(init->getType())) {
         llvm::Type *elemTy = arrayTy->getElementType();
-        uint64_t elemSize = elemTy->isSized() ? dl.getTypeAllocSize(elemTy) : 1;
+        uint64_t elemSize =
+            elemTy->isSized() ? dl.getTypeAllocSize(elemTy) : uint64_t{1};
         for (uint64_t i = 0; i < arrayTy->getNumElements(); ++i) {
           llvm::Constant *elemInit = llvm::Constant::getNullValue(elemTy);
           materializeGlobalInitializer(state, baseValueId,
@@ -198,7 +200,8 @@ void materializeGlobalInitializer(AbstractState &state, uint32_t baseValueId,
       if (const auto *vecTy =
               llvm::dyn_cast<llvm::FixedVectorType>(init->getType())) {
         llvm::Type *elemTy = vecTy->getElementType();
-        uint64_t elemSize = elemTy->isSized() ? dl.getTypeAllocSize(elemTy) : 1;
+        uint64_t elemSize =
+            elemTy->isSized() ? dl.getTypeAllocSize(elemTy) : uint64_t{1};
         for (unsigned i = 0; i < vecTy->getNumElements(); ++i) {
           llvm::Constant *elemInit = llvm::Constant::getNullValue(elemTy);
           materializeGlobalInitializer(state, baseValueId,
@@ -229,7 +232,8 @@ void materializeGlobalInitializer(AbstractState &state, uint32_t baseValueId,
 
   if (const auto *arrayInit = llvm::dyn_cast<llvm::ConstantArray>(init)) {
     llvm::Type *elemTy = arrayInit->getType()->getElementType();
-    uint64_t elemSize = elemTy->isSized() ? dl.getTypeAllocSize(elemTy) : 1;
+    uint64_t elemSize =
+        elemTy->isSized() ? dl.getTypeAllocSize(elemTy) : uint64_t{1};
     for (unsigned i = 0; i < arrayInit->getNumOperands(); ++i) {
       const llvm::Constant *elemInit =
           llvm::cast<llvm::Constant>(arrayInit->getOperand(i));
@@ -242,7 +246,8 @@ void materializeGlobalInitializer(AbstractState &state, uint32_t baseValueId,
 
   if (const auto *vecInit = llvm::dyn_cast<llvm::ConstantVector>(init)) {
     llvm::Type *elemTy = vecInit->getType()->getElementType();
-    uint64_t elemSize = elemTy->isSized() ? dl.getTypeAllocSize(elemTy) : 1;
+    uint64_t elemSize =
+        elemTy->isSized() ? dl.getTypeAllocSize(elemTy) : uint64_t{1};
     for (unsigned i = 0; i < vecInit->getNumOperands(); ++i) {
       const llvm::Constant *elemInit =
           llvm::cast<llvm::Constant>(vecInit->getOperand(i));
@@ -272,7 +277,8 @@ void materializeConstantValue(AbstractState &as, const llvm::Value *val,
 
   if (const auto *cfp = llvm::dyn_cast<llvm::ConstantFP>(val)) {
     double num = cfp->getValueAPF().convertToDouble();
-    as[valueId] = AbstractValue(IntervalValue(num, num));
+    as[valueId] = AbstractValue(
+        IntervalValue(static_cast<int64_t>(num), static_cast<int64_t>(num)));
     return;
   }
 

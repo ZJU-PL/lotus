@@ -56,17 +56,25 @@ template <class T> using pb_set = set<T>;
 #define PII pair<int, int>
 #define all(x) x.begin(), x.end()
 
-template <class T> static void _db(const char *dbStr, T e) {
+template <class S, class T>
+inline ostream &operator<<(ostream &o, const map<S, T> &v);
+template <template <class, class...> class S, class T, class... L>
+inline ostream &operator<<(ostream &o, const S<T, L...> &v);
+template <class S, class T>
+inline ostream &operator<<(ostream &o, const pair<S, T> &pr);
+inline ostream &operator<<(ostream &o, const string &s);
+
+template <class T> inline void _db(const char *dbStr, T e) {
   cout << dbStr << " = " << e << endl;
 }
-template <class T, class... L> static void _db(const char *dbStr, T e, L... r) {
+template <class T, class... L> inline void _db(const char *dbStr, T e, L... r) {
   while (*dbStr != ',')
     cout << *dbStr++;
   cout << " = " << e << ',';
   _db(dbStr + 1, r...);
 }
 template <class S, class T>
-static ostream &operator<<(ostream &o, const map<S, T> &v) {
+inline ostream &operator<<(ostream &o, const map<S, T> &v) {
   o << "[";
   int i = 0;
   for (const pair<S, T> &pr : v)
@@ -74,7 +82,7 @@ static ostream &operator<<(ostream &o, const map<S, T> &v) {
   return o << "]";
 }
 template <template <class, class...> class S, class T, class... L>
-static ostream &operator<<(ostream &o, const S<T, L...> &v) {
+inline ostream &operator<<(ostream &o, const S<T, L...> &v) {
   o << "[";
   int i = 0;
   for (const auto &e : v)
@@ -82,10 +90,10 @@ static ostream &operator<<(ostream &o, const S<T, L...> &v) {
   return o << "]";
 }
 template <class S, class T>
-static ostream &operator<<(ostream &o, const pair<S, T> &pr) {
+inline ostream &operator<<(ostream &o, const pair<S, T> &pr) {
   return o << "(" << pr.fs << ", " << pr.sc << ")";
 }
-static ostream &operator<<(ostream &o, const string &s) {
+inline ostream &operator<<(ostream &o, const string &s) {
   for (const char &c : s)
     o << c;
   return o;
@@ -104,19 +112,19 @@ using umii = unordered_map<int, int>;
 using si = set<int>;
 using usi = unordered_set<int>;
 
-const int INF = 1e9;
-const ll FIRST_32BIT = (1ULL << 32) - 1;
-const int FIRST_16BIT = (1 << 16) - 1;
-const int START_VERTEX = 0;
-const int EXIT_VERTEX = 1;
-const int CALL_VERTEX = 2;
-const int RETURN_SITE_VERTEX = 3;
-const int ERROR_VERTEX = 4;
+inline constexpr int INF = 1e9;
+inline constexpr ll FIRST_32BIT = (1ULL << 32) - 1;
+inline constexpr int FIRST_16BIT = (1 << 16) - 1;
+inline constexpr int START_VERTEX = 0;
+inline constexpr int EXIT_VERTEX = 1;
+inline constexpr int CALL_VERTEX = 2;
+inline constexpr int RETURN_SITE_VERTEX = 3;
+inline constexpr int ERROR_VERTEX = 4;
 
-const int MAX_ALLOWED_GL = 80;
-const int MAX_N_THREADS = 40;
+inline constexpr int MAX_ALLOWED_GL = 80;
+inline constexpr int MAX_N_THREADS = 40;
 
-void stopClock(double Time, string s = "") {
+inline void stopClock(double Time, string s = "") {
 
   cout << "[" << s << "]" << " time taken = " << (omp_get_wtime() - Time)
        << " s" << endl;
@@ -185,4 +193,3 @@ public:
     fOut.close();
   }
 };
-

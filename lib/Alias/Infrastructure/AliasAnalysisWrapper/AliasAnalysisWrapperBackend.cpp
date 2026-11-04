@@ -18,9 +18,6 @@
 #if LOTUS_AA_WRAPPER_ENABLE_CCLYZER
 #include "Alias/InclusionBased/CclyzerAA/CclyzerAA.h"
 #endif
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-#include "Alias/InclusionBased/GPG/Analysis.h"
-#endif
 #include "Alias/InclusionBased/SparrowAA/AndersenAA.h"
 #if LOTUS_AA_WRAPPER_ENABLE_TPA
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Analysis/SemiSparsePointerAnalysis.h"
@@ -188,38 +185,6 @@ AliasResult AliasAnalysisWrapper::queryBackend(const Value *v1,
     // Otherwise, they may alias
     return AliasResult::MayAlias;
   }
-#endif
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-  if (_gpg_aa) {
-    const auto pts1 = _gpg_aa->result().allPointeeSet(v1s);
-    const auto pts2 = _gpg_aa->result().allPointeeSet(v2s);
-    const bool precise1 =
-        pts1.isComplete() && !pts1.containsUnknown() && !pts1.containsNull();
-    const bool precise2 =
-        pts2.isComplete() && !pts2.containsUnknown() && !pts2.containsNull();
-    if (!precise1 || !precise2)
-      return AliasResult::MayAlias;
-
-    const auto &values1 = pts1.values;
-    const auto &values2 = pts2.values;
-    if (values1.empty() || values2.empty())
-      return AliasResult::MayAlias;
-
-    // Avoid materializing a third container for the common case. GPG's
-    // Value-level wrapper query joins its statement-specific facts across all
-    // program points, so set intersection is the conservative alias test.
-    const auto &smaller = values1.size() < values2.size() ? values1 : values2;
-    const auto &larger = values1.size() < values2.size() ? values2 : values1;
-    const bool intersects =
-        std::any_of(smaller.begin(), smaller.end(),
-                    [&larger](const Value *v) { return larger.count(v) != 0; });
-    if (!intersects)
-      return AliasResult::NoAlias;
-    if (values1.size() == 1 && values2.size() == 1)
-      return AliasResult::MustAlias;
-    return AliasResult::MayAlias;
-  }
-
 #endif
   return AliasResult::MayAlias;
 }

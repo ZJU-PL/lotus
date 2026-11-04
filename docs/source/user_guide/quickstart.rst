@@ -28,8 +28,11 @@ Lotus has been tested on **x86/ARM Linux** and **ARM macOS**. The following depe
      - C++17 compatible
      - GCC or Clang with ``-fexceptions -frtti``.
    * - Boost
-     - 1.80+ (optional)
-     - Only required when ``LOTUS_ENABLE_SEAHORN``, ``LOTUS_ENABLE_CLAM``, or ``LOTUS_ENABLE_CCLYZER`` are enabled.
+     - 1.65+ (optional)
+     - Only required when ``LOTUS_ENABLE_SEAHORN``, ``LOTUS_ENABLE_CLAM``,
+       ``LOTUS_ENABLE_SMACK``, ``LOTUS_ENABLE_CCLYZER``, or
+       ``LOTUS_ENABLE_PDAAAL`` are enabled.
+       CLAM additionally requires Boost.JSON 1.80+.
 
 Build Instructions
 ------------------
@@ -50,10 +53,13 @@ If your LLVM installation is not in a standard system path, provide it to CMake:
 
    cmake .. -DLLVM_BUILD_PATH=/path/to/llvm/lib/cmake/llvm
 
-To run the unit test suite (recommended after building):
+To run the unit test suite (recommended after building), configure with
+``-DLOTUS_BUILD_TESTS=ON`` first; tests are off by default:
 
 .. code-block:: bash
 
+   cmake .. -DLOTUS_BUILD_TESTS=ON
+   make -j$(nproc)
    make test
    # Or using ctest:
    ctest --output-on-failure
@@ -75,7 +81,7 @@ The standard workflow for running a Lotus checker on C/C++ code is:
    ./build/bin/lotus-alias-sparrow-aa example.bc
 
    # 3. Run a bug-finding checker (e.g., Use-After-Free & Leak checking)
-   ./build/bin/lotus-saber example.bc
+   ./build/bin/lotus-check --engine=saber example.bc
 
 Command-Line Tools Reference
 ----------------------------
@@ -89,9 +95,12 @@ Lotus exposes its internal libraries through standalone executable drivers in ``
    * - Tool Binary
      - Source Directory
      - Typical Invocation
-   * - ``lotus-check --engine=gvfa``
+   * - ``lotus-check --engine=kint``
      - ``tools/checker/``
-     - ``lotus-check --engine=gvfa target.bc``
+     - ``lotus-check --engine=kint target.bc``
+   * - ``lotus-check --engine=gsaf``
+     - ``tools/checker/``
+     - ``lotus-check --engine=gsaf target.bc``
    * - ``lotus-check --engine=pulse``
      - ``tools/checker/``
      - ``lotus-check --engine=pulse target.bc``

@@ -1,35 +1,11 @@
-// The imported implementation has order-dependent header definitions.
-// clang-format off
-#include "Dataflow/DemandAPA/DemandOmp.h"
-#include <dirent.h>
-#include "Dataflow/DemandAPA/Support.h"
-#include "Dataflow/DemandAPA/RegEx.h"
-#include "bdd.h"
-#include "Dataflow/DemandAPA/ApaInstance.h"
-#include "Dataflow/DemandAPA/Algebra.h"
 #include "Dataflow/DemandAPA/Algorithm.h"
-#include "Dataflow/DemandAPA/PrePreprocess.h"
-#include "Dataflow/DemandAPA/FunctionSummaries.h"
-#include "Dataflow/DemandAPA/Naive.h"
-#include "Dataflow/DemandAPA/Intraprocedural.h"
-#include "Dataflow/DemandAPA/Interprocedural.h"
-// clang-format on
-
-Algorithm<int> algSP;
-Algorithm<vi> algIfds;
-Algorithm<bdd> algBp;
-vvi indicesOflocalsNotInLHS;
-
-// clang-format off
-#include "Dataflow/DemandAPA/Project.h"
-#include "Dataflow/DemandAPA/IfdsReader.h"
-#include "Dataflow/DemandAPA/SPReader.h"
 #include "Dataflow/DemandAPA/BpReader.h"
-// clang-format on
+#include "Dataflow/DemandAPA/IfdsReader.h"
+#include "Dataflow/DemandAPA/Project.h"
+#include "Dataflow/DemandAPA/SPReader.h"
+#include "Dataflow/DemandAPA/Support.h"
 
-int TIMEOUT = 20;
-
-#include "Dataflow/DemandAPA/Comparison.h"
+#include <dirent.h>
 
 int main(int argc, char *argv[]) {
 #ifdef LOCAL
@@ -45,11 +21,11 @@ int main(int argc, char *argv[]) {
     return 2;
   }
 
-  TIMEOUT = stoi(argv[1]);
+  const int timeout = stoi(argv[1]);
   int programCnt = stoi(argv[2]);
   int reset = stoi(argv[3]);
 
-  db(TIMEOUT);
+  db(timeout);
 
   srand(1);
 
@@ -181,7 +157,7 @@ int main(int argc, char *argv[]) {
         ApaInstance<vi> IfdsInstance = reader.getInstance();
 
         algIfds = Algorithm<vi>();
-        algIfds.work(&IfdsInstance, row, 8);
+        algIfds.work(&IfdsInstance, row, 8, timeout);
       } else {
 
         BpReader reader = BpReader(pathToFile, TWDpath, TDDpath);
@@ -191,7 +167,7 @@ int main(int argc, char *argv[]) {
         // successfully!" << endl;
         algBp = Algorithm<bdd>();
 
-        algBp.work(&BPInstance, row, 1);
+        algBp.work(&BPInstance, row, 1, timeout);
       }
 
       cout << "----------------------------------------------------------------"

@@ -62,7 +62,7 @@ Components
   * Array out-of-bounds access
   * Dead branches (unreachable code)
 
-**MKintSummary** (``MKintSummary.cpp``, ``MKintSummary.h``):
+**Function summaries** (``MKintSummary.cpp``; ``FunctionSummary`` in ``SummaryEncoding.h``):
 
 * Builds and applies inter-procedural function summaries as Z3 contracts
 * Captures integer/pointer parameters, return values, memory side effects, and path constraints
@@ -158,14 +158,15 @@ Command-Line Options
 
 **Performance Options**:
 
-* ``--kint.function-timeout-seconds=<seconds>`` – Timeout per function for SMT solving (0 = no limit, default: varies)
+* ``--kint.function-timeout-seconds=<seconds>`` – Timeout per function for SMT solving (0 = no limit, default: 10)
+* ``--kint.max-paths-per-function=<N>`` – Maximum path expansions per function (0 = no limit, default: 20000)
 * ``--kint.summary-mode=<off|on|required>`` – Control inter-procedural summary building (default: on)
 * ``--kint.summary-timeout-seconds=<seconds>`` – Per-summary timeout (default: 5)
 * ``--kint.summary-max-paths=<N>`` – Path budget for summary construction (default: 64)
 
 **Logging Options**:
 
-* ``--log-level=<debug|info|warning|error|none>`` – Set logging level (default: warning)
+* ``--log-level=<none|error|warning|info|debug|trace>`` – Set logging level (default: warning)
 
 **Robust reachability options**:
 

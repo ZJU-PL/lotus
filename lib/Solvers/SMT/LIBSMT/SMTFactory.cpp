@@ -42,6 +42,11 @@ SMTExprVec SMTFactory::translate(const SMTExprVec &Exprs) {
 SMTExpr SMTFactory::translate(const SMTExpr &Expr) {
   std::lock_guard<std::mutex> L(Expr.getSMTFactory().getFactoryLock());
 
+  // Z3_translate requires distinct source and target contexts. Summary
+  // composition can pass an expression already owned by this factory.
+  if (&Expr.getSMTFactory() == this)
+    return Expr;
+
   if (Expr.isTrue()) {
     return this->createBoolVal(true);
   } else if (Expr.isFalse()) {

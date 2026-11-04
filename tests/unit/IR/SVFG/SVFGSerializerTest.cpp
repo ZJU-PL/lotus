@@ -64,6 +64,12 @@ TEST_F(SVFGSerializerTest, RoundTripsSemanticBindings) {
   auto module = parseModule(source);
   ASSERT_NE(module, nullptr);
 
+  SmallString<256> path;
+  int fd = -1;
+  ASSERT_FALSE(
+      sys::fs::createTemporaryFile("svfg-serializer", "txt", fd, path));
+  ::close(fd);
+
   ICFG icfg;
   ICFGBuilder icfgBuilder(&icfg);
   icfgBuilder.build(module.get());
@@ -71,16 +77,11 @@ TEST_F(SVFGSerializerTest, RoundTripsSemanticBindings) {
   SVFGBuilderConfig cfg;
   cfg.usePointerAnalysis = false;
   cfg.buildMSSA = true;
+  cfg.pointerOnly = false;
 
   SVFGBuilder builder(cfg);
   std::unique_ptr<SVFG> original(builder.build(&icfg));
   ASSERT_NE(original, nullptr);
-
-  SmallString<256> path;
-  int fd = -1;
-  ASSERT_FALSE(
-      sys::fs::createTemporaryFile("svfg-serializer", "txt", fd, path));
-  ::close(fd);
 
   ASSERT_TRUE(original->writeToFile(path.str().str()));
 
@@ -603,19 +604,20 @@ TEST_F(SVFGSerializerTest, CanonicalizesLegacyEdgeKindsOnRead) {
   ICFGBuilder icfgBuilder(&icfg);
   icfgBuilder.build(module.get());
 
-  SVFGBuilderConfig cfg;
-  cfg.usePointerAnalysis = false;
-  cfg.buildMSSA = true;
-
-  SVFGBuilder builder(cfg);
-  std::unique_ptr<SVFG> original(builder.build(&icfg));
-  ASSERT_NE(original, nullptr);
-
   SmallString<256> path;
   int fd = -1;
   ASSERT_FALSE(
       sys::fs::createTemporaryFile("svfg-legacy-edges", "txt", fd, path));
   ::close(fd);
+
+  SVFGBuilderConfig cfg;
+  cfg.usePointerAnalysis = false;
+  cfg.buildMSSA = true;
+  cfg.pointerOnly = false;
+
+  SVFGBuilder builder(cfg);
+  std::unique_ptr<SVFG> original(builder.build(&icfg));
+  ASSERT_NE(original, nullptr);
 
   ASSERT_TRUE(original->writeToFile(path.str().str()));
 

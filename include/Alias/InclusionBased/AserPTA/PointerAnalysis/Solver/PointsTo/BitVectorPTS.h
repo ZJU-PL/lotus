@@ -57,7 +57,7 @@ private:
     assert(src < ptsVec.size() && dst < ptsVec.size());
     auto result = ptsVec[src] & ptsVec[dst];
 
-    for (int i = 0; i < NORMAL_NODE_START_ID; i++) {
+    for (NodeID i = 0; i < NORMAL_NODE_START_ID; i++) {
       // remove special node
       result.reset(i);
     }
@@ -123,7 +123,7 @@ private:
   // pointed by information
   static inline constexpr bool supportPointedBy() { return false; }
 
-  friend class PTSTrait<BitVectorPTS>;
+  friend struct PTSTrait<BitVectorPTS>;
 };
 
 // DEFINE_PTS_TRAIT(BitVectorPTS)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Dataflow/DemandAPA/ApaInstance.h"
+#include "Dataflow/DemandAPA/Project.h"
 #include "Dataflow/DemandAPA/Reader.h"
 #include "Dataflow/DemandAPA/Support.h"
 

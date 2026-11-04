@@ -4,11 +4,12 @@
  */
 #pragma once
 
+#include "IR/SVFG/SVFGNodeBS.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -19,7 +20,7 @@ enum class PointsToSetBackend { Mutable, HashConsed };
 class HashConsedPointsToSetArena {
 public:
   using ObjectID = std::uint32_t;
-  using Set = std::set<ObjectID>;
+  using Set = analysis::SVFGNodeBS;
   using SetID = std::uint32_t;
   static constexpr SetID EmptySet = 0;
 

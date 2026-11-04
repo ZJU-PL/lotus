@@ -8,8 +8,23 @@ Lotus's call-string APA solver in `Dataflow/APA`.
 The implementation lives in `include/Dataflow/DemandAPA/`; its command-line
 entry point is `tools/dataflow/DemandAPA/Main.cpp`. The public-facing build
 target is `DemandAPA` (an interface library) and the executable is
-`lotus-demand-apa`. The original artifact uses header-defined templates and
-global state, so this import currently has a single executable consumer.
+`lotus-demand-apa`. Headers include their own dependencies. `Algorithm.h`
+provides the algorithm declaration and all template implementations; callers do
+not need to include implementation fragments in a particular order.
+
+Non-template header definitions use C++17 inline linkage, allowing multiple
+translation units to include the interface. The imported algebra caches and
+projection contexts remain shared global state, owned by `Algebra.h` and
+`Project.h`; this change does not make independent analyses reentrant. Drivers
+use those definitions rather than redeclaring them. The baseline comparison
+timeout is per algorithm instance and is passed as the optional fourth argument
+of `Algorithm::work` (default 20 seconds).
+
+The `dataflow_tests` suite (cases `DemandAPAHeadersTest.*`) compiles every header
+in a separate translation unit, links them together with a reverse-include-order
+consumer, and tests shared projection and algebra state. Select it with
+`LOTUS_TEST_SUBSYSTEMS=dataflow/demandapa` when DemandAPA and unit tests are
+enabled.
 
 Enable it with `-DLOTUS_ENABLE_DEMAND_APA=ON`. BuDDy 2.4 is built from the
 vendored source in `third-party/buddy-2.4`. OpenMP is used when available;

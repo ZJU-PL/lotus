@@ -70,6 +70,18 @@ build/bin/lotus-cfl-interleaved-dyck staged-bounds \
 `taint`), `--print-lower` for certified reachable pairs, or `--print-result`
 for the selected method's pairs. The tool never adds reverse arcs.
 
+Use `--factorized-tracing` to reconstruct the union of contributing terminal
+edges without eager derivation records. Saturation and reconstruction share
+symbol-indexed, adaptive sparse/bitmap relations. Taint regularization constructs
+only product states that can participate in accepted paths. `--stage-stats`
+reports stage wall time and cumulative process peak RSS on stderr; the RSS high-water mark
+never resets between stages. In particular, `--method mutual-refinement` still
+runs regularization, intersection, and underapproximation first.
+
+See [the factorized-tracing algorithm](FACTORIZED_TRACING.md) for relation
+representation, saturation and reconstruction, correctness arguments, product
+trimming, and complexity bounds.
+
 ## Boundary with MutualRefinement
 
 `StagedBounds` is the domain-facing pipeline; its `mutual_refinement` namespace

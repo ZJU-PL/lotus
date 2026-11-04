@@ -69,8 +69,11 @@ Key Options
 
 * ``--crab-dom=<domain>`` – Select abstract domain (int, zones, oct, pk, etc.)
 * ``--crab-inter`` – Enable interprocedural analysis
-* ``--crab-check=<type>`` – Enable property checking (assert, null, bounds, uaf)
-* ``--crab-print-invariants=true`` – Print computed invariants
+* ``--crab-check`` – Run the assertion checker.
+* ``--crab-null-check`` / ``--crab-uaf-check`` / ``--crab-bounds-check`` –
+  Insert null-dereference, use-after-free, or bounds checks (use together with
+  ``--crab-check``).
+* ``--crab-print-invariants=<none|blocks|loops>`` – Print computed invariants (default: ``none``)
 * ``-ojson=<file>`` – Output results in JSON format
 
 Examples
@@ -79,10 +82,10 @@ Examples
 .. code-block:: bash
 
    # Interval domain analysis with assertion checking
-   ./build/bin/clam --crab-dom=int --crab-check=assert program.bc
+   ./build/bin/clam --crab-dom=int --crab-check program.bc
 
    # Interprocedural analysis with zones domain
-   ./build/bin/clam --crab-inter --crab-dom=zones --crab-check=null program.bc
+   ./build/bin/clam --crab-inter --crab-dom=zones --crab-check --crab-null-check program.bc
 
 Preprocessing (clam-pp)
 -----------------------
@@ -133,7 +136,7 @@ Typical Workflow
 
       ./build/bin/clam \
          --crab-dom=zones \
-         --crab-check=assert \
+         --crab-check \
          prep.bc
 
 3. **Export results** (optional):
@@ -142,6 +145,6 @@ Typical Workflow
 
       ./build/bin/clam \
          --crab-dom=zones \
-         --crab-check=assert \
+         --crab-check \
          -ojson=results.json \
          prep.bc

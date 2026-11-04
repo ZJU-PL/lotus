@@ -1,0 +1,61 @@
+#!@PYTHON_VENV_EXECUTABLE@
+###############################################################################
+#
+# ikos-stub: assemble program bitcode with library function stubs
+#
+# Contact: ikos@lists.nasa.gov
+#
+# Notices:
+#
+# Copyright (c) 2018-2023 United States Government as represented by the
+# Administrator of the National Aeronautics and Space Administration.
+# All Rights Reserved.
+#
+# Disclaimers:
+#
+# No Warranty: THE SUBJECT SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF
+# ANY KIND, EITHER EXPRESSED, IMPLIED, OR STATUTORY, INCLUDING, BUT NOT
+# LIMITED TO, ANY WARRANTY THAT THE SUBJECT SOFTWARE WILL CONFORM TO
+# SPECIFICATIONS, ANY IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE OR NON-INFRINGEMENT, ANY WARRANTY THAT THE SOFTWARE
+# WILL BE ERROR FREE, ANY WARRANTY THAT, IF PROVIDED, THE DOCUMENTATION
+# WILL CONFORM TO THE SOFTWARE.  NO GOVERNMENT AGENCY NOR ANY EMPLOYEE
+# THEREOF, ASSUMES ANY LEGAL LIABILITY OR RESPONSIBILITY FOR THE ACCURACY,
+# COMPLETENESS, OR USEFULNESS OF ANY INFORMATION, APPARATUS, PRODUCT, OR
+# PROCESS DISCLOSED, OR THAT ITS USE WOULD NOT INFRINGE PRIVATELY OWNED
+# RIGHTS.
+#
+# Neither the United States Government, nor any employee thereof, makes any
+# warranty, express or implied, or assumes any legal liability or
+# responsibility for the accuracy, completeness, or usefulness of any
+# information, apparatus, product, or process disclosed, or represents that
+# its use would not infringe privately owned rights.
+#
+# IN NO EVENT SHALL THE UNITED STATES GOVERNMENT OR ITS CONTRACTORS OR
+# SUBCONTRACTORS BE LIABLE FOR ANY CLAIMS, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
+# OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# Waiver and Indemnity:  RECIPIENT AGREES TO WAIVE AND AND RELEASE THE
+# UNITED STATES GOVERNMENT, ITS CONTRACTORS AND SUBCONTRACTORS, AND ANY
+# EMPLOYEE THEREOF, FROM ANY AND ALL CLAIMS, DEMANDS OR DAMAGES, INCLUDING
+# EXTRA COSTS THAT MAY ARISE FROM THE USE OF THIS SOFTWARE.  RECIPIENT'S
+# SOLE REMEDY FOR ANY SUCH MATTER SHALL BE THE IMMEDIATE, UNILATERAL
+# TERMINATION OF THIS AGREEMENT.
+#
+###############################################################################
+import sys
+
+if __name__ == '__main__':
+    try:
+        import ikos.stub
+    except ImportError:
+        sys.stderr.write('error: could not find ikos python module\n')
+        sys.stderr.write('error: see TROUBLESHOOTING.md\n')
+        sys.exit(1)
+
+    try:
+        ikos.stub.stub_main(sys.argv)
+    except KeyboardInterrupt:
+        pass

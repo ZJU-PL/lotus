@@ -1,5 +1,7 @@
 add_library(CanaryDebugInfo STATIC
     DebugInfoAnalysis.cpp
+    DebugInfoQueries.cpp
+    IRExpressionRenderer.cpp
     MetadataManager/MetadataEntry.cpp
     MetadataManager/LoopStructure.cpp
     MetadataManager/MetadataManager.cpp

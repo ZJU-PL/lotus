@@ -1,0 +1,613 @@
+{
+  "functions": {
+    "malloc": {
+      "malloc": true,
+      "size-arguments": [
+        0
+      ],
+      "deallocators": [
+        "free",
+        "realloc"
+      ]
+    },
+    "calloc": {
+      "malloc": true,
+      "size-arguments": [
+        1,
+        0
+      ],
+      "deallocators": [
+        "free",
+        "realloc"
+      ]
+    },
+    "realloc": {
+      "malloc": true,
+      "free": true,
+      "reallocate": true,
+      "size-arguments": [
+        1
+      ],
+      "deallocators": [
+        "free",
+        "realloc",
+        "realloc"
+      ]
+    },
+    "reallocf": {
+      "malloc": true,
+      "free": true,
+      "reallocate": true,
+      "size-arguments": [
+        1
+      ],
+      "deallocators": [
+        "free"
+      ]
+    },
+    "memalign": {
+      "malloc": true,
+      "size-arguments": [
+        1
+      ],
+      "deallocators": [
+        "free",
+        "realloc",
+        "realloc"
+      ]
+    },
+    "aligned_alloc": {
+      "malloc": true,
+      "size-arguments": [
+        1
+      ],
+      "deallocators": [
+        "free",
+        "realloc"
+      ]
+    },
+    "pvalloc": {
+      "malloc": true,
+      "size-arguments": [
+        0
+      ],
+      "deallocators": [
+        "free",
+        "realloc"
+      ]
+    },
+    "valloc": {
+      "malloc": true,
+      "size-arguments": [
+        0
+      ],
+      "deallocators": [
+        "free",
+        "realloc"
+      ]
+    },
+    "strdup": {
+      "malloc": true,
+      "deallocators": [
+        "free",
+        "realloc"
+      ]
+    },
+    "strndup": {
+      "malloc": true,
+      "size-arguments": [
+        1
+      ],
+      "deallocators": [
+        "free"
+      ]
+    },
+    "kmalloc": {
+      "malloc": true,
+      "size-arguments": [
+        0
+      ],
+      "deallocators": [
+        "kfree"
+      ]
+    },
+    "mmap": {
+      "malloc": true
+    },
+    "mmap64": {
+      "malloc": true
+    },
+    "get_current_dir_name": {
+      "malloc": true
+    },
+    "getline": {
+      "malloc": true,
+      "free": true,
+      "reallocate": true
+    },
+    "getwline": {
+      "malloc": true,
+      "free": true,
+      "reallocate": true
+    },
+    "getdelim": {
+      "malloc": true,
+      "free": true,
+      "reallocate": true
+    },
+    "getwdelim": {
+      "malloc": true,
+      "free": true,
+      "reallocate": true
+    },
+    "_Znwj": {
+      "new": true,
+      "deallocators": [
+        "_ZdlPv"
+      ]
+    },
+    "_ZnwjRKSt9nothrow_t": {
+      "new": true,
+      "deallocators": [
+        "_ZdlPvRKSt9nothrow_t"
+      ]
+    },
+    "_Znwm": {
+      "new": true,
+      "deallocators": [
+        "_ZdlPvm"
+      ]
+    },
+    "_ZnwmRKSt9nothrow_t": {
+      "new": true,
+      "deallocators": [
+        "_ZdlPvm"
+      ]
+    },
+    "_Znaj": {
+      "new": true,
+      "deallocators": [
+        "_ZdaPv"
+      ]
+    },
+    "_ZnajRKSt9nothrow_t": {
+      "new": true,
+      "deallocators": [
+        "_ZdaPvRKSt9nothrow_t"
+      ]
+    },
+    "_Znam": {
+      "new": true,
+      "deallocators": [
+        "_ZdaPvm"
+      ]
+    },
+    "_ZnamRKSt9nothrow_t": {
+      "new": true,
+      "deallocators": [
+        "_ZdaPvm"
+      ]
+    },
+    "free": {
+      "free": true
+    },
+    "kfree": {
+      "free": true
+    },
+    "munmap": {
+      "free": true
+    },
+    "_ZdlPv": {
+      "delete": true
+    },
+    "_ZdlPvRKSt9nothrow_t": {
+      "delete": true
+    },
+    "_ZdlPvj": {
+      "delete": true
+    },
+    "_ZdlPvm": {
+      "delete": true
+    },
+    "_ZdaPv": {
+      "delete": true
+    },
+    "_ZdaPvRKSt9nothrow_t": {
+      "delete": true
+    },
+    "_ZdaPvj": {
+      "delete": true
+    },
+    "_ZdaPvm": {
+      "delete": true
+    },
+    "llvm.dbg.value": {
+      "ignore": true
+    },
+    "llvm.dbg.declare": {
+      "ignore": true
+    },
+    "printf": {
+      "ignore": true
+    },
+    "fopen": {
+      "resource-acquire": true,
+      "pointer-resource-releases": [
+        "fclose",
+        "freopen"
+      ],
+      "may-return-negative": true,
+      "may-return-null": true,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "freopen": {
+      "resource-acquire": true,
+      "resource-release": true,
+      "may-return-null": true,
+      "dereferenced-arguments": [
+        0,
+        1,
+        2
+      ]
+    },
+    "fdopen": {
+      "resource-acquire": true,
+      "pointer-resource-releases": [
+        "fclose",
+        "freopen"
+      ],
+      "may-return-null": true,
+      "dereferenced-arguments": [
+        1
+      ]
+    },
+    "open": {
+      "resource-acquire": true,
+      "integer-resource-releases": [
+        "close"
+      ]
+    },
+    "creat": {
+      "resource-acquire": true,
+      "integer-resource-releases": [
+        "close"
+      ]
+    },
+    "openat": {
+      "resource-acquire": true,
+      "integer-resource-releases": [
+        "close"
+      ]
+    },
+    "opendir": {
+      "resource-acquire": true,
+      "pointer-resource-releases": [
+        "closedir"
+      ]
+    },
+    "fdopendir": {
+      "resource-acquire": true,
+      "pointer-resource-releases": [
+        "closedir"
+      ]
+    },
+    "socket": {
+      "resource-acquire": true,
+      "integer-resource-releases": [
+        "close"
+      ]
+    },
+    "accept": {
+      "resource-acquire": true,
+      "integer-resource-releases": [
+        "close"
+      ]
+    },
+    "fopen64": {
+      "resource-acquire": true,
+      "pointer-resource-releases": [
+        "fclose64"
+      ]
+    },
+    "freopen64": {
+      "resource-acquire": true,
+      "pointer-resource-releases": [
+        "fclose64"
+      ]
+    },
+    "fdopen64": {
+      "resource-acquire": true,
+      "pointer-resource-releases": [
+        "fclose64"
+      ]
+    },
+    "open64": {
+      "resource-acquire": true,
+      "integer-resource-releases": [
+        "close",
+        "close64"
+      ]
+    },
+    "fclose": {
+      "resource-release": true,
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "close": {
+      "resource-release": true
+    },
+    "closedir": {
+      "resource-release": true
+    },
+    "fclose64": {
+      "resource-release": true
+    },
+    "strcpy": {
+      "buffer-access-pattern": 0,
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "stpcpy": {
+      "buffer-access-pattern": 0
+    },
+    "wcscpy": {
+      "buffer-access-pattern": 0
+    },
+    "wcpcpy": {
+      "buffer-access-pattern": 0
+    },
+    "wcscat": {
+      "buffer-access-pattern": 0
+    },
+    "strccpy": {
+      "buffer-access-pattern": 0
+    },
+    "strcadd": {
+      "buffer-access-pattern": 0
+    },
+    "strecpy": {
+      "buffer-access-pattern": 2
+    },
+    "streadd": {
+      "buffer-access-pattern": 2
+    },
+    "strncpy": {
+      "buffer-access-pattern": 1,
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "strncat": {
+      "buffer-access-pattern": 1
+    },
+    "wcsncpy": {
+      "buffer-access-pattern": 1
+    },
+    "wcsncat": {
+      "buffer-access-pattern": 1
+    },
+    "wcpncpy": {
+      "buffer-access-pattern": 1
+    },
+    "strxfrm": {
+      "buffer-access-pattern": 1
+    },
+    "fseek": {
+      "may-return-negative": true,
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "fread": {
+      "may-return-negative": true,
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        3
+      ]
+    },
+    "fcntl": {
+      "may-return-negative": true
+    },
+    "mkdir": {
+      "may-return-negative": true
+    },
+    "rename": {
+      "may-return-negative": true
+    },
+    "remove": {
+      "may-return-negative": true
+    },
+    "readlink": {
+      "may-return-negative": true
+    },
+    "setsockopt": {
+      "may-return-negative": true
+    },
+    "getpeername": {
+      "may-return-negative": true
+    },
+    "memset": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "memcpy": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "memmove": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "feof": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "fwrite": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        3
+      ]
+    },
+    "fprintf": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "vfprintf": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "fscanf": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "fgetc": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "fgets": {
+      "may-return-null": true,
+      "dereferenced-arguments": [
+        0,
+        2
+      ]
+    },
+    "getc": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "gets": {
+      "may-return-null": true,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "ungetc": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        1
+      ]
+    },
+    "fputs": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        1
+      ]
+    },
+    "fputc": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "putc": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        1
+      ]
+    },
+    "puts": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "memchr": {
+      "may-return-null": true,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "strchr": {
+      "may-return-null": true,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "strstr": {
+      "may-return-null": true,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "strcasestr": {
+      "may-return-null": true,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "strtok": {
+      "may-return-null": true,
+      "dereferenced-arguments": []
+    },
+    "strcmp": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "strncmp": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "llvm.memset": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0
+      ]
+    },
+    "llvm.memcpy": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    },
+    "llvm.memmove": {
+      "may-return-null": false,
+      "dereferenced-arguments": [
+        0,
+        1
+      ]
+    }
+  }
+}

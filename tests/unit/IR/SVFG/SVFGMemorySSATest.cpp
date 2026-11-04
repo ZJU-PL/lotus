@@ -240,7 +240,7 @@ TEST_F(SVFGMemorySSATest, GlobalOnlyCalleeCreatesInterproceduralMemoryNodes) {
   const ICFGNode *globalInitNode = icfg.getGlobalInitICFGNode();
   ASSERT_NE(globalInitNode, nullptr);
   bool sawGlobalEntryChi = false;
-  bool sawStoreSeedIntoMain = false;
+  bool sawInitializerSeedIntoMain = false;
   for (const auto &pair : *svfg) {
     EXPECT_NE(pair.second->getNodeKind(), SVFGK::CallMu);
     EXPECT_NE(pair.second->getNodeKind(), SVFGK::CallChi);
@@ -250,18 +250,21 @@ TEST_F(SVFGMemorySSATest, GlobalOnlyCalleeCreatesInterproceduralMemoryNodes) {
       sawGlobalEntryChi = true;
     }
   }
-  EXPECT_FALSE(sawGlobalEntryChi);
+  EXPECT_TRUE(sawGlobalEntryChi);
 
   for (SVFGNode *formalInNode : svfg->getFormalIns(mainFn)) {
     for (SVFGEdge *edge : formalInNode->getInEdges()) {
-      if (edge && edge->getEdgeKind() == SVFGEdgeK::IntraIndirect &&
-          isa<StoreSVFGNode>(edge->getSrcNode())) {
-        sawStoreSeedIntoMain = true;
-        break;
+      if (edge && edge->getEdgeKind() == SVFGEdgeK::IntraIndirect) {
+        // The store in writer executes after main's entry. It must not be
+        // mistaken for a synthetic initializer and wired back into main.
+        EXPECT_FALSE(isa<StoreSVFGNode>(edge->getSrcNode()));
+        if (isa<EntryChiSVFGNode>(edge->getSrcNode()) &&
+            edge->getSrcNode()->getICFGNode() == globalInitNode)
+          sawInitializerSeedIntoMain = true;
       }
     }
   }
-  EXPECT_TRUE(sawStoreSeedIntoMain);
+  EXPECT_TRUE(sawInitializerSeedIntoMain);
 }
 TEST_F(SVFGMemorySSATest, CallsiteMemoryNodesTrackOnlyTouchedArguments) {
   const char *source = R"(
@@ -455,6 +458,7 @@ TEST_F(SVFGMemorySSATest, InterproceduralMemoryNodesUseExitAndReturnSite) {
   SVFGBuilderConfig cfg;
   cfg.usePointerAnalysis = false;
   cfg.buildMSSA = true;
+  cfg.pointerOnly = false;
 
   SVFGBuilder builder(cfg);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -514,6 +518,7 @@ TEST_F(SVFGMemorySSATest, GlobalEntryFallbackCoversAllDirectUsersWithoutMain) {
   cfg.usePointerAnalysis = false;
   cfg.buildMSSA = true;
   cfg.includeGlobals = true;
+  cfg.pointerOnly = false;
 
   SVFGBuilder builder(cfg);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -582,6 +587,7 @@ TEST_F(SVFGMemorySSATest, MixedArgumentAndGlobalAccessKeepsBothSummaries) {
   SVFGBuilderConfig config;
   config.usePointerAnalysis = true;
   config.buildMSSA = true;
+  config.pointerOnly = false;
   SVFGBuilder builder(config);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
   ASSERT_NE(svfg, nullptr);
@@ -898,6 +904,7 @@ TEST_F(SVFGMemorySSATest, HeapReachableFromGlobalRemainsVisibleInSummaries) {
   SVFGBuilderConfig cfg;
   cfg.usePointerAnalysis = true;
   cfg.buildMSSA = true;
+  cfg.pointerOnly = false;
 
   SVFGBuilder builder(cfg);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -1003,6 +1010,7 @@ TEST_F(SVFGMemorySSATest, NoReturnFunctionMemorySummaryUsesDedicatedExitNode) {
   SVFGBuilderConfig cfg;
   cfg.usePointerAnalysis = false;
   cfg.buildMSSA = true;
+  cfg.pointerOnly = false;
 
   SVFGBuilder builder(cfg);
   std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -1055,4 +1063,168 @@ TEST_F(SVFGMemorySSATest, UntouchedPointerFormalsDoNotCreateMemoryNodes) {
   EXPECT_TRUE(svfg->getFormalOuts(noopFn).empty());
   EXPECT_TRUE(svfg->getActualIns(call).empty());
   EXPECT_TRUE(svfg->getActualOuts(call).empty());
+}
+
+TEST_F(SVFGMemorySSATest, PointerOnlyConfigSkipsScalarFlowAndMemoryNodes) {
+  const char *source = R"(
+    define i32 @main(i1 %cond) {
+    entry:
+      %x = alloca i32
+      %a = add i32 1, 2
+      %cmp = icmp eq i32 %a, 3
+      br i1 %cmp, label %then, label %join
+
+    then:
+      store i32 %a, i32* %x
+      br label %join
+
+    join:
+      %v = load i32, i32* %x
+      ret i32 %v
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  ICFG icfg;
+  std::unique_ptr<SVFG> svfg =
+      buildSVFG(module.get(), icfg, /*pointerOnly=*/true);
+  ASSERT_NE(svfg, nullptr);
+
+  for (const auto &pair : *svfg) {
+    EXPECT_FALSE(isa<BinaryOpSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<CmpSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<BranchSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<StoreSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<LoadSVFGNode>(pair.second));
+    EXPECT_FALSE(isa<IntraMSSAPhiSVFGNode>(pair.second));
+  }
+}
+
+TEST_F(SVFGMemorySSATest, PointerOnlyPrunesDeadJoinButKeepsLiveJoin) {
+  for (bool live : {false, true}) {
+    std::string source = R"(
+      @object = global i8 0
+      define void @main(i1 %condition) {
+      entry:
+        %slot = alloca i8*
+        br i1 %condition, label %write, label %join
+      write:
+        store i8* @object, i8** %slot
+        br label %join
+      join:
+    )";
+    if (live)
+      source += " %value = load i8*, i8** %slot\n";
+    source += " ret void\n}";
+    auto module = parseModule(source.c_str());
+    ASSERT_NE(module, nullptr);
+    ICFG icfg;
+    auto graph = buildSVFG(module.get(), icfg, true);
+    unsigned phis = 0;
+    for (const auto &entry : *graph)
+      phis += isa<IntraMSSAPhiSVFGNode>(entry.second);
+    if (live)
+      EXPECT_GT(phis, 0u);
+    else
+      EXPECT_EQ(phis, 0u);
+  }
+}
+
+TEST_F(SVFGMemorySSATest, PointerOnlyExternalSpecsPreserveUnknownWrites) {
+  auto module = parseModule(R"(
+    declare void @free(i8*)
+    declare void @unknown(i8*)
+    declare i8* @memcpy(i8*, i8*, i64)
+    define void @main() {
+      %slot = alloca i8*
+      %other = alloca i8*
+      %p = bitcast i8** %slot to i8*
+      %q = bitcast i8** %other to i8*
+      call void @free(i8* %p)
+      call void @unknown(i8* %p)
+      %r = call i8* @memcpy(i8* %q, i8* %p, i64 8)
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  ICFG icfg;
+  auto graph = buildSVFG(module.get(), icfg, true);
+  const Function *main = module->getFunction("main");
+  EXPECT_TRUE(graph->getActualOuts(findCallTo(main, "free")).empty());
+  EXPECT_FALSE(graph->getActualOuts(findCallTo(main, "unknown")).empty());
+  EXPECT_FALSE(graph->getActualOuts(findCallTo(main, "memcpy")).empty());
+}
+
+TEST(SVFGObjectIndexTest, TracksMetadataRefinementReplacementAndSwap) {
+  SVFG graph;
+  SVFG::ObjectInfo info;
+  graph.setObjectInfo(1, info);
+  info.baseObjId = 1;
+  graph.setObjectInfo(2, info);
+  EXPECT_EQ(graph.getFieldObjects(1), (SVFGNodeBS{1, 2}));
+  graph.setObjectBase(2, 3);
+  EXPECT_EQ(graph.getFieldObjects(1), (SVFGNodeBS{1}));
+  EXPECT_EQ(graph.getFieldObjects(3), (SVFGNodeBS{2}));
+  graph.setObjectInfo(2, SVFG::ObjectInfo{});
+  EXPECT_EQ(graph.getFieldObjects(2), (SVFGNodeBS{2}));
+  info.baseObjId = 1;
+  graph.updateObjectInfo(2, info);
+  EXPECT_EQ(graph.getFieldObjects(1), (SVFGNodeBS{1, 2}));
+  graph.setObjectOffset(4, 8);
+  EXPECT_EQ(graph.getFieldObjects(4), (SVFGNodeBS{4}));
+  graph.setObjectBase(4, 1);
+  EXPECT_EQ(graph.getFieldObjects(2), (SVFGNodeBS{1, 2, 4}));
+  SVFG other;
+  graph.swapWith(other);
+  EXPECT_EQ(other.getFieldObjects(1), (SVFGNodeBS{1, 2, 4}));
+  EXPECT_EQ(graph.getFieldObjects(1), (SVFGNodeBS{1}));
+}
+
+TEST(SVFGNodeBSTest, WordUnionMatchesIndividualInsertion) {
+  for (unsigned seed = 0; seed < 32; ++seed) {
+    SVFGNodeBS left, right;
+    for (uint32_t i = 0; i < 4096; ++i) {
+      if ((i * 17 + seed) % 23 < 5)
+        left.insert(i);
+      if ((i * 13 + seed) % 19 < 4)
+        right.insert(i);
+    }
+    SVFGNodeBS expected = left;
+    expected.insert(right.begin(), right.end());
+    const bool changed = expected != left;
+    EXPECT_EQ(left.unite(right), changed);
+    EXPECT_EQ(left, expected);
+    EXPECT_FALSE(left.unite(right));
+    EXPECT_FALSE(left.unite(left));
+    EXPECT_FALSE(left.unite(SVFGNodeBS{}));
+    SVFGNodeBS empty;
+    EXPECT_TRUE(empty.unite(left));
+    EXPECT_EQ(empty, expected);
+  }
+}
+
+TEST(SVFGNodeBSTest, WordSubtractionMatchesIndividualErasure) {
+  for (unsigned seed = 0; seed < 32; ++seed) {
+    SVFGNodeBS left, right;
+    for (uint32_t i = 0; i < 4096; ++i) {
+      if ((i + seed) % 5 != 0)
+        left.insert(i * 17);
+      if ((i + seed) % 3 == 0)
+        right.insert(i * 17);
+    }
+    SVFGNodeBS expected = left;
+    for (uint32_t object : right)
+      expected.erase(object);
+    const bool changed = expected != left;
+    EXPECT_EQ(left.subtract(right), changed);
+    EXPECT_EQ(left, expected);
+    EXPECT_FALSE(left.subtract(right));
+    EXPECT_FALSE(left.subtract(SVFGNodeBS{}));
+    EXPECT_TRUE(left.subtract(left));
+    EXPECT_TRUE(left.empty());
+    EXPECT_FALSE(left.subtract(left));
+    EXPECT_FALSE(left.subtract(right));
+  }
 }

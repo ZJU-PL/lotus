@@ -363,7 +363,7 @@ void Index::initIndex(const char *indexfile) {
       //			buf = buf.substr(begin,end-begin);
       //			neighbors.clear();
       //			neighbors = Graph::split(buf, ' ');
-      for (int j = 0; j < neighbors.size(); j++) {
+      for (size_t j = 0; j < neighbors.size(); j++) {
         if (neighbors[j] == "")
           continue;
         vid = atoi(neighbors[j].c_str());
@@ -418,7 +418,7 @@ void Index::computeLocalGates(bool ispartial) {
   }
   localgates =
       vector<vector<vector<int>>>(gsize, vector<vector<int>>(2, vector<int>()));
-  for (int i = 0; i < nodes.size(); i++) {
+  for (size_t i = 0; i < nodes.size(); i++) {
     GraphAlgorithms::collectInLocalGates(g, gates, nodes[i], radius,
                                    localgates[nodes[i]][0]);
     GraphAlgorithms::collectOutLocalGates(g, gates, nodes[i], radius,
@@ -442,7 +442,7 @@ void Index::selectPartialNodes(vector<int> &nodes, int num) {
   srand(time(NULL));
   set<int> tmp_nodes;
   set<int>::iterator sit;
-  while (tmp_nodes.size() < num) {
+  while (tmp_nodes.size() < static_cast<size_t>(num)) {
     int node = rand() % gsize;
     tmp_nodes.insert(node);
   }
@@ -724,12 +724,12 @@ void Index::displayIndex(ostream &out) {
   for (int i = 0; i < gsize; i++) {
     out << i << ": ";
     if (indextype != 1) {
-      for (int j = 0; j < lin[i].size(); j++)
+      for (size_t j = 0; j < lin[i].size(); j++)
         out << lin[i][j] << " ";
     }
     out << "# ";
     if (indextype != 0) {
-      for (int j = 0; j < lout[i].size(); j++)
+      for (size_t j = 0; j < lout[i].size(); j++)
         out << lout[i][j] << " ";
     }
     out << "#" << '\n';
@@ -742,7 +742,7 @@ void Index::displayLabelsByNode(int vid, ostream &out) {
     return;
   }
   out << vid << ": [";
-  for (int j = 0; j < labels[vid].size() - 1; j++)
+  for (size_t j = 0; j + 1 < labels[vid].size(); j++)
     out << labels[vid][j] << " ";
   out << labels[vid][labels[vid].size() - 1] << "]" << '\n';
 }
@@ -777,7 +777,7 @@ void Index::displayGrailLabels(ostream &out) {
   for (int i = 0; i < gsize; i++) {
     if (gates->get(i)) {
       out << i << ": ";
-      for (int j = 0; j < graillabels[i].size(); j++)
+      for (size_t j = 0; j < graillabels[i].size(); j++)
         out << "[" << graillabels[i][j].first << "," << graillabels[i][j].second
             << "] ";
       out << '\n';
@@ -795,10 +795,10 @@ void Index::displayLocalGatesByNode(int vid, ostream &out) {
     cout << "is not gate node" << '\n';
   out << "Local Gates[";
   out << vid << "]: ";
-  for (int j = 0; j < inoutgates[vid][0].size(); j++)
+  for (size_t j = 0; j < inoutgates[vid][0].size(); j++)
     out << inoutgates[vid][0][j] << " ";
   out << "# ";
-  for (int j = 0; j < inoutgates[vid][1].size(); j++)
+  for (size_t j = 0; j < inoutgates[vid][1].size(); j++)
     out << inoutgates[vid][1][j] << " ";
   out << "#" << '\n';
 }

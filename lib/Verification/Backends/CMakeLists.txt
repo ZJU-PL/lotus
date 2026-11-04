@@ -3,6 +3,10 @@
 set(LOTUS_VERIFICATION_VENDOR_ROOT
     "${CMAKE_SOURCE_DIR}/third-party/verification")
 
+if(LOTUS_ENABLE_IKOS)
+  add_subdirectory(ikos)
+endif()
+
 if(LOTUS_ENABLE_CLAM)
   add_subdirectory(
     "${LOTUS_VERIFICATION_VENDOR_ROOT}/clam/src"

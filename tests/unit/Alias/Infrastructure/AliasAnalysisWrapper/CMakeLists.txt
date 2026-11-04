@@ -1,3 +1,1 @@
-add_lotus_test_suite(alias_wrapper_tests
-  SOURCES AliasWrapperBuildTest.cpp
-  LINK_LIBS CanaryAliasAnalysisWrapper)
+lotus_collect_test_sources(alias_tests AliasWrapperBuildTest.cpp)

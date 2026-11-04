@@ -1,0 +1,13 @@
+# Included by CTest after this executable's discovered test list.
+foreach(test_case IN LISTS @test_name@_TESTS)
+    set(test_kind "@test_kind@")
+    if(NOT [==[@LOTUS_SUITE_INTEGRATION_TEST_REGEX@]==] STREQUAL "" AND
+       test_case MATCHES [==[@LOTUS_SUITE_INTEGRATION_TEST_REGEX@]==])
+        set(test_kind integration)
+    elseif(NOT [==[@LOTUS_SUITE_COMPONENT_TEST_REGEX@]==] STREQUAL "" AND
+           test_case MATCHES [==[@LOTUS_SUITE_COMPONENT_TEST_REGEX@]==])
+        set(test_kind component)
+    endif()
+    set_tests_properties("${test_case}" PROPERTIES
+        LABELS "@labels@;${test_kind}")
+endforeach()

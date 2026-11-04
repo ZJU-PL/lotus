@@ -962,7 +962,7 @@ private:
     Id id = union_find_.makeSet();
     ensureNodeStorage(id, original);
 
-    Class klass{id, {canonical}, AnalysisT::make(*this, original, id), {}};
+    Class klass{id, {canonical}, AnalysisT::make(*this, original, id), {}, nullptr};
     klass.nodes_dirty = false;
 
     if (classes_.size() <= id.index()) {

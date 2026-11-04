@@ -47,7 +47,7 @@ empty string.
 
 ## Testing
 
-Unit coverage for this subsystem lives in `tests/unit/Analysis/General/CryptoAnalysisTest.cpp`.
+Unit coverage for this subsystem lives in `tests/unit/Security/ConstantTime/CryptoAnalysisTest.cpp`.
 The tests cover:
 
 - default-option compatibility

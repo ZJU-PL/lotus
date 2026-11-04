@@ -183,10 +183,13 @@ Usage
 .. code-block:: cpp
 
    #include "IR/SSI/SSI.h"
-   
-   // SSI transformation is typically run as part of a pass pipeline
-   // The pass requires DominatorTree, PostDominatorTree, and DominanceFrontier
-   FunctionPass *createSSIfyPass();
+
+   // SSIfy is a legacy FunctionPass (registered under the name "ssify").
+   // It requires DominatorTree, PostDominatorTree, and DominanceFrontier,
+   // which it declares through getAnalysisUsage().
+   legacy::PassManager PM;
+   PM.add(new SSIfy());
+   PM.run(module);
 
 **Command-Line Options**:
 

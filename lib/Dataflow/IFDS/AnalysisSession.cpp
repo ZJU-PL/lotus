@@ -2,10 +2,10 @@
 
 #include "Analysis/CFG/ExternCallbackModel.h"
 #include "Analysis/CFG/GlobalCtorsDtorsModel.h"
-#include "Analysis/TypeHierarchy/CallGraphBuilder.h"
+#include "Analysis/CallGraph/CallGraphBuilder.h"
 #include "Analysis/TypeHierarchy/DIBasedTypeHierarchy.h"
 #include "Analysis/TypeHierarchy/LLVMVFTableProvider.h"
-#include "Analysis/TypeHierarchy/OTF/OTFResolver.h"
+#include "Analysis/CallGraph/OTF/OTFResolver.h"
 
 #include <stdexcept>
 #include <unordered_set>

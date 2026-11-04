@@ -109,7 +109,7 @@ inline BitIDFunc operator~(BitIDFunc f)
 {
     for (int i = 0; i < f.data_.preimage_count(); ++i)
         f.data_[i] = ~f.data_[i];
-    return std::move(f);
+    return f;
 }
 
 inline BitIDFunc& operator^=(BitIDFunc& l, const BitIDFunc& r)
@@ -151,25 +151,25 @@ inline BitIDFunc& inplace_and_not(BitIDFunc& l, const BitIDFunc& r)
 inline BitIDFunc operator^(BitIDFunc l, const BitIDFunc& r)
 {
     l ^= r;
-    return std::move(l);
+    return l;
 }
 
 inline BitIDFunc operator|(BitIDFunc l, const BitIDFunc& r)
 {
     l |= r;
-    return std::move(l);
+    return l;
 }
 
 inline BitIDFunc operator&(BitIDFunc l, const BitIDFunc& r)
 {
     l &= r;
-    return std::move(l);
+    return l;
 }
 
 inline BitIDFunc and_not(BitIDFunc l, const BitIDFunc& r)
 {
     inplace_and_not(l, r);
-    return std::move(l);
+    return l;
 }
 
 #endif

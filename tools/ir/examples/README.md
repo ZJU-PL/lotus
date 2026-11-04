@@ -1,6 +1,6 @@
 # PDG Cypher query examples
 
-These files are meant to be run with `lotus-ir-pdg-query` (one query per line; `#` starts a comment).
+These files are meant to be run with `lotus-ir-pdg-query`. Queries may span multiple lines and are separated by blank lines, `#` comment lines, a trailing `;`, or the start of a new `MATCH` after a completed query; `#` starts a comment.
 
 ## Run
 

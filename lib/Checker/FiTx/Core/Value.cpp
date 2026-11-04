@@ -45,22 +45,22 @@
 namespace fitx {
 Value::Value(llvm::Value *value, std::vector<Fields> fields,
              long array_element_num)
-    : value_(value), fields_(fields), array_element_num_(array_element_num),
-      is_global_var_(llvm::isa<llvm::GlobalValue>(value)),
-      value_type_(value->getValueID()) {}
+    : value_(value), value_type_(value->getValueID()),
+      array_element_num_(array_element_num),
+      is_global_var_(llvm::isa<llvm::GlobalValue>(value)), fields_(fields) {}
 
 Value::Value(std::shared_ptr<fitx::Value> value,
              std::vector<Fields> fields, long array_element_num)
-    : value_(value->value_), fields_(fields),
+    : value_(value->value_), value_type_(value->getValueID()),
       array_element_num_(array_element_num),
       is_global_var_(value->isGlobalVar()),
-      is_return_value_(value->is_return_value_),
-      value_type_(value->getValueID()) {}
+      is_return_value_(value->is_return_value_), fields_(fields) {}
 
 Value::Value(const Value &value)
-    : value_(value.value_), fields_(value.fields_),
+    : value_(value.value_), value_type_(value.getValueID()),
       array_element_num_(value.array_element_num_),
-      is_global_var_(value.is_global_var_), value_type_(value.getValueID()) {}
+      is_global_var_(value.is_global_var_),
+      is_return_value_(value.is_return_value_), fields_(value.fields_) {}
 
 Value::Value(std::shared_ptr<Value> value) {
   value_ = value->value_;
@@ -155,7 +155,7 @@ bool Value::operator<(const Value &V) const {
   if (value_type_ != V.value_type_)
     return value_type_ < V.value_type_;
 
-  for (int i = 0; i < fields_.size(); i++) {
+  for (size_t i = 0; i < fields_.size(); i++) {
     if (fields_[i].type != V.fields_[i].type)
       return fields_[i].type < V.fields_[i].type;
 
@@ -172,7 +172,7 @@ bool Value::operator==(const Value &V) const {
       value_type_ != V.value_type_)
     return false;
 
-  for (int i = 0; i < fields_.size(); i++) {
+  for (size_t i = 0; i < fields_.size(); i++) {
     if (fields_[i].type != V.fields_[i].type ||
         fields_[i].field != V.fields_[i].field)
       return false;
@@ -210,7 +210,7 @@ ConstValue::ConstValue(llvm::ConstantInt *value)
     : Value(value), const_value_(value->getSExtValue()) {}
 
 ConstValue::ConstValue(int64_t const_value)
-    : const_value_(const_value), Value(llvm::Value::ConstantIntVal) {}
+    : Value(llvm::Value::ConstantIntVal), const_value_(const_value) {}
 
 ConstValue::ConstValue(std::shared_ptr<ConstValue> value)
     : Value(value), const_value_(value->getConstValue()) {}

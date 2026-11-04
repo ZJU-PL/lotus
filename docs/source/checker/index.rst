@@ -21,6 +21,7 @@ The Checker Framework consists of several checker categories, all unified throug
 * **Concurrency Checkers** – Thread safety and parallel-runtime issues (data races, deadlocks, atomicity violations, OpenMP bugs, MPI bugs) using MHP, lock set, OpenMP, and MPI analyses
 * **Pulse Checker** – Memory safety and other bugs using biabductive analysis with path-sensitive interprocedural reasoning
 * **Saber Checkers** – Source-sink bug detection over sparse value-flow graphs
+* **GSAF Checkers** – Path-sensitive checks over the guarded value-flow graph (use-after-free and taint)
 * **SymEx Checker** – Symbolic-execution bug checks backed by the top-level ``SymbolicExecution`` engine
 
 All checkers report bugs through the centralized ``BugReportMgr`` system, enabling unified output formats (JSON, SARIF) and consistent bug reporting across all analysis tools. The repository builds a single checker binary, ``lotus-check``; each invocation selects one engine with ``--engine=<name>``.
@@ -50,7 +51,7 @@ enables that engine's own checks.
      - Typical use
    * - Use-after-free
      - ``pulse``
-     - ``ae``, ``fitx``, ``symex``
+     - ``ae``, ``fitx``, ``symex``, ``gsaf``
      - Witness-oriented investigation
    * - Null-pointer dereference
      - ``pulse`` or ``ae``
@@ -78,7 +79,7 @@ enables that engine's own checks.
      - Initialization-state checking
    * - Tainted data reaches a sink
      - ``taint``
-     - ``pulse``, ``symex``
+     - ``pulse``, ``gsaf``
      - Configurable source-to-sink analysis
    * - Data race, deadlock, or parallel-runtime error
      - ``concur``
@@ -212,8 +213,8 @@ Components
 
 **FiTx Bug Checkers** (``lib/Checker/FiTx/``):
 
-* ``frontend/Framework.cpp`` – Main FiTx pass; typestate-based daily development-friendly checkers (Suzuki et al., USENIX ATC 2024)
-* ``frontend/Analyzer.cpp`` – CFG-based typestate analysis with return-code aware state propagation
+* ``Frontend/Framework.cpp`` – Main FiTx pass; typestate-based daily development-friendly checkers (Suzuki et al., USENIX ATC 2024)
+* ``Frontend/Analyzer.cpp`` – CFG-based typestate analysis with return-code aware state propagation
 * ``FrameworkIR/Analyzer.cpp`` – IR builder; collects return values for function summaries
 * ``Detector/`` – Typestate definitions per bug pattern
 
@@ -231,16 +232,16 @@ Components
 
 **Pulse Checker** (``lib/Checker/Pulse/``):
 
-* ``PulseChecker.cpp`` – Main bug finder using biabductive analysis
-* ``PulseDomain.cpp`` – Execution domain abstraction
-* ``PulseAbductiveDomain.h`` – Core abstract domain with biabduction
-* ``PulseOperations.cpp`` – Core memory operations (readDeref, writeDeref, etc.)
-* ``PulseDisjunctiveDomain.cpp`` – Disjunctive analysis for path-sensitive reasoning
-* ``PulseLoopAbstraction.cpp`` – Loop abstraction with widening
-* ``PulseSummary.cpp`` – Function summary representation and application
-* ``PulseTaint.cpp`` – Taint analysis for security vulnerabilities
-* ``PulseModels.cpp`` – Library function models
-* ``PulseDiagnostic.cpp`` – Rich diagnostic reporting with traces
+* ``Checker/PulseChecker.cpp`` – Main bug finder using biabductive analysis
+* ``Domain/PulseDomain.cpp`` – Execution domain abstraction
+* ``include/Checker/Pulse/Domain/PulseAbductiveDomain.h`` – Core abstract domain with biabduction
+* ``Domain/PulseOperations.cpp`` – Core memory operations (readDeref, writeDeref, etc.)
+* ``Domain/PulseDisjunctiveDomain.cpp`` – Disjunctive analysis for path-sensitive reasoning
+* ``Domain/PulseLoopAbstraction.cpp`` – Loop abstraction with widening
+* ``Interproc/PulseSummary.cpp`` – Function summary representation and application
+* ``Domain/PulseTaint.cpp`` – Taint analysis for security vulnerabilities
+* ``Interproc/PulseModels.cpp`` – Library function models
+* ``Report/PulseDiagnostic.cpp`` – Rich diagnostic reporting with traces
 
 **Saber Checker** (``lib/Checker/Saber/``):
 
@@ -251,10 +252,10 @@ Components
 
 **Symbolic Execution Checker** (``lib/SymbolicExecution/``):
 
-* ``AnalysisDriver.cpp`` – Whole-module symbolic execution driver
-* ``AnalysisState*.cpp`` – Symbolic state, summaries, taint updates, and bug queries
-* ``PathCondSolver.cpp`` – SMT-backed feasibility checking for path conditions
-* ``SymbolicExecutionWrapper.cpp`` – LLVM pass wrapper used by ``lotus-check --engine=symex``
+* ``Core/AnalysisDriver.cpp`` – Whole-module symbolic execution driver
+* ``Core/AnalysisState*.cpp`` – Symbolic state, summaries, taint updates, and bug queries
+* ``Solver/PathCondSolver.cpp`` – SMT-backed feasibility checking for path conditions
+* ``Integration/SymbolicExecutionWrapper.cpp`` – LLVM pass wrapper used by ``lotus-check --engine=symex``
 
 **Debug Info Analysis** (``lib/Analysis/DebugInfo/``):
 
@@ -263,14 +264,23 @@ Components
 Build Targets
 -------------
 
+* ``CheckerFramework`` – Core checker framework, registry, and diagnostic library
+* ``AE`` – Abstract-execution checker library
+* ``CanaryKint`` – KINT numerical bug checker library
+* ``ConcurrencyChecker`` – Concurrency bug checker library
 * ``FiTxChecker`` – FiTx typestate-based bug checker library
+* ``GSAF`` – Guarded value-flow analysis checker library
 * ``PulseChecker`` – Pulse biabductive analysis checker library
+* ``Saber`` – Saber source-sink checker library
+* ``TypeQualifier`` – Type qualifier checker library
 * ``CanarySymbolicExecution`` – Symbolic-execution engine library used by ``symex``
 * ``lotus-check`` – Unified checker frontend
+* ``tools/checker/lotus-check-generic.cpp`` – Declarative generic engine runner
 * ``tools/checker/lotus-check-ae.cpp`` – AE engine runner
-* ``tools/checker/lotus-check-fitx.cpp`` – FiTx engine runner
-* ``tools/checker/lotus-check-kint.cpp`` – KINT engine runner
 * ``tools/checker/lotus-check-concur.cpp`` – Concurrency engine runner
+* ``tools/checker/lotus-check-fitx.cpp`` – FiTx engine runner
+* ``tools/checker/lotus-check-gsaf.cpp`` – GSAF engine runner
+* ``tools/checker/lotus-check-kint.cpp`` – KINT engine runner
 * ``tools/checker/lotus-check-pulse.cpp`` – Pulse engine runner
 * ``tools/checker/lotus-check-saber.cpp`` – Saber engine runner
 * ``tools/checker/lotus-check-symex.cpp`` – Symbolic-execution engine runner
@@ -328,7 +338,7 @@ The framework detects the following bug categories:
 * **Reachability**: Unreachable (dead) branches, reported alongside the numerical checks
 * **Concurrency**: Data races, deadlocks, atomicity violations, lock mismatches, condition-variable misuse, OpenMP runtime misuse, MPI protocol/RMA bugs
 * **Security**: Taint errors (untrusted data flows), use-after-free, null dereferences
-* **Performance**: Unnecessary copies, const-refable parameters
+* **Performance**: Unnecessary copies, const-refable parameters (planned)
 
 All bug types are classified by importance (LOW, MEDIUM, HIGH) and category (SECURITY, ERROR, WARNING, PERFORMANCE) with CWE mappings.
 
@@ -356,5 +366,7 @@ See Also
    report
    saber
    symex
+   gsaf
    taint
    tooling
+   typequalifier

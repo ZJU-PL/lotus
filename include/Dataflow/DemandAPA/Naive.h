@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Dataflow/DemandAPA/Algorithm.h"
+
 template <class T> void Algorithm<T>::prepareNaive() {
   for (int p = 0; p < n_H; ++p)
     for (auto &pr : edgeListGPerProc[p]) {

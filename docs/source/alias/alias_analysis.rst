@@ -47,10 +47,13 @@ For detailed information about each analysis, see the corresponding documentatio
 * :doc:`dyckaa` - Unification-based alias analysis with Dyck-CFL reachability
 * :doc:`seadsa` - Context-sensitive, field-sensitive alias analysis based on DSA
 * :doc:`sparrowaa` - Inclusion-based points-to analysis
-* :doc:`fpa` - Function pointer analysis with multiple algorithms
+* :doc:`../analysis/fpa` - Function pointer analysis with multiple algorithms
 * :doc:`lotusaa` - Lotus-specific alias analysis framework
 * :doc:`underapproxaa` - Under-approximate must-alias analysis with no false positives
 * :doc:`dynaa` - Dynamic validation of static alias analysis results
 * :doc:`sraa` - Strict Relations Alias Analysis built on interprocedural range analysis
 * :doc:`flowsensitive` - Sparse flow-sensitive inclusion-based pointer analysis
 * :doc:`valueflowpta` - Direct value-flow-based flow-sensitive pointer analysis
+* :doc:`tpa` - Flow- and context-sensitive pointer analysis with semi-sparse representation
+* :doc:`cclyzeraa` - Datalog-based pointer analysis powered by cclyzer++
+* :doc:`dda` - Demand-driven alias-analysis infrastructure on SVFG

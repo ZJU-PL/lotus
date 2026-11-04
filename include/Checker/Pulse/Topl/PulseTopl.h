@@ -13,7 +13,7 @@
 
 namespace llvm {
 class Instruction;
-}
+} // namespace llvm
 
 namespace pulse {
 

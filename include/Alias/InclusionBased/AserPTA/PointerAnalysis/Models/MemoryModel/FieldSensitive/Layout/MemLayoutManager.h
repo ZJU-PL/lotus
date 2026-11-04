@@ -112,7 +112,7 @@ private:
     auto *layout = new (memLayoutAllocator.Allocate()) MemLayout;
     auto structLayout = DL.getStructLayout(T);
 
-    for (int i = 0; i < T->getNumElements(); i++) {
+    for (unsigned i = 0; i < T->getNumElements(); i++) {
       // accumulate physical offset
       size_t elemOffset = structLayout->getElementOffset(i);
       assert(elemOffset >= pOffset);

@@ -91,8 +91,8 @@ The top-level results include:
 
 See:
 
-- `tests/unit/Concurrency/MPIAnalysisTest.cpp`
-- `tests/unit/Concurrency/MPIRankAnalysisTest.cpp`
+- `tests/unit/Concurrency/MPI/MPIAnalysisTest.cpp`
+- `tests/unit/Concurrency/MPI/MPIRankAnalysisTest_Basic.cpp`
 
 ## Related Work
 

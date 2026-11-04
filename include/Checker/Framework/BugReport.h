@@ -5,12 +5,15 @@
 #include "Checker/Framework/BugTypes.h"
 #include "Utils/Formats/cJSON.h"
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
 
 #include <llvm/ADT/StringRef.h>
 #include <llvm/IR/Value.h>
+
+class DebugInfoAnalysis;
 
 namespace llvm {
 class Instruction;
@@ -81,6 +84,10 @@ struct BugDiagStep {
 
   // Node ID: identifier for the CFG node (if available)
   int node_id = -1;
+  uint64_t binary_addr = 0;
+
+  // Fill source and IR metadata through the shared debug-info analysis.
+  void populateDebugInfo(DebugInfoAnalysis &debugInfo);
 };
 
 /**
@@ -187,4 +194,3 @@ private:
 void printBugReport(const llvm::Instruction *BugInst,
                     const std::string &BugType,
                     const llvm::Value *RelatedValue = nullptr);
-

@@ -133,19 +133,19 @@ namespace wpds
             /* Getters         */
             /*******************/
             /*! @return the rule's from state */
-            const wpds_key_t from_state() const { return p; }
+            wpds_key_t from_state() const { return p; }
 
             /*! @return the rule's from stack */
-            const wpds_key_t from_stack() const { return y; }
+            wpds_key_t from_stack() const { return y; }
 
             /*! @return the rule's to state */
-            const wpds_key_t to_state()   const { return q; }
+            wpds_key_t to_state()   const { return q; }
 
             /*! @return the rule's 1st rhs stack symbol */
-            const wpds_key_t to_stack1() const  { return yp; }
+            wpds_key_t to_stack1() const  { return yp; }
 
             /*! @return the rule's 2nd rhs stack symbol */
-            const wpds_key_t to_stack2() const  { return ypp; }
+            wpds_key_t to_stack2() const  { return ypp; }
 
             /*! @return A const reference to the rule's weight */
             const sem_elem_t& weight() const    { return se; }

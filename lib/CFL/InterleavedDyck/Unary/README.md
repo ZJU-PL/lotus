@@ -156,7 +156,10 @@ build/bin/lotus-cfl-interleaved-dyck unary \
 ```
 
 `--direct` disables quotient sparsification. `--shallow K` is specific to the
-adaptive algorithm. `--print-pairs` groups vertices by component and streams
+adaptive algorithm. `--phase-timing` requires `--stats` and selects the
+compile-time-instrumented Adaptive implementation used by the RQ2.2 phase
+breakdown. Without it, the additional fine-grained timers are compiled out.
+`--print-pairs` groups vertices by component and streams
 non-reflexive pairs in `O(|V| + output)` time without storing a pair set.
 `--bidirect` explicitly selects `AddMissingReverseEdges`; output always states
 the selected algorithm and exactness guarantee.

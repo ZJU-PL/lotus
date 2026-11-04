@@ -39,13 +39,13 @@ separate executables:
 .. code-block:: bash
 
    # SymAbsAI
-   ./build/bin/lotus-verify-symabs-ai input.bc --property unreach-call
+   ./build/bin/lotus-verify-symabs-ai input.bc --check-assertions
 
    # Sifa
    ./build/bin/lotus-verify-sifa input.bc --function main
 
    # CLAM (requires -DLOTUS_ENABLE_CLAM=ON)
-   ./build/bin/clam input.bc --crab-check=assert
+   ./build/bin/clam input.bc --crab-check
 
    # SeaHorn (requires -DLOTUS_ENABLE_SEAHORN=ON)
    ./build/bin/seahorn input.bc

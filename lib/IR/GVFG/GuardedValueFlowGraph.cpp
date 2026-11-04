@@ -32,6 +32,22 @@
 
 #include "IR/GVFG/GuardedValueFlowGraph.h"
 
+llvm::Function *
+lotus::gvfg::GuardedValueFlowObject::getParentFunction() const {
+  return getGraph()->getBaseFunction();
+}
+
+llvm::raw_ostream &lotus::gvfg::operator<<(
+    llvm::raw_ostream &out, const GuardedValueFlowObject &object) {
+  if (auto *value = object.getDebugValue())
+    return out << *value;
+  if (auto *inst = object.getDebugInstruction())
+    return out << *inst;
+  if (auto *node = llvm::dyn_cast<GuardedValueFlowNode>(&object))
+    return out << node->getDescription();
+  return out << "site " << object.getObjectId();
+}
+
 #include <algorithm>
 
 #include <llvm/IR/Constants.h>

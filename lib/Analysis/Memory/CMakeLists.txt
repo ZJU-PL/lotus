@@ -1,0 +1,2 @@
+add_library(CanaryMemoryAnalysis STATIC HeapPointerAnalysis.cpp)
+target_link_libraries(CanaryMemoryAnalysis PUBLIC CanaryDyckAA)

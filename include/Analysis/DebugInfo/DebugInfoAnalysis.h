@@ -5,6 +5,7 @@
 #pragma once
 
 #include <map>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -14,6 +15,8 @@ namespace llvm {
     class Value;
     class Function;
     class MDNode;
+    class PHINode;
+    class Type;
 } // namespace llvm
 
 class DebugInfoAnalysis {
@@ -26,6 +29,14 @@ public:
 
     // Get function name from debug info or LLVM IR (with C++ demangling)
     std::string getFunctionName(const llvm::Instruction *I);
+
+    std::string getDeclaredFunctionName(const llvm::Function *F);
+    uint64_t getBinaryAddress(const llvm::Value *V);
+    int getPhiOperandSourceLine(const llvm::PHINode *Phi, const llvm::Value *Operand);
+    std::string getIRString(const llvm::Value *V);
+    bool hasVariableDebugName(const llvm::Value *V);
+    void registerFieldName(llvm::Type *type, int64_t offset, const std::string &name);
+    std::string getFieldName(llvm::Type *type, int64_t offset, int recursiveDepth = 0);
 
     // Get variable name from debug info or LLVM IR (with C++ demangling)
     std::string getVariableName(const llvm::Value *V);
@@ -69,6 +80,10 @@ private:
 
     // Cache for variable names (per-instance, keyed by Value*)
     std::unordered_map<const llvm::Value*, std::string> varNameCache;
+    std::map<std::pair<llvm::Type *, int64_t>, std::string> fieldNameCache;
+    std::map<std::string, std::vector<std::string>> compositeFieldNames;
+    uint64_t pointerWidth = 64;
+    void collectTypeMetadata(const llvm::Function *F);
 
     // Internal recursive implementation of getVariableName with a depth guard
     std::string getVariableName(const llvm::Value *V, unsigned recursionDepth);

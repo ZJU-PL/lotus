@@ -4,20 +4,6 @@ Alias Analysis Tools
 This page documents the command-line tools under ``tools/alias/``. For the
 underlying algorithms and architecture, see :doc:`../../alias/alias_analysis`.
 
-GPG (lotus-alias-gpg)
----------------------
-
-Bottom-up generalized-points-to-graph analysis. The default ``fscs`` mode is
-flow-, field-, and fully context-sensitive; ``fics`` and ``fici`` reproduce
-the reference implementation's comparison variants.
-
-.. code-block:: bash
-
-   ./build/bin/lotus-alias-gpg --mode=fscs --print-pts \
-     --print-call-graph --print-modref input.bc
-
-See :doc:`../../alias/gpg` for architecture and options.
-
 SparrowAA (lotus-alias-sparrow-aa)
 ----------------------------------
 
@@ -32,6 +18,20 @@ context-insensitive and k-CFA variants).
 .. code-block:: bash
 
    ./build/bin/lotus-alias-sparrow-aa [options] input.bc
+
+**Key Options**:
+
+- ``--andersen-k-cs=<k>`` – Select call-site sensitivity (0 <= k <= 32; 0 = context-insensitive, default)
+- ``--andersen-adaptive-cs`` – Enable adaptive context sensitivity via HVN feedback
+- ``--andersen-adaptive-cs-threshold=<score>`` – Context-need score threshold in [0,1] (default: 0.5)
+- ``--print-pts`` – Print points-to information for all pointers
+- ``--print-globals-only`` – Print points-to information for global variables only
+- ``--print-alloc-sites`` – Print all allocation sites identified
+- ``--print-alias-queries`` – Perform and print alias queries between pointers
+- ``--print-context-need`` – Print per-function adaptive-CS context-need scores
+- ``--enable-hvn``, ``--enable-hu``, ``--enable-hcd``, ``--enable-lcd`` – Constraint optimizations
+- ``-v`` – Verbose output
+- ``-s`` – Only output statistics
 
 **Notes**:
 
@@ -255,11 +255,10 @@ or call-graph analyses.
 
    ./build/bin/lotus-alias-call-graph -cg-type=dyck input.bc
    ./build/bin/lotus-alias-call-graph -cg-type=lotus -emit-cg-as-json input.bc
-   ./build/bin/lotus-alias-call-graph -cg-type=gpg -emit-cg-as-json input.bc
 
 Key options:
 
-- ``-cg-type=gpg|dyck|lotus|fpa-flta|fpa-mlta|fpa-mltadf|fpa-kelp|aserpta-ci|aserpta-1cfa|aserpta-2cfa``
+- ``-cg-type=dyck|lotus|fpa-flta|fpa-mlta|fpa-mltadf|fpa-kelp|aserpta-ci|aserpta-1cfa|aserpta-2cfa``
 - ``-emit-cg-as-dot`` or ``-emit-cg-as-json``
 - ``-o <file>`` – output destination
 - ``-S`` – compute graph statistics and write them to standard error
@@ -283,6 +282,9 @@ Unification-based alias analysis using Dyck-CFL reachability.
 
 **Key Options**:
 
+- ``-print-cg`` – Print call graph statistics
+- ``-v`` – Verbose output
+- ``-s`` – Only output statistics
 - ``-print-alias-set-info`` – Print alias sets and relations (DOT)
 - ``-count-fp`` – Count possible targets for each function pointer
 - ``-dot-dyck-callgraph`` – Generate call graph from alias results
@@ -310,6 +312,18 @@ on-the-fly call graph construction.
 
    ./build/bin/lotus-alias-lotus-aa [options] input.bc
 
+**Key Options**:
+
+- ``-o <file>`` – Override output filename
+- ``-S`` – Write LLVM assembly instead of bitcode
+- ``-v`` – Verbose output
+- ``-s`` – Only output statistics
+- ``-lotus-print-pts`` – Print points-to results
+- ``-lotus-print-cg`` – Print call graph results
+- ``-lotus-cg`` – Use LotusAA to build call graph
+- ``-lotus-restrict-cg-iter=<int>`` – Maximum iterations for call graph construction
+- ``-lotus-enable-must-kill`` – Enable must-kill store pruning (default: true)
+
 **Characteristics**:
 
 - Flow-sensitive intra-procedural analysis
@@ -320,36 +334,40 @@ FPA (Function Pointer Analysis)
 -------------------------------
 
 Function pointer analysis toolbox (FLTA, MLTA, MLTADF, KELP) for resolving
-indirect calls.
+indirect calls. It is exposed through the unified call-graph driver
+``lotus-alias-call-graph`` (the former standalone ``lotus-alias-fpa`` binary
+was merged into it).
 
-**Binary**: ``lotus-alias-fpa``  
-**Location**: ``tools/alias/lotus-alias-fpa.cpp``
+**Binary**: ``lotus-alias-call-graph``  
+**Location**: ``tools/alias/lotus-alias-call-graph.cpp``
 
 **Usage**:
 
 .. code-block:: bash
 
-   ./build/bin/lotus-alias-fpa [options] input.bc
+   ./build/bin/lotus-alias-call-graph -cg-type=<type> [options] input.bc
 
 **Key Options**:
 
-- ``-analysis-type=<N>``:
+- ``-cg-type=<type>``:
 
-  - ``1`` – FLTA
-  - ``2`` – MLTA
-  - ``3`` – MLTADF
-  - ``4`` – KELP (USENIX Security'24)
+  - ``fpa-flta`` – FLTA
+  - ``fpa-mlta`` – MLTA
+  - ``fpa-mltadf`` – MLTADF
+  - ``fpa-kelp`` – KELP (USENIX Security'24)
 
-- ``-max-type-layer=<N>`` – Maximum type layer for MLTA (default: 10)
-- ``-debug`` – Enable debug output
-- ``-output-file=<path>`` – Output file (\"cout\" for stdout)
+- ``-fpa-max-type-layer=<N>`` – Maximum type layer for MLTA (default: 10)
+- ``-fpa-debug`` – Enable debug output
+- ``-fpa-dump-targets=<path>`` – Dump resolved targets (use "cout" for stdout)
 
 **Example**:
 
 .. code-block:: bash
 
    # KELP-based function pointer analysis
-   ./build/bin/lotus-alias-fpa -analysis-type=4 -debug input.bc
+   ./build/bin/lotus-alias-call-graph -cg-type=fpa-kelp -fpa-debug input.bc
+
+See :doc:`../../analysis/fpa` for the algorithm-level description.
 
 Sea-DSA Tools
 -------------
@@ -389,6 +407,7 @@ Dynamic checker that validates static alias analyses against runtime behavior.
 
 **Binaries**:
 
+- ``dynaa`` – Driver for running dynamic alias checking workflows
 - ``dynaa-instrument`` – Instrument program to log pointer behavior
 - ``dynaa-check`` – Compare runtime logs against static AA
 - ``dynaa-log-dump`` – Dump binary logs to readable format

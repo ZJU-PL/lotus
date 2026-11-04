@@ -188,6 +188,12 @@ public:
   using iterator = SVFGNodeMap::iterator;
   using const_iterator = SVFGNodeMap::const_iterator;
 
+  /// @brief Base of the abstract-object ID namespace.
+  ///
+  /// Shared with SVFGBuilder::kObjIdBase so builder and solve-time allocations
+  /// draw from the same counter.
+  static constexpr uint32_t kObjectIdBase = 1u << 30;
+
   /// @brief Object metadata for DDA (heap/stack/field-insensitive/etc.).
   ///
   /// This metadata is monotonic and merged by OR in updateObjectInfo().
@@ -256,6 +262,12 @@ private:
   /// @brief Next available node ID
   uint32_t nextNodeId;
 
+  /// @brief Next available abstract object ID.
+  ///
+  /// Object IDs are disjoint from node and value-symbol IDs, so a DPItem may
+  /// hold either a node ID or an object ID.
+  uint32_t nextObjectId = kObjectIdBase;
+
   /// @brief Statistics
   SVFGStat stat;
 
@@ -273,6 +285,21 @@ private:
   std::unordered_map<const llvm::GetElementPtrInst *, GepAccessInfo>
       gepAccessInfo;
   std::unordered_map<uint32_t, ObjectInfo> objIdToInfo;
+  std::unordered_map<uint32_t, SVFGNodeBS> baseToFieldObjects;
+
+  void indexObjectBase(uint32_t object, uint32_t oldBase, uint32_t newBase) {
+    oldBase = oldBase ? oldBase : object;
+    newBase = newBase ? newBase : object;
+    if (oldBase != newBase) {
+      auto old = baseToFieldObjects.find(oldBase);
+      if (old != baseToFieldObjects.end()) {
+        old->second.erase(object);
+        if (old->second.empty())
+          baseToFieldObjects.erase(old);
+      }
+    }
+    baseToFieldObjects[newBase].insert(object);
+  }
   std::unordered_map<uint32_t, std::string> nodeFunctionDebug;
   std::unordered_map<uint32_t, std::string> nodeCallSiteDebug;
 
@@ -716,6 +743,8 @@ public:
   inline void setObjectInfo(uint32_t objId, const ObjectInfo &info) {
     if (objId == 0)
       return;
+    const auto *old = getObjectInfo(objId);
+    indexObjectBase(objId, old ? old->baseObjId : 0, info.baseObjId);
     objIdToInfo[objId] = info;
   }
 
@@ -724,6 +753,7 @@ public:
     if (objId == 0)
       return;
     auto &dst = objIdToInfo[objId];
+    const uint32_t oldBase = dst.baseObjId;
     dst.isHeap = dst.isHeap || info.isHeap;
     dst.isConcreteHeap = dst.isConcreteHeap || info.isConcreteHeap;
     dst.isStack = dst.isStack || info.isStack;
@@ -736,6 +766,7 @@ public:
     dst.isSingleton = dst.isSingleton || info.isSingleton;
     if (dst.baseObjId == 0)
       dst.baseObjId = info.baseObjId;
+    indexObjectBase(objId, oldBase, dst.baseObjId);
     if (!dst.hasFieldOffset && info.hasFieldOffset) {
       dst.fieldOffset = info.fieldOffset;
       dst.hasFieldOffset = true;
@@ -749,13 +780,18 @@ public:
   }
 
   inline void setObjectBase(uint32_t objId, uint32_t baseObjId) {
-    if (objId != 0 && baseObjId != 0)
-      objIdToInfo[objId].baseObjId = baseObjId;
+    if (objId != 0 && baseObjId != 0) {
+      auto &info = objIdToInfo[objId];
+      indexObjectBase(objId, info.baseObjId, baseObjId);
+      info.baseObjId = baseObjId;
+    }
   }
   inline void setObjectOffset(uint32_t objId, uint64_t offset) {
     if (objId == 0)
       return;
-    objIdToInfo[objId].fieldOffset = offset;
+    auto &info = objIdToInfo[objId];
+    indexObjectBase(objId, info.baseObjId, info.baseObjId);
+    info.fieldOffset = offset;
     objIdToInfo[objId].hasFieldOffset = true;
   }
   inline uint32_t getOffsetObject(uint32_t baseObjId, uint64_t offset) const {
@@ -822,6 +858,47 @@ public:
         result.insert(entry.first);
     return result;
   }
+
+  /// @brief Every abstract object ID that carries metadata.
+  /// Used by statistics that mirror SVF's object population counts.
+  inline std::vector<uint32_t> getAllObjectIds() const {
+    std::vector<uint32_t> ids;
+    ids.reserve(objIdToInfo.size());
+    for (const auto &entry : objIdToInfo)
+      ids.push_back(entry.first);
+    return ids;
+  }
+
+  /// @brief Distinct base objects split by field sensitivity.
+  /// Mirrors SVF's FIObjNum / FSObjNum: only base objects are counted, and a
+  /// base is field-insensitive once any variant access collapsed it.
+  inline std::pair<std::size_t, std::size_t> countBaseObjects() const {
+    std::size_t fieldInsensitive = 0;
+    std::size_t fieldSensitive = 0;
+    for (const auto &entry : objIdToInfo) {
+      const ObjectInfo &info = entry.second;
+      if (info.baseObjId != 0 && info.baseObjId != entry.first)
+        continue; // a field object, not a base
+      if (info.isFieldInsensitive)
+        ++fieldInsensitive;
+      else
+        ++fieldSensitive;
+    }
+    return {fieldInsensitive, fieldSensitive};
+  }
+
+  /// @brief Number of pointer-typed value nodes.
+  /// SVF's TotalPointers counts PAG value nodes; under a pointer-only SVFG
+  /// every one of them is a pointer.
+  inline std::size_t countPointerValueNodes() const {
+    std::size_t count = 0;
+    for (const auto &entry : valueToNodeMap) {
+      const llvm::Value *value = entry.first;
+      if (value && value->getType()->isPointerTy())
+        ++count;
+    }
+    return count;
+  }
   inline bool isSingletonObject(uint32_t objId) const {
     if (const ObjectInfo *info = getObjectInfo(objId))
       return info->isSingleton;
@@ -833,16 +910,53 @@ public:
     if (const ObjectInfo *info = getObjectInfo(objId))
       if (info->baseObjId != 0)
         base = info->baseObjId;
-    for (const auto &entry : objIdToInfo) {
-      const uint32_t candidateBase =
-          entry.second.baseObjId != 0 ? entry.second.baseObjId : entry.first;
-      if (candidateBase == base)
-        fields.insert(entry.first);
-    }
-    if (fields.empty())
-      fields.insert(objId);
+    auto it = baseToFieldObjects.find(base);
+    if (it != baseToFieldObjects.end())
+      return it->second;
+    fields.insert(objId);
     return fields;
   }
+
+  //===------------------------------------------------------------------===
+  // Solve-time object creation
+  //
+  // Mirrors SVF's `SVFIR::setObjFieldInsensitive` / `getFIObjVar`: analyses
+  // which discover a variant field access while solving can collapse the
+  // struct into a single representative without rebuilding the graph.
+  //===------------------------------------------------------------------===
+
+  /// @brief Allocate a fresh abstract object ID that cannot collide with the
+  /// IDs handed out by SVFGBuilder (which allocates through this method when a
+  /// graph is attached).
+  inline uint32_t allocateObjectId() { return nextObjectId++; }
+
+  /// @brief Ensure future allocations do not reuse IDs below @p id.
+  inline void raiseObjectIdFloor(uint32_t id) {
+    if (id > nextObjectId)
+      nextObjectId = id;
+  }
+
+  /// @brief Field-insensitive representative for @p baseObjId, or 0 if none
+  /// exists yet.
+  uint32_t getFieldInsensitiveObject(uint32_t baseObjId) const;
+
+  /// @brief Field-insensitive representative for @p baseObjId, creating one
+  /// and marking the base field-insensitive if necessary.
+  ///
+  /// The returned object has `baseObjId == canonical base` and no field
+  /// offset, so `getFieldObjects()` keeps reporting every per-field object.
+  uint32_t getOrCreateFieldInsensitiveObject(uint32_t baseObjId);
+
+  /// @brief Canonical identity for result reporting.
+  ///
+  /// SVF has no separate field-insensitive object: `getFIObjVar` returns the
+  /// base object itself, so its dumps never contain two IDs for one struct.
+  /// Lotus allocates a dedicated representative (`FI_OBJ(base)`), which is
+  /// what keeps per-field accesses consistent.  This maps that representative
+  /// back to its base; every other object maps to itself.  Solving must not
+  /// use it -- `getFieldObjects()`/`expandIndirectObjects()` remain the
+  /// precision-preserving path.
+  uint32_t canonicalObjectId(uint32_t objId) const;
 
   inline void setNodeFunctionDebug(uint32_t nodeId, std::string label) {
     nodeFunctionDebug[nodeId] = std::move(label);

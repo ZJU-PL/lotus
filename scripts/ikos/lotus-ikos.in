@@ -1,0 +1,45 @@
+#!@Python3_EXECUTABLE@
+"""Lotus entry point for the bundled IKOS API-spec tools."""
+import os
+from pathlib import Path
+import runpy
+import sys
+import importlib
+
+# Installed launchers resolve their private payload relative to bin/, including
+# when installed with DESTDIR or cmake --install --prefix.
+root = Path(__file__).resolve().parent.parent / 'share/lotus/ikos-api-spec'
+if not root.is_dir():
+    root = Path(r'@LOTUS_IKOS_SOURCE_DIR@')
+os.environ.setdefault('LOTUS_IKOS_LLVM_BIN', r'@LOTUS_IKOS_LLVM_BIN@')
+os.environ.setdefault('LOTUS_IKOS_BIN', str(Path(__file__).resolve().parent))
+os.environ.setdefault('LOTUS_IKOS_BUILD_MODE', '@CMAKE_BUILD_TYPE@')
+os.environ.setdefault('LOTUS_IKOS_HAS_APRON', '@LOTUS_IKOS_ENABLE_APRON@')
+sys.path.insert(0, str(root / 'analyzer/python'))
+
+
+def main():
+    command = '@IKOS_COMMAND@'
+    if command == 'stub':
+        from ikos.stub import stub_main
+        stub_main(sys.argv)
+    elif command == 'api-census':
+        from ikos.api_census import api_census_main
+        api_census_main(sys.argv)
+    elif command == 'api-spec':
+        runpy.run_path(str(root / 'tool/api-spec/ikos-api-spec.py'),
+                       run_name='__main__')
+    elif command.startswith('compile:'):
+        from ikos.scan import compile_main
+        compile_main(command.split(':')[1], sys.argv)
+    else:
+        module, function = command.split(':')
+        entry = getattr(importlib.import_module('ikos.' + module), function)
+        entry(sys.argv)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (RuntimeError, OSError) as error:
+        sys.exit('error: %s' % error)

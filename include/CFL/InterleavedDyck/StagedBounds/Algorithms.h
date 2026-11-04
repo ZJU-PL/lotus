@@ -2,6 +2,7 @@
 
 #include "CFL/InterleavedDyck/StagedBounds/Solver.h"
 
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -37,8 +38,16 @@ runProjected(const Graph &graph, Alphabet balanced, GrammarStrength strength,
              unsigned parity_groups, bool trace = false,
              bool factorized_tracing = false,
              const std::optional<Pair> &trace_pair = std::nullopt);
+// Stream classic projected pairs through a map/filter. Used by regularization
+// to avoid materializing pairs of product vertices which will be discarded.
+PairSet runClassicProjectedMapped(
+    const Graph &graph, Alphabet balanced,
+    const std::function<std::optional<Pair>(const Pair &)> &map_pair);
 PairSet runCombined(const Graph &graph);
 
+// Builds only product vertices that can participate in accepted taint paths.
+Graph automatonProduct(const Graph &graph, BenchmarkKind benchmark,
+                       std::size_t &state_count, std::size_t &accept_state);
 PairSet regularization(const Graph &graph, BenchmarkKind benchmark);
 PairSet refinedWithCondensation(const Graph &graph,
                                 const PairSet &underapproximation,

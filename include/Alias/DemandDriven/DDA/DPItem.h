@@ -67,7 +67,7 @@
 namespace lotus {
 namespace analysis {
 
-struct SVFGNode; // forward decl for StmtDPItem<SVFGNode>
+class SVFGNode; // forward decl for StmtDPItem<SVFGNode>
 
 /// Base DP item (current variable only, no location).
 ///
@@ -79,6 +79,7 @@ protected:
 public:
   explicit DPItem(uint32_t c) : cur(c) {}
   DPItem(const DPItem &o) : cur(o.cur) {}
+  DPItem &operator=(const DPItem &) = default;
   uint32_t getCurNodeID() const { return cur; }
   void setCurNodeID(uint32_t c) { cur = c; }
   static void setMaxBudget(uint32_t max) { maximumBudget = max; }
@@ -100,6 +101,7 @@ protected:
 public:
   StmtDPItem(uint32_t c, const LocCond *loc) : DPItem(c), curloc(loc) {}
   StmtDPItem(const StmtDPItem &o) : DPItem(o), curloc(o.curloc) {}
+  StmtDPItem &operator=(const StmtDPItem &) = default;
   const LocCond *getLoc() const { return curloc; }
   void setLoc(const LocCond *l) { curloc = l; }
   void setLocVar(const LocCond *l, uint32_t v) {

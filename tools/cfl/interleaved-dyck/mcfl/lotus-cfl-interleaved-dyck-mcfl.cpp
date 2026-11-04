@@ -1,17 +1,25 @@
 #include "CFL/InterleavedDyck/Core/Graph.h"
 #include "CFL/InterleavedDyck/MCFL/InterleavedDyck.h"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
+
+#if defined(__APPLE__) || defined(__linux__)
+#include <sys/resource.h>
+#endif
 
 namespace mcfl = lotus::cfl::interleaved_dyck::mcfl;
 namespace interleaved_dyck = lotus::cfl::interleaved_dyck;
@@ -21,6 +29,7 @@ namespace {
 struct CommandLine {
   std::string input;
   std::string output;
+  std::string relation_directory;
   unsigned dimension = 2;
   mcfl::InterleavedGrammarVariant variant =
       mcfl::InterleavedGrammarVariant::Full;
@@ -45,6 +54,8 @@ void usage(std::ostream &output) {
             "                     use the artifact's condensed cross-product\n"
             "  --stats            print saturation statistics\n"
             "  --print-pairs      print final non-reflexive reachable pairs\n"
+            "  --dump-relations DIR\n"
+            "                     write one sorted pair file per dimension\n"
             "  -o FILE            write output to FILE\n"
             "  -h, --help         show this help\n";
 }
@@ -96,6 +107,13 @@ CommandLine parseCommandLine(int argc, char **argv) {
       result.print_pairs = true;
       continue;
     }
+    if (argument == "--dump-relations") {
+      if (++i == argc) {
+        throw std::invalid_argument("missing value for --dump-relations");
+      }
+      result.relation_directory = argv[i];
+      continue;
+    }
     if (argument == "-o") {
       if (++i == argc) {
         throw std::invalid_argument("missing value for -o");
@@ -115,6 +133,57 @@ CommandLine parseCommandLine(int argc, char **argv) {
     throw std::invalid_argument("no input graph was provided");
   }
   return result;
+}
+
+void writePairs(const std::filesystem::path &path, const mcfl::PairSet &pairs) {
+  std::vector<mcfl::Pair> ordered(pairs.begin(), pairs.end());
+  std::sort(
+      ordered.begin(), ordered.end(), [](const auto &left, const auto &right) {
+        return left.source < right.source ||
+               (left.source == right.source && left.target < right.target);
+      });
+  std::ofstream output(path);
+  if (!output) {
+    throw std::runtime_error("cannot open relation file: " + path.string());
+  }
+  for (const auto &pair : ordered) {
+    output << pair.source << ' ' << pair.target << '\n';
+  }
+  output.flush();
+  if (!output) {
+    throw std::runtime_error("cannot write relation file: " + path.string());
+  }
+}
+
+void dumpRelations(const CommandLine &command_line,
+                   const mcfl::InterleavedAnalysisResult &result) {
+  if (command_line.relation_directory.empty()) {
+    return;
+  }
+  const std::filesystem::path directory(command_line.relation_directory);
+  std::filesystem::create_directories(directory);
+  const char *family =
+      command_line.variant == mcfl::InterleavedGrammarVariant::Full ? "plus"
+                                                                    : "circ";
+  for (const auto &dimension : result.dimensions) {
+    writePairs(directory / ("g-" + std::string(family) + "-" +
+                            std::to_string(dimension.dimension) + ".pairs"),
+               dimension.reachable_pairs);
+  }
+}
+
+std::optional<std::uint64_t> peakRssBytes() {
+#if defined(__APPLE__) || defined(__linux__)
+  struct rusage usage {};
+  if (getrusage(RUSAGE_SELF, &usage) == 0) {
+    std::uint64_t bytes = static_cast<std::uint64_t>(usage.ru_maxrss);
+#if defined(__linux__)
+    bytes *= 1024;
+#endif
+    return bytes;
+  }
+#endif
+  return std::nullopt;
 }
 
 void printResult(std::ostream &output, const CommandLine &command_line,
@@ -173,7 +242,12 @@ int runInterleavedDyckMCFL(int argc, char **argv) {
         mcfl::InterleavedDyckSolver{}.solve(graph, options);
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start);
+    const std::optional<std::uint64_t> peak_rss = peakRssBytes();
+    dumpRelations(command_line, result);
     printResult(*output, command_line, result, elapsed.count());
+    if (peak_rss) {
+      *output << "process peak RSS (bytes): " << *peak_rss << '\n';
+    }
     return 0;
   } catch (const std::exception &error) {
     std::cerr << "lotus-cfl-interleaved-dyck mcfl: " << error.what() << '\n';

@@ -1,0 +1,9 @@
+#pragma once
+namespace lotus {
+namespace gsaf {
+namespace defaults {
+inline constexpr const char API[] = R"LOTUS(@GSAF_API_DEFAULTS@)LOTUS";
+inline constexpr const char Taint[] = R"LOTUS(@GSAF_TAINT_DEFAULTS@)LOTUS";
+} // namespace defaults
+} // namespace gsaf
+} // namespace lotus

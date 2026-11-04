@@ -52,11 +52,11 @@ bool Function::IsMemSetFunction(std::shared_ptr<fitx::Function> function) {
 
 Function::Function(llvm::Function *function,
                    std::unique_ptr<llvm::LoopInfo> loop_info)
-    : llvm_function_(function), function_name_(function->getName()),
-      return_type_(function->getReturnType()),
+    : llvm_function_(function), return_type_(function->getReturnType()),
+      loop_info_(std::move(loop_info)), function_name_(function->getName()),
       is_definition_(function->isDeclaration()),
-      arg_size_(function->arg_size()), loop_info_(std::move(loop_info)),
-      contains_loop_back_blocks_(false), return_value_(nullptr),
+      arg_size_(function->arg_size()), return_value_(nullptr),
+      contains_loop_back_blocks_(false),
       protected_refcount_value_(nullptr) {}
 
 std::shared_ptr<fitx::BasicBlock>

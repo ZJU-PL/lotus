@@ -13,5 +13,6 @@ llvm::cl::SubCommand &fitxSubCommand();
 llvm::cl::SubCommand &saberSubCommand();
 llvm::cl::SubCommand &aeSubCommand();
 llvm::cl::SubCommand &symexSubCommand();
+llvm::cl::SubCommand &gsafSubCommand();
 
 } // namespace lotus::checker::tooling

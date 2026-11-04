@@ -113,7 +113,7 @@ At a high level, an IFDS/IDE analysis is instantiated and solved as:
    solver.solve(module);
 
 Analysis Sessions and Graph Providers
-====================================
+=====================================
 
 ``AnalysisSession`` lazily shares alias analysis, a debug-info type hierarchy,
 and an instruction graph between IFDS/IDE problems. Its taint model is an
@@ -172,12 +172,11 @@ and does not promise a general memory reduction.
 
    build/bin/lotus-dfa-ifds input.ll --analysis=taint \
      --taint-config=config/taint.spec --call-graph=otf --sparse --statistics --stdout
-   python3 scripts/benchmark_ifds_sparse.py --instructions=10000 --repeats=5
 
-The benchmark compares serialized findings and reports median solve time,
-processed jobs, sparse transfers and process peak RSS on Linux/macOS. It uses
-an identity-heavy synthetic fixture; dense/sparse unit tests additionally compare
-facts and values at every instruction and preserve summaries and ESG edges.
+The dense/sparse unit tests compare findings on an identity-heavy synthetic
+fixture and check facts and values at every instruction while preserving
+summaries and ESG edges. Timing, job-count, and RSS measurements require an
+external benchmark harness; no such script ships with the repository.
 
 Command-Line Tool: lotus-check --engine=taint
 =============================================

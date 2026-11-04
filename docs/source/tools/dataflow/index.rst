@@ -45,8 +45,12 @@ Standalone front-end for the elimination-based APA engine.
 
 **Source**: ``tools/dataflow/lotus-dfa-apa.cpp``
 
-Supports the same ``--analysis`` space as ``lotus-dfa`` plus
-``--elim-method`` for choosing the elimination solver variant.
+Supports the APA analysis space: the intraprocedural ``reachable``,
+``reaching_defs``, ``uninitialized``, ``constant_prop``, ``available_exprs``,
+``affine``, ``lockset``, ``nonnull``, and ``sign`` analyses, plus their
+``inter_*`` interprocedural variants. ``--elim-method`` selects the elimination
+solver variant, and ``--entry-function`` sets the entry point for
+interprocedural runs.
 
 Profiling-oriented dumps are available with:
 
@@ -82,6 +86,7 @@ Supported analyses:
 
 - ``reaching_defs``
 - ``uninitialized``
+- ``taint``
 
 lotus-dfa-npa
 --------------
@@ -155,9 +160,27 @@ printing a successful result. ``--wpds-query-count`` measures deterministic,
 distinct boundary seeds on one prepared liveness model; one-time preparation
 and cumulative query timings are reported separately.
 
+lotus-demand-apa
+----------------
+
+Batch front-end for the demand-driven APA (Algebraic Program Analysis) engine
+over Boolean programs.
+
+**Binary**: ``lotus-demand-apa`` (requires ``-DLOTUS_ENABLE_DEMAND_APA=ON``)
+
+**Source**: ``tools/dataflow/DemandAPA/``
+
+**Usage**:
+
+.. code-block:: bash
+
+   ./build/bin/lotus-demand-apa TIMEOUT COUNT RESET dataset-root/
+
+See :doc:`../../dataflow/demand_apa` for algorithm and option details.
+
 See also
 --------
 
-- See :doc:`../../dataflow/apa`, :doc:`../../dataflow/mono`,
-  :doc:`../../dataflow/ifds_ide`, and :doc:`../../dataflow/npa` for the
-  underlying engines.
+- See :doc:`../../dataflow/apa`, :doc:`../../dataflow/demand_apa`,
+  :doc:`../../dataflow/mono`, :doc:`../../dataflow/ifds_ide`,
+  and :doc:`../../dataflow/npa` for the underlying engines.

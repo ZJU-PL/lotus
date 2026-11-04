@@ -40,7 +40,9 @@ struct StopReason {
   std::string other_message;
 
   static StopReason saturated() {
-    return StopReason{StopReasonKind::Saturated};
+    StopReason out;
+    out.kind = StopReasonKind::Saturated;
+    return out;
   }
 
   static StopReason iterationLimit(size_t value) {

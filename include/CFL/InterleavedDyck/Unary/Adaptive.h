@@ -3,6 +3,7 @@
 #include "CFL/InterleavedDyck/Core/UnaryGraph.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <unordered_map>
 
 namespace lotus::cfl::interleaved_dyck::unary {
@@ -11,11 +12,27 @@ using interleaved_dyck::BidirectedInputPolicy;
 using interleaved_dyck::Graph;
 using interleaved_dyck::Vertex;
 
+/// Optional fine-grained timings used by the RQ2.2 phase breakdown.
+struct AdaptivePhaseTiming {
+  bool enabled = false;
+  std::uint64_t projection_us = 0;
+  std::uint64_t quotient_sparsification_us = 0;
+  std::uint64_t decomposition_us = 0;
+  std::uint64_t vertical_construction_us = 0;
+  std::uint64_t vertical_solving_us = 0;
+  std::uint64_t horizontal_construction_us = 0;
+  std::uint64_t horizontal_solving_us = 0;
+  std::uint64_t parent_map_labeling_us = 0;
+  std::uint64_t boundary_unions_us = 0;
+  std::uint64_t output_lifting_us = 0;
+};
+
 /// Construction statistics for adaptive unary interleaved-Dyck reachability.
 /// Arm counts sum the mixed-counter weak components actually constructed.
 /// threshold is their maximum K (or the requested K for solveShallow).
 struct AdaptiveStats {
   interleaved_dyck::UnaryExecutionStats execution;
+  AdaptivePhaseTiming phase_timing;
   std::uint64_t vertical_us = 0;
   std::uint64_t horizontal_us = 0;
   std::uint64_t merge_us = 0;
@@ -60,6 +77,10 @@ struct AdaptiveOptions {
   /// Apply the reachability-preserving fixed-alphabet quotient before the two
   /// arm computations. This is the paper's end-to-end algorithm.
   bool sparsify = true;
+
+  /// Collect the fine-grained RQ2.2 timings. The disabled implementation
+  /// is selected through a compile-time specialization.
+  bool collect_phase_timing = false;
 
   BidirectedInputPolicy input_policy = BidirectedInputPolicy::RequireBidirected;
 };

@@ -25,6 +25,8 @@ layout:
    ``Engines/CAT/``, and ``Engines/IEOCE/`` contain the paper algorithms;
    ``Engines/CERT/`` is the Lotus-native cardinality-certified engine.
    ``Engines/POCR/`` also contains the client grammars.
+   ``Engines/SubcubicAA/`` provides the specialized OOPSLA 2014 PEG
+   memory/value alias algorithms through a separate graph-analysis API.
 
 ``Solvers/Preprocessing/``
    Graph simplification and RSM-guided foldability analysis.
@@ -237,6 +239,13 @@ these through ``--scc-elimination``, ``--graph-folding``,
 Direct foldable pairs are collected once after SCC elimination; alias
 common-dereference merging and FastDyck then use their own worklists, preserving
 the original phase boundaries.
+Merging turns direct edges inside a class into self-loops. The self-loop of a
+direct edge ``x -> y`` and of its explicit reverse is kept only when ``y`` has
+an incoming dereference edge, where the alias grammar still uses it
+(``A ::= a M`` and ``Abar ::= M abar``); all other such loops are dropped. On
+the unit tests and on the SVF-exported PEGs of eleven C programs, the reduced
+``V`` relation then equals the original one mapped onto the representatives,
+for SCC elimination, folding and both.
 
 ``RecursiveStateMachine`` and ``FoldabilityChecker`` implement POCR's RSM
 transition semantics and node-pair foldability proof. These utilities remain
@@ -253,6 +262,8 @@ See :doc:`/cfl/classical/pearl`, :doc:`/cfl/classical/stg`, and
 :doc:`/cfl/classical/sqid` for the papers, key ideas,
 published algorithms, Lotus adaptations, and validation boundaries.
 See :doc:`/cfl/classical/cat_ieoce` for the CAT and IEOCE engines.
+See :doc:`/cfl/classical/subcubic_aa` for the specialized PEG memory/value
+alias engine and its ``lotus-cfl-subcubic-aa`` driver.
 
 Adapters
 --------
@@ -404,7 +415,7 @@ When a target-projected backend consumes a transformed grammar, its ``Follow``
 set supplies the exact propagating nonterminals. Default solver sessions remain
 all-symbol and therefore preserve the complete ``Relation`` contract used by
 the LLVM clients. Dataset-specific batch policy is kept outside the binary in
-``scripts/cfl/run_cfl_dataset.py``.
+``scripts/cfl/run_cfl_classical.py``.
 
 Use ``--graph-mode plain|matrix|pag-matrix`` and
 ``--direction plain|reverse|bidirectional`` to state input semantics.

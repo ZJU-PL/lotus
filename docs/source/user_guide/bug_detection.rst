@@ -21,6 +21,7 @@ and taint-related classes are intentionally supported by more than one engine.
 7. **ae**: Broad abstract-execution memory-safety checking
 8. **generic**: Custom checkers via declarative rules
 9. **symex**: Symbolic execution engine
+10. **gsaf**: Guarded value-flow analysis for taint and use-after-free style checks
 
 See :ref:`Choosing a Checker <choosing-a-checker>` for the bug-class-to-engine
 guide.  ``./build/bin/lotus-check --list-checkers`` lists checker ids for both

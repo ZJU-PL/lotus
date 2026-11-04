@@ -46,4 +46,5 @@ queries per program, ``RESET`` re-creates ``results.csv`` when non-zero, and
 argument is missing.
 
 Input programs are normalized Boolean Program (``.bp``) files, which can be
-pre-processed or normalized using the ``BooleanProgramNormalizer`` under ``tools/verifier/boolean-program/``.
+pre-processed or normalized with the ``lotus-bool-normalize`` binary built from
+``tools/verifier/boolean-program/BooleanProgramNormalizer.cpp``.

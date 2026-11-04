@@ -10,7 +10,9 @@ class Function;
 class Module;
 } // namespace llvm
 
+#include <llvm/ADT/StringRef.h>
 #include <string>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -86,6 +88,24 @@ struct FunctionSpec {
   std::vector<AllocEffect> allocs; // may contain multiple variants
   std::vector<CopyEffect> copies;
   std::vector<ModRefEffect> modref; // entries from modref.spec
+
+  // Optional resource and buffer contracts. Existing text specifications and
+  // clients retain their current defaults.
+  bool isMallocLike{false};
+  bool isNewLike{false};
+  bool isFreeLike{false};
+  bool isDeleteLike{false};
+  bool isReallocator{false};
+  std::vector<int> allocationSizeArguments;
+  std::vector<std::string> matchingDeallocators;
+  bool acquiresResource{false};
+  bool releasesResource{false};
+  std::vector<std::string> pointerResourceReleases;
+  std::vector<std::string> integerResourceReleases;
+  int bufferAccessPattern{-1};
+  bool mayReturnNegative{false};
+  std::optional<bool> mayReturnNull;
+  std::vector<unsigned> dereferencedArguments;
 };
 
 // APISpec contains specifications across all functions and ops loaded from one
@@ -103,6 +123,8 @@ public:
   // Convenience: load many files. Returns first error message if any.
   bool loadFiles(const std::vector<std::string> &paths,
                  std::string &errorMessage);
+  bool loadJSONFile(const std::string &path, std::string &errorMessage);
+  bool loadJSONString(llvm::StringRef content, std::string &errorMessage);
 
   // Expose raw map for advanced consumers
   const std::unordered_map<std::string, FunctionSpec> &all() const {
@@ -162,4 +184,3 @@ inline bool isDataQualifier(QualifierKind q) {
 }
 
 } // namespace lotus
-

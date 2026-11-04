@@ -1,0 +1,319 @@
+#!/usr/bin/env python
+###############################################################################
+#
+# Run clang-tidy on the whole repository
+#
+# Author: Maxime Arthaud
+#
+# Contact: ikos@lists.nasa.gov
+#
+# Notices:
+#
+# Copyright (c) 2011-2019 United States Government as represented by the
+# Administrator of the National Aeronautics and Space Administration.
+# All Rights Reserved.
+#
+# Disclaimers:
+#
+# No Warranty: THE SUBJECT SOFTWARE IS PROVIDED "AS IS" WITHOUT ANY WARRANTY OF
+# ANY KIND, EITHER EXPRESSED, IMPLIED, OR STATUTORY, INCLUDING, BUT NOT LIMITED
+# TO, ANY WARRANTY THAT THE SUBJECT SOFTWARE WILL CONFORM TO SPECIFICATIONS,
+# ANY IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+# OR FREEDOM FROM INFRINGEMENT, ANY WARRANTY THAT THE SUBJECT SOFTWARE WILL BE
+# ERROR FREE, OR ANY WARRANTY THAT DOCUMENTATION, IF PROVIDED, WILL CONFORM TO
+# THE SUBJECT SOFTWARE. THIS AGREEMENT DOES NOT, IN ANY MANNER, CONSTITUTE AN
+# ENDORSEMENT BY GOVERNMENT AGENCY OR ANY PRIOR RECIPIENT OF ANY RESULTS,
+# RESULTING DESIGNS, HARDWARE, SOFTWARE PRODUCTS OR ANY OTHER APPLICATIONS
+# RESULTING FROM USE OF THE SUBJECT SOFTWARE.  FURTHER, GOVERNMENT AGENCY
+# DISCLAIMS ALL WARRANTIES AND LIABILITIES REGARDING THIRD-PARTY SOFTWARE,
+# IF PRESENT IN THE ORIGINAL SOFTWARE, AND DISTRIBUTES IT "AS IS."
+#
+# Waiver and Indemnity:  RECIPIENT AGREES TO WAIVE ANY AND ALL CLAIMS AGAINST
+# THE UNITED STATES GOVERNMENT, ITS CONTRACTORS AND SUBCONTRACTORS, AS WELL
+# AS ANY PRIOR RECIPIENT.  IF RECIPIENT'S USE OF THE SUBJECT SOFTWARE RESULTS
+# IN ANY LIABILITIES, DEMANDS, DAMAGES, EXPENSES OR LOSSES ARISING FROM SUCH
+# USE, INCLUDING ANY DAMAGES FROM PRODUCTS BASED ON, OR RESULTING FROM,
+# RECIPIENT'S USE OF THE SUBJECT SOFTWARE, RECIPIENT SHALL INDEMNIFY AND HOLD
+# HARMLESS THE UNITED STATES GOVERNMENT, ITS CONTRACTORS AND SUBCONTRACTORS,
+# AS WELL AS ANY PRIOR RECIPIENT, TO THE EXTENT PERMITTED BY LAW.
+# RECIPIENT'S SOLE REMEDY FOR ANY SUCH MATTER SHALL BE THE IMMEDIATE,
+# UNILATERAL TERMINATION OF THIS AGREEMENT.
+#
+###############################################################################
+import argparse
+import os.path
+import re
+import subprocess
+import sys
+import threading
+
+try:
+    import Queue as queue  # python 2
+except ImportError:
+    import queue as queue  # python 3
+
+
+# Extensions to analyze
+SOURCE_EXTENSIONS = ('.c', '.cpp', '.h', '.hpp')
+
+# Directories to ignore
+IGNORE_DIRECTORIES = (
+    '.git',
+    'build',
+    'analyzer/test/regression',
+    'frontend/llvm/test/regression/import',
+)
+
+# Ignore checks for specific files
+FILE_IGNORE_CHECKS = {
+    'analyzer/include/ikos/analyzer/analysis/execution_engine/inliner.hpp':
+        ('cppcoreguidelines-pro-bounds-pointer-arithmetic',),
+    'analyzer/include/ikos/analyzer/intrinsic.h':
+        ('cppcoreguidelines-macro-usage',
+         'hicpp-deprecated-headers',
+         'modernize-deprecated-headers',
+         'readability-identifier-naming',),
+    'analyzer/include/ikos/analyzer/support/cast.hpp':
+        ('misc-unused-using-decls',),
+    'analyzer/include/ikos/analyzer/support/number.hpp':
+        ('misc-unused-using-decls',),
+    'analyzer/include/ikos/analyzer/support/string_ref.hpp':
+        ('misc-unused-using-decls',),
+    'analyzer/include/ikos/analyzer/util/source_location.hpp':
+        ('misc-unused-using-decls',),
+    'analyzer/src/ikos_analyzer.cpp':
+        ('cert-err58-cpp',
+         'cppcoreguidelines-slicing',),
+    'ar/include/ikos/ar/support/cast.hpp':
+        ('misc-unused-using-decls',),
+    'ar/include/ikos/ar/support/flags.hpp':
+        ('clang-diagnostic-unused-macros',),
+    'ar/include/ikos/ar/support/number.hpp':
+        ('misc-unused-using-decls',),
+    'core/include/ikos/core/domain/numeric/apron.hpp':
+        ('cppcoreguidelines-pro-bounds-pointer-arithmetic',
+         'cppcoreguidelines-pro-type-union-access',),
+    'core/include/ikos/core/domain/numeric/octagon.hpp':
+        ('readability-implicit-bool-conversion',),
+    'core/include/ikos/core/number/machine_int.hpp':
+        ('cppcoreguidelines-owning-memory',
+         'cppcoreguidelines-pro-type-member-init',
+         'cppcoreguidelines-pro-type-union-access',
+         'hicpp-member-init',),
+    'core/include/ikos/core/number/supported_integral.hpp':
+        ('google-runtime-int',),
+    'core/include/ikos/core/number/z_number.hpp':
+        ('google-runtime-int',),
+    'core/include/ikos/core/support/assert.hpp':
+        ('clang-diagnostic-unused-macros',
+         'cppcoreguidelines-macro-usage',),
+    'core/include/ikos/core/support/compiler.hpp':
+        ('clang-diagnostic-unused-macros',
+         'cppcoreguidelines-macro-usage',),
+    'core/include/ikos/core/support/mpl.hpp':
+        ('readability-identifier-naming',),
+    'frontend/llvm/include/ikos/frontend/llvm/pass.hpp':
+        ('readability-identifier-naming',),
+    'frontend/llvm/src/ikos_import.cpp':
+        ('cert-err58-cpp',),
+    'frontend/llvm/src/ikos_pp.cpp':
+        ('cert-err58-cpp',),
+}
+
+
+def printf(fmt, *args, **kwargs):
+    file = kwargs.pop('file', sys.stdout)
+    file.write(fmt % args if args else fmt)
+    file.flush()
+
+
+def is_executable(fpath):
+    return fpath and os.path.isfile(fpath) and os.access(fpath, os.X_OK)
+
+
+def which(program):
+    ''' Try to find program in the PATH, otherwise return None.
+
+    >>> which('cat')
+    '/bin/cat'
+    '''
+    fpath, fname = os.path.split(program)
+    if fpath:
+        if is_executable(program):
+            return program
+    else:
+        for path in os.environ['PATH'].split(os.pathsep):
+            exe_file = os.path.join(path, program)
+            if is_executable(exe_file):
+                return exe_file
+
+    return None
+
+
+def run_tidy(clang_tidy, build_dir, extra_checks, fix, task_queue, lock):
+    while True:
+        # Get the next task
+        fullpath = task_queue.get()
+
+        # Build the clang-tidy command
+        # TODO: enable colors when clang-tidy supports it
+        cmd = [clang_tidy]
+        cmd.append('-quiet')
+        cmd.append('-p=%s' % build_dir)
+        checks = []
+        if fullpath in FILE_IGNORE_CHECKS:
+            for check in FILE_IGNORE_CHECKS[fullpath]:
+                checks.append('-%s' % check)
+        if extra_checks:
+            checks.append(extra_checks)
+        if checks:
+            cmd.append('-checks=%s' % ','.join(checks))
+        if fix:
+            cmd.append('-fix')
+        cmd.append(fullpath)
+
+        # Run the clang-tidy command
+        proc = subprocess.Popen(cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        output, err = proc.communicate()
+
+        output = output.decode('utf-8')
+        err = err.decode('utf-8')
+
+        # Remove the line 'xxx warnings generated.'
+        n = err.rfind('\n', 0, len(err) - 1)
+        line = err[n + 1:]
+        if re.match(r'^\d+ warnings? generated.\n$', line):
+            err = err[:n + 1]
+
+        with lock:
+            printf('[*] %s\n', ' '.join(cmd))
+            sys.stdout.write(output)
+            sys.stderr.write(err)
+        task_queue.task_done()
+
+
+if __name__ == '__main__':
+    progname = os.path.basename(sys.argv[0])
+
+    # Default source directory is '..'
+    src_dir = os.path.join(os.path.dirname(sys.argv[0]), '..')
+    src_dir = os.path.normpath(src_dir)
+
+    # Default build directory is '../build'
+    build_dir = os.path.join(os.path.dirname(sys.argv[0]), '..', 'build')
+    build_dir = os.path.normpath(build_dir)
+
+    # Parse arguments
+    description = 'Run clang-tidy on the whole repository'
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument('--srcdir',
+                        dest='src_dir',
+                        help='Path to the source directory [%s]' % src_dir,
+                        default=src_dir)
+    parser.add_argument('--builddir',
+                        dest='build_dir',
+                        help='Path to the build directory [%s]' % build_dir,
+                        default=build_dir)
+    parser.add_argument('--clang-tidy',
+                        dest='clang_tidy',
+                        help='Path to the clang-tidy binary',
+                        default='clang-tidy')
+    parser.add_argument('--checks',
+                        dest='checks',
+                        help='Additional checks filters',
+                        default=None)
+    parser.add_argument('--jobs', '-j',
+                        dest='jobs',
+                        metavar='N',
+                        type=int,
+                        help='Allow N jobs at once [1]',
+                        default=1)
+    parser.add_argument('--fix',
+                        dest='fix',
+                        help='Apply suggested fixes',
+                        action='store_true',
+                        default=False)
+    opt = parser.parse_args()
+
+    # Check source directory
+    if not os.path.isdir(opt.src_dir):
+        printf("%s: error: '%s' is not a directory\n",
+               progname,
+               opt.src_dir,
+               file=sys.stderr)
+        sys.exit(1)
+
+    # Check build directory
+    if not os.path.isdir(opt.build_dir):
+        printf("%s: error: '%s' is not a directory\n",
+               progname,
+               opt.build_dir,
+               file=sys.stderr)
+        sys.exit(1)
+
+    build_dir = os.path.abspath(opt.build_dir)
+
+    # Check clang-tidy
+    clang_tidy = which(opt.clang_tidy)
+    if not clang_tidy:
+        printf('%s: error: %s: command not found\n',
+               progname,
+               opt.clang_tidy,
+               file=sys.stderr)
+        sys.exit(1)
+
+    # Check jobs
+    if opt.jobs < 1:
+        printf('%s: error: invalid number of jobs\n',
+               progname,
+               file=sys.stderr)
+        sys.exit(1)
+
+    os.chdir(opt.src_dir)
+
+    # Print the list of checks
+    cmd = [clang_tidy]
+    cmd.append('-p=%s' % build_dir)
+    if opt.checks:
+        cmd.append('-checks=%s' % opt.checks)
+    cmd.append('-list-checks')
+    cmd.append('-')
+    subprocess.check_call(cmd)
+
+    try:
+        task_queue = queue.Queue(opt.jobs)
+        lock = threading.Lock()
+
+        # Start threads
+        for _ in range(opt.jobs):
+            t = threading.Thread(target=run_tidy,
+                                 args=(clang_tidy,
+                                       build_dir,
+                                       opt.checks,
+                                       opt.fix,
+                                       task_queue,
+                                       lock))
+            t.daemon = True
+            t.start()
+
+        # Fill the queue
+        for dirpath, _, filenames in os.walk('.'):
+            if dirpath.startswith('./'):
+                dirpath = dirpath[2:]
+
+            if any(dirpath.startswith(n) for n in IGNORE_DIRECTORIES):
+                continue
+
+            for filename in filenames:
+                _, ext = os.path.splitext(filename)
+
+                if ext in SOURCE_EXTENSIONS:
+                    fullpath = os.path.join(dirpath, filename)
+                    task_queue.put(fullpath)
+
+        # Wait for all threads to be done
+        task_queue.join()
+    except KeyboardInterrupt:
+        os.kill(0, 9)

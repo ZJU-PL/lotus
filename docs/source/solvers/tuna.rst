@@ -77,7 +77,7 @@ Full pipeline: SMT-LIB 2 to LLVM IR, optimize, LLVM IR back to SMT-LIB 2.
 
    ./slot -m -s problem.smt2 -lu before.ll -lo after.ll -o simplified.smt2 -p ../passes-run.txt
 
-Options (verified in ``src/tools/main.cpp``):
+Options (verified in ``lib/Solvers/SMT/TUNA/TUNA-Opt/SMT2LLVM/src/tools/main.cpp``):
 
 - ``-s <file>``: input SMT-LIB 2 file (required)
 - ``-o <file>``: output SMT-LIB 2 file (default: stdout)

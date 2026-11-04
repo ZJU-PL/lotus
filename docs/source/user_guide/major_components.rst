@@ -20,7 +20,7 @@ See :doc:`../alias/alias_analysis` for detailed instructions and command example
 * **SparrowAA** – Inclusion-based pointer analysis without on-the-fly
   call-graph construction (``lib/Alias/InclusionBased/SparrowAA``).
 * **FPA** – Function Pointer Analysis toolbox (FLTA, MLTA, MLTADF, KELP) under
-  ``lib/Alias/Specialized/FPA`` for resolving indirect calls.
+  ``lib/Analysis/CallGraph/FPA`` for resolving indirect calls.
 * **DynAA** – Dynamic checker living in ``tools/alias/dynaa`` that validates static
   alias analyses against runtime traces.
 * **AserPTA** – Constraint-based pointer analysis with multiple context
@@ -53,9 +53,22 @@ See :doc:`../alias/alias_analysis` for detailed instructions and command example
 * **Metrics** – Pointer analysis metrics for measuring precision and
   soundness-related properties (``lib/Alias/Infrastructure/Metrics``).
   See :doc:`../alias/metrics`.
-* **TypeQualifier** – Qualifier-based analysis infrastructure that models
-  qualifier-style properties over program values
-  (``lib/Alias/Specialized/TypeQualifier``). See :doc:`../alias/typequalifier`.
+
+Bug Detection and Checkers
+--------------------------
+
+See :doc:`bug_detection` and :doc:`../checker/index` for engine details and selection guides.
+
+* **KINT** – Numerical bug detection (integer overflow, division by zero, bad shift, array bounds).
+* **AE** – Abstract execution for memory safety (buffer overflow, null dereference, use-after-free).
+* **Pulse** – Witness-oriented biabductive memory-safety analysis.
+* **Saber** – Source-sink resource checking over sparse value-flow graphs (leaks, double frees).
+* **FiTx** – Fast typestate-based feedback for routine development.
+* **Concurrency** – Thread safety, data races, deadlocks, OpenMP, and MPI protocol verification.
+* **Taint** – Interprocedural IFDS-based information flow and injection checking.
+* **GSAF** – Path-sensitive checks over guarded value-flow graphs.
+* **SymEx** – Symbolic-execution bug checks backed by the ``SymbolicExecution`` engine.
+* **TypeQualifier** – Qualifier-based analysis infrastructure modeling qualifier-style properties over program values (``lib/Checker/TypeQualifier``). See :doc:`../checker/typequalifier`.
 
 Intermediate Representations
 ----------------------------
@@ -64,8 +77,9 @@ See :doc:`../ir/index` for builder APIs and code snippets.
 
 * **Program Dependence Graph (PDG)** – Captures fine-grained data/control
   dependencies.
-* **Static Single Information (SSI)** – Planned extension of SSA to encode
-  predicate information.
+* **Static Single Information (SSI)** – Extension of SSA with sigma (σ) functions
+  at control splits to encode predicate information (``lib/IR/SSI``).
+  See :doc:`../ir/ssi`.
 * **DyckVFG** – Value Flow Graph variant designed for Dyck-based alias
   analyses (``lib/Alias/UnificationBased/DyckAA/DyckVFG.cpp``).
 * **SVFG** – Sparse Value-Flow Graph combining SSA with MemorySSA for
@@ -83,6 +97,8 @@ See :doc:`../ir/index` for builder APIs and code snippets.
   values at join points (``lib/IR/GSA``). See :doc:`../ir/gsa`.
 * **vSSA** – Variable Static Single Assignment, an SSI variant designed for
   precise symbolic range analysis (``lib/IR/vSSA``). See :doc:`../ir/vssa`.
+* **UFG** – Universal Flow Graph, an object-expanded use-flow graph baseline for
+  resource defect detection (``lib/IR/UFG``). See :doc:`../ir/ufg`.
 
 Machine Learning Features
 -------------------------

@@ -8,6 +8,11 @@ namespace lotus::checker {
 
 namespace {
 
+constexpr NativeCheckDescriptor GSAF_CHECKS[] = {
+    {"use-after-free", "Use after free", true},
+    {"taint", "Path-sensitive taint", false},
+};
+
 constexpr NativeCheckDescriptor AE_CHECKS[] = {
     {"buffer-overflow", "Buffer overflow"},
     {"null-deref", "Null pointer dereference"},
@@ -222,6 +227,10 @@ Error registerBuiltinNativeCheckers(CheckerRegistry &registry) {
                      {CheckerCapability::SVFG, CheckerCapability::SMT})) {
     return error;
   }
+  if (Error error = add_native("gsaf", "Guarded Value-Flow Analysis", "path-sensitive",
+                               Severity::High, EngineKind::GSAF,
+                               {CheckerCapability::InterproceduralFlow, CheckerCapability::SMT}))
+    return error;
   return Error::success();
 }
 
@@ -243,6 +252,8 @@ ArrayRef<NativeCheckDescriptor> getBuiltinNativeChecks(EngineKind engine) {
     return CONCURRENCY_CHECKS;
   case EngineKind::SymExec:
     return SYMEX_CHECKS;
+  case EngineKind::GSAF:
+    return GSAF_CHECKS;
   case EngineKind::Declarative:
     return {};
   }

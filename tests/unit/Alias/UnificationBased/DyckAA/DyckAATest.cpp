@@ -18,6 +18,22 @@ using namespace lotus::unittest;
 
 class DyckAATest : public LlvmModuleTest {};
 
+TEST_F(DyckAATest, InsertElementIntoConstantVectorKeepsLiveRepresentatives) {
+  auto module = parseModule(R"(
+    define <2 x i32> @test() {
+      %result = insertelement <2 x i32> <i32 42, i32 undef>, i32 42, i32 0
+      ret <2 x i32> %result
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  auto *insert = cast<InsertElementInst>(
+      &module->getFunction("test")->getEntryBlock().front());
+  DyckAliasAnalysis analysis;
+  analysis.runOnModule(*module);
+  EXPECT_TRUE(analysis.mayAlias(insert, insert->getOperand(0)));
+  EXPECT_TRUE(analysis.mayAlias(insert, insert->getOperand(1)));
+}
+
 // ============================================================================
 // Basic Alias Tests
 // ============================================================================

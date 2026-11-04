@@ -60,6 +60,8 @@ target_include_directories(extern-statics PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/externalizer
   ${SMACK_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/include
+)
+target_include_directories(extern-statics SYSTEM PRIVATE
   ${LLVM_INCLUDE_DIRS}
 )
 

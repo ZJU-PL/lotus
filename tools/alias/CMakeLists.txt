@@ -42,26 +42,10 @@ target_link_libraries(lotus-alias-seadsa-tool PRIVATE
   CanaryAliasCLIUtils
 )
 
-# FPA (Function pointer analysis) Tool
-add_executable(lotus-alias-fpa lotus-alias-fpa.cpp)
-target_link_libraries(lotus-alias-fpa PRIVATE
-  CanaryFPA
-  CanaryAliasCLIUtils
-  ${LLVM_LINK_COMPONENTS}
-)
-
 # LotusAA Pointer Analysis Tool
 add_executable(lotus-alias-lotus-aa lotus-alias-lotus-aa.cpp)
 target_link_libraries(lotus-alias-lotus-aa PRIVATE
   LotusAA
-  CanaryAliasCLIUtils
-  ${LLVM_LINK_COMPONENTS}
-)
-
-# GPG flow- and context-sensitive points-to analysis tool
-add_executable(lotus-alias-gpg lotus-alias-gpg.cpp)
-target_link_libraries(lotus-alias-gpg PRIVATE
-  CanaryGPG
   CanaryAliasCLIUtils
   ${LLVM_LINK_COMPONENTS}
 )
@@ -96,7 +80,6 @@ target_link_libraries(lotus-alias-tpa PRIVATE
 add_executable(lotus-alias-call-graph lotus-alias-call-graph.cpp)
 target_link_libraries(lotus-alias-call-graph PRIVATE
   CanaryDyckAA
-  CanaryGPG
   LotusAA
   CanaryFPA
   AserPTA

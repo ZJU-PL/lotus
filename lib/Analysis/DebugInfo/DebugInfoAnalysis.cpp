@@ -599,6 +599,7 @@ std::string DebugInfoAnalysis::getTypeName(const Value *V) {
 void DebugInfoAnalysis::collectMetadata(const Function *F) {
   if (!F)
     return;
+  collectTypeMetadata(F);
   // Pre-populate the varNameCache for all debug intrinsics in the function
   // so that subsequent getVariableName() calls are O(1).
   for (const auto &BB : *F) {

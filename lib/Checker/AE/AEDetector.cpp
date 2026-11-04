@@ -1150,7 +1150,8 @@ bool DivZeroDetector::mayDivideByZero(AbstractState &as,
       as[divisorId] = AbstractValue(IntervalValue(ci->getSExtValue()));
     } else if (const auto *cfp = llvm::dyn_cast<llvm::ConstantFP>(divisor)) {
       double num = cfp->getValueAPF().convertToDouble();
-      as[divisorId] = AbstractValue(IntervalValue(num, num));
+      as[divisorId] = AbstractValue(IntervalValue(static_cast<int64_t>(num),
+                                                  static_cast<int64_t>(num)));
     }
   }
   if (!as.inVarToValTable(divisorId))

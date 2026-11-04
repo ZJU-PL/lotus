@@ -286,7 +286,7 @@ namespace flow_cutter{
 				x.source = original_node_to_expanded_node(x.source, false);
 				x.target = original_node_to_expanded_node(x.target, true);
 			}
-			return std::move(p);
+			return p;
 		}
 	} // namespace expanded_graph
 

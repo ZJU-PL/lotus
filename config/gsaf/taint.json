@@ -1,0 +1,624 @@
+{
+  "taint-return-as-source": [
+    "fgetc",
+    "getc",
+    "getchar",
+    "fgetc_unlocked",
+    "getc_unlocked",
+    "getchar_unlocked",
+    "fgetwc",
+    "getwc",
+    "getwchar",
+    "fgetwc_unlocked",
+    "getwc_unlocked",
+    "getwchar_unlocked",
+    "getw",
+    "_IO_getc",
+    "fgets",
+    "gets",
+    "fgets_unlocked",
+    "fgetws",
+    "fgetws_unlocked",
+    "fgetln",
+    "fgetline",
+    "getcwd",
+    "getwd",
+    "get_current_dir_name",
+    "g_get_current_dir",
+    "getpass",
+    "getenv",
+    "wgetenv",
+    "curl_getenv",
+    "g_getenv",
+    "g_get_home_dir",
+    "g_get_tmp_dir",
+    "_wgetenv"
+  ],
+  "taint-argument-as-source": {
+    "fgets": [
+      0
+    ],
+    "gets": [
+      0
+    ],
+    "fgets_unlocked": [
+      0
+    ],
+    "fgetws": [
+      0
+    ],
+    "fgetws_unlocked": [
+      0
+    ],
+    "getline": [
+      0
+    ],
+    "getdelim": [
+      0
+    ],
+    "__getdelim": [
+      0
+    ],
+    "__isoc99_scanf": [
+      -1
+    ],
+    "scanf": [
+      -1
+    ],
+    "fscanf": [
+      -2
+    ],
+    "vscanf": [
+      1
+    ],
+    "vfscanf": [
+      2
+    ],
+    "wscanf": [
+      -1
+    ],
+    "fwscanf": [
+      -2
+    ],
+    "read": [
+      1
+    ],
+    "pread": [
+      1
+    ],
+    "pread64": [
+      1
+    ],
+    "readv": [
+      1
+    ],
+    "preadv": [
+      1
+    ],
+    "fread": [
+      0
+    ],
+    "fread_unlocked": [
+      0
+    ],
+    "aio_read": [
+      0
+    ],
+    "getcwd": [
+      0
+    ],
+    "getwd": [
+      0
+    ],
+    "readlink": [
+      1
+    ],
+    "recvfrom": [
+      1
+    ],
+    "recv": [
+      1
+    ],
+    "recvmsg": [
+      1
+    ]
+  },
+  "taint-sink": {
+    "printf": [
+      0
+    ],
+    "sprintf": [
+      1
+    ],
+    "fprintf": [
+      0,
+      1
+    ],
+    "snprintf": [
+      1,
+      2
+    ],
+    "asprintf": [
+      1
+    ],
+    "dprintf": [
+      0,
+      1
+    ],
+    "vprintf": [
+      0
+    ],
+    "vsprintf": [
+      1
+    ],
+    "vfprintf": [
+      0,
+      1
+    ],
+    "vsnprintf": [
+      1,
+      2
+    ],
+    "vasprintf": [
+      1
+    ],
+    "wprintf": [
+      0
+    ],
+    "swprintf": [
+      1
+    ],
+    "fwprintf": [
+      0,
+      1
+    ],
+    "snwprintf": [
+      1,
+      2
+    ],
+    "vwprintf": [
+      0
+    ],
+    "vswprintf": [
+      1
+    ],
+    "vfwprintf": [
+      0,
+      1
+    ],
+    "obstack_printf": [
+      0
+    ],
+    "obstack_vprintf": [
+      0
+    ],
+    "setproctitle": [
+      0
+    ],
+    "syslog": [
+      1
+    ],
+    "vsyslog": [
+      1
+    ],
+    "execl": [
+      0,
+      -1
+    ],
+    "execlp": [
+      0,
+      -1
+    ],
+    "execle": [
+      0,
+      -1
+    ],
+    "execlpe": [
+      0,
+      -1
+    ],
+    "wexecl": [
+      0,
+      -1
+    ],
+    "wexeclp": [
+      0,
+      -1
+    ],
+    "wexecle": [
+      0,
+      -1
+    ],
+    "wexeclpe": [
+      0,
+      -1
+    ],
+    "execv": [
+      0,
+      1
+    ],
+    "execve": [
+      0,
+      1,
+      2
+    ],
+    "execvp": [
+      0,
+      1
+    ],
+    "execvpe": [
+      0,
+      1,
+      2
+    ],
+    "fexecve": [
+      0,
+      1,
+      2
+    ],
+    "wexecv": [
+      0,
+      1
+    ],
+    "wexecve": [
+      0,
+      1,
+      2
+    ],
+    "wexecvp": [
+      0,
+      1
+    ],
+    "wexecvpe": [
+      0,
+      1,
+      2
+    ],
+    "system": [
+      0
+    ],
+    "popen": [
+      0
+    ],
+    "_wsystem": [
+      0
+    ],
+    "wpopen": [
+      0
+    ],
+    "_spawnl": [
+      -1
+    ],
+    "_spawnle": [
+      -1
+    ],
+    "_spawnlp": [
+      -1
+    ],
+    "_spawnlpe": [
+      -1
+    ],
+    "_wspawnl": [
+      -1
+    ],
+    "_wspawnle": [
+      -1
+    ],
+    "_wspawnlp": [
+      -1
+    ],
+    "_wspawnlpe": [
+      -1
+    ],
+    "_spawnv": [
+      1,
+      2
+    ],
+    "_spawnve": [
+      1,
+      2,
+      3
+    ],
+    "_spawnvp": [
+      1,
+      2
+    ],
+    "_spawnvpe": [
+      1,
+      2,
+      3
+    ],
+    "_wspawnv": [
+      1,
+      2
+    ],
+    "_wspawnve": [
+      1,
+      2,
+      3
+    ],
+    "_wspawnvp": [
+      1,
+      2
+    ],
+    "_wspawnvpe": [
+      1,
+      2,
+      3
+    ],
+    "WinExe": [
+      0
+    ],
+    "ShellExecute": [
+      0
+    ],
+    "ShellExecuteA": [
+      0
+    ],
+    "ShellExecuteW": [
+      0
+    ],
+    "ShellExecuteEx": [
+      0
+    ],
+    "ShellExecuteExA": [
+      0
+    ],
+    "ShellExecuteExW": [
+      0
+    ],
+    "strcpy": [
+      1
+    ],
+    "stpcpy": [
+      1
+    ],
+    "strcat": [
+      1
+    ],
+    "wcscpy": [
+      1
+    ],
+    "wcpcpy": [
+      1
+    ],
+    "wcscat": [
+      1
+    ],
+    "strccpy": [
+      1
+    ],
+    "strcadd": [
+      1
+    ],
+    "strecpy": [
+      1
+    ],
+    "streadd": [
+      1
+    ],
+    "strlcat": [
+      1,
+      2
+    ],
+    "strlcpy": [
+      1,
+      2
+    ],
+    "strncpy": [
+      1,
+      2
+    ],
+    "stpncpy": [
+      1,
+      2
+    ],
+    "strncat": [
+      1,
+      2
+    ],
+    "wcsncpy": [
+      1,
+      2
+    ],
+    "wcsncat": [
+      1,
+      2
+    ],
+    "wcpncpy": [
+      1,
+      2
+    ],
+    "strxfrm": [
+      1,
+      2
+    ],
+    "memcpy": [
+      1,
+      2
+    ],
+    "mempcpy": [
+      1,
+      2
+    ],
+    "memmove": [
+      1,
+      2
+    ],
+    "memset": [
+      1,
+      2
+    ],
+    "memccpy": [
+      1,
+      2,
+      3
+    ],
+    "wmemcpy": [
+      1,
+      2
+    ],
+    "wmempcpy": [
+      1,
+      2
+    ],
+    "wmemmove": [
+      1,
+      2
+    ],
+    "wmemset": [
+      1,
+      2
+    ],
+    "bcopy": [
+      0,
+      2
+    ],
+    "CopyMemory": [
+      1,
+      2
+    ],
+    "MoveMemory": [
+      1,
+      2
+    ],
+    "SetComputerName": [
+      0
+    ],
+    "SetComputeNameA": [
+      0
+    ],
+    "SetComputeNameW": [
+      0
+    ],
+    "sethostid": [
+      0
+    ],
+    "open": [
+      0
+    ],
+    "fopen": [
+      0
+    ],
+    "fdopen": [
+      0
+    ],
+    "freopen": [
+      0
+    ],
+    "wopen": [
+      0
+    ],
+    "CreateFile": [
+      0
+    ],
+    "CreateFileA": [
+      0
+    ],
+    "CreateFileW": [
+      0
+    ],
+    "remove": [
+      0
+    ],
+    "rename": [
+      0
+    ],
+    "_ZNSt14basic_ifstreamIcSt11char_traitsIcEE4openEPKcSt13_Ios_Openmode": [
+      0
+    ],
+    "_ZNSt14basic_ofstreamIcSt11char_traitsIcEE4openEPKcSt13_Ios_Openmode": [
+      0
+    ],
+    "dlopen": [
+      0
+    ],
+    "LoadLibrary": [
+      0
+    ],
+    "LoadLibraryW": [
+      0
+    ],
+    "LoadLibraryA": [
+      0
+    ],
+    "LoadLibraryEx": [
+      0
+    ],
+    "LoadLibraryExA": [
+      0
+    ],
+    "LoadLibraryExW": [
+      0
+    ],
+    "AfxLoadLibrary": [
+      0
+    ],
+    "putenv": [
+      0
+    ],
+    "wputenv": [
+      0
+    ],
+    "setenv": [
+      0,
+      1,
+      2
+    ],
+    "write": [
+      0,
+      -1
+    ],
+    "fwrite": [
+      0,
+      -1
+    ],
+    "pwrite": [
+      0,
+      -1
+    ],
+    "writev": [
+      0,
+      -1
+    ],
+    "puts": [
+      0
+    ],
+    "fputs": [
+      0,
+      1
+    ],
+    "send": [
+      0,
+      -1
+    ],
+    "sendto": [
+      0,
+      -1
+    ],
+    "sendmsg": [
+      0,
+      -1
+    ]
+  },
+  "taint-exception": [
+    [
+      "read",
+      1,
+      "write",
+      1
+    ],
+    [
+      "fread",
+      0,
+      "fwrite",
+      0
+    ],
+    [
+      "pread",
+      1,
+      "pwrite",
+      1
+    ]
+  ]
+}

@@ -100,6 +100,7 @@
 
 #include "IR/ICFG/ICFGNode.h"
 #include "IR/SVFG/SVFGBase.h"
+#include "IR/SVFG/SVFGNodeBS.h"
 
 #include <algorithm>
 #include <map>
@@ -124,9 +125,8 @@ namespace analysis {
 // Forward declarations
 class SVFGEdge;
 
-/// SVFGNodeBS: Points-to set representation using object IDs
-/// Each element is an abstract memory object ID from pointer analysis
-using SVFGNodeBS = std::set<uint32_t>;
+// SVFGNodeBS (the compact sparse points-to set) is defined in SVFGNodeBS.h.
+// Each element is an abstract memory object ID from pointer analysis.
 
 /// SVFGNode is the base class for all SVFG node types.
 ///

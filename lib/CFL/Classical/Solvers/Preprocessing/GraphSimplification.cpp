@@ -443,6 +443,28 @@ simplifyGraph(const LabeledGraph &graph,
     foldGraph(graph, options.flavor, sets, result.statistics);
   }
 
+  // A direct edge x -> y merged into a self-loop still matters when y has an
+  // incoming dereference edge: then the input derives `A ::= a M` across the
+  // edge, and through its explicit reverse y -> x `Abar ::= M abar`. Otherwise
+  // the loop only adds facts the input does not have (on the merged node,
+  // `Abar ::= M abar` would turn every memory alias of a folded node's source
+  // into a value alias), so both directions are dropped, as POCR drops its
+  // implicit reverse. A folded target never has an incoming dereference edge.
+  std::vector<bool> dereferenced(graph.vertexCount(), false);
+  for (const LabeledEdge &edge : graph.edges()) {
+    if (isDereferenceLabel(edge.label)) {
+      dereferenced[edge.target] = true;
+    }
+  }
+  auto redundantSelfLoop = [&](const LabeledEdge &edge) {
+    if (isDirectLabel(edge.label, options.flavor)) {
+      return !dereferenced[edge.target];
+    }
+    return isDirectLabel(LabeledGraph::complementLabel(edge.label),
+                         options.flavor) &&
+           !dereferenced[edge.source];
+  };
+
   std::unordered_map<std::size_t, std::size_t> reduced_ids;
   result.representative.resize(graph.vertexCount());
   for (std::size_t node = 0; node < graph.vertexCount(); ++node) {
@@ -462,7 +484,7 @@ simplifyGraph(const LabeledGraph &graph,
   for (const LabeledEdge &edge : graph.edges()) {
     const std::size_t source = result.representative[edge.source];
     const std::size_t target = result.representative[edge.target];
-    if (source == target && isDirectLabel(edge.label, options.flavor)) {
+    if (source == target && redundantSelfLoop(edge)) {
       continue;
     }
     result.graph.addEdge(source, target, edge.label);

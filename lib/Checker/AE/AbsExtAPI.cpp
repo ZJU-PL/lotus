@@ -745,7 +745,8 @@ void AEExtAPI::initExtFunMap() {
         static_cast<double>(as[argId].getInterval().lb().getIntNumeralOrZero());
     double res = sin(rhs);
     uint32_t lhsId = getValueId(callNode);
-    as[lhsId] = AbstractValue(IntervalValue(res, res));
+    as[lhsId] = AbstractValue(
+        IntervalValue(static_cast<int64_t>(res), static_cast<int64_t>(res)));
   };
   func_map["sin"] = sse_sin;
   func_map["llvm.sin.f64"] = sse_sin;
@@ -762,7 +763,8 @@ void AEExtAPI::initExtFunMap() {
         static_cast<double>(as[argId].getInterval().lb().getIntNumeralOrZero());
     double res = cos(rhs);
     uint32_t lhsId = getValueId(callNode);
-    as[lhsId] = AbstractValue(IntervalValue(res, res));
+    as[lhsId] = AbstractValue(
+        IntervalValue(static_cast<int64_t>(res), static_cast<int64_t>(res)));
   };
   func_map["cos"] = sse_cos;
   func_map["llvm.cos.f64"] = sse_cos;
@@ -779,7 +781,8 @@ void AEExtAPI::initExtFunMap() {
         static_cast<double>(as[argId].getInterval().lb().getIntNumeralOrZero());
     double res = tan(rhs);
     uint32_t lhsId = getValueId(callNode);
-    as[lhsId] = AbstractValue(IntervalValue(res, res));
+    as[lhsId] = AbstractValue(
+        IntervalValue(static_cast<int64_t>(res), static_cast<int64_t>(res)));
   };
   func_map["tan"] = sse_tan;
   func_map["llvm.tan.f64"] = sse_tan;
@@ -796,7 +799,8 @@ void AEExtAPI::initExtFunMap() {
         static_cast<double>(as[argId].getInterval().lb().getIntNumeralOrZero());
     double res = log(rhs);
     uint32_t lhsId = getValueId(callNode);
-    as[lhsId] = AbstractValue(IntervalValue(res, res));
+    as[lhsId] = AbstractValue(
+        IntervalValue(static_cast<int64_t>(res), static_cast<int64_t>(res)));
   };
   func_map["log"] = sse_log;
   func_map["llvm.log.f64"] = sse_log;
@@ -813,7 +817,8 @@ void AEExtAPI::initExtFunMap() {
         static_cast<double>(as[argId].getInterval().lb().getIntNumeralOrZero());
     double res = sinh(rhs);
     uint32_t lhsId = getValueId(callNode);
-    as[lhsId] = AbstractValue(IntervalValue(res, res));
+    as[lhsId] = AbstractValue(
+        IntervalValue(static_cast<int64_t>(res), static_cast<int64_t>(res)));
   };
   func_map["sinh"] = sse_sinh;
 
@@ -829,7 +834,8 @@ void AEExtAPI::initExtFunMap() {
         static_cast<double>(as[argId].getInterval().lb().getIntNumeralOrZero());
     double res = cosh(rhs);
     uint32_t lhsId = getValueId(callNode);
-    as[lhsId] = AbstractValue(IntervalValue(res, res));
+    as[lhsId] = AbstractValue(
+        IntervalValue(static_cast<int64_t>(res), static_cast<int64_t>(res)));
   };
   func_map["cosh"] = sse_cosh;
 
@@ -845,7 +851,8 @@ void AEExtAPI::initExtFunMap() {
         static_cast<double>(as[argId].getInterval().lb().getIntNumeralOrZero());
     double res = tanh(rhs);
     uint32_t lhsId = getValueId(callNode);
-    as[lhsId] = AbstractValue(IntervalValue(res, res));
+    as[lhsId] = AbstractValue(
+        IntervalValue(static_cast<int64_t>(res), static_cast<int64_t>(res)));
   };
   func_map["tanh"] = sse_tanh;
 
@@ -861,7 +868,13 @@ void AEExtAPI::initExtFunMap() {
         static_cast<double>(as[argId].getInterval().lb().getIntNumeralOrZero());
     double res = sqrt(rhs);
     uint32_t lhsId = getValueId(callNode);
-    as[lhsId] = AbstractValue(IntervalValue(res, res));
+    if (!std::isfinite(res)) {
+      as[lhsId] = AbstractValue(IntervalValue::top());
+      return;
+    }
+    as[lhsId] =
+        AbstractValue(IntervalValue(static_cast<int64_t>(std::floor(res)),
+                                    static_cast<int64_t>(std::ceil(res))));
   };
   func_map["sqrt"] = sse_sqrt;
 

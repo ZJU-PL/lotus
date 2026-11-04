@@ -309,8 +309,8 @@ and options, then build:
 ```sh
 cmake -S . -B build -DLOTUS_BUILD_TESTS=ON
 cmake --build build --target CanaryInterleavedDyckSPDS \
-  lotus-cfl-interleaved-dyck spds interleaved_dyck_spds_test
-ctest --test-dir build -R interleaved_dyck_spds --output-on-failure
+  lotus-cfl-interleaved-dyck cfl_tests
+ctest --test-dir build -R 'cfl_tests.InterleavedDyckSPDS' --output-on-failure
 
 build/bin/lotus-cfl-interleaved-dyck spds --query 0 4 \
   tests/regress/CFL/InterleavedDyck/SPDS/crossing.dot
@@ -324,16 +324,16 @@ Run `--help` for prefix, output, and resource options. Exit 0 means a completed 
 (including an unreachable answer), 2 means invalid input, and 3 means a resource
 limit. Failure cases print no result relation.
 
-The serial corpus runner uses an explicit checked-in manifest; it never infers
-all-pairs from graph size:
+The serial corpus runner referenced by earlier revisions was removed; the
+checked-in corpus manifest no longer exists, so never infer all-pairs from graph
+size. Drive the CLI directly with an explicit `--queries` batch file:
 
 ```sh
-scripts/benchmark_interleaved_dyck_spds.py --engine spds --timeout 60
-scripts/benchmark_interleaved_dyck_spds.py --engine affine \
-  --filter backflash --timeout 60
+build/bin/lotus-cfl-interleaved-dyck spds --queries pairs.txt --timings graph.dot
+build/bin/lotus-cfl-interleaved-dyck affine-spds --all-pairs --timings graph.dot
 ```
 
 Use a Release or RelWithDebInfo build for performance comparisons; Debug leaves
-the template-heavy saturation and affine operations unoptimized.
-Its TSV/optional JSON output records wall time, facts, promotions, rules, and
-the instrumented projection, session-setup, saturation, and readout times.
+the template-heavy saturation and affine operations unoptimized. `--timings`
+reports the instrumented projection, session-setup, saturation, and readout
+times; the CLI also reports facts, promotions, and rules.

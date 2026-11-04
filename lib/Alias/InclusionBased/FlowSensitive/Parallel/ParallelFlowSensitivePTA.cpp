@@ -77,6 +77,15 @@ class FlowSensitivePTA::ParallelExecution {
 
   void worker() {
     try {
+      if (owner.timeLimitExceeded()) {
+        owner.noteTimeout();
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          stopped = true;
+        }
+        changed.notify_all();
+        return;
+      }
       Config config = owner.config_;
       config.parallel = false;
       // Immutable snapshots contain ordinary sets. Interning is performed
@@ -136,6 +145,9 @@ class FlowSensitivePTA::ParallelExecution {
                         return false;
                       })
                 : Config::IndirectCallConnector{};
+        // The worker only proposes candidates; the owner applies the bound
+        // when it retires them, so rejections are counted exactly once.
+        evaluator.config_.isIndirectCallTargetAllowed = {};
 
         const NodeID id = slots[task].node->getId();
         evaluator.strongUpdateSites_.clear();
@@ -287,7 +299,7 @@ public:
       return result;
     };
     for (const Slot &slot : slots) {
-      if (!owner.inScope(slot.node))
+      if (!owner.inScope(slot.node) || !slot.snapshot)
         continue;
       const NodeID id = slot.node->getId();
       owner.topLevelPointsTo_[id] = exportSet(slot.snapshot->top);
@@ -309,8 +321,18 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
     return solveOrderedParallel();
   const auto started = std::chrono::steady_clock::now();
   stats_ = {};
+  buildObjectClustering();
+  hasDeadline_ = config_.timeLimitSeconds != 0;
+  if (hasDeadline_)
+    deadline_ = started +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(config_.timeLimitSeconds));
   bool changed;
   do {
+    if (timeLimitExceeded()) {
+      stats_.timedOut = true;
+      break;
+    }
     ++stats_.topologyEpochs;
     topLevelPointsTo_.clear();
     dfIn_.clear();
@@ -325,12 +347,20 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
     ParallelExecution execution(*this);
     const auto calls = execution.run();
     changed = false;
-    for (const auto &call : calls)
+    for (const auto &call : calls) {
+      if (config_.isIndirectCallTargetAllowed &&
+          !config_.isIndirectCallTargetAllowed(call.first, call.second)) {
+        ++stats_.indirectCallsRejected;
+        continue;
+      }
       if (config_.connectIndirectCall(call.first, call.second)) {
         changed = true;
         ++stats_.indirectCallEdges;
+        if (!config_.isIndirectCallTargetAllowed)
+          ++stats_.unboundedIndirectCalls;
       }
-  } while (changed);
+    }
+  } while (changed && !stats_.timedOut);
   const SCCInfo scc = computeSCCs();
   stats_.sccs = scc.components.size();
   for (const auto &component : scc.components) {
@@ -339,14 +369,10 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
   }
   for (const auto &entry : topLevelPointsTo_)
     stats_.topLevelFacts += materialize(entry.second).size();
-  for (const auto &entry : dfIn_)
-    for (const auto &fact : entry.second)
-      stats_.memoryInFacts += materialize(fact.second).size();
-  for (const auto &entry : dfOut_)
-    for (const auto &fact : entry.second)
-      stats_.memoryOutFacts += materialize(fact.second).size();
+  collectStatistics();
   stats_.strongUpdates = strongUpdateSites_.size();
   stats_.weakUpdates = weakUpdateSites_.size();
+  stats_.svfgHasSU = !strongUpdateSites_.empty();
   if (config_.setBackend == PointsToSetBackend::HashConsed) {
     const auto hashStats = arena_.statistics();
     stats_.hashConsedUniqueSets = hashStats.uniqueSets;

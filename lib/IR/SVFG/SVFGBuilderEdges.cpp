@@ -30,8 +30,10 @@ void SVFGBuilder::buildEdges() {
   buildCopyEdges();
   buildGepEdges();
   buildPhiEdges();
-  buildCmpEdges();
-  buildBranchEdges();
+  if (!config.pointerOnly) {
+    buildCmpEdges();
+    buildBranchEdges();
+  }
   buildMemoryEdges(); // This calls buildLoadEdges() and buildStoreEdges()
 }
 

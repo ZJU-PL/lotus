@@ -48,14 +48,14 @@ The feature budget bounds the observation, not the execution.
 
 Library target: `CanaryInterleavedDyckAffineSPDS`.
 CLI target: `lotus-cfl-interleaved-dyck affine-spds`.
-Lotus GoogleTest target: `interleaved_dyck_affine_spds_test`.
+Lotus GoogleTest suite: `cfl_tests` (cases `InterleavedDyckAffineSPDS.*`).
 Namespace: `lotus::cfl::interleaved_dyck::affine`.
 
 ```sh
 cmake -S . -B build -DLOTUS_BUILD_TESTS=ON
 cmake --build build --target CanaryInterleavedDyckAffineSPDS \
-  lotus-cfl-interleaved-dyck affine-spds interleaved_dyck_affine_spds_test
-ctest --test-dir build -R interleaved_dyck_affine_spds --output-on-failure
+  lotus-cfl-interleaved-dyck cfl_tests
+ctest --test-dir build -R 'cfl_tests.InterleavedDyckAffineSPDS' --output-on-failure
 ```
 
 ## Main API

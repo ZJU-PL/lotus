@@ -207,9 +207,9 @@ struct ResourcePlan {
   ResourceProperty property;
   bool hasRequired = false;
   ObjectSet universe = ObjectSet::unknown();
-  std::map<const llvm::Instruction *, GuardedEventEffect> effects;
-  std::vector<const llvm::CallBase *> calls;
-  std::vector<std::string> issues;
+  std::map<const llvm::Instruction *, GuardedEventEffect> effects = {};
+  std::vector<const llvm::CallBase *> calls = {};
+  std::vector<std::string> issues = {};
   bool keeps(const llvm::Instruction &instruction) const {
     return effects.count(&instruction) || structuralCall(instruction);
   }

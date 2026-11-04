@@ -121,7 +121,8 @@ GuardedValueFlowNode::GuardedValueFlowNode(Kind kind, Type *type,
                                            GuardedValueFlowGraph *graph,
                                            BasicBlock *block, Value *llvm_value,
                                            Instruction *dbg_inst)
-    : kind_(kind), type_(type), graph_(graph), block_(block),
+    : GuardedValueFlowObject(Domain::Node), kind_(kind), type_(type),
+      graph_(graph), block_(block),
       llvm_value_(llvm_value), dbg_inst_(dbg_inst) {}
 
 void GuardedValueFlowNode::addChild(GuardedValueFlowNode *child,

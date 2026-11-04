@@ -174,11 +174,11 @@ StarvationChecker::analyze(const llvm::Function &function) const {
                 ? std::vector<mhp::LockID>{}
                 : locks_.getUnderlyingRAIILocks(call, call->getArgOperand(0));
         if (!underlying.empty()) {
-          for (auto lock : underlying)
+          for (const auto *lock : underlying)
             acquire(state, lock, call);
         } else {
-          auto lock = locks_.getLockValue(call);
-          if (auto wrapperLock = locks_.getCppWrapperLockValue(call))
+          const auto *lock = locks_.getLockValue(call);
+          if (const auto *wrapperLock = locks_.getCppWrapperLockValue(call))
             lock = wrapperLock;
           acquire(state, lock, call);
         }
@@ -187,19 +187,19 @@ StarvationChecker::analyze(const llvm::Function &function) const {
       if (threadAPI_->isTDRelease(call)) {
         auto released = locks_.getRAIILocksReleasedAt(call, true);
         if (released.empty()) {
-          auto lock = locks_.getLockValue(call);
-          if (auto underlying = locks_.getCppWrapperLockValue(call))
+          const auto *lock = locks_.getLockValue(call);
+          if (const auto *underlying = locks_.getCppWrapperLockValue(call))
             lock = underlying;
           release(state, lock);
         } else {
-          for (auto lock : released)
+          for (const auto *lock : released)
             release(state, lock);
         }
         continue;
       }
       if (threadAPI_->isTDCondWait(call)) {
         auto pair = makePair(EventKind::BlockingCall);
-        auto mutex = canonical(threadAPI_->getCondMutex(call));
+        const auto *mutex = canonical(threadAPI_->getCondMutex(call));
         if (mutex) {
           for (auto it = pair.held.begin(); it != pair.held.end();) {
             if (locks_.locksMustMatch(it->first, mutex))
@@ -225,15 +225,15 @@ StarvationChecker::analyze(const llvm::Function &function) const {
           pair.held.clear();
           pair.releasedBefore = state.released;
           State inherited = state;
-          for (auto lock : effect.releasedBefore) {
-            auto actual = instantiate(lock, *call);
+          for (const auto *lock : effect.releasedBefore) {
+            const auto *actual = instantiate(lock, *call);
             release(inherited, actual);
             if (actual)
               pair.releasedBefore.insert(actual);
           }
           pair.held = inherited.held;
           for (const auto &lock : effect.held) {
-            if (auto actual = instantiate(lock.first, *call))
+            if (const auto *actual = instantiate(lock.first, *call))
               pair.held.emplace(actual, lock.second);
           }
           pair.uiThread |= ui;
@@ -243,7 +243,7 @@ StarvationChecker::analyze(const llvm::Function &function) const {
             pair.trace.insert(pair.trace.begin(), call);
           emit(std::move(pair));
         }
-        for (auto lock : found->second.releasedOnReturn)
+        for (const auto *lock : found->second.releasedOnReturn)
           release(state, instantiate(lock, *call));
         for (const auto &lock : found->second.acquiredOnReturn)
           acquire(state, instantiate(lock.first, *call), lock.second);

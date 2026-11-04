@@ -70,8 +70,10 @@ Inputs
 The ``fspta`` and ``vfspta`` solvers operate on the Lotus SVFG built from an
 ICFG. The driver builds
 the ICFG with ``ICFGBuilder`` and the SVFG with ``SVFGBuilder``, enabling
-MemorySSA construction and a selectable memory-region partition strategy, then
-connects pre-analysis indirect calls before solving.
+MemorySSA construction and a selectable memory-region partition strategy.
+Indirect callees are connected from flow-sensitive function-pointer results,
+bounded by the auxiliary analysis. The versioned driver defaults to auxiliary
+points-to prelabels; ``--vfspta-prelabel=builder`` selects region seeds.
 
 The ``vfpta`` solver consumes an LLVM module directly. It builds a separate
 control graph and value-flow graph, so ``--dump-svfg`` and ``--print-memory``

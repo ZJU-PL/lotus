@@ -18,7 +18,8 @@ enum class EngineKind {
   Taint,
   FiTx,
   Concurrency,
-  SymExec
+  SymExec,
+  GSAF
 };
 
 enum class CheckerCapability {

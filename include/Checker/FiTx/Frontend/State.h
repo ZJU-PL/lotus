@@ -67,9 +67,9 @@ struct StateArgs {
             BugNotificationTiming timing = IMMEDIATE,
             bool early_notification = true, TriggerConstraint constraint = NONE,
             StateMergeMethod method = STRICT)
-      : name_(name), type_(type), method_(method),
+      : name_(name), type_(type), method_(method), timing_(timing),
         early_notification_(early_notification),
-        trigger_constraint_(constraint), timing_(timing) {};
+        trigger_constraint_(constraint) {}
   std::string name_;
   StateType type_;
   StateMergeMethod method_;

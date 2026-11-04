@@ -12,16 +12,16 @@ Cypher provides a declarative way to:
 - Perform forward and backward slicing
 - Check information flow properties
 - Verify security policies
-- Find shortest paths between program elements
+- Explore shortest paths with the built-in ``shortest-path`` analysis mode
 - Analyze parameter dependencies
 
 The language supports:
 
 - Pattern matching (nodes and relationships)
 - WHERE clauses for filtering
-- Path queries with variable-length patterns
-- Set operations (UNION, intersection via WHERE EXISTS)
-- Aggregations and ordering
+- Variable-length pattern matching
+- Set operations (UNION, intersection via shared variables)
+- Aggregations (``COUNT``) and ordering (``ORDER BY``)
 
 Getting Started
 ---------------
@@ -48,15 +48,15 @@ Use ``-i`` flag for interactive queries:
 
    ./build/bin/lotus-ir-pdg-query -i program.bc
    
-   PDG> MATCH (n:FUNC_ENTRY) WHERE n.name = 'main' RETURN n
+   PDG Query (type 'help' or 'quit')
+   > MATCH (n:FUNC_ENTRY) WHERE n.name = 'main' RETURN n
    [Results displayed]
-   
-   PDG> MATCH (input:FUNC_ENTRY)-[:PARAMETER_OUT]->(ret:INST_RET)-[*]->(n)
-   PDG> WHERE input.name = 'getInput'
-   PDG> RETURN n
+   > MATCH (input:FUNC_ENTRY)-[:PARAMETER_OUT]->(ret:INST_RET)-[*]->(n) WHERE input.name = 'getInput' RETURN n
    [Slice displayed]
-   
-   PDG> exit
+   > exit
+
+Each interactive line is parsed as a complete query. Use ``-q`` for a single
+multi-line query or ``-f`` for a batch file.
 
 Single Query Mode
 ~~~~~~~~~~~~~~~~~
@@ -109,19 +109,24 @@ Select nodes by their label (type).
 - ``INST_FUNCALL`` - Function call instructions
 - ``INST_RET`` - Return instructions
 - ``INST_BR`` - Branch instructions
-- ``INST_LOAD`` - Load instructions
-- ``INST_STORE`` - Store instructions
-- ``INST_ALLOCA`` - Alloca instructions
-- ``INST_GEP`` - GetElementPtr instructions
-- ``INST_OTHER`` - Other instructions
+- ``INST_OTHER`` - All other instructions (loads, stores, allocas, GEPs, ...)
 - ``FUNC_ENTRY`` - Function entry points
 - ``PARAM_FORMALIN`` - Formal input parameters
 - ``PARAM_FORMALOUT`` - Formal output parameters (return values)
 - ``PARAM_ACTUALIN`` - Actual input parameters
 - ``PARAM_ACTUALOUT`` - Actual output parameters
-- ``GLOBAL`` - Global variables
+- ``VAR_STATICALLOCGLOBALSCOPE`` - Statically allocated globals
+- ``VAR_STATICALLOCMODULESCOPE`` - Module-scoped statically allocated variables
+- ``VAR_STATICALLOCFUNCTIONSCOPE`` - Function-scoped statically allocated variables
+- ``VAR_OTHER`` - Other variables
 - ``FUNC`` - Function nodes
 - ``CLASS`` - Class nodes
+- ``ANNO_VAR`` - Variable annotations
+- ``ANNO_GLOBAL`` - Global annotations
+- ``ANNO_OTHER`` - Other annotations
+
+The query engine also accepts the node groups ``INST``, ``VAR``, ``PARAM``,
+and ``ANNO`` to match all labels in that group.
 
 **Example**:
 
@@ -200,19 +205,30 @@ Select edges by their relationship type.
 
 **Edge Types (Relationship Types)**:
 
+- ``IND_CALL`` - Indirect call edges
+- ``CONTROLDEP_CALLINV`` - Control dependency from a call site to the callee
+- ``CONTROLDEP_CALLRET`` - Control dependency from the callee return to the call site
+- ``CONTROLDEP_ENTRY`` - Control dependency from the function entry
+- ``CONTROLDEP_BR`` - Control dependency from branches
+- ``CONTROLDEP_IND_BR`` - Control dependency from indirect branches
 - ``DATA_DEF_USE`` - Data definition-use edges
 - ``DATA_RAW`` - Read-after-write edges
 - ``DATA_READ`` - Read edges
-- ``DATA_WRITE`` - Write edges
 - ``DATA_ALIAS`` - Alias edges
-- ``CONTROL_DEP`` - Control dependency edges
-- ``CONTROLDEP_BR`` - Control dependency from branches
-- ``CONTROLDEP_ENTRY`` - Control dependency from entry
+- ``DATA_RET`` - Return-value data edges
 - ``PARAMETER_IN`` - Parameter input edges
 - ``PARAMETER_OUT`` - Parameter output edges
 - ``PARAMETER_FIELD`` - Field parameter edges
-- ``CALL_DEP`` - Call dependency edges
 - ``GLOBAL_DEP`` - Global dependency edges
+- ``VAL_DEP`` - Value dependency edges
+- ``CLS_MTH`` - Class-to-method edges
+- ``ANNO_VAR`` - Variable annotation edges
+- ``ANNO_GLOBAL`` - Global annotation edges
+- ``ANNO_OTHER`` - Other annotation edges
+- ``TYPE_OTHEREDGE`` - Type-related edges
+
+The aliases ``CALL_INV``, ``CALL_RET``, ``PARAM_IN``, and ``PARAM_OUT`` are
+also accepted in relationship patterns.
 
 **Example**:
 
@@ -283,7 +299,7 @@ Path Between Nodes
 
 Find nodes on paths between two sets of nodes.
 
-**Syntax**: ``MATCH path = (start)-[*]->(end) RETURN path``
+**Syntax**: ``MATCH (start)-[*]->(end) RETURN DISTINCT end``
 
 **Example**:
 
@@ -293,32 +309,34 @@ Find nodes on paths between two sets of nodes.
    WHERE input.name = 'getInput'
    MATCH (output:FUNC_ENTRY)-[:PARAMETER_IN]->(outputParam:PARAM_FORMALIN)
    WHERE output.name = 'system'
-   MATCH path = (inputRet)-[*]->(outputParam)
-   RETURN path
+   MATCH (inputRet)-[*]->(outputParam)
+   RETURN DISTINCT outputParam
 
-**Returns**: Paths from sources to sinks.
+**Returns**: Sink nodes reachable from the source nodes. A non-empty result
+means at least one source-to-sink path exists.
 
-**Use Case**: Information flow analysis.
+**Use Case**: Information flow analysis. Return a node from each end of the
+path rather than binding ``path``; use the CLI ``--analysis=shortest-path`` or
+``--analysis=chop`` modes when you need a materialized witness path.
 
 Shortest Path
 ^^^^^^^^^^^^^
 
-Find shortest path between two sets of nodes.
-
-**Syntax**: ``MATCH path = shortestPath((start)-[*]->(end)) RETURN path``
+Shortest-path queries are a built-in analysis mode rather than a Cypher
+function; ``shortestPath(...)`` is not part of the query grammar.
 
 **Example**:
 
-.. code-block:: cypher
+.. code-block:: bash
 
-   MATCH (malloc:FUNC_ENTRY)-[:PARAMETER_OUT]->(mallocRet:INST_RET)
-   WHERE malloc.name = 'malloc'
-   MATCH (free:FUNC_ENTRY)-[:PARAMETER_IN]->(freeParam:PARAM_FORMALIN)
-   WHERE free.name = 'free'
-   MATCH path = shortestPath((mallocRet)-[*]->(freeParam))
-   RETURN path
+   ./build/bin/lotus-ir-pdg-query --analysis=shortest-path \
+     --criteria-query "MATCH (m:INST_FUNCALL) WHERE m.callee = 'malloc' RETURN m" \
+     --target-query "MATCH (f:INST_FUNCALL) WHERE f.callee = 'free' RETURN f" \
+     --edge-preset value-flow program.bc
 
-**Returns**: Shortest path between nodes.
+**Returns**: The shortest dependence path between the criteria and target
+nodes selected by the two Cypher queries. Add ``--format=json`` to inspect the
+witness nodes or ``--format=dot`` to render the path.
 
 Set Operations
 ~~~~~~~~~~~~~~~
@@ -347,41 +365,43 @@ Union of two sets using ``UNION`` keyword.
 Intersection
 ^^^^^^^^^^^^
 
-Intersection using ``WHERE EXISTS`` subquery.
+Intersection by binding the same variable in two ``MATCH`` clauses.
 
-**Syntax**: ``MATCH (n) WHERE EXISTS { MATCH (m) WHERE ... } RETURN n``
+**Syntax**: ``MATCH (a)-[*]->(n) MATCH (b)-[*]->(n) RETURN n``
 
 **Example**:
 
 .. code-block:: cypher
 
-   MATCH (dataNodes:INST_FUNCALL)
-   WHERE EXISTS {
-     MATCH (controlNodes:INST_BR)
-     WHERE dataNodes.id = controlNodes.id
-   }
-   RETURN dataNodes
+   MATCH (source:FUNC_ENTRY)-[*]->(n)
+   WHERE source.name = 'read_input'
+   MATCH (sink:FUNC_ENTRY)-[*]->(n)
+   WHERE sink.name = 'process'
+   RETURN n
 
-**Returns**: Nodes in both sets.
+**Returns**: Nodes reachable from both functions.
 
-**Use Case**: Find nodes that are both data and control dependent.
+**Use Case**: Find program points shared by two flows. Bind the same variable in
+both ``MATCH`` clauses to intersect their result sets.
 
 Difference
 ^^^^^^^^^^
 
-Set difference using ``WHERE NOT``.
+The grammar has no direct set-difference operator. Run both queries and
+subtract the result sets, or exclude rows with a negated condition on a
+supported property.
 
-**Syntax**: ``MATCH (n) WHERE NOT (condition) RETURN n``
+**Syntax**: ``MATCH (n) WHERE NOT n.property = value RETURN n``
 
 **Example**:
 
 .. code-block:: cypher
 
    MATCH (calls:INST_FUNCALL)
-   WHERE NOT (calls:INST_BR)
+   WHERE NOT calls.callee = 'printf'
    RETURN calls
 
-**Returns**: Nodes in first set but not matching condition.
+**Returns**: Nodes in the first set that do not satisfy the negated condition.
 
 Filtering with WHERE
 ~~~~~~~~~~~~~~~~~~~~
@@ -402,7 +422,7 @@ Filter nodes by properties.
    RETURN n
 
    MATCH (n)
-   WHERE n.line > 100 AND n.line < 200
+   WHERE n.src_line > 100 AND n.src_line < 200
    RETURN n
 
 Multiple Conditions
@@ -417,7 +437,7 @@ Combine conditions with AND, OR, NOT.
 .. code-block:: cypher
 
    MATCH (n:INST_FUNCALL)
-   WHERE n.name = 'malloc' OR n.name = 'calloc'
+   WHERE n.callee = 'malloc' OR n.callee = 'calloc'
    RETURN n
 
 Security Analysis Examples
@@ -434,15 +454,27 @@ Check if secret data flows to network:
    WHERE secret.name = 'getPassword'
    MATCH (network:FUNC_ENTRY)-[:PARAMETER_IN]->(networkParam:PARAM_FORMALIN)
    WHERE network.name = 'sendToNetwork'
-   MATCH path = (secretRet)-[*]->(networkParam)
-   RETURN path
+   MATCH (secretRet)-[*]->(networkParam)
+   RETURN DISTINCT networkParam
 
-If result is non-empty, there's a potential information leak.
+If result is non-empty, there's a potential information leak. The returned
+node is the sink reached by the secret value; use ``--analysis=shortest-path``
+if you need the actual witness path.
 
 Sanitization Verification
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Verify all user inputs are sanitized before use in SQL:
+Check which user inputs reach SQL sinks directly, then check which of those
+flows pass through a sanitizer:
+
+.. code-block:: cypher
+
+   MATCH (sources:FUNC_ENTRY)-[:PARAMETER_OUT]->(sourceRet:INST_RET)
+   WHERE sources.name = 'getUserInput'
+   MATCH (sinks:FUNC_ENTRY)-[:PARAMETER_IN]->(sinkParam:PARAM_FORMALIN)
+   WHERE sinks.name = 'executeSQL'
+   MATCH (sourceRet)-[*]->(sinkParam)
+   RETURN DISTINCT sinkParam
 
 .. code-block:: cypher
 
@@ -452,30 +484,32 @@ Verify all user inputs are sanitized before use in SQL:
    WHERE sanitizers.name = 'sanitizeSQL'
    MATCH (sinks:FUNC_ENTRY)-[:PARAMETER_IN]->(sinkParam:PARAM_FORMALIN)
    WHERE sinks.name = 'executeSQL'
-   MATCH path = (sourceRet)-[*]->(sinkParam)
-   WHERE NOT EXISTS {
-     MATCH (sourceRet)-[*]->(sanitizerRet)-[*]->(sinkParam)
-   }
-   RETURN path
+   MATCH (sourceRet)-[*]->(sanitizerRet)-[*]->(sinkParam)
+   RETURN DISTINCT sinkParam
 
-If result is empty, all flows are sanitized.
+The two queries form the two halves of a sanitization check: sinks returned by
+Query 1 but not Query 2 are candidates for review. The query grammar has no
+negated path pattern, so express the complement by comparing the two result
+sets rather than with ``NOT EXISTS``.
 
 Access Control Policy
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Verify sensitive file operations require authorization:
+Check sensitive file operations guarded by an authorization check:
 
 .. code-block:: cypher
 
    MATCH (auth:FUNC_ENTRY)-[:PARAMETER_OUT]->(authRet:INST_RET)
    WHERE auth.name = 'checkPermission'
-   MATCH (authRet)-[:CONTROLDEP_BR]->(check)
+   MATCH (authRet)-[:CONTROLDEP_BR]->(check)-[:CONTROLDEP_BR]->(fileParam)
    MATCH (fileOps:FUNC_ENTRY)-[:PARAMETER_IN]->(fileParam:PARAM_FORMALIN)
    WHERE fileOps.name = 'openFile' OR fileOps.name = 'writeFile'
-   WHERE NOT EXISTS {
-     MATCH (check)-[:CONTROLDEP_BR]->(fileParam)
-   }
-   RETURN fileParam
+   RETURN DISTINCT fileParam
+
+Run the same query without the authorization chain to list every file
+operation; operations missing from the guarded result need review. As with the
+sanitization check, the complement is computed outside the query because
+negated path patterns are not supported.
 
 Null Pointer Analysis
 ~~~~~~~~~~~~~~~~~~~~~
@@ -484,10 +518,10 @@ Find potential null dereferences:
 
 .. code-block:: cypher
 
-   MATCH (nullRet:INST_RET)
-   WHERE nullRet.function = 'malloc' OR nullRet.function = 'fopen'
-   MATCH (nullRet)-[*]->(deref)
-   WHERE deref:INST_LOAD OR deref:INST_STORE
+   MATCH (alloc:INST_FUNCALL)
+   WHERE alloc.callee = 'malloc' OR alloc.callee = 'fopen'
+   MATCH (alloc)-[*]->(deref:INST_OTHER)
+   WHERE deref.opcode IN ['load', 'store']
    RETURN deref
 
 Control Flow Analysis
@@ -514,8 +548,8 @@ Find dependencies between function parameters:
    WHERE inputs.name = 'processData'
    MATCH (outputs:FUNC_ENTRY)-[:PARAMETER_OUT]->(outputRet:INST_RET)
    WHERE outputs.name = 'processData'
-   MATCH path = (inputParam)-[*]->(outputRet)
-   RETURN path
+   MATCH (inputParam)-[*]->(outputRet)
+   RETURN DISTINCT outputRet
 
 Taint Analysis
 ~~~~~~~~~~~~~~
@@ -528,42 +562,39 @@ Complete taint analysis from sources to sinks:
    WHERE sources.name = 'read' OR sources.name = 'recv' OR sources.name = 'scanf'
    MATCH (sinks:FUNC_ENTRY)-[:PARAMETER_IN]->(sinkParam:PARAM_FORMALIN)
    WHERE sinks.name = 'system' OR sinks.name = 'exec' OR sinks.name = 'popen'
-   MATCH path = (sourceRet)-[*]->(sinkParam)
-   RETURN path
+   MATCH (sourceRet)-[*]->(sinkParam)
+   RETURN DISTINCT sinkParam
 
 Query File Format
 -----------------
 
-Batch query files support:
+Batch query files may contain single-line or multi-line queries:
 
-- Comments (``#`` prefix)
-- Multiple queries (one per line or separated by ``;``)
-- Multi-line queries
+- A line whose first character is ``#`` is a comment and also separates queries.
+- Blank lines separate queries.
+- A trailing ``;`` terminates the current query.
+- A new ``MATCH`` after a completed query (one containing ``RETURN`` or
+  ``LIMIT``) starts a new query, so files with one query per line also work.
 
 Example query file (``security_policy.txt``):
 
-.. code-block:: cypher
+.. code-block:: text
 
-   // Security Policy Verification
-   
-   // Check for direct flows from sources to sinks
+   # Direct flows from sources to sinks
    MATCH (sources:FUNC_ENTRY)-[:PARAMETER_OUT]->(sourceRet:INST_RET)
    WHERE sources.name = 'read' OR sources.name = 'recv'
    MATCH (sinks:FUNC_ENTRY)-[:PARAMETER_IN]->(sinkParam:PARAM_FORMALIN)
    WHERE sinks.name = 'system' OR sinks.name = 'exec'
-   MATCH path = (sourceRet)-[*]->(sinkParam)
-   RETURN path
-   
-   // Check sensitive operations are authorized
+   MATCH (sourceRet)-[*]->(sinkParam)
+   RETURN DISTINCT sinkParam
+
+   # Sensitive operations guarded by checkAuth
    MATCH (auth:FUNC_ENTRY)-[:PARAMETER_OUT]->(authRet:INST_RET)
    WHERE auth.name = 'checkAuth'
-   MATCH (authRet)-[:CONTROLDEP_BR]->(check)
+   MATCH (authRet)-[:CONTROLDEP_BR]->(check)-[:CONTROLDEP_BR]->(opParam)
    MATCH (sensitiveOps:FUNC_ENTRY)-[:PARAMETER_IN]->(opParam:PARAM_FORMALIN)
    WHERE sensitiveOps.name = 'deleteFile' OR sensitiveOps.name = 'changePassword'
-   WHERE NOT EXISTS {
-     MATCH (check)-[:CONTROLDEP_BR]->(opParam)
-   }
-   RETURN opParam
+   RETURN DISTINCT opParam
 
 Run with:
 
@@ -571,24 +602,34 @@ Run with:
 
    ./build/bin/lotus-ir-pdg-query -f security_policy.txt program.bc
 
+The multi-line examples elsewhere in this page can be copied directly into a
+batch file; separate each example with a blank line or ``#`` comment.
+
 Best Practices
 --------------
 
 1. **Use Descriptive Variable Names**:
 
+   **Good**:
+
    .. code-block:: cypher
 
-      // Good
       MATCH (userInput:FUNC_ENTRY)-[:PARAMETER_OUT]->(inputRet:INST_RET)
       WHERE userInput.name = 'scanf'
-      
-      // Bad
+      RETURN inputRet
+
+   **Avoid**:
+
+   .. code-block:: cypher
+
       MATCH (x:FUNC_ENTRY)-[:PARAMETER_OUT]->(y:INST_RET)
       WHERE x.name = 'scanf'
+      RETURN y
 
 2. **Break Complex Queries**:
 
-   Use multiple MATCH clauses for clarity:
+   Use multiple MATCH clauses for clarity. This query returns input-to-sink
+   flows that pass through a sanitizer:
 
    .. code-block:: cypher
 
@@ -598,48 +639,47 @@ Best Practices
       WHERE sanitizers.name = 'sanitize'
       MATCH (sinks:FUNC_ENTRY)-[:PARAMETER_IN]->(sinkParam:PARAM_FORMALIN)
       WHERE sinks.name = 'output'
-      MATCH path = (sourceRet)-[*]->(sinkParam)
-      WHERE NOT EXISTS {
-        MATCH (sourceRet)-[*]->(sanitizerRet)-[*]->(sinkParam)
-      }
-      RETURN path
+      MATCH (sourceRet)-[*]->(sanitizerRet)-[*]->(sinkParam)
+      RETURN DISTINCT sinkParam
+
+   To find unsanitized flows, run the same query without the sanitizer pattern
+   and compare the two result sets.
 
 3. **Comment Your Policies**:
 
-   .. code-block:: cypher
+   Comments belong on their own ``#`` lines in batch files:
 
-      // Policy: User input must be sanitized before database queries
-      MATCH (input:FUNC_ENTRY)-[:PARAMETER_OUT]->(inputRet:INST_RET)
-      WHERE input.name = 'getUserInput'
-      MATCH (sanitize:FUNC_ENTRY)-[:PARAMETER_OUT]->(sanitizerRet:INST_RET)
-      WHERE sanitize.name = 'sanitizeSQL'
-      MATCH (dbQuery:FUNC_ENTRY)-[:PARAMETER_IN]->(queryParam:PARAM_FORMALIN)
-      WHERE dbQuery.name = 'executeQuery'
-      MATCH path = (inputRet)-[*]->(queryParam)
-      WHERE NOT EXISTS {
-        MATCH (inputRet)-[*]->(sanitizerRet)-[*]->(queryParam)
-      }
-      RETURN path
+   .. code-block:: text
+
+      # Policy: user input must reach the database through sanitizeSQL
+      MATCH (input:FUNC_ENTRY)-[:PARAMETER_OUT]->(inputRet:INST_RET) WHERE input.name = 'getUserInput' MATCH (sanitize:FUNC_ENTRY)-[:PARAMETER_OUT]->(sanitizerRet:INST_RET) WHERE sanitize.name = 'sanitizeSQL' MATCH (dbQuery:FUNC_ENTRY)-[:PARAMETER_IN]->(queryParam:PARAM_FORMALIN) WHERE dbQuery.name = 'executeQuery' MATCH (inputRet)-[*]->(sanitizerRet)-[*]->(queryParam) RETURN DISTINCT queryParam
 
 4. **Test Incrementally**:
 
-   Start with simple queries and build up:
+   Start with simple queries and build up.
+
+   Verify the source exists:
 
    .. code-block:: cypher
 
-      // Step 1: Verify sources exist
       MATCH (n:FUNC_ENTRY) WHERE n.name = 'getInput' RETURN n
-      
-      // Step 2: Verify sinks exist
+
+   Verify the sink exists:
+
+   .. code-block:: cypher
+
       MATCH (n:FUNC_ENTRY) WHERE n.name = 'system' RETURN n
-      
-      // Step 3: Check flows
+
+   Then check for flows:
+
+   .. code-block:: cypher
+
       MATCH (input:FUNC_ENTRY)-[:PARAMETER_OUT]->(inputRet:INST_RET)
       WHERE input.name = 'getInput'
       MATCH (output:FUNC_ENTRY)-[:PARAMETER_IN]->(outputParam:PARAM_FORMALIN)
       WHERE output.name = 'system'
-      MATCH path = (inputRet)-[*]->(outputParam)
-      RETURN path
+      MATCH (inputRet)-[*]->(outputParam)
+      RETURN DISTINCT outputParam
 
 5. **Use DISTINCT for Slices**:
 
@@ -669,17 +709,13 @@ Performance Tips
    .. code-block:: cypher
 
       MATCH (start)-[*1..5]->(end)
-      RETURN path
+      RETURN end
 
 2. **Use Specific Labels**: Always specify node labels when possible:
 
    .. code-block:: cypher
 
-      // Good
       MATCH (n:INST_FUNCALL) RETURN n
-      
-      // Less efficient
-      MATCH (n) WHERE n:INST_FUNCALL RETURN n
 
 3. **Filter Early**: Apply WHERE clauses as early as possible:
 

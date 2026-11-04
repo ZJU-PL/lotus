@@ -46,19 +46,20 @@ namespace fitx {
 State::State(int ID, std::string name, StateType type, StateMergeMethod method,
              bool early_notification, TriggerConstraint constraint,
              BugNotificationTiming timing)
-    : ID_(ID), name_(name), type_(type), method_(method),
-      early_notification_(early_notification), trigger_constraint_(constraint),
-      timing_(timing) {};
+    : ID_(ID), name_(name), type_(type), method_(method), timing_(timing),
+      trigger_constraint_(constraint),
+      early_notification_(early_notification) {}
 
 State::State(int ID, StateArgs &args)
     : ID_(ID), name_(args.name_), type_(args.type_), method_(args.method_),
-      early_notification_(args.early_notification_),
-      trigger_constraint_(args.trigger_constraint_), timing_(args.timing_) {};
+      timing_(args.timing_), trigger_constraint_(args.trigger_constraint_),
+      early_notification_(args.early_notification_) {}
 
 State::State(const State &state)
     : ID_(state.ID_), name_(state.name_), type_(state.type_),
-      method_(state.method_), early_notification_(state.early_notification_),
-      trigger_constraint_(state.trigger_constraint_), timing_(state.timing_) {};
+      method_(state.method_), timing_(state.timing_),
+      trigger_constraint_(state.trigger_constraint_),
+      early_notification_(state.early_notification_) {}
 
 void State::addTransition(State &state, TransitionRule &rule) {
   transitions_.push_back(std::pair<State, TransitionRule>(state, rule));
@@ -93,8 +94,8 @@ State &State::operator=(const State &state) {
 }
 
 StateManager::StateManager()
-    : early_state_transition_(false), init_state_(nullptr),
-      propagation_constraint_(nullptr) {
+    : propagation_constraint_(nullptr), init_state_(nullptr),
+      early_state_transition_(false) {
   StateArgs init_args =
       fitx::StateArgs("init", fitx::StateType::INIT);
   init_state_ = &createState(init_args);

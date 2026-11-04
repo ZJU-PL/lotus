@@ -58,7 +58,7 @@ Example Analyses
 Constant Propagation
 --------------------
 
-``WPDSConstantPropagation`` demonstrates a forward **constant
+``runConstantPropagationAnalysis`` demonstrates a forward **constant
 propagation** analysis:
 
 * facts track variables that currently hold constant values,
@@ -69,7 +69,7 @@ propagation** analysis:
 Liveness
 --------
 
-``WPDSLivenessAnalysis`` performs a backward **liveness analysis**:
+``runLivenessAnalysis`` performs a backward **liveness analysis**:
 
 * GEN collects variables used at an instruction (including loads and
   uses in stores),
@@ -79,7 +79,7 @@ Liveness
 Taint Analysis
 --------------
 
-``WPDSTaintAnalysis`` is a WPDS-based **taint analysis**:
+``runTaintAnalysis`` is a WPDS-based **taint analysis**:
 
 * facts represent tainted values,
 * GEN introduces taint at configurable source calls,
@@ -90,7 +90,7 @@ Taint Analysis
 Uninitialized Variables
 -----------------------
 
-``WPDSUninitializedVariables`` shows a forward analysis for detecting
+``runUninitializedVariablesAnalysis`` shows a forward analysis for detecting
 reads from **possibly uninitialized memory**:
 
 * GEN marks newly allocated locals (``alloca``) as uninitialized,

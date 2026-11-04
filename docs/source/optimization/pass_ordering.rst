@@ -53,8 +53,9 @@ Use cases
    llvm_utils::optimiseModule(M, llvm::OptimizationLevel::O2);
 
    // Then run Lotus analysis on the optimised IR
-   lotus::analysis::nullpointer::NullCheckAnalysis nullCheck(M);
-   nullCheck.run();
+   #include <Analysis/NullPointer/NullCheckAnalysis.h>
+   NullCheckAnalysis nullCheck;
+   nullCheck.runOnModule(M);
 
 See Also
 --------

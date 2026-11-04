@@ -103,6 +103,7 @@ public:
     auto node = std::make_unique<NodeT>(std::forward<Args>(args)...);
     NodeT *raw = node.get();
     raw->node_id_ = next_node_id_++;
+    raw->object_id_ = next_object_id_++;
     nodes_.push_back(std::move(node));
     assignNodeRegion(raw);
     compat_caches_dirty_ = true;
@@ -113,11 +114,15 @@ public:
   SiteT *createSite(Args &&...args) {
     auto site = std::make_unique<SiteT>(std::forward<Args>(args)...);
     SiteT *raw = site.get();
+    raw->object_id_ = next_object_id_++;
     sites_.push_back(std::move(site));
     return raw;
   }
 
   GuardedValueFlowNode *findNode(Value *value) const;
+  const DenseMap<Value *, GuardedValueFlowNode *> &valueNodes() const {
+    return value_nodes_;
+  }
   void mapValueNode(Value *value, GuardedValueFlowNode *node);
   // Interface nodes live in a separate namespace so synthetic call-boundary
   // values do not collide with ordinary SSA values.
@@ -242,6 +247,12 @@ public:
     } else if constexpr (std::is_same_v<SiteT, GuardedValueFlowReturnSite>) {
       return findReturnSite(inst);
     } else {
+      for (const auto &site : sites_) {
+        if (site->getInstruction() == inst) {
+          if (auto *typed_site = dynamic_cast<SiteT *>(site.get()))
+            return typed_site;
+        }
+      }
       return nullptr;
     }
   }
@@ -252,6 +263,13 @@ public:
   GuardedValueFlowNode *findFunctionSummaryReturnNode(unsigned ap_depth) const;
   void mapFunctionSummaryReturnNode(unsigned ap_depth,
                                     GuardedValueFlowNode *node);
+  bool isSummaryReturn(const GuardedValueFlowNode *node) const {
+    for (const auto &entry : function_summary_return_nodes_)
+      if (entry.second == node) return true;
+    for (const auto &entry : summary_return_nodes_)
+      for (auto *summary : entry.second) if (summary == node) return true;
+    return false;
+  }
   void resetFunctionSummaryInterface();
   void registerSummaryArgumentNode(unsigned ap_depth,
                                    GuardedValueFlowNode *node);
@@ -339,6 +357,7 @@ private:
 
   Function *base_function_;
   unsigned next_node_id_{0};
+  unsigned next_object_id_{0};
   std::vector<std::unique_ptr<GuardedValueFlowNode>> nodes_;
   std::vector<std::unique_ptr<GuardedValueFlowSite>> sites_;
   DenseMap<Value *, GuardedValueFlowNode *> value_nodes_;

@@ -10,9 +10,15 @@
 #include "IR/GVFG/GuardedValueFlowSites.h"
 
 #include "IR/GVFG/GuardedValueFlowGraph.h"
+#include <llvm/IR/Instructions.h>
 
 using namespace llvm;
 using namespace lotus::gvfg;
+
+Function *GuardedValueFlowCallSite::getCalledFunction() const {
+  auto *call = dyn_cast_or_null<CallBase>(getInstruction());
+  return call ? call->getCalledFunction() : nullptr;
+}
 
 void GuardedValueFlowCallSite::addCommonInput(GuardedValueFlowNode *node) {
   common_inputs_.push_back(node);

@@ -1,11 +1,7 @@
-// clang-format off
+#include "Dataflow/DemandAPA/Algebra.h"
 #include "Dataflow/DemandAPA/DemandOmp.h"
 #include "Dataflow/DemandAPA/Support.h"
 #include "bdd.h"
-#include "Dataflow/DemandAPA/Algebra.h"
-// clang-format on
-
-const int TIMEOUT = 20;
 
 bdd add(int i, int j) {
   // i and j are integers (binary strings) less than 2^GL. this returns a BDD

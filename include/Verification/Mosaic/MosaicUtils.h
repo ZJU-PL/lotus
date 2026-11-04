@@ -167,7 +167,7 @@ struct MTHSolver {
 
   MTHSolver(z3::context &ctx, bool is_bv,
             unsigned bv_size = UNDETERMINED_BV_SIZE)
-      : fp_solver(ctx), query(ctx), is_bv(is_bv), bv_size(bv_size) {}
+      : fp_solver(ctx), query(ctx), bv_size(bv_size), is_bv(is_bv) {}
   z3::expr_vector get_all_clauses() const;
   bool is_bv_solver() const { return is_bv; }
   unsigned get_bv_size() const;
@@ -248,8 +248,8 @@ struct ClauseAnalysisResult {
   VarIndexMap var_index_map;
 
   ClauseAnalysisResult(z3::context &ctx)
-      : in_pred_body_vars(), all_vars(), is_signed(Signedness::UNKNOWN),
-        bv_size(UNDETERM_BV_SIZE), has_bit_manipulating_apps(false) {}
+      : is_signed(Signedness::UNKNOWN), bv_size(UNDETERM_BV_SIZE),
+        has_bit_manipulating_apps(false), in_pred_body_vars(), all_vars() {}
 
   bool is_bv_size_determined() const { return bv_size != UNDETERM_BV_SIZE; }
 

@@ -3,6 +3,7 @@
 #include "CFL/InterleavedDyck/Core/Graph.h"
 
 #include <cstddef>
+#include <functional>
 
 namespace lotus::cfl::interleaved_dyck::staged_bounds {
 
@@ -37,6 +38,10 @@ struct Options {
   /// Reconstruct contributing edges from the saturated CFL relations instead
   /// of recording derivations eagerly. Disabled by default for compatibility.
   bool factorized_tracing = false;
+  /// Optional observation hook, invoked synchronously after each completed
+  /// stage (including its graph filtering). Useful for phase timing and RSS
+  /// high-water marks without changing which stages or results are computed.
+  std::function<void(Method)> stage_completed;
 };
 
 struct ApproximationResult {

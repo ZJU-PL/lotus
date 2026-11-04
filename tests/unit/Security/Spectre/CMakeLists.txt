@@ -1,0 +1,1 @@
+lotus_collect_test_sources(security_tests SpectreAnalysisTest.cpp)

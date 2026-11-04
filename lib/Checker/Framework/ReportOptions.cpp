@@ -7,6 +7,14 @@ llvm::cl::OptionCategory
                    "Options for controlling bug report output formats (applies "
                    "to all checkers)");
 
+// Diagnostic text rendering, shared by event-based builders.
+llvm::cl::opt<std::string>
+    TipFormat("report-decoration-format",
+              llvm::cl::desc("Diagnostic tip format: plain-text, html, "
+                             "pp-formatted-string or pp-event"),
+              llvm::cl::init("plain-text"), llvm::cl::cat(OutputCategory),
+              llvm::cl::sub(*llvm::cl::AllSubCommands));
+
 // JSON output
 llvm::cl::opt<std::string> JsonOutputFile(
     "report-json",

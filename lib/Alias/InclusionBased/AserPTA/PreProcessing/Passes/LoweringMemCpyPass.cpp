@@ -42,7 +42,7 @@ void LoweringMemCpyPass::lowerMemCpyForType(Type *type, Value *src, Value *dst,
   switch (type->getTypeID()) {
   case llvm::Type::StructTyID: {
     const auto *structType = static_cast<const StructType *>(type);
-    for (int i = 0; i < structType->getNumElements(); i++) {
+    for (unsigned i = 0; i < structType->getNumElements(); i++) {
       idx.push_back(ConstantInt::get(idxType, i));
       lowerMemCpyForType(structType->getElementType(i), src, dst, idx, builder);
       idx.pop_back();
@@ -51,7 +51,7 @@ void LoweringMemCpyPass::lowerMemCpyForType(Type *type, Value *src, Value *dst,
   }
   case llvm::Type::ArrayTyID: {
     const auto *arrayType = static_cast<const ArrayType *>(type);
-    for (int i = 0; i < arrayType->getNumElements(); i++) {
+    for (unsigned i = 0; i < arrayType->getNumElements(); i++) {
       idx.push_back(ConstantInt::get(idxType, i));
       lowerMemCpyForType(arrayType->getElementType(), src, dst, idx, builder);
       idx.pop_back();
@@ -112,7 +112,10 @@ bool LoweringMemCpyPass::runOnModule(llvm::Module &M) {
 
             if (dstType == srcType) {
               Type *elemType = dstType->getPointerElementType();
-              if (DL.getTypeAllocSize(elemType) == constLen->getSExtValue()) {
+              // The allocation size is unsigned; a negative constant length can
+              // never match it, so compare as unsigned without a sign mismatch.
+              if (DL.getTypeAllocSize(elemType) ==
+                  static_cast<uint64_t>(constLen->getSExtValue())) {
                 changed = true;
                 builder.SetInsertPoint(callInst);
 

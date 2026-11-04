@@ -81,8 +81,8 @@ protected:
   IndirectNodeSet indirectNodes;
 
   inline CGNodeBase(NodeID id, CGNodeKind type)
-      : id(id), type(type), superNode(nullptr), childNodes{}, indirectNodes{},
-        color(Color::DEFAULT) {}
+      : type(type), id(id), color(Color::DEFAULT), superNode(nullptr),
+        childNodes{}, indirectNodes{} {}
 
 private:
   inline bool insertConstraint(Self *node, Constraints edgeKind) {

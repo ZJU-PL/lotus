@@ -27,7 +27,7 @@ struct dfssorter {
 struct sorter {
   bool reverse;
   vector<int> *labels;
-  sorter(vector<int> *_labels, bool _r) : labels(_labels), reverse(_r) {}
+  sorter(vector<int> *_labels, bool _r) : reverse(_r), labels(_labels) {}
   bool operator()(const int a, const int b) const {
     if (!reverse) {
       if ((*labels)[a] > (*labels)[b])
@@ -189,7 +189,7 @@ public:
       vl.size = lout[i].size();
       vlabels[dfsmap[i]] = vl;
       prev += lout[i].size();
-      for (int j = 0; j < lout[i].size(); j++) {
+      for (size_t j = 0; j < lout[i].size(); j++) {
         out_uncover[counter++] = dfsmap[lout[i][j]];
       }
     }
@@ -447,7 +447,7 @@ public:
         int size, index;
         int *pointer = 0, *end = 0;
 
-        for (int i = 0; i < inoutgates[src][1].size(); i++) {
+        for (size_t i = 0; i < inoutgates[src][1].size(); i++) {
           nid = inoutgates[src][1][i];
           if (!contains(nid, trg))
             continue;
@@ -478,7 +478,7 @@ public:
         int size, index;
         int *pointer = 0, *end = 0;
 
-        for (int i = 0; i < inoutgates[src][1].size(); i++) {
+        for (size_t i = 0; i < inoutgates[src][1].size(); i++) {
           nid = inoutgates[src][1][i];
           if (!contains(nid, trg))
             continue;
@@ -621,7 +621,7 @@ public:
     } else {
       if (gates->get(trg)) {
         // src is NOT gate and trg is gate
-        for (int i = 0; i < inoutgates[src][1].size(); i++) {
+        for (size_t i = 0; i < inoutgates[src][1].size(); i++) {
           nid = inoutgates[src][1][i];
           if (!contains(nid, trg))
             continue;
@@ -644,7 +644,7 @@ public:
         }
       } else {
         // both src and trg are NOT gates
-        for (int i = 0; i < inoutgates[src][1].size(); i++) {
+        for (size_t i = 0; i < inoutgates[src][1].size(); i++) {
           nid = inoutgates[src][1][i];
           if (!contains(nid, trg))
             continue;
@@ -769,7 +769,7 @@ public:
       }
     } else {
 #endif
-      for (int i = 0; i < inoutgates[src][1].size(); i++) {
+      for (size_t i = 0; i < inoutgates[src][1].size(); i++) {
         nid = inoutgates[src][1][i];
         if (!contains(nid, trg))
           continue;
@@ -1076,7 +1076,7 @@ public:
     } else {
       if (gates->get(trg)) {
         // src is NOT gate and trg is gate
-        for (int i = 0; i < inoutgates[src][1].size(); i++) {
+        for (size_t i = 0; i < inoutgates[src][1].size(); i++) {
           nid = inoutgates[src][1][i];
           if (!contains(nid, trg))
             continue;
@@ -1099,7 +1099,7 @@ public:
         }
       } else {
         // both src and trg are NOT gates
-        for (int i = 0; i < inoutgates[src][1].size(); i++) {
+        for (size_t i = 0; i < inoutgates[src][1].size(); i++) {
           nid = inoutgates[src][1][i];
           if (!contains(nid, trg))
             continue;

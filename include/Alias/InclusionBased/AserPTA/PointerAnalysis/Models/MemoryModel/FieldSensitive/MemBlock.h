@@ -42,7 +42,7 @@ private:
 protected:
   MemBlock(const ctx *c, const llvm::Value *v, const AllocType t,
            const MemBlockKind kind)
-      : allocSite(c, v, t), kind(kind) {};
+      : kind(kind), allocSite(c, v, t) {};
 
 public:
   __attribute__((warn_unused_result)) inline const ctx *getContext() const {

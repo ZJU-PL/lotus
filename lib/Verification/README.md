@@ -7,11 +7,14 @@ symbolic reasoning.
 | Subdir | Purpose |
 |--------|---------|
 | **Analysis** | Pre-verification module analyses such as module checking, instruction and loop classification, instruction counting, and test-target extraction. |
+| **Automata** | Automata library: Nested Word Automata (NWA), Büchi automata, operations, minimization, inclusion, and simulation games. |
 | **Driver** | Common verification-driver interface and runner logic for invoking verification engines and normalizing results. |
 | **Frontend** | Frontend implementations for verification-oriented input languages; currently contains the Boolean/predicate-program frontend. |
 | **Mosaic** | Theory-modular CHC solving across fixed-size bit-vectors and integer arithmetic. See `Mosaic/README.md`. |
+| **PathProgram** | Path program extraction, compressed CFG representation, and path-based analysis. |
 | **Sifa** | Symbolic Interpretation with Fluid Abstractions: interprocedural symbolic interpretation over ICFG-style procedure graphs and regex-DAG summaries. See `Sifa/README.md`. |
 | **SymAbsAI** | SMT-backed abstract interpretation framework with reusable transfer semantics, fixpoint engines, and abstract domains. See `SymAbsAI/README.md`. |
+| **TraceAbstraction** | Automata-based trace abstraction refinement (CEGAR) verification engine using interpolant automata and trace checks. |
 | **Transform** | IR transformations for verification, including CFG normalization, loop/control-flow rewriting, memory instrumentation, and nondeterminism injection. |
 | **Backends** | Lotus-owned build adapters for optional vendored verification backends. |
 
@@ -38,7 +41,7 @@ Pre-verification analysis passes:
 - **SymAbsAI**: reusable abstract interpretation framework with SMT-based symbolic abstraction.
 - **Mosaic**: bit-precise CHC satisfiability through coordinated bit-vector and integer Spacer instances.
 - **Seahorn**: Horn-clause-based verification.
-- **smack**: translation from LLVM IR to Boogie-based verification workflows.
+- **SMACK**: translation from LLVM IR to Boogie-based verification workflows.
 
 The upstream-derived backend implementations and headers live under
 `third-party/verification/`. `lib/Verification/Backends/` is the Lotus-owned

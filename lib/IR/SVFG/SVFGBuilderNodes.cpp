@@ -21,6 +21,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "IR/ICFG/ICFG.h"
+#include "IR/SVFG/NormalizedGep.h"
 #include "IR/SVFG/SVFGBuilder.h"
 
 #include <llvm/Analysis/CaptureTracking.h>
@@ -104,16 +105,22 @@ void SVFGBuilder::buildNodes() {
             registerConstantFields(dyn_cast<Constant>(operand.get()));
 
           const auto *expression = dyn_cast<ConstantExpr>(constant);
+          if (const auto *alias = dyn_cast<GlobalAlias>(constant)) {
+            const auto &objects = svfg->getObjectIds(alias->getAliasee());
+            svfg->setObjectsForValue(alias, objects);
+            return;
+          }
+          if (expression && expression->isCast()) {
+            const auto &objects = svfg->getObjectIds(expression->getOperand(0));
+            if (!objects.empty())
+              svfg->setObjectsForValue(expression, objects);
+            return;
+          }
           if (!expression ||
               expression->getOpcode() != Instruction::GetElementPtr)
             return;
           const auto *gep = cast<GEPOperator>(expression);
-          APInt offset(layout.getIndexTypeSizeInBits(
-                           gep->getPointerOperandType()),
-                       0);
-          if (!gep->accumulateConstantOffset(layout, offset) ||
-              offset.isNegative())
-            return;
+          const auto access = getNormalizedGepOffset(gep, layout);
 
           uint32_t baseObject = 0;
           uint64_t baseOffset = 0;
@@ -140,7 +147,12 @@ void SVFGBuilder::buildNodes() {
             if (info->baseObjId != 0)
               baseObject = info->baseObjId;
 
-          const uint64_t localOffset = offset.getZExtValue();
+          if (!access.valid) {
+            svfg->setObjectsForValue(
+                expression, SVFGNodeBS{getOrCreateFIObjId(baseObject)});
+            return;
+          }
+          const uint64_t localOffset = access.offset;
           if (localOffset >
               std::numeric_limits<uint64_t>::max() - baseOffset)
             return;
@@ -149,13 +161,14 @@ void SVFGBuilder::buildNodes() {
               byteOffset == 0 ? baseObject
                               : svfg->getOffsetObject(baseObject, byteOffset);
           if (fieldObject == 0) {
-            fieldObject = nextObjId++;
+            fieldObject = allocateObjectId();
             SVFG::ObjectInfo info;
             if (const auto *baseInfo = svfg->getObjectInfo(baseObject))
               info = *baseInfo;
             info.baseObjId = baseObject;
             info.fieldOffset = byteOffset;
             info.hasFieldOffset = true;
+            info.isArray = info.isArray || access.traversesArray;
             svfg->setObjectInfo(fieldObject, info);
             svfg->setObjectBase(fieldObject, baseObject);
             svfg->setObjectOffset(fieldObject, byteOffset);
@@ -172,8 +185,18 @@ void SVFGBuilder::buildNodes() {
     for (const GlobalVariable &GV : M->globals())
       if (GV.hasInitializer())
         registerConstantFields(GV.getInitializer());
+    for (const GlobalAlias &alias : M->aliases())
+      registerConstantFields(&alias);
+    // Expressions in instruction operands need the same objects as global
+    // initializers (including nested GEPs used by stores, phis and calls).
+    for (const Function &function : *M)
+      for (const BasicBlock &block : function)
+        for (const Instruction &instruction : block)
+          for (const Use &operand : instruction.operands())
+            registerConstantFields(dyn_cast<Constant>(operand.get()));
   }
   buildTopLevelNodes();
+  prepareMemoryRegionPartitioning();
   buildAddressTakenNodes();
   buildFormalParmNodes();
   buildActualParmNodes();
@@ -198,8 +221,8 @@ void SVFGBuilder::buildTopLevelNodes() {
     auto it = valueToNode.find(v);
     if (it != valueToNode.end())
       return it->second;
-    const bool isConstPtrTarget =
-        isa<Function>(v) || isa<GlobalVariable>(v) || isa<GlobalAlias>(v);
+    const bool isConstPtrTarget = isa<Function>(v) || isa<GlobalVariable>(v) ||
+                                  isa<GlobalAlias>(v) || isa<ConstantExpr>(v);
     if (!isConstPtrTarget)
       return std::numeric_limits<uint32_t>::max();
 
@@ -209,7 +232,12 @@ void SVFGBuilder::buildTopLevelNodes() {
     SVFG::ObjectInfo info;
     info.isFunction = isa<Function>(v);
     info.isGlobal = isa<GlobalValue>(v) && !isa<Function>(v);
-    uint32_t baseObjId = ensureBaseObjIdForValue(v, info);
+    const SVFGNodeBS &known = svfg->getObjectIds(v);
+    uint32_t baseObjId = known.size() == 1 ? *known.begin() : 0;
+    if (baseObjId == 0)
+      baseObjId = isa<ConstantExpr, GlobalAlias>(v)
+                      ? getOrCreateUnknownObjId()
+                      : ensureBaseObjIdForValue(v, info);
 
     const uint32_t nodeId = nextNode();
     auto *addrNode = new AddrSVFGNode(nodeId, at, v);
@@ -271,9 +299,17 @@ void SVFGBuilder::buildTopLevelNodes() {
       // etc.  Both can carry pointer-type results, so they must be considered.
       const bool isUnary = isa<UnaryOperator>(&inst) || isa<CastInst>(&inst);
       const bool hasPointerResult = inst.getType()->isPointerTy();
-      if (!hasPointerResult && !isStore && !isCmp && !isBranch && !isBinary &&
-          !isUnary)
-        continue;
+      if (config.pointerOnly) {
+        const bool isPointerStore =
+            isStore &&
+            cast<StoreInst>(&inst)->getValueOperand()->getType()->isPointerTy();
+        if (!hasPointerResult && !isPointerStore)
+          continue;
+      } else {
+        if (!hasPointerResult && !isStore && !isCmp && !isBranch && !isBinary &&
+            !isUnary)
+          continue;
+      }
 
       if (isa<AllocaInst>(&inst)) {
         uint32_t nodeId = nextNode();
@@ -489,18 +525,34 @@ void SVFGBuilder::buildAddressTakenNodes() {
         if (const AllocaInst *alloca = dyn_cast<AllocaInst>(opVal)) {
           if (!processedAllocas.insert(alloca).second)
             continue;
+          if (config.pointerOnly &&
+              !canTypeContainPointer(alloca->getAllocatedType()))
+            continue;
 
           bool addressTaken = false;
           for (const Use &use : alloca->uses()) {
-            if (!isa<LoadInst>(use.getUser())) {
-              addressTaken = true;
-              break;
+            const User *user = use.getUser();
+            if (config.pointerOnly) {
+              if (const auto *store = dyn_cast<StoreInst>(user)) {
+                if (store->getValueOperand() == alloca ||
+                    store->getValueOperand()->getType()->isPointerTy()) {
+                  addressTaken = true;
+                  break;
+                }
+              } else if (!isa<LoadInst>(user)) {
+                addressTaken = true;
+                break;
+              }
+            } else {
+              if (!isa<LoadInst>(user)) {
+                addressTaken = true;
+                break;
+              }
             }
           }
 
           if (addressTaken) {
-            std::vector<const void *> ptsVoid = getPointsToSet(alloca);
-            SVFGNodeBS objIds = convertPTAObjectsToObjIDs(ptsVoid);
+            SVFGNodeBS objIds = getObjectIdsForValue(alloca);
 
             const Function *entryFunc = alloca->getParent()->getParent();
             if (objIds.empty()) {
@@ -520,11 +572,32 @@ void SVFGBuilder::buildAddressTakenNodes() {
   const Module *M = getModuleFromICFG(icfg);
   if (M && config.includeGlobals) {
     for (const GlobalVariable &gv : M->globals()) {
+      if (config.pointerOnly &&
+          !canTypeContainPointer(gv.getValueType()))
+        continue;
       bool addressTaken = false;
       for (const User *user : gv.users()) {
-        if (isa<Instruction>(user)) {
-          addressTaken = true;
-          break;
+        if (config.pointerOnly) {
+          if (const auto *store = dyn_cast<StoreInst>(user)) {
+            if (store->getValueOperand() == &gv ||
+                store->getValueOperand()->getType()->isPointerTy()) {
+              addressTaken = true;
+              break;
+            }
+          } else if (isa<LoadInst>(user)) {
+            if (user->getType()->isPointerTy()) {
+              addressTaken = true;
+              break;
+            }
+          } else if (isa<Instruction>(user)) {
+            addressTaken = true;
+            break;
+          }
+        } else {
+          if (isa<Instruction>(user)) {
+            addressTaken = true;
+            break;
+          }
         }
         if (const ConstantExpr *ce = dyn_cast<ConstantExpr>(user)) {
           if (ce->getOpcode() == Instruction::GetElementPtr ||
@@ -537,8 +610,7 @@ void SVFGBuilder::buildAddressTakenNodes() {
       }
 
       if (addressTaken) {
-        std::vector<const void *> ptsVoid = getPointsToSet(&gv);
-        SVFGNodeBS objIds = convertPTAObjectsToObjIDs(ptsVoid);
+        SVFGNodeBS objIds = getObjectIdsForValue(&gv);
 
         if (objIds.empty()) {
           const uint32_t memReg = getOrCreateMemReg(&gv);
@@ -756,8 +828,11 @@ void SVFGBuilder::buildActualRetNodes() {
       // Handle call return value (if call result is used)
       if (call->getType()->isPointerTy()) {
         if (const Function *directCallee = call->getCalledFunction()) {
-          if (directCallee->isDeclaration())
+          if (directCallee->isDeclaration()) {
+            std::vector<SVFGEdge *> edges;
+            connectExternalReturn(svfg.get(), call, directCallee, edges);
             continue;
+          }
         }
 
         uint32_t nodeId = nextNode();
@@ -777,6 +852,85 @@ void SVFGBuilder::buildActualRetNodes() {
       }
     }
   }
+}
+
+void SVFGBuilder::connectExternalReturn(SVFG *graph, const CallBase *call,
+                                        const Function *callee,
+                                        std::vector<SVFGEdge *> &edges) {
+  if (!graph || !call || !callee || !call->getType()->isPointerTy())
+    return;
+  SVFGNode *result = graph->getValueNode(call);
+  if (!result)
+    return;
+  // Indirect calls already have an ActualRet anchor. Keeping summary edges
+  // incident to it lets the versioned solver discover and schedule them.
+  for (SVFGNode *node : graph->getActualRets(call)) {
+    result = node;
+    break;
+  }
+  auto addEdge = [&](SVFGNode *source) {
+    if (source)
+      if (SVFGEdge *edge =
+              graph->addEdge(source, result, SVFGEdgeK::IntraCopy, call))
+        edges.push_back(edge);
+  };
+  auto address = [&](uint32_t object) {
+    auto *node =
+        new AddrSVFGNode(nextNode(), result->getICFGNode(), nullptr, object);
+    graph->addNode(node);
+    addEdge(node);
+  };
+
+  // malloc/new already have an address node rather than a copy result.
+  bool modeled = isa<AddrSVFGNode>(result);
+  if (externalSpecs && externalSpecs->isAllocator(callee) && !modeled) {
+    const uint32_t object = allocateObjectId();
+    SVFG::ObjectInfo info;
+    info.isHeap = true;
+    info.baseObjId = object;
+    graph->setObjectInfo(object, info);
+    graph->setObjectValue(object, call);
+    graph->addObjectForValue(call, object);
+    address(object);
+    modeled = true;
+  }
+  if (externalSpecs) {
+    const auto *spec = externalSpecs->getAPISpec().get(callee->getName().str());
+    if (spec)
+      for (const auto &effect : spec->copies) {
+        if (effect.dst.kind != lotus::SelectorKind::Ret ||
+            effect.dstQualifier != lotus::QualifierKind::Value)
+          continue;
+        if (effect.src.kind == lotus::SelectorKind::Null) {
+          modeled = true; // NULL is bottom.
+          continue;
+        }
+        SVFGNode *source = nullptr;
+        if (effect.src.kind == lotus::SelectorKind::Arg &&
+            effect.srcQualifier == lotus::QualifierKind::Value &&
+            effect.src.index >= 0 &&
+            static_cast<unsigned>(effect.src.index) < call->arg_size()) {
+          const Value *argument = call->getArgOperand(effect.src.index);
+          if (argument->getType()->isPointerTy())
+            source = graph->getValueNode(argument);
+        }
+        // STATIC and dereferenced-return effects need an unknown address
+        // until their complete memory summaries are available. Preserve each
+        // alternative even when another effect already modeled an argument.
+        if (source)
+          addEdge(source);
+        else
+          address(getOrCreateUnknownObjId());
+        modeled = true;
+      }
+  }
+  for (unsigned index = 0; index < call->arg_size(); ++index)
+    if (call->paramHasAttr(index, Attribute::Returned)) {
+      addEdge(graph->getValueNode(call->getArgOperand(index)));
+      modeled = true;
+    }
+  if (!modeled)
+    address(getOrCreateUnknownObjId());
 }
 
 void SVFGBuilder::refreshStmtPointerNodeIds() {

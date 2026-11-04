@@ -244,6 +244,85 @@ uint32_t SVFG::getObjectId(const llvm::Value *v) const {
   return (it != valueToObjId.end()) ? it->second : 0;
 }
 
+uint32_t SVFG::getFieldInsensitiveObject(uint32_t baseObjId) const {
+  if (baseObjId == 0)
+    return 0;
+  if (isUnknownObject(baseObjId))
+    return baseObjId;
+
+  uint32_t canonical = baseObjId;
+  if (const ObjectInfo *info = getObjectInfo(baseObjId))
+    if (info->baseObjId != 0)
+      canonical = info->baseObjId;
+
+  // A pre-analysis may hand us a field object that is itself the collapsed
+  // representative of its base (SVF's `getFIObjVar` can return such a node).
+  if (const ObjectInfo *info = getObjectInfo(baseObjId))
+    if (info->isFieldInsensitive && baseObjId != canonical &&
+        !info->hasFieldOffset)
+      return baseObjId;
+
+  for (const auto &entry : objIdToInfo) {
+    if (entry.first == canonical)
+      continue;
+    const ObjectInfo &info = entry.second;
+    if (!info.isFieldInsensitive || info.hasFieldOffset)
+      continue;
+    if (info.baseObjId == canonical)
+      return entry.first;
+  }
+  return 0;
+}
+
+uint32_t SVFG::getOrCreateFieldInsensitiveObject(uint32_t baseObjId) {
+  if (baseObjId == 0)
+    return 0;
+  if (isUnknownObject(baseObjId))
+    return baseObjId;
+
+  if (const uint32_t existing = getFieldInsensitiveObject(baseObjId))
+    return existing;
+
+  uint32_t base = baseObjId;
+  if (const ObjectInfo *info = getObjectInfo(baseObjId))
+    if (info->baseObjId != 0)
+      base = info->baseObjId;
+
+  // Mark the base first: every subsequent field access must collapse, exactly
+  // like SVF's irreversible `setObjFieldInsensitive`.
+  ObjectInfo baseUpdate;
+  baseUpdate.isFieldInsensitive = true;
+  baseUpdate.baseObjId = base;
+  updateObjectInfo(base, baseUpdate);
+
+  ObjectInfo info;
+  if (const ObjectInfo *baseInfo = getObjectInfo(base))
+    info = *baseInfo;
+  info.isFieldInsensitive = true;
+  info.isArray = false;
+  info.baseObjId = base;
+  info.hasFieldOffset = false;
+  info.fieldOffset = 0;
+
+  const uint32_t fiObjId = allocateObjectId();
+  setObjectInfo(fiObjId, info);
+  if (const llvm::Value *value = getObjectValue(base))
+    setObjectValue(fiObjId, value);
+  setObjectDebug(fiObjId, "FI_OBJ(" + std::to_string(base) + ")");
+  return fiObjId;
+}
+
+uint32_t SVFG::canonicalObjectId(uint32_t objId) const {
+  const ObjectInfo *info = getObjectInfo(objId);
+  if (!info || !info->isFieldInsensitive)
+    return objId;
+  // Only the dedicated representative (whose base differs from itself) is
+  // rewritten.  The marked base already is the canonical object.
+  if (info->baseObjId != 0 && info->baseObjId != objId)
+    return info->baseObjId;
+  return objId;
+}
+
 SVFGNode *SVFG::getCanonicalDefNodeForDDAId(uint32_t ddaId) const {
   if (SVFGNode *valueNode = getValueIdNode(ddaId))
     return valueNode;
@@ -762,6 +841,7 @@ void SVFG::swapWith(SVFG &other) {
   swap(storeInstToChiMap, other.storeInstToChiMap);
   swap(icfg, other.icfg);
   swap(nextNodeId, other.nextNodeId);
+  swap(nextObjectId, other.nextObjectId);
   swap(stat, other.stat);
   swap(objectDebug, other.objectDebug);
   swap(objIdToValue, other.objIdToValue);
@@ -771,6 +851,7 @@ void SVFG::swapWith(SVFG &other) {
   swap(baseOffsetToFieldObject, other.baseOffsetToFieldObject);
   swap(gepAccessInfo, other.gepAccessInfo);
   swap(objIdToInfo, other.objIdToInfo);
+  swap(baseToFieldObjects, other.baseToFieldObjects);
   swap(nodeFunctionDebug, other.nodeFunctionDebug);
   swap(nodeCallSiteDebug, other.nodeCallSiteDebug);
   swap(nodesForUpdate, other.nodesForUpdate);

@@ -110,7 +110,7 @@ order in which these stages run.
    - **PrecisionLossTracker**: Tracks precision loss during analysis
    - **ValueDependenceTracker**: Tracks value dependencies
 
-7. **Output** (``Output/``)
+7. **Output** (``Util/IO/``)
    - **CFGNodePrinter**: Prints CFG nodes
    - **ContextPrinter**: Prints contexts
    - **MemoryPrinter**: Prints memory objects

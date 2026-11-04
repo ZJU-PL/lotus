@@ -17,9 +17,6 @@
 #if LOTUS_AA_WRAPPER_ENABLE_CCLYZER
 #include "Alias/InclusionBased/CclyzerAA/CclyzerAA.h"
 #endif
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-#include "Alias/InclusionBased/GPG/Analysis.h"
-#endif
 #include "Alias/InclusionBased/SparrowAA/AndersenAA.h"
 #if LOTUS_AA_WRAPPER_ENABLE_TPA
 #include "Alias/InclusionBased/TPA/Context/ContextPolicy.h"
@@ -233,22 +230,6 @@ void AliasAnalysisWrapper::initialize() {
     break;
   }
 
-  case AAConfig::Implementation::GPG:
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-    _initialized = initAA(
-        [this] {
-          lotus::gpg::GPGConfig config;
-          config.field_sensitive = _config.fieldSensitive;
-          _gpg_aa =
-              std::make_unique<lotus::gpg::GPGAnalysisEngine>(*_module, config);
-          _gpg_aa->run();
-        },
-        "GPG");
-#else
-    errs() << "AliasAnalysisWrapper: GPG was disabled at build time\n";
-#endif
-    break;
-
   case AAConfig::Implementation::DDA:
 #if LOTUS_AA_WRAPPER_ENABLE_DDA
     _initialized = initAA(
@@ -446,10 +427,6 @@ std::string AAConfig::getName() const {
     } else {
       oss << "(NoCtx)";
     }
-    break;
-
-  case Implementation::GPG:
-    oss << "GPG(FSCS)";
     break;
 
   case Implementation::DDA:

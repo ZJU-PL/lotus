@@ -14,16 +14,21 @@ Lotus is a **program analysis, verification, and optimization framework** built 
 lotus/
 ├── include/           # Public headers (mirrors lib structure)
 │   ├── Alias/         # Alias analysis (DyckAA, AserPTA, LotusAA, SparrowAA, etc.)
-│   ├── Analysis/      # Analysis utilities (NullPointer,CFG, etc.)
+│   ├── Analysis/      # Analysis utilities (NullPointer, CFG, etc.)
+│   ├── Annotation/    # Source-level annotations & API specifications
 │   ├── CFL/           # CFL reachability
 │   ├── Checker/       # Bug checkers (AE, Concurrency, FiTx, KINT, Pulse, Saber etc.)
 │   ├── Concurrency/   # Concurrency analyses (MHP, lockset, MPI, OpenMP, kernel, CUDA, etc.)
 │   ├── Dataflow/      # APA, IFDS/IDE, Mono, NPA, VASCO, WPDS
+│   ├── Fuzzing/       # Directed fuzzing support
 │   ├── IR/            # GSA, GVFG, ICFG, PDG, SSI, SVFG, vSSA, etc.
+│   ├── Optimization/  # Program optimizations (IPO, prefetch, etc.)
+│   ├── Security/      # Side-channel & constant-time analyses
 │   ├── Solvers/       # Datalog, EGraph, SMT
+│   ├── SymbolicExecution/ # Symbolic execution engine
 │   ├── Transform/     # Bitcode transformations
 │   ├── Utils/         # LLVM utilities, ThreadPool, formats, etc.
-│   └── Verification/  # SIFA, CLAM, smarck, Seahorn, etc.
+│   └── Verification/  # SIFA, CLAM, SMACK, Seahorn, etc.
 ├── lib/               # Implementations (mirrors include)
 ├── tools/             # Command-line tools (alias, checker, verifier, ir, etc.)
 ├── tests/             # GTest-based tests (tests/unit/ mirrors subsystems)
@@ -42,9 +47,9 @@ lotus/
 
 ```bash
 mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake .. -DCMAKE_BUILD_TYPE=Release -DLOTUS_BUILD_TESTS=ON
 make -j$(nproc)
-make test
+ctest --output-on-failure  # or make test
 ```
 
 Custom LLVM path: `cmake .. -DLLVM_BUILD_PATH=/path/to/llvm/lib/cmake/llvm`
@@ -65,8 +70,8 @@ LLVM (Module, Function, BasicBlock, Instruction) | Solvers
 
 ## Testing
 
-- Tests live under `tests/unit/` and are grouped by subsystem (`Analysis`, `Checker`, `Concurrency`, `ControlFlow`, `DataFlow`, `Fuzzing`, `IR`, `Pointer`, `Solvers`, `TypeHierarchy`, `Utils`, `Verification`).
+- Tests live under `tests/unit/` and are grouped by subsystem (`Alias`, `Analysis`, `CFL`, `Checker`, `Concurrency`, `Dataflow`, `Fuzzing`, `IR`, `Security`, `Solvers`, `SymbolicExecution`, `Transform`, `Utils`, `Verification`).
 - Shared unit-test build helpers are defined in `tests/unit/UnitTestHelpers.cmake`, which is included by `tests/unit/CMakeLists.txt`.
-- Add new tests with the subsystem-specific helpers from `tests/unit/UnitTestHelpers.cmake`, e.g. `add_lotus_analysis_test`, `add_lotus_concurrency_test`, `add_lotus_ir_test`, `add_lotus_pointer_test`, `add_lotus_verification_test`.
+- Add new tests using `lotus_add_test_group` or `add_lotus_test_suite` from `tests/unit/UnitTestHelpers.cmake`.
 - Shared test support targets include `lotus_test_utils` and `lotus_test_harness_utils`; prefer them over reintroducing large catch-all link bundles.
 - Run all tests with `cd build && ctest --output-on-failure`, or build specific test targets with `cmake --build build --target <test_name>`.

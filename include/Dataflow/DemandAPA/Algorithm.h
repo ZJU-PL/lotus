@@ -1,7 +1,9 @@
 #pragma once
 
+#include "Dataflow/DemandAPA/ApaInstance.h"
 #include "Dataflow/DemandAPA/LCA.h"
 #include "Dataflow/DemandAPA/SCC.h"
+#include "Dataflow/DemandAPA/Support.h"
 #include "Dataflow/DemandAPA/Tarjan.h"
 #include "Dataflow/DemandAPA/TreeDecomposition.h"
 
@@ -10,6 +12,7 @@ public:
   double Time;
   RowInExcelSheet row;
   int threadNum;
+  int baselineTimeout = 20;
 
   /*
    * Pre-preprocessing
@@ -207,7 +210,9 @@ public:
 
   Algorithm() {}
 
-  void work(ApaInstance<T> *inst, RowInExcelSheet _row, int _threadNum) {
+  void work(ApaInstance<T> *inst, RowInExcelSheet _row, int _threadNum,
+            int timeout = 20) {
+    baselineTimeout = timeout;
     threadNum = _threadNum;
 #ifndef _OPENMP
     threadNum = 1;
@@ -290,3 +295,14 @@ public:
   }
 };
 
+// Template definitions belong to Algorithm's interface. Clients can include
+// Algorithm.h alone; definition headers also include this declaration and are
+// protected against recursive inclusion by their own header guards.
+#include "Dataflow/DemandAPA/CentroidPreprocessing.h"
+#include "Dataflow/DemandAPA/Comparison.h"
+#include "Dataflow/DemandAPA/FunctionSummaries.h"
+#include "Dataflow/DemandAPA/Interprocedural.h"
+#include "Dataflow/DemandAPA/Intraprocedural.h"
+#include "Dataflow/DemandAPA/Naive.h"
+#include "Dataflow/DemandAPA/PrePreprocess.h"
+#include "Dataflow/DemandAPA/SameBagPreprocessing.h"

@@ -62,16 +62,20 @@ Directory Structure
    ├── include/           # Public headers (mirrors lib structure)
    │   ├── Alias/         # Alias analysis (DyckAA, AserPTA, LotusAA, SparrowAA, etc.)
    │   ├── Analysis/      # Analysis utilities (NullPointer, CFG, etc.)
+   │   ├── Annotation/    # Source-level annotations & API specifications
    │   ├── CFL/           # CFL reachability
    │   ├── Checker/       # Bug checkers (AE, Concurrency, FiTx, KINT, Pulse, Saber, etc.)
    │   ├── Concurrency/   # Concurrency analyses (MHP, lockset, OpenMP, CUDA, etc.)
    │   ├── Dataflow/      # APA, IFDS/IDE, Mono, NPA, VASCO, WPDS
+   │   ├── Fuzzing/       # Directed fuzzing support
    │   ├── IR/            # GSA, GVFG, ICFG, PDG, SSI, SVFG, vSSA, etc.
+   │   ├── Optimization/  # Program optimizations (IPO, prefetch, etc.)
+   │   ├── Security/      # Side-channel & constant-time analyses
    │   ├── Solvers/       # Datalog, EGraph, SMT
-   │   ├── SymbolicExecution/ # Symbolic execution
+   │   ├── SymbolicExecution/ # Symbolic execution engine
    │   ├── Transform/     # LLVM bitcode transformations
    │   ├── Utils/         # LLVM utilities, ThreadPool, formats, etc.
-   │   └── Verification/  # SIFA, CLAM, smarck, Seahorn, etc.
+   │   └── Verification/  # SIFA, CLAM, SMACK, Seahorn, etc.
    ├── lib/               # Implementations (mirrors include)
    ├── tools/             # Command-line tools (alias, checker, verifier, ir, cfl, etc.)
    ├── tests/             # GTest-based tests (tests/unit/ mirrors subsystems)
@@ -485,11 +489,11 @@ Testing and Debugging
 Writing Unit Tests
 ~~~~~~~~~~~~~~~~~~
 
-Unit tests live under ``tests/unit/``, organized by subsystem (e.g., ``Analysis``, ``Checker``, ``Concurrency``, ``ControlFlow``, ``Dataflow``, ``Fuzzing``, ``IR``, ``Pointer``, ``Solvers``, ``Verification``).
+Unit tests live under ``tests/unit/``, organized by subsystem (``Alias``, ``Analysis``, ``CFL``, ``Checker``, ``Concurrency``, ``Dataflow``, ``Fuzzing``, ``IR``, ``Security``, ``Solvers``, ``SymbolicExecution``, ``Transform``, ``Utils``, ``Verification``).
 
-Shared CMake helpers are defined in ``tests/unit/UnitTestHelpers.cmake``. Use the subsystem-specific helper (such as ``add_lotus_pointer_test`` or ``add_lotus_checker_test``) rather than generic custom targets.
+Shared CMake helpers are defined in ``tests/unit/UnitTestHelpers.cmake``. Each subsystem registers selectable groups with ``lotus_add_test_group`` and collects sources into a shared suite with ``lotus_collect_test_sources``; use those helpers rather than custom targets.
 
-Create ``tests/unit/Pointer/MyAliasAnalysisTest.cpp``:
+Create ``tests/unit/Alias/MyAA/MyAliasAnalysisTest.cpp``:
 
 .. code-block:: cpp
 
@@ -514,14 +518,17 @@ Create ``tests/unit/Pointer/MyAliasAnalysisTest.cpp``:
        EXPECT_TRUE(true);
    }
 
-Register the test in ``tests/unit/Pointer/CMakeLists.txt``:
+Register the source in ``tests/unit/Alias/MyAA/CMakeLists.txt``:
 
 .. code-block:: cmake
 
-   add_lotus_pointer_test(MyAliasAnalysisTest
-       MyAliasAnalysisTest.cpp
-       LIBRARIES CanaryMyAA
-   )
+   lotus_collect_test_sources(alias_tests MyAliasAnalysisTest.cpp)
+
+Then declare the group in ``tests/unit/Alias/CMakeLists.txt``:
+
+.. code-block:: cmake
+
+   lotus_add_test_group(alias myaa MyAA alias_tests LINK_LIBS CanaryMyAA)
 
 Run tests:
 

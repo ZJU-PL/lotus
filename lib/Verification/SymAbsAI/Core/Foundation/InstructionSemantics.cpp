@@ -11,6 +11,7 @@
  * @author rainoftime
  */
 #include "Verification/SymAbsAI/Core/Foundation/InstructionSemantics.h"
+#include "Verification/SymAbsAI/Core/Foundation/IntegerSemantics.h"
 
 #include "Verification/SymAbsAI/Core/Foundation/FloatingPointModel.h"
 #include "Verification/SymAbsAI/Core/Foundation/MemoryModel.h"
@@ -379,7 +380,7 @@ z3::expr InstructionSemantics::visitAdd(llvm::BinaryOperator &I) {
     cond = cond && z3_ext::add_nuf(in0, in1);
   }
 
-  z3::expr result = out_var == in0 + in1;
+  z3::expr result = out_var == integerBinary(llvm::Instruction::Add, in0, in1);
 
   return implies(cond, result) &&
          implies(!cond, FunctionContext_.getUndefinedBehaviorFlag());
@@ -409,7 +410,7 @@ z3::expr InstructionSemantics::visitSub(llvm::BinaryOperator &I) {
     cond = cond && z3_ext::sub_nof(in0, in1);
   }
 
-  z3::expr result = out_var == in0 - in1;
+  z3::expr result = out_var == integerBinary(llvm::Instruction::Sub, in0, in1);
 
   return implies(cond, result) &&
          implies(!cond, FunctionContext_.getUndefinedBehaviorFlag());
@@ -439,7 +440,7 @@ z3::expr InstructionSemantics::visitMul(llvm::BinaryOperator &I) {
     cond = cond && z3_ext::mul_nuf(in0, in1);
   }
 
-  z3::expr result = out_var == in0 * in1;
+  z3::expr result = out_var == integerBinary(llvm::Instruction::Mul, in0, in1);
 
   return implies(cond, result) &&
          implies(!cond, FunctionContext_.getUndefinedBehaviorFlag());
@@ -912,40 +913,9 @@ z3::expr InstructionSemantics::visitAddrSpaceCast(llvm::AddrSpaceCastInst &I) {
 // "Other" Instructions
 
 z3::expr InstructionSemantics::visitICmp(llvm::ICmpInst &I) {
-  using namespace llvm;
-
-  z3::expr in0 = rValue(I.getOperand(0));
-  z3::expr in1 = rValue(I.getOperand(1));
-  z3::expr out_var = lValue();
-
-  switch (I.getPredicate()) {
-  case CmpInst::ICMP_EQ:
-    return (in0 == in1) == (out_var == Z3Context_->bv_val(1, 1));
-  // return implies(in0 == in1, out_var == Z3Context_->bv_val(1,1))
-  //     && implies(!(in0 == in1), out_var == Z3Context_->bv_val(0,1));
-  case CmpInst::ICMP_NE:
-    return (in0 != in1) == (out_var == Z3Context_->bv_val(1, 1));
-  case CmpInst::ICMP_UGT:
-    return ugt(in0, in1) == (out_var == Z3Context_->bv_val(1, 1));
-  case CmpInst::ICMP_UGE:
-    return uge(in0, in1) == (out_var == Z3Context_->bv_val(1, 1));
-  case CmpInst::ICMP_ULT:
-    return ult(in0, in1) == (out_var == Z3Context_->bv_val(1, 1));
-  case CmpInst::ICMP_ULE:
-    return ule(in0, in1) == (out_var == Z3Context_->bv_val(1, 1));
-  case CmpInst::ICMP_SGT: // z3 default is signed!
-    return (in0 > in1) == (out_var == Z3Context_->bv_val(1, 1));
-  case CmpInst::ICMP_SGE:
-    return (in0 >= in1) == (out_var == Z3Context_->bv_val(1, 1));
-  case CmpInst::ICMP_SLT:
-    return (in0 < in1) == (out_var == Z3Context_->bv_val(1, 1));
-  case CmpInst::ICMP_SLE:
-    return (in0 <= in1) == (out_var == Z3Context_->bv_val(1, 1));
-  default:
-    llvm_unreachable("Unknown ICMP predicate!");
-  }
-
-  return Z3Context_->bool_val(true);
+  return integerCompare(I.getPredicate(), rValue(I.getOperand(0)),
+                        rValue(I.getOperand(1))) ==
+         (lValue() == Z3Context_->bv_val(1, 1));
 }
 
 z3::expr InstructionSemantics::visitFCmp(llvm::FCmpInst &I) {

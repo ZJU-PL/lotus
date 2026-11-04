@@ -19,9 +19,6 @@
 #if LOTUS_AA_WRAPPER_ENABLE_CCLYZER
 #include "Alias/InclusionBased/CclyzerAA/CclyzerAA.h"
 #endif
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-#include "Alias/InclusionBased/GPG/Analysis.h"
-#endif
 #include "Alias/InclusionBased/SparrowAA/AndersenAA.h"
 #if LOTUS_AA_WRAPPER_ENABLE_TPA
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Analysis/SemiSparsePointerAnalysis.h"
@@ -230,12 +227,7 @@ bool AliasAnalysisWrapper::mayNull(const Value *v) {
  * @return true if the points-to set was successfully retrieved, false otherwise
  *
  * @note The ptsSet vector is cleared before being filled
- * @note Supported by: SparrowAA, TPA, DDA, GPG
- * @note GPG joins statement-specific points-to facts across program points
- *       because this API does not carry an instruction/program-point argument.
- *       It returns false when that projection contains unknown, null, or
- *       otherwise unrepresentable targets rather than exposing a partial set
- *       as complete.
+ * @note Supported by: SparrowAA, TPA, DDA
  * @note Returns false if ptr is null, not a pointer type, or the backend
  *       is not available/initialized
  */
@@ -286,17 +278,6 @@ bool AliasAnalysisWrapper::getPointsToSet(const Value *ptr,
   if (_dda_aa && _initialized && _dda_aa->getPointsToSet(ptr, ptsSet))
     return true;
 #endif
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-  if (_gpg_aa && _initialized) {
-    const auto points_to =
-        _gpg_aa->result().allPointeeSet(ptr->stripPointerCasts());
-    if (!points_to.isComplete() || points_to.containsUnknown() ||
-        points_to.containsNull())
-      return false;
-    ptsSet.assign(points_to.values.begin(), points_to.values.end());
-    return true;
-  }
-#endif
   return false;
 }
 
@@ -333,17 +314,6 @@ bool AliasAnalysisWrapper::getPointsToSetSize(const Value *ptr,
       return true;
     }
     return false;
-  }
-#endif
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-  if (_gpg_aa) {
-    const auto points_to =
-        _gpg_aa->result().allPointeeSet(ptr->stripPointerCasts());
-    if (!points_to.isComplete() || points_to.containsUnknown() ||
-        points_to.containsNull())
-      return false;
-    outSize = points_to.values.size();
-    return true;
   }
 #endif
   return false;
@@ -411,13 +381,6 @@ void AliasAnalysisWrapper::getIndirectCallTargets(
         _tpa_aa->getCallees(call, nullptr);
     targets.assign(tpaCallees.begin(), tpaCallees.end());
     return;
-  }
-#endif
-#if LOTUS_AA_WRAPPER_ENABLE_GPG
-  if (_gpg_aa) {
-    const auto *gpgTargets = _gpg_aa->result().callTargets(call);
-    if (gpgTargets)
-      targets.assign(gpgTargets->begin(), gpgTargets->end());
   }
 #endif
 }

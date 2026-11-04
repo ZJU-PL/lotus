@@ -265,6 +265,9 @@ class FlowSensitivePTA::OrderedExecution {
                 return false;
               })
             : Config::IndirectCallConnector{};
+    // The worker only proposes candidates; the owner applies the bound when it
+    // retires them, so rejections are counted exactly once.
+    evaluator.config_.isIndirectCallTargetAllowed = {};
     evaluator.strongUpdateSites_.clear();
     evaluator.weakUpdateSites_.clear();
     const auto strongBefore = evaluator.stats_.strongUpdateExecutions;
@@ -343,6 +346,16 @@ class FlowSensitivePTA::OrderedExecution {
 
   void worker() {
     try {
+      if (owner.timeLimitExceeded()) {
+        owner.noteTimeout();
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          stopped = true;
+        }
+        changed.notify_all();
+        dispatch.notify_all();
+        return;
+      }
       auto evaluator = makeEvaluator();
       while (true) {
         std::vector<std::size_t> block;
@@ -437,8 +450,11 @@ class FlowSensitivePTA::OrderedExecution {
           begin(executionTask);
           execute = true;
         } else {
-          changed.wait(lock,
-                       [&] { return failure || slots[task].draft != nullptr; });
+          changed.wait(lock, [&] {
+            return failure || slots[task].draft != nullptr || owner.timedOut();
+          });
+          if (!slot.draft && owner.timedOut())
+            return nullptr;
         }
       }
       if (execute)
@@ -538,7 +554,12 @@ public:
       std::vector<bool> queued(scc.components.size(), true);
       for (std::size_t i = 0; i < scc.components.size(); ++i)
         components.push_back(i);
-      while (!components.empty() && !owner.topologyChanged_) {
+      while (!components.empty() && !owner.topologyChanged_ &&
+             !owner.timedOut()) {
+        if (owner.timeLimitExceeded()) {
+          owner.noteTimeout();
+          break;
+        }
         const std::size_t component = components.front();
         components.pop_front();
         queued[component] = false;
@@ -549,7 +570,7 @@ public:
           local.push_back(node);
           locallyQueued.insert(node->getId());
         }
-        while (!local.empty() && !owner.topologyChanged_) {
+        while (!local.empty() && !owner.topologyChanged_ && !owner.timedOut()) {
           const SVFGNode *node = local.front();
           const std::size_t task = indices.at(node->getId());
           {
@@ -572,6 +593,8 @@ public:
           }
           dispatch.notify_all();
           auto draft = obtain(task, *evaluator);
+          if (!draft)
+            break;
           bool anyChanged, topChanged;
           {
             std::lock_guard<std::mutex> lock(mutex);
@@ -606,10 +629,14 @@ public:
             } else {
               slots[task].memo.reset();
             }
-            if (draft->strong)
+            if (draft->strong) {
+              owner.weakUpdateSites_.erase(node->getId());
               owner.strongUpdateSites_.insert(node->getId());
-            if (draft->weak)
+            }
+            if (draft->weak) {
+              owner.strongUpdateSites_.erase(node->getId());
               owner.weakUpdateSites_.insert(node->getId());
+            }
             owner.stats_.strongUpdateExecutions += draft->strongExecutions;
             owner.stats_.weakUpdateExecutions += draft->weakExecutions;
           }
@@ -621,15 +648,26 @@ public:
             {
               std::unique_lock<std::mutex> lock(mutex);
               paused = true;
-              changed.wait(lock, [&] { return failure || active == 0; });
+              changed.wait(lock, [&] {
+                return failure || active == 0 || owner.timedOut();
+              });
               if (failure)
                 std::rethrow_exception(failure);
             }
-            for (const auto &call : draft->calls)
+            for (const auto &call : draft->calls) {
+              if (owner.config_.isIndirectCallTargetAllowed &&
+                  !owner.config_.isIndirectCallTargetAllowed(call.first,
+                                                             call.second)) {
+                ++owner.stats_.indirectCallsRejected;
+                continue;
+              }
               if (owner.config_.connectIndirectCall(call.first, call.second)) {
                 ++owner.stats_.indirectCallEdges;
+                if (!owner.config_.isIndirectCallTargetAllowed)
+                  ++owner.stats_.unboundedIndirectCalls;
                 owner.topologyChanged_ = true;
               }
+            }
             {
               std::lock_guard<std::mutex> lock(mutex);
               if (!owner.topologyChanged_)
@@ -681,13 +719,30 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveOrderedParallel() {
   weakUpdateSites_.clear();
   if (config_.setBackend == PointsToSetBackend::HashConsed)
     arena_.reset();
-  initializeGlobalMemory();
+  hasDeadline_ = config_.timeLimitSeconds != 0;
+  if (hasDeadline_)
+    deadline_ = started +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(config_.timeLimitSeconds));
+  buildObjectClustering();
+  {
+    const auto initializeStarted = std::chrono::steady_clock::now();
+    initializeGlobalMemory();
+    stats_.initializeSeconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      initializeStarted)
+            .count();
+  }
   do {
+    if (timeLimitExceeded()) {
+      stats_.timedOut = true;
+      break;
+    }
     ++stats_.topologyEpochs;
     topologyChanged_ = false;
     initializeRecursiveFunctions();
     OrderedExecution(*this).run();
-  } while (topologyChanged_);
+  } while (topologyChanged_ && !stats_.timedOut);
   const auto scc = computeSCCs();
   stats_.sccs = scc.components.size();
   for (const auto &component : scc.components) {
@@ -696,14 +751,10 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveOrderedParallel() {
   }
   for (const auto &entry : topLevelPointsTo_)
     stats_.topLevelFacts += materialize(entry.second).size();
-  for (const auto &entry : dfIn_)
-    for (const auto &fact : entry.second)
-      stats_.memoryInFacts += materialize(fact.second).size();
-  for (const auto &entry : dfOut_)
-    for (const auto &fact : entry.second)
-      stats_.memoryOutFacts += materialize(fact.second).size();
+  collectStatistics();
   stats_.strongUpdates = strongUpdateSites_.size();
   stats_.weakUpdates = weakUpdateSites_.size();
+  stats_.svfgHasSU = !strongUpdateSites_.empty();
   if (config_.setBackend == PointsToSetBackend::HashConsed) {
     const auto hashStats = arena_.statistics();
     stats_.hashConsedUniqueSets = hashStats.uniqueSets;

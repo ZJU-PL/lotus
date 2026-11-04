@@ -9,10 +9,9 @@ namespace lotus::mosaic {
 Int2BvTranslator::Int2BvTranslator(z3::context &c, bool is_signed,
                                    unsigned bv_size, bool force_preprocess,
                                    bool simplify, const VarMap &int2bv_var_map)
-    : ctx(c), m_is_signed(is_signed), m_is_vars_signed(is_signed), m_vars(c),
-      m_bv_size(bv_size), m_extended_bv_size(bv_size),
-      m_force_preprocess(force_preprocess), m_simplify(simplify),
-      m_int2bv_var_map(int2bv_var_map) {}
+    : ctx(c), m_bv_size(bv_size), m_is_signed(is_signed), m_simplify(simplify),
+      m_force_preprocess(force_preprocess), m_int2bv_var_map(int2bv_var_map),
+      m_extended_bv_size(bv_size), m_is_vars_signed(is_signed), m_vars(c) {}
 
 void Int2BvTranslator::reset() { m_translate.clear(); }
 

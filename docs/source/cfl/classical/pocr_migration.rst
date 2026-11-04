@@ -92,8 +92,9 @@ Clients and preprocessing
 
 ``PEGInterDyck`` and ``IVFGInterDyck``
    Ported as the ``prune_interdyck`` graph-simplification phase. Lotus's
-   separate ``InterleavedDyckGraphReduction`` remains the single implementation of the
-   stronger PLDI'20 reduction pipeline; it is not copied into ``Classical``.
+   separate ``lib/CFL/InterleavedDyck/GraphReduction`` implementation remains the
+   single implementation of the stronger PLDI'20 reduction pipeline; it is not
+   copied into ``Classical``.
 
 ``RSM`` and ``GFPattern``
    Ported as ``RecursiveStateMachine``, ``NodePairPattern``, and

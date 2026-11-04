@@ -2,7 +2,7 @@
 
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
 #include "Analysis/CFG/SparseControlFlow.h"
-#include "Analysis/TypeHierarchy/CallGraphAnalysisType.h"
+#include "Analysis/CallGraph/CallGraphAnalysisType.h"
 #include "Annotation/Taint/TaintConfigParser.h"
 #include "Dataflow/ControlFlow/InterCFG.h"
 

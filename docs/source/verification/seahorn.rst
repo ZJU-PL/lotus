@@ -162,7 +162,7 @@ The SeaHorn framework is organized into the following subdirectories:
 
   * **Instrumentation/** – Property instrumentation
 
-    * ``BufferBoundsCheck.cc``, ``FatBufferBoundsCheck.cc`` – Buffer bounds checking
+    * ``FatBufferBoundsCheck.cc`` – Buffer bounds checking
     * ``NullCheck.cc`` – Null pointer checking
     * ``SimpleMemoryCheck.cc`` – Memory safety checks
     * ``MixedSemantics.cc`` – Mixed operational semantics
@@ -185,7 +185,7 @@ The SeaHorn framework is organized into the following subdirectories:
 
 * **Support/** – Utility functions
   * ``CFGPrinter.cc`` – Control flow graph printing
-  * ``GitSHA1.cc`` – Version information
+  * ``GitSHA1.cc.in`` – Version information
   * ``Profiler.cc`` – Profiling support
   * ``Stats.cc`` – Statistics collection
 
@@ -210,18 +210,19 @@ Main verification tool for C programs.
 
 **Common modes**:
 
-- ``--bmc=<N>`` – Bounded model checking up to ``N`` steps.
+- ``--horn-bmc`` – Bounded model checking (intra-procedural; select the engine
+  with ``--horn-bmc-engine=mono|path``).
 - ``--horn-kinduction`` – K-induction (PathBMC-based): incrementally peel loops
   and run PathBMC until UNSAT (safe) or SAT (bug). Requires CLAM.
-- ``--horn`` – CHC-based (unbounded) verification.
-- ``--abstractor=clam`` – Use CLAM-based abstract interpretation as an
-  abstractor.
+- ``--horn-solve`` – CHC-based (unbounded) verification with the Horn solver.
+- ``--horn-crab`` – Use Crab/CLAM invariants during verification.
 
 **Frequently used options**:
 
-- ``--cex=<file>`` – Dump a counterexample harness to ``<file>``.
-- ``--track=mem`` – Track memory (heap/stack) explicitly.
-- ``--horn-solver=spacer|ice`` – Select CHC solving engine.
+- ``--horn-cex=<file>`` – Dump a counterexample harness to ``<file>``.
+- ``--horn-sem-lvl=reg|ptr|mem`` – Track level for symbolic execution.
+- ``--horn-pdr-engine=spacer`` – Select the Z3 fixedpoint engine (default:
+  ``spacer``).
 
 Counterexample Analysis
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -230,5 +231,5 @@ Generate executable counterexamples:
 
 .. code-block:: bash
 
-   ./build/bin/seahorn --cex=harness.ll program.c
+   ./build/bin/seahorn --horn-cex=harness.ll program.c
    clang -m64 -g program.c harness.ll -o counterexample

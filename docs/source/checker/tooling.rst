@@ -45,6 +45,7 @@ Declares accessor functions for each subcommand (defined in
    auto &sub = lotus::checker::tooling::saberSubCommand();
    auto &sub = lotus::checker::tooling::aeSubCommand();
    auto &sub = lotus::checker::tooling::symexSubCommand();
+   auto &sub = lotus::checker::tooling::gsafSubCommand();
 
 Registered Subcommands
 ----------------------
@@ -71,6 +72,8 @@ Registered Subcommands
 +-------------------+-------------------------------------------+
 | ``symex``         | Run the symbolic-execution checker        |
 +-------------------+-------------------------------------------+
+| ``gsaf``          | Run the guarded value-flow checker        |
++-------------------+-------------------------------------------+
 
 Usage
 -----
@@ -90,8 +93,8 @@ options. Parameters whose semantics belong to an engine use the qualified form
 ``--kint.summary-mode``, while Pulse path solving is configured by
 ``--pulse.smt``. No unqualified compatibility aliases are provided.
 
-Use ``lotus-check --list-parameters`` to print all global and engine groups,
-or ``lotus-check --engine=<name> --help`` for one engine.
+Use ``lotus-check --list-checkers`` to print available checker ids, or
+``lotus-check --engine=<name> --help`` for one engine.
 
 See Also
 --------

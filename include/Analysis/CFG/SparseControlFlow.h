@@ -6,7 +6,7 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Value.h"
 
-#include "Analysis/TypeHierarchy/CallGraph.h"
+#include "Analysis/CallGraph/CallGraph.h"
 
 #include <functional>
 #include <unordered_map>

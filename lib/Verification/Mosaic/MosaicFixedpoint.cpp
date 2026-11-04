@@ -541,9 +541,9 @@ void MosaicFixedpoint::set_params_for_all_engines() {
 //==============================================================================
 MosaicFixedpoint::MosaicFixedpoint(z3::context &ctx, bool force_preprocess,
                                    bool simplify)
-    : m_ctx(ctx), m_mth_fp_set(ctx), m_original_clauses(ctx),
-      m_int2bv_preprocess(force_preprocess), m_simplify(simplify),
-      m_params(ctx), m_params_set(false) {}
+    : m_ctx(ctx), m_simplify(simplify), m_int2bv_preprocess(force_preprocess),
+      m_mth_fp_set(ctx), m_params_set(false), m_params(ctx),
+      m_original_clauses(ctx) {}
 
 void MosaicFixedpoint::from_solver(z3::fixedpoint &fp) {
   MOSAIC_DEBUG_MSG(OUT() << "Importing rules from fixedpoint solver:\n"
@@ -670,7 +670,6 @@ z3::check_result MosaicFixedpoint::query(z3::expr &query) {
           Bv2IntTranslator bv2int_t(m_ctx, is_signed, m_simplify,
                                     /* no_overflow */ false, var_map);
           p_interp_trans = bv2int_t.translate(p_interp);
-          p_interp_trans = p_interp_trans;
         } else {
           unsigned bv_size = current_solver->get_bv_size();
           Int2BvTranslator int2bv_t(m_ctx, is_signed /*is_signed*/, bv_size,

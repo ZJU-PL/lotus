@@ -30,165 +30,166 @@ const std::vector<RuleDescriptor> &RuleQuery::catalog() {
         {"cpp/dangerous-function-overflow", "error",
          "Security/CWE/CWE-676/DangerousFunctionOverflow.ql",
          "Direct global/std gets calls with one declared parameter; no "
-         "unresolved indirect calls."},
+         "unresolved indirect calls.", {}},
         {"cpp/potentially-dangerous-function", "warning",
          "Security/CWE/CWE-676/PotentiallyDangerousFunction.ql",
          "Direct global gmtime/localtime/ctime/asctime calls; no unresolved "
-         "indirect calls."},
+         "indirect calls.", {}},
         {"cpp/power-of-10/use-of-jmp", "warning",
          "Power of 10/Rule 1/UseOfJmp.ql",
          "Direct calls with base name setjmp/longjmp/sigsetjmp/siglongjmp in "
          "any "
-         "namespace; lowered builtins and unresolved indirect calls excluded."},
+         "namespace; lowered builtins and unresolved indirect calls "
+         "excluded.", {}},
         {"cpp/bad-strncpy-size", "warning",
          "Likely Bugs/Memory Management/StrncpyFlippedArgs.ql",
          "Subset: fixed object and constant bound, or strlen/wcslen(source) "
          "with "
          "constant offsets >= 0; requires SSA pointer values. No GVN or sizeof "
          "provenance. Same-block load equivalence checks intervening "
-         "clobbers."},
+         "clobbers.", {}},
         {"cpp/return-stack-allocated-memory", "warning",
          "Likely Bugs/Memory Management/ReturnStackAllocatedMemory.ql",
          "Subset: pointer returns whose SSA origins are all local allocas or "
          "modeled stack-returning APIs (including GEP/cast/PHI/select). No "
          "memory loads or interprocedural flow; use mem2reg. Functions named "
-         "with stack/sp excluded."},
+         "with stack/sp excluded.", {}},
         {"cpp/power-of-10/use-of-recursion", "warning",
          "Power of 10/Rule 1/UseOfRecursion.ql",
          "Direct call-graph cycles, including mutual recursion; unresolved "
-         "indirect calls excluded."},
+         "indirect calls excluded.", {}},
         {"cpp/jpl-c/recursion", "warning", "JPL_C/LOC-2/Rule 04/Recursion.ql",
          "Direct call-graph cycles, including mutual recursion; unresolved "
-         "indirect calls excluded."},
+         "indirect calls excluded.", {}},
         {"cpp/wrong-number-format-arguments", "error",
          "Likely Bugs/Format/WrongNumberOfFormatArguments.ql",
          "Known printf-family APIs with constant ASCII/narrow or wide "
          "literals; "
          "positional and star arguments supported. Custom formatting "
          "attributes "
-         "and source syntax errors unavailable."},
+         "and source syntax errors unavailable.", {}},
         {"cpp/too-many-format-arguments", "recommendation",
          "Likely Bugs/Format/TooManyFormatArguments.ql",
          "Known printf-family APIs and parsed literals; unknown directives and "
-         "va_list calls excluded."},
+         "va_list calls excluded.", {}},
         {"cpp/memory-unsafe-function-scan", "warning",
          "experimental/Security/CWE/CWE-120/MemoryUnsafeFunctionScan.ql",
          "Scanf-family constant formats with unsuppressed unbounded %s/%ls. "
-         "Escaped percent and bounded fields excluded."},
+         "Escaped percent and bounded fields excluded.", {}},
         {"cpp/incorrectly-checked-scanf", "warning",
          "Critical/IncorrectCheckScanf.ql",
          "SSA scanf results used by branches testing only equality/inequality "
          "with zero; positive, EOF and signed range checks suppress. Kernel "
-         "detection needs debug macros."},
+         "detection needs debug macros.", {}},
         {"cpp/new-free-mismatch", "warning", "Critical/NewFreeMismatch.ql",
          "SSA/GEP/cast origins from modeled allocation APIs reaching an "
          "incompatible release in the same function; all origins must "
          "establish "
-         "the mismatch. No escaping member memory or cross-function flow."},
+         "the mismatch. No escaping member memory or cross-function flow.", {}},
         {"cpp/new-array-delete-mismatch", "warning",
          "Critical/NewArrayDeleteMismatch.ql",
          "Direct modeled operator new[] origins reaching operator delete "
          "through "
-         "SSA values; placement/nothrow wrappers excluded."},
+         "SSA values; placement/nothrow wrappers excluded.", {}},
         {"cpp/new-delete-array-mismatch", "warning",
          "Critical/NewDeleteArrayMismatch.ql",
          "Direct modeled operator new origins reaching operator delete[] "
          "through "
-         "SSA values; placement/nothrow wrappers excluded."},
+         "SSA values; placement/nothrow wrappers excluded.", {}},
         {"cpp/incomplete-parity-check", "warning",
          "Likely Bugs/Arithmetic/BadCheckOdd.ql",
          "Signed remainder by 2 compared with 1 in retained LLVM instructions; "
-         "source literal/macro distinctions unavailable."},
+         "source literal/macro distinctions unavailable.", {}},
         {"cpp/equality-on-floats", "recommendation",
          "Likely Bugs/Arithmetic/FloatComparison.ql",
          "Retained floating equality/inequality between nonconstants that are "
-         "not equivalent; configuration-test-file exclusions unavailable."},
+         "not equivalent; configuration-test-file exclusions unavailable.", {}},
         {"cpp/lossy-pointer-cast", "warning",
          "Likely Bugs/Conversion/LossyPointerCast.ql",
          "Retained pointer-to-integer instructions narrower than the target "
          "pointer width, excluding booleans and bitmask uses. Source macro "
-         "exclusions unavailable."},
+         "exclusions unavailable.", {}},
         {"cpp/unsafe-strncat", "warning",
          "Likely Bugs/Memory Management/SuspiciousCallToStrncat.ql",
          "Subset: known destination capacity minus strlen(destination), "
          "missing "
          "the extra byte for the terminator. sizeof provenance branch "
-         "unavailable."},
+         "unavailable.", {}},
         {"cpp/open-call-with-mode-argument", "error",
          "Security/CWE/CWE-732/OpenCallMissingModeArgument.ql",
          "Direct open/openat/_open/_wopen with constant flags and missing "
          "mode; "
          "O_CREAT/O_TMPFILE obtained from unique debug macros, never host "
-         "constants."},
+         "constants.", {}},
         {"cpp/world-writable-file-creation", "warning",
          "Security/CWE/CWE-732/DoNotCreateWorldWritable.ql",
          "chmod/creat/fopen/open families with known mode and same-block "
          "constant umask. Cross-block umask, wide fopen modes and "
          "configuration "
-         "exclusions unavailable."},
+         "exclusions unavailable.", {}},
         {"cpp/insecure-generation-of-filename", "warning",
          "experimental/Security/CWE/CWE-377/InsecureTemporaryFile.ql",
          "tmpnam-family calls without a CFG-connected "
-         "mktemp/mkstemp/mkstemps/mkdtemp call in the same function."},
+         "mktemp/mkstemp/mkstemps/mkdtemp call in the same function.", {}},
         {"cpp/alloca-in-loop", "warning",
          "Likely Bugs/Memory Management/AllocaInLoop.ql",
          "LLVM alloca instructions in natural loops not proved small by SCEV; "
          "loops with stackrestore excluded to avoid scoped VLAs. Microsoft "
-         "declaration provenance unavailable."},
+         "declaration provenance unavailable.", {}},
         {"cpp/curl-disabled-ssl", "warning",
          "experimental/Security/CWE/CWE-295/CurlSSL.ql",
          "curl_easy_setopt disabling numeric "
          "CURLOPT_SSL_VERIFYHOST(81)/VERIFYPEER(64); source enum-name "
          "provenance "
-         "unavailable."},
+         "unavailable.", {}},
         {"cpp/signed-overflow-check", "warning",
          "Likely Bugs/Arithmetic/SignedOverflowCheck.ql",
          "Retained comparisons of an nsw addition that may overflow positively "
          "to an equivalent operand; SCEV suppresses bounded additions. nsw "
          "excludes wrapping "
-         "additions; source macro exclusions unavailable."},
+         "additions; source macro exclusions unavailable.", {}},
         {"cpp/dead-code-function", "warning", "Critical/DeadCodeFunction.ql",
          "Defined local-linkage nonconstructor/nonoperator functions with no "
          "uses; source private methods/templates unavailable and "
-         "compiler-discarded functions absent."},
+         "compiler-discarded functions absent.", {}},
         {"cpp/return-value-ignored", "recommendation",
          "Critical/ReturnValueIgnored.ql",
          "Subset: unused fgets return values (CodeQL default mandatory-check "
          "API). Statistical, explicit-void and macro/source-context handling "
-         "unavailable."},
+         "unavailable.", {}},
         {"cpp/uncontrolled-process-operation", "warning",
          "Security/CWE/CWE-114/UncontrolledProcessOperation.ql",
          "PDG user-input content flow into modeled process/library-loading "
          "arguments; matched parameter/return and memory updates. Unknown "
-         "unknown aliases/indirect calls/unmodeled C++ objects excluded."},
+         "unknown aliases/indirect calls/unmodeled C++ objects excluded.", {}},
         {"cpp/command-line-injection", "error",
          "Security/CWE/CWE-078/ExecTainted.ql",
          "PDG flow-state requires a noninitial %s/%S conversion or strcat "
          "source "
          "before a shell-command sink; transparent wrappers supported. Direct "
-         "whole-command input uses uncontrolled-process-operation."},
+         "whole-command input uses uncontrolled-process-operation.", {}},
         {"cpp/sql-injection", "error", "Security/CWE/CWE-089/SqlTainted.ql",
          "PDG input-content flow into modeled SQL arguments and transparent "
          "wrappers; modeled SQL escaping is a domain-specific barrier. C++ "
-         "database objects and arbitrary barrier models excluded."},
+         "database objects and arbitrary barrier models excluded.", {}},
         {"cpp/path-injection", "warning", "Security/CWE/CWE-022/TaintedPath.ql",
          "PDG input-content flow into modeled file-path arguments and "
          "transparent wrappers. Source-AST variable upper-bound checks, "
          "fstream "
-         "objects and unknown aliases excluded."},
+         "objects and unknown aliases excluded.", {}},
         {"cpp/tainted-format-string", "warning",
          "Security/CWE/CWE-134/UncontrolledFormatString.ql",
          "PDG user-input content flow into formatting API roles and "
          "transparent "
          "wrappers. Numeric/content facts are separate; custom format "
          "attributes "
-         "and unmodeled C++ string APIs excluded."},
+         "and unmodeled C++ string APIs excluded.", {}},
         {"cpp/non-constant-format", "recommendation",
          "Likely Bugs/Format/NonConstantFormat.ql",
          "PDG format-content provenance from input, uncalled pointer "
          "parameters "
          "and unknown external pointer outputs. Constant strings/uninitialized "
-         "allocations are not sources; no array-index taint propagation."},
+         "allocations are not sources; no array-index taint propagation.", {}},
         {"cpp/uncontrolled-allocation-size", "warning",
          "Security/CWE/CWE-190/TaintedAllocationSize.ql",
          "PDG scalar input flow into modeled heap allocation sizes; dominating "
@@ -196,14 +197,14 @@ const std::vector<RuleDescriptor> &RuleQuery::catalog() {
          "candidates. Signed upper guards also require nonnegativity. "
          "Source-AST "
          "variable checks, stack allocation expressions and indirect/custom "
-         "allocators remain partial."},
+         "allocators remain partial.", {}},
         {"cpp/wordexp-injection", "error",
          "experimental/Security/CWE/CWE-078/WordexpTainted.ql",
          "PDG-native user-content flow to POSIX wordexp input, including "
          "direct call/return summaries and transparent wrappers. WRDE_NOCMD "
          "in constant or OR-composed flags suppresses command substitution. "
          "Unknown aliases, indirect calls and unmodeled C++ object APIs remain "
-         "partial."}};
+         "partial.", {}}};
     auto append = [&](const auto &catalog) {
       for (const auto &rule : catalog)
         rules.push_back(

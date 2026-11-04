@@ -24,6 +24,7 @@
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Models/MemoryModel/FieldSensitive/FSMemModel.h"
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Solver/DeepPropagation.h"
 #include "IR/ICFG/ICFG.h"
+#include "IR/SVFG/NormalizedGep.h"
 #include "IR/SVFG/SVFG.h"
 #include "IR/SVFG/SVFGEdge.h"
 #include "IR/SVFG/SVFGNode.h"
@@ -35,6 +36,7 @@
 #include <queue>
 #include <set>
 
+#include <llvm/ADT/ScopeExit.h>
 #include <llvm/ADT/Statistic.h>
 #include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/Analysis/MemoryBuiltins.h>
@@ -128,72 +130,8 @@ static SVFG::ObjectInfo inferObjectInfoFromValue(const Value *val) {
   return info;
 }
 
-struct NormalizedGepOffset {
-  uint64_t offset = 0;
-  bool traversesArray = false;
-  bool valid = false;
-};
-
-static NormalizedGepOffset getNormalizedGepOffset(const GEPOperator *gep,
-                                                  const DataLayout &layout) {
-  NormalizedGepOffset result;
-  if (!gep)
-    return result;
-
-  Type *current = gep->getSourceElementType();
-  bool firstIndex = true;
-  for (const Use &indexUse : gep->indices()) {
-    const auto *index = dyn_cast<ConstantInt>(indexUse.get());
-    if (firstIndex) {
-      firstIndex = false;
-      if (!index) {
-        result.traversesArray = true;
-      } else if (!current->isArrayTy() && !index->isZero()) {
-        if (index->isNegative())
-          return result;
-        const uint64_t elementSize = layout.getTypeAllocSize(current);
-        const uint64_t element = index->getZExtValue();
-        if (elementSize != 0 &&
-            element > std::numeric_limits<uint64_t>::max() / elementSize)
-          return result;
-        const uint64_t increment = element * elementSize;
-        if (increment >
-            std::numeric_limits<uint64_t>::max() - result.offset)
-          return result;
-        result.offset += increment;
-      }
-      continue;
-    }
-    if (auto *structure = dyn_cast<StructType>(current)) {
-      if (!index || index->getZExtValue() >= structure->getNumElements())
-        return result;
-      const unsigned field = static_cast<unsigned>(index->getZExtValue());
-      const uint64_t increment =
-          layout.getStructLayout(structure)->getElementOffset(field);
-      if (increment > std::numeric_limits<uint64_t>::max() - result.offset)
-        return result;
-      result.offset += increment;
-      current = structure->getElementType(field);
-      continue;
-    }
-    if (auto *array = dyn_cast<ArrayType>(current)) {
-      result.traversesArray = true;
-      current = array->getElementType();
-      continue;
-    }
-    if (auto *vector = dyn_cast<VectorType>(current)) {
-      result.traversesArray = true;
-      current = vector->getElementType();
-      continue;
-    }
-    return result;
-  }
-  result.valid = true;
-  return result;
-}
-
-static NormalizedGepOffset getNormalizedGepOffset(
-    const GetElementPtrInst *gep) {
+static NormalizedGepOffset
+getInstructionGepOffset(const GetElementPtrInst *gep) {
   if (!gep || !gep->getModule())
     return {};
   return getNormalizedGepOffset(cast<GEPOperator>(gep),
@@ -204,15 +142,21 @@ static NormalizedGepOffset getNormalizedGepOffset(
 
 static SVFGNodeBS intersectPointsToSets(const SVFGNodeBS &lhs,
                                         const SVFGNodeBS &rhs,
-                                        uint32_t unknownObjId) {
-  // Empty means "no objects" (not "unknown"). Unknown is represented explicitly
-  // via a wildcard object ID.
+                                        uint32_t unknownObjId,
+                                        bool wildcardUnknown = true) {
+  // Empty means "no objects".
   if (lhs.empty() || rhs.empty())
     return SVFGNodeBS{};
 
-  if (unknownObjId != 0 &&
-      (lhs.count(unknownObjId) != 0 || rhs.count(unknownObjId) != 0)) {
-    return SVFGNodeBS{unknownObjId};
+  if (wildcardUnknown && unknownObjId != 0) {
+    const bool lhsHasUnknown = lhs.count(unknownObjId) != 0;
+    const bool rhsHasUnknown = rhs.count(unknownObjId) != 0;
+    if (lhsHasUnknown && rhsHasUnknown)
+      return SVFGNodeBS{unknownObjId};
+    if (lhsHasUnknown)
+      return rhs;
+    if (rhsHasUnknown)
+      return lhs;
   }
 
   SVFGNodeBS out;
@@ -385,8 +329,6 @@ SVFG *SVFGBuilder::build(const ICFG *icfg, const SVFGBuilderConfig &cfg) {
     runPointerAnalysis();
   }
 
-  prepareMemoryRegionPartitioning();
-
   initializeIndirectCallReverseIndex();
   buildNodes();
   buildEdges();
@@ -413,6 +355,9 @@ void SVFGBuilder::initialize(const ICFG *cfg) {
   svfg = std::make_unique<SVFG>();
   svfg->setICFG(icfg);
   const Module *M = getModuleFromICFG(icfg);
+  externalSpecs = std::make_unique<lotus::alias::AliasSpecManager>();
+  if (M)
+    externalSpecs->initialize(*M);
   if (M)
     svfg->initializeRefinedCallGraph(*const_cast<Module *>(M));
   lastBuiltSVFG = nullptr;
@@ -423,6 +368,8 @@ void SVFGBuilder::initialize(const ICFG *cfg) {
   ptaSolverWrapper.reset();
 
   valueToNode.clear();
+  objectQueryStack.clear();
+  objectQueryResults.clear();
   valueToValueId.clear();
   formalRetValueIds.clear();
   varArgValueIds.clear();
@@ -440,6 +387,8 @@ void SVFGBuilder::initialize(const ICFG *cfg) {
   callToMuNodes.clear();
   callToChiNodes.clear();
   ptaObjectToObjId.clear();
+  objIdToPTAObject.clear();
+  baseObjToFIObjId.clear();
   unknownObjId = 0;
   nextObjId = kObjIdBase;
   objIdToMemReg.clear();
@@ -504,6 +453,18 @@ void SVFGBuilder::runPointerAnalysis() {
 }
 
 void SVFGBuilder::prepareMemoryRegionPartitioning() {
+  // Address/GEP construction can refine AserPTA's objects. No MemorySSA nodes
+  // exist yet, so discard provisional region IDs and freeze a partition over
+  // the final canonical addresses rather than the auxiliary IDs alone.
+  nextMemRegId = 1;
+  allocaToMemReg.clear();
+  globalToMemReg.clear();
+  heapAllocToMemReg.clear();
+  ptrValToMemReg.clear();
+  objIdToMemReg.clear();
+  memRegToObjId.clear();
+  memRegToPts.clear();
+  ptsToMemReg.clear();
   const Module *module = getModuleFromICFG(icfg);
   if (!module) {
     memoryRegionPartitioner.freeze();
@@ -514,12 +475,25 @@ void SVFGBuilder::prepareMemoryRegionPartitioning() {
     if (!pointer || !pointer->getType()->isPointerTy())
       return;
     const SVFGNodeBS objects = getObjectIdsForValue(pointer);
-    if (!objects.empty())
-      memoryRegionPartitioner.observe(scope, objects);
+    if (!objects.empty()) {
+      SVFGNodeBS expanded = objects;
+      if (svfg) {
+        for (uint32_t obj : objects) {
+          if (svfg->isFieldInsensitiveObject(obj)) {
+            const SVFGNodeBS fields = svfg->getFieldObjects(obj);
+            expanded.insert(fields.begin(), fields.end());
+          }
+        }
+      }
+      memoryRegionPartitioner.observe(scope, expanded);
+    }
   };
 
-  for (const GlobalVariable &global : module->globals())
+  for (const GlobalVariable &global : module->globals()) {
+    if (config.pointerOnly && !canTypeContainPointer(global.getValueType()))
+      continue;
     observe(&global, nullptr);
+  }
 
   for (const Function &function : *module) {
     if (function.isDeclaration())
@@ -528,10 +502,21 @@ void SVFGBuilder::prepareMemoryRegionPartitioning() {
       observe(&argument, &function);
     for (const BasicBlock &block : function) {
       for (const Instruction &instruction : block) {
-        if (const auto *load = dyn_cast<LoadInst>(&instruction))
+        if (const auto *load = dyn_cast<LoadInst>(&instruction)) {
+          if (config.pointerOnly && !load->getType()->isPointerTy())
+            continue;
           observe(load->getPointerOperand(), &function);
-        else if (const auto *store = dyn_cast<StoreInst>(&instruction))
+        } else if (const auto *store = dyn_cast<StoreInst>(&instruction)) {
+          if (config.pointerOnly &&
+              !store->getValueOperand()->getType()->isPointerTy())
+            continue;
           observe(store->getPointerOperand(), &function);
+        } else if (const auto *alloca = dyn_cast<AllocaInst>(&instruction)) {
+          if (config.pointerOnly &&
+              !canTypeContainPointer(alloca->getAllocatedType()))
+            continue;
+          observe(alloca, &function);
+        }
 
         if (instruction.getType()->isPointerTy())
           observe(&instruction, &function);
@@ -707,7 +692,7 @@ SVFGNodeBS SVFGBuilder::convertPTAObjectsToObjIDs(
       SVFGBuilderConfig::MemModelType::FieldInsensitive) {
     if (!ptaObjects.empty()) {
       if (unknownObjId == 0) {
-        unknownObjId = nextObjId++;
+        unknownObjId = allocateObjectId();
         if (svfg) {
           svfg->setObjectDebug(unknownObjId, "FI_ANY_OBJECT");
           SVFG::ObjectInfo info;
@@ -772,7 +757,7 @@ SVFGNodeBS SVFGBuilder::convertPTAObjectsToObjIDs(
       continue;
     }
 
-    const uint32_t objId = nextObjId++;
+    const uint32_t objId = allocateObjectId();
     ptaObjectToObjId.emplace(v, objId);
     objIdToPTAObject.emplace(objId, v);
     result.insert(objId);
@@ -814,7 +799,7 @@ SVFGBuilder::getOrCreateCanonicalObjectIdForValue(const Value *v,
     }
   }
 
-  const uint32_t objId = nextObjId++;
+  const uint32_t objId = allocateObjectId();
   if (info.baseObjId == 0)
     info.baseObjId = objId;
   svfg->setObjectInfo(objId, info);
@@ -842,15 +827,67 @@ uint32_t SVFGBuilder::getCanonicalBaseObjId(uint32_t objId) const {
   return objId;
 }
 
+SVFGNodeBS SVFGBuilder::getPreAnalysisPointsTo(const Value *ptr) const {
+  if (!ptr || !ptr->getType()->isPointerTy() || !config.usePointerAnalysis ||
+      !ptaSolverWrapper || !ptaSolverWrapper->solver)
+    return {};
+  // Version labelling invokes the provider concurrently. All pointer values
+  // of interest were observed while constructing the graph, so return that
+  // immutable canonical snapshot rather than rerunning mutable normalization.
+  const SVFG *graph = getActiveSVFG();
+  return graph ? graph->getObjectIds(ptr) : SVFGNodeBS{};
+}
+
 SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
   SVFGNodeBS result;
   SVFG *graph = getActiveSVFG();
   if (!ptr)
     return result;
-  if (graph && isa<GetElementPtrInst>(ptr)) {
+  if (graph && isa<GetElementPtrInst, ConstantExpr>(ptr)) {
     const SVFGNodeBS &mapped = graph->getObjectIds(ptr);
     if (!mapped.empty())
       return mapped;
+  }
+  // Memoize within one recursive query: shared select/phi operands must not
+  // turn a linear pointer-expression DAG into an exponential traversal.
+  // Start fresh on the next query because address construction can refine
+  // the graph between queries.
+  if (objectQueryStack.empty())
+    objectQueryResults.clear();
+  const auto previous = objectQueryResults.find(ptr);
+  if (previous != objectQueryResults.end())
+    return previous->second;
+  const bool normalize = objectQueryStack.insert(ptr).second;
+  auto cleanup = make_scope_exit([&] {
+    if (normalize)
+      objectQueryStack.erase(ptr);
+  });
+  if (normalize && graph) {
+    auto addOperand = [&](const Value *operand) {
+      if (operand && operand->getType()->isPointerTy()) {
+        const SVFGNodeBS targets = getObjectIdsForValue(operand);
+        result.insert(targets.begin(), targets.end());
+      }
+    };
+    bool merge = false;
+    if (const auto *select = dyn_cast<SelectInst>(ptr)) {
+      merge = true;
+      addOperand(select->getTrueValue());
+      addOperand(select->getFalseValue());
+    } else if (const auto *phi = dyn_cast<PHINode>(ptr)) {
+      merge = true;
+      for (const Value *incoming : phi->incoming_values())
+        addOperand(incoming);
+    } else if (const auto *cast = dyn_cast<CastInst>(ptr)) {
+      merge = cast->getOperand(0)->getType()->isPointerTy();
+      if (merge)
+        addOperand(cast->getOperand(0));
+    }
+    if (merge && !result.empty()) {
+      graph->setObjectsForValue(ptr, result);
+      objectQueryResults[ptr] = result;
+      return result;
+    }
   }
   if (config.usePointerAnalysis && ptaSolverWrapper &&
       ptaSolverWrapper->solver && ptr->getType()->isPointerTy()) {
@@ -879,6 +916,8 @@ SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
   if (graph)
     for (uint32_t objId : result)
       graph->addObjectForValue(ptr, objId);
+  if (normalize)
+    objectQueryResults[ptr] = result;
   return result;
 }
 
@@ -888,6 +927,21 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
     return 0;
   SVFG *graph = getActiveSVFG();
   const uint32_t canonicalBaseObjId = getCanonicalBaseObjId(baseObjId);
+  if (::getenv("LOTUS_SVFG_DEBUG")) {
+    auto label = [&](uint32_t id) -> std::string {
+      if (!graph)
+        return "<no-graph>";
+      auto it = graph->getObjectDebugMap().find(id);
+      return it == graph->getObjectDebugMap().end() ? std::string("<none>")
+                                                    : it->second;
+    };
+    const auto dbgNorm = getInstructionGepOffset(gep);
+    llvm::errs() << "[svfg] gep-entry ";
+    gep->printAsOperand(llvm::errs(), false);
+    llvm::errs() << " base=" << baseObjId << "[" << label(baseObjId)
+                 << "] canon=" << canonicalBaseObjId
+                 << " off=" << dbgNorm.offset << "\n";
+  }
 
   if (graph && graph->isUnknownObject(baseObjId))
     return baseObjId;
@@ -938,6 +992,11 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
         fieldObjectNode ? fieldObjectNode->getObject() : nullptr;
     if (!fieldObject)
       return 0;
+    // Field-insensitive/collapsed models can answer with the base object
+    // itself. Do not adopt that object as a distinct field: doing so would
+    // overwrite the base's metadata with a member offset.
+    if (fieldObject == baseObject)
+      return 0;
     auto cached = ptaObjectToObjId.find(fieldObject);
     if (cached != ptaObjectToObjId.end())
       return cached->second;
@@ -945,7 +1004,7 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
     return ids.empty() ? 0 : *ids.begin();
   };
 
-  const NormalizedGepOffset normalized = getNormalizedGepOffset(gep);
+  const NormalizedGepOffset normalized = getInstructionGepOffset(gep);
   if (graph && normalized.valid) {
     graph->setGepAccess(gep, normalized.offset, normalized.traversesArray);
     uint64_t baseOffset = 0;
@@ -975,8 +1034,37 @@ uint32_t SVFGBuilder::getGepObjectId(uint32_t baseObjId,
     }
 
     uint32_t fieldObjId = queryAserFieldObject();
+    if (::getenv("LOTUS_SVFG_DEBUG")) {
+      auto label = [&](uint32_t id) -> std::string {
+        auto it = graph->getObjectDebugMap().find(id);
+        return it == graph->getObjectDebugMap().end() ? std::string("<none>")
+                                                      : it->second;
+      };
+      llvm::errs() << "  [svfg] query=" << fieldObjId << "[" << label(fieldObjId)
+                   << "] base=" << canonicalBaseObjId << " off=" << totalOffset
+                   << "\n";
+    }
+    // The auxiliary analysis may collapse an array to its base. Reusing
+    // that ID here would overwrite the base's metadata with a member offset
+    // and conflate every member's initializer with that field.
+    if (fieldObjId == canonicalBaseObjId)
+      fieldObjId = 0;
+    // Objects materialized directly from PTA points-to sets become their own
+    // base (baseObjId == objId) because their allocation-site value alone does
+    // not say which field they represent.  When the GEP query above identifies
+    // such an object as the field at `totalOffset`, adopt it instead of
+    // synthesizing a second object for the same location.  Reject objects that
+    // are already bound to another base/offset, or that are field-insensitive.
+    if (const auto *existing = graph->getObjectInfo(fieldObjId)) {
+      const bool isUnbound =
+          existing->baseObjId == 0 || existing->baseObjId == fieldObjId;
+      if ((!isUnbound && existing->baseObjId != canonicalBaseObjId) ||
+          (existing->hasFieldOffset && existing->fieldOffset != totalOffset) ||
+          existing->isFieldInsensitive)
+        fieldObjId = 0;
+    }
     if (fieldObjId == 0)
-      fieldObjId = nextObjId++;
+      fieldObjId = allocateObjectId();
     SVFG::ObjectInfo info;
     if (const SVFG::ObjectInfo *baseInfo =
             graph->getObjectInfo(canonicalBaseObjId))
@@ -1097,7 +1185,7 @@ uint32_t SVFGBuilder::getOrCreateFIObjId(uint32_t baseObjId) {
     baseObjToFIObjId[canonicalBaseObjId] = baseObjId;
     return baseObjId;
   }
-  const uint32_t fiObjId = nextObjId++;
+  const uint32_t fiObjId = allocateObjectId();
   baseObjToFIObjId[canonicalBaseObjId] = fiObjId;
   if (graph) {
     SVFG::ObjectInfo baseUpdate;
@@ -1123,7 +1211,7 @@ uint32_t SVFGBuilder::getOrCreateFIObjId(uint32_t baseObjId) {
 uint32_t SVFGBuilder::getOrCreateUnknownObjId() {
   if (unknownObjId != 0)
     return unknownObjId;
-  unknownObjId = nextObjId++;
+  unknownObjId = allocateObjectId();
   if (SVFG *graph = getActiveSVFG()) {
     graph->setObjectDebug(unknownObjId, "ANY_OBJECT");
     SVFG::ObjectInfo info;
@@ -1131,6 +1219,18 @@ uint32_t SVFGBuilder::getOrCreateUnknownObjId() {
     graph->setObjectInfo(unknownObjId, info);
   }
   return unknownObjId;
+}
+
+uint32_t SVFGBuilder::allocateObjectId() {
+  uint32_t objId;
+  if (SVFG *graph = getActiveSVFG()) {
+    objId = graph->allocateObjectId();
+  } else {
+    objId = nextObjId;
+  }
+  if (objId >= nextObjId)
+    nextObjId = objId + 1;
+  return objId;
 }
 
 uint32_t SVFGBuilder::getUnknownObjId() { return getOrCreateUnknownObjId(); }
@@ -1461,14 +1561,16 @@ bool SVFGBuilder::mayAliasMemoryNodes(const MSSASVFGNode *lhs,
   if (!lhs || !rhs)
     return false;
 
+  if (lhs->getMemReg() != 0 && rhs->getMemReg() != 0 &&
+      lhs->getMemReg() == rhs->getMemReg())
+    return true;
+
   const SVFGNodeBS lhsPts = lhs->getDefSVFVars();
   const SVFGNodeBS rhsPts = rhs->getDefSVFVars();
 
-  // Conservative: if either set is unknown/empty, keep the edge.
   if (lhsPts.empty() || rhsPts.empty())
-    return true;
+    return !config.usePointerAnalysis;
 
-  // Unknown object is a wildcard and may alias anything.
   if (unknownObjId != 0 &&
       (lhsPts.count(unknownObjId) != 0 || rhsPts.count(unknownObjId) != 0))
     return true;
@@ -1811,6 +1913,29 @@ bool SVFGBuilder::callMayModifyMemory(const CallBase *call) {
   return true;
 }
 
+// A pointer specification describes memory effects separately from passing
+// pointer values. Unknown declarations retain the conservative fallback.
+static bool specAccessesArgument(const lotus::FunctionSpec &spec,
+                                 unsigned argument, bool write) {
+  auto matches = [&](const lotus::ValueSelector &selector) {
+    return (selector.kind == lotus::SelectorKind::Arg &&
+            selector.index == static_cast<int>(argument)) ||
+           (selector.kind == lotus::SelectorKind::AfterArg &&
+            static_cast<int>(argument) > selector.index);
+  };
+  for (const auto &effect : spec.modref)
+    if (effect.op == (write ? lotus::SpecOpKind::Mod : lotus::SpecOpKind::Ref) &&
+        matches(effect.target))
+      return true;
+  for (const auto &effect : spec.copies) {
+    const auto &selector = write ? effect.dst : effect.src;
+    const auto qualifier = write ? effect.dstQualifier : effect.srcQualifier;
+    if (qualifier != lotus::QualifierKind::Value && matches(selector))
+      return true;
+  }
+  return false;
+}
+
 bool SVFGBuilder::callArgMayReadMemory(const CallBase *call,
                                        unsigned argNo) const {
   if (!call)
@@ -1818,6 +1943,14 @@ bool SVFGBuilder::callArgMayReadMemory(const CallBase *call,
   if (call->paramHasAttr(argNo, Attribute::ReadNone) ||
       call->paramHasAttr(argNo, Attribute::WriteOnly)) {
     return false;
+  }
+  if (config.pointerOnly && externalSpecs) {
+    const Function *callee = call->getCalledFunction();
+    if (callee && callee->isDeclaration()) {
+      if (const auto *spec =
+              externalSpecs->getAPISpec().get(callee->getName().str()))
+        return specAccessesArgument(*spec, argNo, false);
+    }
   }
   return true;
 }
@@ -1830,7 +1963,32 @@ bool SVFGBuilder::callArgMayModifyMemory(const CallBase *call,
       call->paramHasAttr(argNo, Attribute::ReadOnly)) {
     return false;
   }
+  if (config.pointerOnly && externalSpecs) {
+    const Function *callee = call->getCalledFunction();
+    if (callee && callee->isDeclaration()) {
+      if (const auto *spec =
+              externalSpecs->getAPISpec().get(callee->getName().str()))
+        return specAccessesArgument(*spec, argNo, true);
+    }
+  }
   return true;
+}
+
+bool SVFGBuilder::canTypeContainPointer(const Type *T) {
+  if (!T)
+    return false;
+  if (T->isPointerTy())
+    return true;
+  if (const auto *AT = dyn_cast<ArrayType>(T))
+    return canTypeContainPointer(AT->getElementType());
+  if (const auto *ST = dyn_cast<StructType>(T)) {
+    for (const auto *elem : ST->elements()) {
+      if (canTypeContainPointer(elem))
+        return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 uint32_t SVFGBuilder::nextVersion(const Function *F, uint32_t memReg) {

@@ -22,8 +22,6 @@ pages alongside an algorithm page when comparing analyses.
    dda
    dyckaa
    seadsa
-   fpa
-   gpg
    flowsensitive
    valueflowpta
    lotusaa
@@ -34,4 +32,3 @@ pages alongside an algorithm page when comparing analyses.
    ptsset
    spec
    tpa
-   typequalifier

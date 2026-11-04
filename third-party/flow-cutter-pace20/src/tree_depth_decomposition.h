@@ -368,7 +368,7 @@ ArrayIDIDFunc compute_tree_depth_order_of_connected_graph(
         if(best_order_depth > tree_depth_must_be_below)
             return ArrayIDIDFunc();
         else
-            return std::move(best_order);
+            return best_order;
     }
 }
 

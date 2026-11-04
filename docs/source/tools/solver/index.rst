@@ -3,8 +3,9 @@ Solver Tools
 
 This page documents the command-line front-ends under ``tools/solver/``.
 ``lotus-solver-datalog`` is built by default, while ``lotus-solver-owl`` requires
-``-DLOTUS_ENABLE_OWL=ON``. ``lotus-solver-staub`` is an experimental tool
-(not built by default); ``lotus-solver-smt-stabilizer`` requires
+``-DLOTUS_ENABLE_OWL=ON``. ``lotus-solver-staub`` currently has no CMake target
+and is therefore never built (see ``tools/solver/CMakeLists.txt``);
+``lotus-solver-smt-stabilizer`` requires
 ``-DLOTUS_ENABLE_SMT_STABILIZER=ON`` (GMP/MPFR). SMT↔LLVM translation is provided
 by TUNA under ``lib/Solvers/SMT/TUNA``.
 
@@ -45,7 +46,7 @@ lotus-solver-owl – SMT/Model Checking Front-End
 
 .. code-block:: bash
 
-   ./build/bin/lotus-solver-owl examples/solver/example.smt2
+   ./build/bin/lotus-solver-owl problem.smt2
 
 See :doc:`../../solvers/smt` for details about the solver stack.
 
@@ -55,11 +56,13 @@ lotus-solver-staub – Bounded-Theory Conversion Front-End
 ``lotus-solver-staub`` rewrites unbounded SMT constraints into bounded encodings
 before translation or solving.
 
-**Binary**: ``lotus-solver-staub`` (source present, not built by default)
+**Binary**: ``lotus-solver-staub`` (source present, no build target)
 
 **Source**: ``tools/solver/lotus-solver-staub.cpp``
 
-This tool is not built by default.
+This tool is not built by any configuration; ``tools/solver/CMakeLists.txt``
+keeps its ``add_executable`` disabled. The invocation below documents the
+intended interface for a manual build.
 
 Basic usage:
 

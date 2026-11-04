@@ -62,6 +62,7 @@ public:
   ArgTransitions();
   ArgTransitions(std::set<fitx::State> states);
   ArgTransitions(const ArgTransitions &arg_transitions);
+  ArgTransitions &operator=(const ArgTransitions &) = default;
 
   bool operator==(const ArgTransitions &arg_transitions) const;
 
@@ -94,18 +95,18 @@ public:
                        std::shared_ptr<fitx::Instruction> instruction);
 
   void addArgValueState(const ArgValueStates &states);
-  const uint64_t Size() const { return value_states_.size(); }
+  uint64_t Size() const { return value_states_.size(); }
   bool ValueExistsInArg(uint64_t arg, std::shared_ptr<Value>);
 
   const std::map<std::shared_ptr<fitx::Value>, std::vector<Transition>>
-  getValueStateForArg(int64_t index) const;
+  getValueStateForArg(uint64_t index) const;
 
   /* const std::map<std::shared_ptr<fitx::Value>,
    * std::vector<TransitionLogs>> */
   /* getValueTransitionLogsForArg(int64_t index) const; */
 
   const std::map<std::shared_ptr<fitx::Value>, ArgTransitions>
-  getArgTransitions(int64_t index) const;
+  getArgTransitions(uint64_t index) const;
 
   std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>>
   getValueTransitionStates(const fitx::State &state);

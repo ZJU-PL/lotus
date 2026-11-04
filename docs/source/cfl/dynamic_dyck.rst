@@ -146,10 +146,10 @@ Benchmark workflow
 
 .. code-block:: bash
 
-   cmake --build build --target lotus-cfl-dynamic-dyck dynamic_dyck_test
+   cmake --build build --target lotus-cfl-dynamic-dyck cfl_tests
    build/bin/lotus-cfl-dynamic-dyck 1 initial.dot updates.seq
    build/bin/lotus-cfl-dynamic-dyck 0 initial.dot updates.seq
-   ctest --test-dir build -R dynamic_dyck --output-on-failure
+   ctest --test-dir build -R 'cfl_tests.(DynamicDyckTest|PrimaryComponent)' --output-on-failure
 
 ``0`` selects recomputation after every input record, including no-ops;
 ``1`` selects dynamic updates. The CLI accepts original
@@ -171,7 +171,8 @@ repository, with ``DYCK_REACH_BINARY`` and ``DYCK_BENCHMARK_ROOT`` overrides:
 The C++ benchmark inputs live in
 ``benchmarks/real-world/CFL/DynamicDyck`` and the scripts in
 ``scripts/cfl/dynamic-dyck``.
-The optional ``run_benchmarks.py`` runner
-supports case selection, dry-run input validation, and partition comparison
+The optional ``run_benchmarks.py`` runner in
+``benchmarks/real-world/CFL/DynamicDyck/`` supports case selection, dry-run
+input validation, and partition comparison
 without changing the table ordering; ``--binary`` selects another
 build. The DDlog encoding is not accepted by this CLI.

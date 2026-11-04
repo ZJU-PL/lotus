@@ -1,4 +1,5 @@
-/** @file ReportOptions.h @brief Reporting configuration options for checker output. */
+/** @file ReportOptions.h @brief Reporting configuration options for checker
+ * output. */
 #pragma once
 
 #include <string>
@@ -20,6 +21,7 @@ extern llvm::cl::OptionCategory OutputCategory;
 
 // Output format options (apply to all checkers)
 extern llvm::cl::opt<std::string> JsonOutputFile;
+extern llvm::cl::opt<std::string> TipFormat;
 extern llvm::cl::opt<std::string> SarifOutputFile;
 extern llvm::cl::opt<std::string> TargetsOutputFile;
 extern llvm::cl::opt<std::string> SuppressionFile;
@@ -31,4 +33,3 @@ extern llvm::cl::opt<bool> FailOnFindings;
 void initializeReportOptions();
 
 } // namespace report_options
-

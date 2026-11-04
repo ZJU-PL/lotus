@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Dataflow/DemandAPA/Support.h"
+
 class TreeDec {
 public:
   TreeDec() {

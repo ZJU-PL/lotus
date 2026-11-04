@@ -50,6 +50,7 @@
 
 #pragma once
 
+#include "Alias/Infrastructure/Spec/AliasSpecManager.h"
 #include "IR/ICFG/CallGraph.h"
 #include "IR/ICFG/ICFG.h"
 #include "IR/SVFG/MemoryRegionPartitioner.h"
@@ -68,6 +69,9 @@ namespace analysis {
 
 /// @brief SVFGBuilder configuration
 struct SVFGBuilderConfig {
+  /// @brief Only include pointer-typed value flows (aligns with SVF PTROnlySVFG)
+  bool pointerOnly = true;
+
   /// @brief Enable Memory SSA construction
   bool buildMSSA = true;
 
@@ -135,7 +139,7 @@ public:
   /// Object IDs live in a disjoint namespace from SVFG node IDs.
   /// This avoids accidental collisions in DDA where `DPItem::cur` can hold
   /// either a pointer (SVFG node ID) or an abstract object ID.
-  static constexpr uint32_t kObjIdBase = 1u << 30;
+  static constexpr uint32_t kObjIdBase = SVFG::kObjectIdBase;
 
   /// @brief Memory region version info
   struct MemRegVer {
@@ -197,11 +201,21 @@ private:
   /// @brief Next memory region ID (separate from node IDs)
   uint32_t nextMemRegId;
 
+  /// @brief Allocate an abstract object ID.
+  ///
+  /// Allocations go through the attached SVFG when one exists so that
+  /// solve-time object creation (field-insensitive collapse) cannot collide
+  /// with builder IDs.
+  uint32_t allocateObjectId();
+
   /// @brief Next top-level value-symbol ID.
   uint32_t nextValueId = kValueIdBase;
 
   /// @brief Value to SVFG node mapping
   std::unordered_map<const llvm::Value *, uint32_t> valueToNode;
+  /// Recursion guard while normalizing auxiliary targets of pointer merges.
+  std::unordered_set<const llvm::Value *> objectQueryStack;
+  std::unordered_map<const llvm::Value *, SVFGNodeBS> objectQueryResults;
   /// @brief LLVM value to canonical top-level value-symbol ID.
   std::unordered_map<const llvm::Value *, uint32_t> valueToValueId;
   /// @brief Synthetic value-symbol IDs for formal returns and varargs.
@@ -308,6 +322,16 @@ private:
 
   /// @brief Last graph returned by build(); used for compatibility accessors.
   SVFG *lastBuiltSVFG = nullptr;
+  std::unique_ptr<lotus::alias::AliasSpecManager> externalSpecs;
+
+  // Materialize library return summaries as ordinary address/copy edges so
+  // sparse, versioned and demand solvers share the same external semantics.
+  void connectExternalReturn(SVFG *graph, const llvm::CallBase *call,
+                             const llvm::Function *callee,
+                             std::vector<SVFGEdge *> &edges);
+  void connectUnmodifiedCallMemory(SVFG *graph, const llvm::CallBase *call,
+                                   const llvm::Function *callee,
+                                   std::vector<SVFGEdge *> &edges);
 
 protected:
   SVFG *getActiveSVFG() const { return svfg ? svfg.get() : lastBuiltSVFG; }
@@ -349,6 +373,15 @@ public:
   /// Field-insensitive fallback (FIMemModel or large objects) returns a single
   /// base object ID for all fields.
   SVFGNodeBS getObjectIdsForValue(const llvm::Value *ptr);
+
+  /// @brief Points-to objects of a pointer from the pre-analysis (AserPTA).
+  ///
+  /// SVF's versioned analysis seeds its meld labels from the auxiliary
+  /// Andersen result (`ander->getPts(store lhs)`); this exposes the same
+  /// information in SVFG object-id space.
+  /// The completed build records these canonical targets in the graph. This
+  /// lookup is read-only and safe for concurrent version-label workers.
+  SVFGNodeBS getPreAnalysisPointsTo(const llvm::Value *ptr) const;
 
   /// @brief Map base object + GEP to field object ID (field-sensitive if possible).
   ///
@@ -581,6 +614,7 @@ private:
   bool callArgMayReadMemory(const llvm::CallBase *call, unsigned argNo) const;
   bool callArgMayModifyMemory(const llvm::CallBase *call,
                               unsigned argNo) const;
+  static bool canTypeContainPointer(const llvm::Type *T);
   std::vector<const llvm::Function *> getRootFunctionsFromICFG() const;
   uint32_t getOrCreateCanonicalObjectIdForValue(const llvm::Value *v,
                                                 SVFG::ObjectInfo info);

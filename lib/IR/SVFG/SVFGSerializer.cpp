@@ -1205,6 +1205,7 @@ bool SVFGSerializer::readText(SVFG &graph, const std::string &filename) {
         object.objId,
         unpackObjectInfoFlags(object.flags, object.baseObjId,
                               object.fieldOffset));
+    graph.raiseObjectIdFloor(object.objId + 1);
     if ((object.flags & (1u << 10)) != 0 && object.baseObjId != 0)
       graph.setOffsetObject(object.baseObjId, object.fieldOffset, object.objId);
     if (const Value *V = resolveValueAnchor(module, object.valueAnchor))

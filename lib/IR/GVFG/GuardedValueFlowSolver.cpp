@@ -18,6 +18,7 @@
 
 #include <climits>
 
+#include <llvm/ADT/ScopeExit.h>
 #include <llvm/ADT/StringExtras.h>
 #include <llvm/ADT/Twine.h>
 #include <llvm/IR/Constants.h>
@@ -226,7 +227,8 @@ GuardedValueFlowSolver::getOrInsertExpr(const GuardedValueFlowNode *node) {
     FunctionArgumentCache.add(node);
   } else if (auto *call_output =
                  dyn_cast<GuardedValueFlowCallOutputNode>(node)) {
-    if (!CallSiteOutputCache.contains(call_output))
+    if (trackCallOutput(call_output) &&
+        !CallSiteOutputCache.contains(call_output))
       CallSiteOutputCache.add(call_output);
   }
 
@@ -234,31 +236,28 @@ GuardedValueFlowSolver::getOrInsertExpr(const GuardedValueFlowNode *node) {
   if (existing != NodeExprMap.end())
     return existing->second;
 
-  const std::string symbol = buildNodeSymbol(node);
+  const std::string symbol = getEncodingSymbol(node);
   NodeSymbolNameMap[symbol] = node;
 
   SMTExpr result = Factory->createEmptySMTExpr();
   if (isTerminalNode(node) && !isa<GuardedValueFlowOpcodeNode>(node)) {
     if (Value *value = node->getLLVMValue()) {
       if (auto *constant_int = dyn_cast<ConstantInt>(value)) {
-        result = Factory->createBitVecVal(
-            llvm::toString(constant_int->getValue(), 10, false),
-            DL.getTypeSizeInBits(node->getType()));
+        result = encodeScalarConstant(constant_int,
+                                      getEncodingTypeSize(node->getType()));
         NodeExprMap.insert({node, result});
         return result;
       }
       if (isa<ConstantPointerNull>(value) ||
           isa<ConstantAggregateZero>(value)) {
-        result =
-            Factory->createBitVecVal(0, DL.getTypeSizeInBits(node->getType()));
+        result = encodeScalarConstant(cast<Constant>(value),
+                                      getEncodingTypeSize(node->getType()));
         NodeExprMap.insert({node, result});
         return result;
       }
       if (auto *constant_fp = dyn_cast<ConstantFP>(value)) {
-        APInt bits = constant_fp->getValueAPF().bitcastToAPInt();
-        result =
-            Factory->createBitVecVal(llvm::toString(bits, 10, false),
-                                     DL.getTypeSizeInBits(node->getType()));
+        result = encodeScalarConstant(constant_fp,
+                                      getEncodingTypeSize(node->getType()));
         NodeExprMap.insert({node, result});
         return result;
       }
@@ -267,11 +266,11 @@ GuardedValueFlowSolver::getOrInsertExpr(const GuardedValueFlowNode *node) {
         if (!element_type->isFloatTy() && !element_type->isDoubleTy() &&
             !element_type->isIntegerTy()) {
           result = Factory->createBitVecConst(
-              symbol, DL.getTypeSizeInBits(node->getType()));
+              symbol, getEncodingTypeSize(node->getType()));
         } else {
           unsigned element_num = cds->getNumElements();
           uint64_t elem_size =
-              DL.getTypeSizeInBits(node->getType()) / std::max(1u, element_num);
+              getEncodingTypeSize(node->getType()) / std::max(1u, element_num);
           for (unsigned idx = 0; idx < element_num; ++idx) {
             uint64_t elem = 0;
             if (element_type->isFloatTy())
@@ -292,9 +291,49 @@ GuardedValueFlowSolver::getOrInsertExpr(const GuardedValueFlowNode *node) {
   }
 
   result =
-      Factory->createBitVecConst(symbol, DL.getTypeSizeInBits(node->getType()));
+      Factory->createBitVecConst(symbol, getEncodingTypeSize(node->getType()));
   NodeExprMap.insert({node, result});
   return result;
+}
+
+uint64_t GuardedValueFlowSolver::getEncodingTypeSize(Type *type) const {
+  return DL.getTypeSizeInBits(type);
+}
+
+std::string GuardedValueFlowSolver::getEncodingSymbol(
+    const GuardedValueFlowNode *node) const {
+  return buildNodeSymbol(node);
+}
+
+SMTExpr GuardedValueFlowSolver::encodeScalarConstant(
+    const Constant *constant, uint64_t width) {
+  if (auto *integer = dyn_cast<ConstantInt>(constant))
+    return Factory->createBitVecVal(
+        llvm::toString(integer->getValue(), 10, false), width);
+  if (auto *floating = dyn_cast<ConstantFP>(constant))
+    return Factory->createBitVecVal(
+        llvm::toString(floating->getValueAPF().bitcastToAPInt(), 10, false),
+        width);
+  assert((isa<ConstantPointerNull>(constant) ||
+          isa<ConstantAggregateZero>(constant)) &&
+         "Unexpected scalar constant kind");
+  return Factory->createBitVecVal(0, width);
+}
+
+std::pair<uint64_t, uint64_t>
+GuardedValueFlowSolver::getEncodingCastWidths(
+    const GuardedValueFlowOpcodeNode *node) const {
+  return {node->getCastSrcBits(), node->getCastDstBits()};
+}
+
+bool GuardedValueFlowSolver::trackCallOutput(
+    const GuardedValueFlowCallOutputNode *) const {
+  return true;
+}
+
+bool GuardedValueFlowSolver::isNonNullTerminal(
+    const GuardedValueFlowNode *node) const {
+  return isNonNullTerminalValue(node);
 }
 
 SMTExpr GuardedValueFlowSolver::encodeOpcodeNode(
@@ -307,7 +346,8 @@ SMTExpr GuardedValueFlowSolver::encodeOpcodeNode(
         FunctionArgumentCache.add(edge.target);
       } else if (auto *call_output =
                      dyn_cast<GuardedValueFlowCallOutputNode>(edge.target)) {
-        if (!CallSiteOutputCache.contains(call_output))
+        if (trackCallOutput(call_output) &&
+            !CallSiteOutputCache.contains(call_output))
           CallSiteOutputCache.add(call_output);
       }
     }
@@ -496,8 +536,9 @@ SMTExpr GuardedValueFlowSolver::encodeCastOpcodeNode(
   SMTExpr self = getOrInsertExpr(node);
   SMTExpr child = getOrInsertExpr(node->getOperand(0));
   unsigned elem_num = getVectorElementCount(node->getType());
-  uint64_t origin_size = node->getCastSrcBits();
-  uint64_t target_size = node->getCastDstBits();
+  auto widths = getEncodingCastWidths(node);
+  uint64_t origin_size = widths.first;
+  uint64_t target_size = widths.second;
 
   switch (node->getOpcodeKind()) {
   case GuardedValueFlowOpcodeNode::OpcodeKind::Trunc:
@@ -695,7 +736,9 @@ std::pair<SMTExprVec, SMTExprVec> GuardedValueFlowSolver::_getCtrlDeps(
     return {ctrl, data};
   }
 
-  if (depth >= GVFGCDMaxDepth) {
+  // Loop control dependencies can be cyclic. Abstract a recursive revisit in
+  // the same way as a depth cutoff, rather than expanding it indefinitely.
+  if (depth >= GVFGCDMaxDepth || ActiveCtrlBlocks.count(block)) {
     SMTExprVec ctrl = Factory->createEmptySMTExprVec();
     SMTExprVec data = Factory->createEmptySMTExprVec();
     ctrl.push_back(Factory->createBoolConst(
@@ -744,6 +787,9 @@ std::pair<SMTExprVec, SMTExprVec> GuardedValueFlowSolver::_getCtrlDeps(
 
   SMTExprVec ctrl = Factory->createEmptySMTExprVec();
   SMTExprVec data = Factory->createEmptySMTExprVec();
+
+  ActiveCtrlBlocks.insert(block);
+  auto active_guard = make_scope_exit([&] { ActiveCtrlBlocks.erase(block); });
 
   auto block_conditions = graph->getBlockConditions(block);
   if (!block_conditions.empty()) {
@@ -838,7 +884,7 @@ GuardedValueFlowSolver::_getDataDeps(const GuardedValueFlowNode *node,
         if (edge.target && !shouldExcludeSummaryBackedChild(node, edge.target))
           ret = SMTExprVec::merge(ret, _getDataDeps(edge.target, depth + 1));
       }
-    } else if (isNonNullTerminalValue(node)) {
+    } else if (isNonNullTerminal(node)) {
       ret.push_back(self != 0);
     }
   } else if (node->getKind() == GuardedValueFlowNode::Kind::Unknown) {

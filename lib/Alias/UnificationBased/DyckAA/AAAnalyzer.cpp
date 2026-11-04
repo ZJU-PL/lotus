@@ -959,8 +959,11 @@ void AAAnalyzer::handleExtractInsertValueInst(Value *AggValue, Type *AggTy,
 }
 
 void AAAnalyzer::handleExtractInsertElmtInst(Value *Vec, Value *Elmt) {
-  auto *ElmtVer = wrapValue(Elmt);
+  wrapValue(Elmt);
   auto *VecVer = wrapValue(Vec);
+  // Wrapping a constant vector can merge its elements and delete their old
+  // representatives. Retrieve the element again after the vector is wrapped.
+  auto *ElmtVer = wrapValue(Elmt);
   this->makeAlias(VecVer, ElmtVer);
 }
 

@@ -55,13 +55,14 @@ or via the solver-agnostic abstraction layer :doc:`libsmt`:
    #include "Solvers/SMT/LIBSMT/SMTFactory.h"
    #include "Solvers/SMT/LIBSMT/SMTSolver.h"
 
-   auto &factory = SMTFactory::instance();
-   auto solver = factory.createSolver();
+   SMTFactory factory;
+   SMTSolver solver = factory.createSMTSolver();
 
-   auto intSort = factory.getSort("Int");
-   auto x = factory.makeVariable(intSort, "x");
-   solver->assertExpr(factory.makeGT(x, factory.makeIntVal(0)));
-   auto result = solver->check();
+   SMTExpr x    = factory.createBitVecConst("x", 32);
+   SMTExpr zero = factory.createBitVecVal(0, 32);
+
+   solver.add(x > zero);
+   auto result = solver.check();   // SMTSolver::SMTRT_Sat, ...
 
 Submodules
 ----------

@@ -5,5 +5,3 @@ lotus_collect_test_sources(cfl_tests
   PrimaryComponentIntegrationTest.cpp)
 
 add_subdirectory(PrimaryComponent)
-
-include(${CMAKE_SOURCE_DIR}/tests/regress/CFL/DynamicDyck/Tests.cmake)

@@ -28,6 +28,7 @@
 #pragma once
 
 #include "IR/GVFG/ConditionRef.h"
+#include "IR/GVFG/GuardedValueFlowObject.h"
 
 #include <cassert>
 #include <map>
@@ -130,7 +131,7 @@ private:
 ///
 /// **Matching regions** are populated by the adapter pass to record the path
 /// condition under which a load-memory node's producer is valid.
-class GuardedValueFlowNode {
+class GuardedValueFlowNode : public GuardedValueFlowObject {
 public:
   enum class Kind {
     CommonArgument,
@@ -179,11 +180,16 @@ public:
 
   Kind getKind() const { return kind_; }
   Type *getType() const { return type_; }
-  GuardedValueFlowGraph *getGraph() const { return graph_; }
-  BasicBlock *getParentBasicBlock() const { return block_; }
+  GuardedValueFlowGraph *getGraph() const override { return graph_; }
+  BasicBlock *getParentBasicBlock() const override { return block_; }
   Value *getLLVMValue() const { return llvm_value_; }
-  Instruction *getDebugInstruction() const { return dbg_inst_; }
+  Value *getDebugValue() const override { return llvm_value_; }
+  Instruction *getDebugInstruction() const override { return dbg_inst_; }
   unsigned getNodeId() const { return node_id_; }
+
+  static bool classof(const GuardedValueFlowObject *object) {
+    return object->getDomain() == Domain::Node;
+  }
 
   virtual void addChild(GuardedValueFlowNode *child, float confidence = 1.0f,
                         ConditionRef condition = ConditionRef::none());
@@ -207,6 +213,12 @@ public:
     return static_cast<unsigned>(parents_.size());
   }
   bool containsParent(const GuardedValueFlowNode *parent) const;
+  /// Confidence attached to a producer or consumer dependency edge.
+  float getConfidence(const GuardedValueFlowNode *other) const {
+    for (const auto &edge : parents_) if (edge.target == other) return edge.confidence;
+    for (const auto &edge : children_) if (edge.target == other) return edge.confidence;
+    return 1.0f;
+  }
   std::vector<GuardedValueFlowNode *>
   getValueFlowParents(bool enable_arithmetic_flow = false) const;
 
@@ -264,6 +276,11 @@ public:
                                Value *llvm_value)
       : GuardedValueFlowNode(kind, type, graph, block, llvm_value,
                              dyn_cast<Instruction>(llvm_value)) {}
+
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowNode::classof(object) &&
+           classof(static_cast<const GuardedValueFlowNode *>(object));
+  }
 
   static bool classof(const GuardedValueFlowNode *node) {
     return node->getKind() == Kind::CommonArgument ||
@@ -430,6 +447,11 @@ public:
   }
 
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowNode::classof(object) &&
+           classof(static_cast<const GuardedValueFlowNode *>(object));
+  }
+
   static bool classof(const GuardedValueFlowNode *node) {
     return node->getKind() == Kind::Region;
   }
@@ -562,6 +584,11 @@ private:
   std::vector<OperandUse> operands_;
 
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowNode::classof(object) &&
+           classof(static_cast<const GuardedValueFlowNode *>(object));
+  }
+
   static bool classof(const GuardedValueFlowNode *node) {
     return node->getKind() == Kind::SimpleOpcode ||
            node->getKind() == Kind::CastOpcode;
@@ -601,6 +628,11 @@ private:
   std::vector<Incoming> incoming_;
 
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowNode::classof(object) &&
+           classof(static_cast<const GuardedValueFlowNode *>(object));
+  }
+
   static bool classof(const GuardedValueFlowNode *node) {
     return node->getKind() == Kind::Phi;
   }
@@ -633,6 +665,11 @@ private:
   std::vector<ReturnIncoming> incoming_returns_;
 
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowNode::classof(object) &&
+           classof(static_cast<const GuardedValueFlowNode *>(object));
+  }
+
   static bool classof(const GuardedValueFlowNode *node) {
     return node->getKind() == Kind::CommonReturn ||
            node->getKind() == Kind::PseudoReturn;
@@ -662,6 +699,11 @@ private:
   Function *callee_;
 
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowNode::classof(object) &&
+           classof(static_cast<const GuardedValueFlowNode *>(object));
+  }
+
   static bool classof(const GuardedValueFlowNode *node) {
     return node->getKind() == Kind::CallSiteCommonOutput ||
            node->getKind() == Kind::CallSitePseudoOutput ||
@@ -684,6 +726,11 @@ public:
   Instruction *getCallSite() const { return call_site_; }
   Function *getCallee() const { return callee_; }
   unsigned getSummaryIndex() const { return summary_index_; }
+
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowNode::classof(object) &&
+           classof(static_cast<const GuardedValueFlowNode *>(object));
+  }
 
   static bool classof(const GuardedValueFlowNode *node) {
     return node->getKind() == Kind::CallSiteArgumentSummary ||

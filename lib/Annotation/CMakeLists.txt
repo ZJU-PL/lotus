@@ -6,6 +6,8 @@ add_library(Annotation STATIC
     Taint/TaintConfigParser.cpp
     Taint/TaintConfigManager.cpp
     APISpec.cpp
+    APISpecJSON.cpp
+    Taint/TaintConfigJSON.cpp
 )
 
 # Create alias for backward compatibility

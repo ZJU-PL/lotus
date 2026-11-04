@@ -259,8 +259,9 @@ void GraphAlgorithms::mergeSCC(Graph &g, int *on, vector<int> &reverse_topo_sort
     // topological sort
     topological_sort(g, reverse_topo_sort);
     // update graph's topological id
-    for (int i = 0; i < reverse_topo_sort.size(); i++)
-      g[reverse_topo_sort[i]].topo_id = reverse_topo_sort.size() - i - 1;
+    for (size_t i = 0; i < reverse_topo_sort.size(); i++)
+      g[reverse_topo_sort[i]].topo_id =
+          static_cast<int>(reverse_topo_sort.size() - i - 1);
 
     return;
   }
@@ -351,8 +352,9 @@ void GraphAlgorithms::mergeSCC(Graph &g, int *on, vector<int> &reverse_topo_sort
   // topological sort
   topological_sort(g, reverse_topo_sort);
   // update graph's topological id
-  for (int i = 0; i < reverse_topo_sort.size(); i++)
-    g[reverse_topo_sort[i]].topo_id = reverse_topo_sort.size() - i - 1;
+  for (size_t i = 0; i < reverse_topo_sort.size(); i++)
+    g[reverse_topo_sort[i]].topo_id =
+        static_cast<int>(reverse_topo_sort.size() - i - 1);
 
   // update index map
   unordered_map<int, int> indexmap;
@@ -720,7 +722,7 @@ int GraphAlgorithms::buildGateGraphByNodeFastWrite(Graph &g, BitVector *isgates,
   //	gategraph.sortEdges();
   out << gateid << ": ";
   sort(neighbors.begin(), neighbors.end());
-  for (int i = 0; i < neighbors.size(); i++) {
+  for (size_t i = 0; i < neighbors.size(); i++) {
     out << neighbors[i] << " ";
   }
   out << "#" << '\n';

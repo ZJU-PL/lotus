@@ -214,6 +214,11 @@ void LeakChecker::initSrcs() {
           !SaberCheckerAPI::getCheckerAPI()->isExtCall(caller)) {
         addToSources(node);
         addSrcToCSID(node, cs);
+        if (::getenv("LOTUS_SABER_DEBUG")) {
+          llvm::errs() << "[saber] source ";
+          cs->printAsOperand(llvm::errs(), false);
+          llvm::errs() << " in " << caller->getName() << "\n";
+        }
       }
     }
   }
@@ -243,10 +248,21 @@ void LeakChecker::initSnks() {
                   SaberCheckerAPI::getCheckerAPI()->isMultiLevelMemDealloc(c);
             }
           }
+          if (::getenv("LOTUS_SABER_DEBUG") &&
+              F.getName().contains("bzfree")) {
+            llvm::errs() << "[saber] check sink-like in " << F.getName()
+                         << " callees=" << collectResolvedCallees(CI, svfg, memSSA).size()
+                         << " sinkLike=" << sinkLike << "\n";
+          }
           if (!sinkLike)
             continue;
 
           const auto &actualParms = svfg->getActualParms(CI);
+          if (::getenv("LOTUS_SABER_DEBUG") &&
+              F.getName().contains("bzfree")) {
+            llvm::errs() << "[saber]   sink call actualParms="
+                         << actualParms.size() << "\n";
+          }
           unsigned argIndex = 0;
           for (auto &arg : CI->args()) {
             if (!arg->getType()->isPointerTy()) {
@@ -269,10 +285,21 @@ void LeakChecker::initSnks() {
               }
             }
 
-            if (actualParmNode)
+            if (actualParmNode) {
               addToSinks(actualParmNode);
+              if (::getenv("LOTUS_SABER_DEBUG")) {
+                llvm::errs() << "[saber] sink arg#" << argIndex << " of ";
+                llvm::errs() << "call in " << F.getName() << "\n";
+              }
+            }
 
             SVFGNode *snkNode = svfg->getValueNode(arg.get());
+            if (::getenv("LOTUS_SABER_DEBUG") &&
+                F.getName().contains("bzfree")) {
+              llvm::errs() << "[saber]   arg#" << argIndex
+                           << " actualParm=" << (actualParmNode != nullptr)
+                           << " snkNode=" << (snkNode != nullptr) << "\n";
+            }
             if (snkNode) {
               if (!actualParmNode)
                 addToSinks(snkNode);

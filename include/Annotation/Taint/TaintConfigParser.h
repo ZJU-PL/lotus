@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -70,6 +72,13 @@ public:
 
   // Detailed specifications for each function
   std::unordered_map<std::string, FunctionTaintConfig> function_specs;
+  std::unordered_set<std::string> argument_source_functions;
+  std::map<std::pair<std::string, int>,
+           std::set<std::pair<std::string, int>>> exceptions;
+
+  bool loadJSONFile(const std::string &path, std::string &error);
+  bool loadJSONString(const std::string &content, std::string &error,
+                      bool sortArgumentIndices = true);
 
   bool is_source(const std::string &func) const { return sources.count(func); }
   bool is_sink(const std::string &func) const { return sinks.count(func); }

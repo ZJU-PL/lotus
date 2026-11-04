@@ -29,7 +29,7 @@
 namespace lotus {
 namespace analysis {
 
-struct SVFGNode;
+class SVFGNode;
 
 /// Call-string context: sequence of call site IDs (e.g. ICFG call node IDs).
 using CallStrCxt = std::vector<uint32_t>;

@@ -122,7 +122,8 @@ endif()
 add_definitions(-DLLVM14)
 
 # Configure LLVM
-include_directories(${LLVM_INCLUDE_DIRS}
+include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
+include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/include/Verification
   ${CMAKE_CURRENT_SOURCE_DIR}/third-party

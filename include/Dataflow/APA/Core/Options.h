@@ -237,7 +237,7 @@ struct EliminationOptions final {
   // Pivot-order policy for the state-elimination engine. Default preserves the
   // historical baseline order; CostAware selects the paper's "Order" policy.
   OrderingPolicy Ordering = OrderingPolicy::Default;
-  OrderPolicyOptions Order;
+  OrderPolicyOptions Order = {};
   OnNonConvergentStar NonConvergentStarPolicy = OnNonConvergentStar::Fail;
   // 0 means "use Problem.maxStarIterations()".
   std::size_t MaxStarIterations = 0;

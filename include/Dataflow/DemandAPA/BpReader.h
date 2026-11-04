@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Dataflow/DemandAPA/Algebra.h"
+#include "Dataflow/DemandAPA/ApaInstance.h"
+#include "Dataflow/DemandAPA/Project.h"
 #include "Dataflow/DemandAPA/Support.h"
 #include "bdd.h" // from buddy?
 

@@ -1,0 +1,46 @@
+Checks: '*,-cert-dcl03-c,-cert-err58-cpp,-cppcoreguidelines-avoid-magic-numbers,-cppcoreguidelines-macro-usage,-cppcoreguidelines-non-private-member-variables-in-classes,-cppcoreguidelines-pro-bounds-array-to-pointer-decay,-cppcoreguidelines-pro-type-vararg,-fuchsia-default-arguments,-fuchsia-overloaded-operator,-fuchsia-statically-constructed-objects,-google-build-using-namespace,-google-readability-function-size,-google-runtime-references,-hicpp-function-size,-hicpp-no-array-decay,-hicpp-static-assert,-hicpp-vararg,-llvm-header-guard,-misc-non-private-member-variables-in-classes,-misc-static-assert,-readability-container-size-empty,-readability-else-after-return,-readability-function-size,-readability-magic-numbers,-readability-named-parameter'
+CheckOptions:
+  - { key: readability-identifier-naming.NamespaceCase,         value: lower_case }
+  - { key: readability-identifier-naming.TypeAliasCase,         value: CamelCase  }
+  - { key: readability-identifier-naming.TemplateParameterCase, value: CamelCase  }
+  - { key: readability-identifier-naming.TypedefCase,           value: CamelCase  }
+  - { key: readability-identifier-naming.ClassCase,             value: CamelCase  }
+  - { key: readability-identifier-naming.StructCase,            value: CamelCase  }
+  - { key: readability-identifier-naming.EnumCase,              value: CamelCase  }
+  - { key: readability-identifier-naming.UnionCase,             value: CamelCase  }
+  - { key: readability-identifier-naming.MemberCase,            value: lower_case }
+  - { key: readability-identifier-naming.PrivateMemberPrefix,   value: _          }
+  - { key: readability-identifier-naming.ProtectedMemberPrefix, value: _          }
+  - { key: readability-identifier-naming.FunctionCase,          value: lower_case }
+  - { key: readability-identifier-naming.MethodCase,            value: lower_case }
+  - { key: readability-identifier-naming.VariableCase,          value: lower_case }
+  - { key: readability-identifier-naming.GlobalConstantCase,    value: CamelCase  }
+  - { key: readability-identifier-naming.StaticVariableCase,    value: CamelCase  }
+  - { key: readability-identifier-naming.GlobalVariableCase,    value: CamelCase  }
+  - { key: modernize-use-default-member-init.UseAssignment,     value: 1          }
+# Reasons for disabling checks:
+# * cert-dcl03-c: It generates false positives with ikos_unreachable()
+# * cert-err58-cpp: It generates warnings in Boost.Test
+# * cppcoreguidelines-avoid-magic-numbers: We use 'magic' numbers in tests
+# * cppcoreguidelines-macro-usage: We use macros in tests
+# * cppcoreguidelines-non-private-member-variables-in-classes: It generates warnings for protected members of classes
+# * cppcoreguidelines-pro-bounds-array-to-pointer-decay: It generates warnings for ikos_assert_msg()
+# * cppcoreguidelines-pro-type-vararg: It generates warnings in Boost.Test
+# * fuchsia-default-arguments: We allow default arguments
+# * fuchsia-overloaded-operator: We allow overloads of operators
+# * fuchsia-statically-constructed-objects: We allow static objects
+# * google-build-using-namespace: We allow 'using namespace' in tests
+# * google-readability-function-size: We allow long functions in tests
+# * google-runtime-references: We allow output parameters as reference
+# * hicpp-function-size: We allow long functions in tests
+# * hicpp-no-array-decay: It generates warnings for ikos_assert_msg()
+# * hicpp-static-assert: It generates false positives with ikos_unreachable()
+# * hicpp-vararg: It generates warnings in Boost.Test
+# * llvm-header-guard: We use #pragma once
+# * misc-non-private-member-variables-in-classes: It generates warnings for public members of structures
+# * misc-static-assert: It generates false positives with ikos_unreachable()
+# * readability-container-size-empty: Accept `x.size() == 0` checks in tests
+# * readability-else-after-return: We allow else after return
+# * readability-function-size: We allow long functions in tests
+# * readability-magic-numbers: We use 'magic' numbers in tests
+# * readability-named-parameter: We allow unnamed parameters

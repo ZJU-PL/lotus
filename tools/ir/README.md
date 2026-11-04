@@ -179,7 +179,7 @@ Relevant options:
 
 ```bash
 # Run a single query
-build/bin/lotus-ir-pdg-query test.bc --query "MATCH (f:Function) RETURN f.name"
+build/bin/lotus-ir-pdg-query test.bc --query "MATCH (f:FUNC_ENTRY) RETURN f.name"
 
 # Compute a backward slice from criteria selected by a query
 build/bin/lotus-ir-pdg-query test.bc \

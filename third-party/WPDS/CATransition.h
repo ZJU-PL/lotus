@@ -127,12 +127,12 @@ namespace wpds
              * @return the from state of the CATransition
              * @see wpds_key_t
              */
-            const wpds_key_t from_state() const
+            wpds_key_t from_state() const
             {
                 return kp.first;
             }
 
-            const wpds_key_t transition() const
+            wpds_key_t transition() const
             {
                 return kp.second;
             }
@@ -141,7 +141,7 @@ namespace wpds
              * @return the stack symbol of the CATransition
              * @see wpds_key_t
              */
-            const wpds_key_t stack() const
+            wpds_key_t stack() const
             {
                 return kp.second;
             }
@@ -150,7 +150,7 @@ namespace wpds
              * @return the to state of the CATransition
              * @see wpds_key_t
              */
-            const wpds_key_t to_state() const
+            wpds_key_t to_state() const
             {
                 return to;
             }

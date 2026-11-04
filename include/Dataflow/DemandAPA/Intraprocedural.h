@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Dataflow/DemandAPA/Algorithm.h"
 #include "Dataflow/DemandAPA/CentroidPreprocessing.h"
 #include "Dataflow/DemandAPA/SameBagPreprocessing.h"
 

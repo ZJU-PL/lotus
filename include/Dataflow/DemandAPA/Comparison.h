@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Dataflow/DemandAPA/Algorithm.h"
+
 template <class T> void Algorithm<T>::doComparison() {
   int maxQueries = 1000000;
   if (const char *value = getenv("LOTUS_DEMAND_APA_MAX_QUERIES"))
@@ -100,7 +102,7 @@ template <class T> void Algorithm<T>::doComparison() {
 
   row.totQueryTime = totQueryTime;
   row.OAR = (totQueryTime + row.Proc) / sz(queries);
-  if (row.Proc > TIMEOUT)
+  if (row.Proc > baselineTimeout)
     row.ratio = 0;
   else
     row.ratio = 1;
@@ -112,7 +114,7 @@ template <class T> void Algorithm<T>::doComparison() {
     totNaiveQueryTime += omp_get_wtime() - t;
     qNaiveAnswered++;
     db(qNaiveAnswered, totNaiveQueryTime);
-    if (totNaiveQueryTime > TIMEOUT) {
+    if (totNaiveQueryTime > baselineTimeout) {
       break;
     }
   }

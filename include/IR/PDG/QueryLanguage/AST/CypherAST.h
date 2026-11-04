@@ -431,6 +431,15 @@ public:
     whereClause_ = std::move(where);
   }
 
+  void andWhereClause(std::unique_ptr<CypherWhereClause> where) {
+    if (whereClause_) {
+      whereClause_ =
+          CypherWhereClause::makeAnd(std::move(whereClause_), std::move(where));
+    } else {
+      whereClause_ = std::move(where);
+    }
+  }
+
   void addReturnItem(std::unique_ptr<CypherReturnItem> item) {
     returnItems_.push_back(std::move(item));
   }

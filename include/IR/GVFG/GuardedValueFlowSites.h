@@ -20,6 +20,7 @@
 #pragma once
 
 #include "IR/GVFG/ConditionRef.h"
+#include "IR/GVFG/GuardedValueFlowObject.h"
 
 #include <algorithm>
 #include <map>
@@ -58,7 +59,7 @@ struct GuardedValueFlowCallSiteInput {
 /// Sites annotate instructions that are semantically important to later
 /// analyses.  Nodes carry the value-flow graph; sites carry the original
 /// program operation and the operands that made that operation interesting.
-class GuardedValueFlowSite {
+class GuardedValueFlowSite : public GuardedValueFlowObject {
 public:
   enum class Kind {
     CallSite,
@@ -73,12 +74,22 @@ public:
 
   GuardedValueFlowSite(Kind kind, GuardedValueFlowGraph *graph,
                        Instruction *inst)
-      : kind_(kind), graph_(graph), inst_(inst) {}
+      : GuardedValueFlowObject(Domain::Site), kind_(kind), graph_(graph),
+        inst_(inst) {}
   virtual ~GuardedValueFlowSite() = default;
 
   Kind getKind() const { return kind_; }
-  GuardedValueFlowGraph *getGraph() const { return graph_; }
+  GuardedValueFlowGraph *getGraph() const override { return graph_; }
   Instruction *getInstruction() const { return inst_; }
+  Instruction *getDebugInstruction() const override { return inst_; }
+  llvm::Value *getDebugValue() const override { return inst_; }
+  llvm::BasicBlock *getParentBasicBlock() const override {
+    return inst_ ? inst_->getParent() : nullptr;
+  }
+
+  static bool classof(const GuardedValueFlowObject *object) {
+    return object->getDomain() == Domain::Site;
+  }
 
 private:
   Kind kind_;
@@ -89,6 +100,14 @@ private:
 /// Alloca instruction site.
 class GuardedValueFlowAllocSite : public GuardedValueFlowSite {
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowSite::classof(object) &&
+           classof(static_cast<const GuardedValueFlowSite *>(object));
+  }
+  static bool classof(const GuardedValueFlowSite *site) {
+    return site->getKind() == Kind::Alloc;
+  }
+
   GuardedValueFlowAllocSite(GuardedValueFlowGraph *graph, Instruction *inst)
       : GuardedValueFlowSite(Kind::Alloc, graph, inst) {}
 };
@@ -97,6 +116,14 @@ public:
 /// channels, summary nodes, and callee-specific path conditions.
 class GuardedValueFlowCallSite : public GuardedValueFlowSite {
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowSite::classof(object) &&
+           classof(static_cast<const GuardedValueFlowSite *>(object));
+  }
+  static bool classof(const GuardedValueFlowSite *site) {
+    return site->getKind() == Kind::CallSite;
+  }
+
   using CallInputSnapshot = std::vector<GuardedValueFlowCallSiteInput>;
 
   GuardedValueFlowCallSite(GuardedValueFlowGraph *graph, Instruction *inst)
@@ -109,10 +136,24 @@ public:
       callees_.push_back(callee);
   }
   ArrayRef<Function *> getCallees() const { return callees_; }
+  Function *getCalledFunction() const;
 
   void addCommonInput(GuardedValueFlowNode *node);
   ArrayRef<GuardedValueFlowNode *> getCommonInputs() const {
     return common_inputs_;
+  }
+  GuardedValueFlowNode *getCommonInput(unsigned index) const {
+    assert(index < common_inputs_.size());
+    return common_inputs_[index];
+  }
+  bool isCommonInput(const GuardedValueFlowNode *node) const {
+    return std::find(common_inputs_.begin(), common_inputs_.end(), node) !=
+           common_inputs_.end();
+  }
+  unsigned getInputIndex(const GuardedValueFlowNode *node) const {
+    auto position = std::find(common_inputs_.begin(), common_inputs_.end(), node);
+    assert(position != common_inputs_.end());
+    return static_cast<unsigned>(position - common_inputs_.begin());
   }
 
   void setCommonOutput(GuardedValueFlowNode *node) { common_output_ = node; }
@@ -215,6 +256,14 @@ public:
 /// populated; for stores both pointer and value operands are recorded.
 class GuardedValueFlowDereferenceSite : public GuardedValueFlowSite {
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowSite::classof(object) &&
+           classof(static_cast<const GuardedValueFlowSite *>(object));
+  }
+  static bool classof(const GuardedValueFlowSite *site) {
+    return site->getKind() == Kind::DereferenceSite;
+  }
+
   GuardedValueFlowDereferenceSite(GuardedValueFlowGraph *graph,
                                   Instruction *inst)
       : GuardedValueFlowSite(Kind::DereferenceSite, graph, inst) {}
@@ -234,6 +283,14 @@ private:
 /// Return instruction site.
 class GuardedValueFlowReturnSite : public GuardedValueFlowSite {
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowSite::classof(object) &&
+           classof(static_cast<const GuardedValueFlowSite *>(object));
+  }
+  static bool classof(const GuardedValueFlowSite *site) {
+    return site->getKind() == Kind::ReturnSite;
+  }
+
   GuardedValueFlowReturnSite(GuardedValueFlowGraph *graph, Instruction *inst)
       : GuardedValueFlowSite(Kind::ReturnSite, graph, inst) {}
 };
@@ -243,6 +300,14 @@ public:
 /// even when internal lowering inserts temporary cast/add nodes.
 class GuardedValueFlowGEPReferenceSite : public GuardedValueFlowSite {
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowSite::classof(object) &&
+           classof(static_cast<const GuardedValueFlowSite *>(object));
+  }
+  static bool classof(const GuardedValueFlowSite *site) {
+    return site->getKind() == Kind::GEP;
+  }
+
   GuardedValueFlowGEPReferenceSite(GuardedValueFlowGraph *graph,
                                    Instruction *inst)
       : GuardedValueFlowSite(Kind::GEP, graph, inst) {}
@@ -269,6 +334,14 @@ private:
 /// Compare instruction site (icmp / fcmp).
 class GuardedValueFlowCompareSite : public GuardedValueFlowSite {
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowSite::classof(object) &&
+           classof(static_cast<const GuardedValueFlowSite *>(object));
+  }
+  static bool classof(const GuardedValueFlowSite *site) {
+    return site->getKind() == Kind::Compare;
+  }
+
   GuardedValueFlowCompareSite(GuardedValueFlowGraph *graph, Instruction *inst)
       : GuardedValueFlowSite(Kind::Compare, graph, inst) {}
 
@@ -285,6 +358,14 @@ private:
 /// Division / remainder site (udiv, sdiv, fdiv, urem, srem, frem).
 class GuardedValueFlowDivSite : public GuardedValueFlowSite {
 public:
+  static bool classof(const GuardedValueFlowObject *object) {
+    return GuardedValueFlowSite::classof(object) &&
+           classof(static_cast<const GuardedValueFlowSite *>(object));
+  }
+  static bool classof(const GuardedValueFlowSite *site) {
+    return site->getKind() == Kind::Div;
+  }
+
   GuardedValueFlowDivSite(GuardedValueFlowGraph *graph, Instruction *inst)
       : GuardedValueFlowSite(Kind::Div, graph, inst) {}
 

@@ -30,6 +30,24 @@ struct LabeledObject {
   std::size_t object = 0;
 };
 
+template <bool CollectTiming, typename Operation>
+auto measurePhase(std::uint64_t &target, Operation &&operation) {
+  if constexpr (CollectTiming) {
+    const auto begin = Clock::now();
+    auto result = std::forward<Operation>(operation)();
+    target += elapsed(begin);
+    return result;
+  } else {
+    return std::forward<Operation>(operation)();
+  }
+}
+
+template <bool CollectTiming>
+void recordPhase(std::uint64_t &target, std::uint64_t duration) {
+  if constexpr (CollectTiming)
+    target += duration;
+}
+
 template <typename Key>
 void countingSort(std::vector<LabeledObject> &values,
                   std::vector<LabeledObject> &scratch,
@@ -65,10 +83,13 @@ void sortVerticalLabels(std::vector<LabeledObject> &labels, std::size_t width,
   // Scratch and counting buckets are released before allocating the merge DSU.
 }
 
+template <bool CollectTiming>
 std::vector<std::size_t> shallowComponents(const UnaryGraph &graph,
                                            std::size_t threshold,
                                            AdaptiveStats &stats) {
-  const LiftedCounterGraph vertical_view(graph, threshold, true);
+  const auto vertical_view = measurePhase<CollectTiming>(
+      stats.phase_timing.vertical_construction_us,
+      [&] { return LiftedCounterGraph(graph, threshold, true); });
   const auto width = vertical_view.width;
   const auto object_count = checkedAdd(graph.vertex_count, vertical_view.states,
                                        "adaptive merge objects");
@@ -81,7 +102,10 @@ std::vector<std::size_t> shallowComponents(const UnaryGraph &graph,
   {
     auto begin = Clock::now();
     const auto vertical = vertical_view.solve(true);
-    stats.vertical_us += elapsed(begin);
+    const auto vertical_us = elapsed(begin);
+    stats.vertical_us += vertical_us;
+    recordPhase<CollectTiming>(stats.phase_timing.vertical_solving_us,
+                               vertical_us);
     accumulate(stats.vertical_dyck, vertical.stats);
     stats.execution.peak_working_bytes = std::max(
         stats.execution.peak_working_bytes, vertical.stats.peak_working_bytes);
@@ -117,7 +141,10 @@ std::vector<std::size_t> shallowComponents(const UnaryGraph &graph,
                      labels.capacity() * sizeof(LabeledObject) +
                      vertical.quotient_closing_edges.capacity() *
                          sizeof(LabeledStateEdge));
-    stats.merge_us += elapsed(begin);
+    const auto parent_map_labeling_us = elapsed(begin);
+    stats.merge_us += parent_map_labeling_us;
+    recordPhase<CollectTiming>(stats.phase_timing.parent_map_labeling_us,
+                               parent_map_labeling_us);
   }
   auto begin = Clock::now();
   sortVerticalLabels(labels, width, vertical_count, stats);
@@ -129,14 +156,22 @@ std::vector<std::size_t> shallowComponents(const UnaryGraph &graph,
     if (labels[i - 1].label == labels[i].label)
       merged.join(labels[i - 1].object, labels[i].object);
   std::vector<LabeledObject>().swap(labels);
-  stats.merge_us += elapsed(begin);
+  const auto vertical_unions_us = elapsed(begin);
+  stats.merge_us += vertical_unions_us;
+  recordPhase<CollectTiming>(stats.phase_timing.boundary_unions_us,
+                             vertical_unions_us);
 
   {
-    const LiftedCounterGraph horizontal_view(graph, threshold, false);
+    const auto horizontal_view = measurePhase<CollectTiming>(
+        stats.phase_timing.horizontal_construction_us,
+        [&] { return LiftedCounterGraph(graph, threshold, false); });
     stats.horizontal_arcs += horizontal_view.arcs;
     begin = Clock::now();
     const auto horizontal = horizontal_view.solve();
-    stats.horizontal_us += elapsed(begin);
+    const auto horizontal_us = elapsed(begin);
+    stats.horizontal_us += horizontal_us;
+    recordPhase<CollectTiming>(stats.phase_timing.horizontal_solving_us,
+                               horizontal_us);
     accumulate(stats.horizontal_dyck, horizontal.stats);
     stats.execution.peak_working_bytes =
         std::max(stats.execution.peak_working_bytes,
@@ -159,7 +194,10 @@ std::vector<std::size_t> shallowComponents(const UnaryGraph &graph,
         else
           merged.join(representative, boundary);
       }
-    stats.merge_us += elapsed(begin);
+    const auto horizontal_unions_us = elapsed(begin);
+    stats.merge_us += horizontal_unions_us;
+    recordPhase<CollectTiming>(stats.phase_timing.boundary_unions_us,
+                               horizontal_unions_us);
   }
 
   begin = Clock::now();
@@ -174,7 +212,10 @@ std::vector<std::size_t> shallowComponents(const UnaryGraph &graph,
       merged.payloadBytes() + result.capacity() * sizeof(std::size_t) +
           identifiers.size() * sizeof(decltype(identifiers)::value_type) +
           identifiers.bucket_count() * sizeof(void *));
-  stats.merge_us += elapsed(begin);
+  const auto merge_finalization_us = elapsed(begin);
+  stats.merge_us += merge_finalization_us;
+  recordPhase<CollectTiming>(stats.phase_timing.boundary_unions_us,
+                             merge_finalization_us);
   return result;
 }
 
@@ -183,6 +224,7 @@ struct PartitionData {
   AdaptiveStats stats;
 };
 
+template <bool CollectTiming>
 PartitionData
 computePartition(const UnaryProjection &canonical, const UnaryGraph &processed,
                  const std::vector<std::size_t> &original_to_processed,
@@ -203,6 +245,8 @@ computePartition(const UnaryProjection &canonical, const UnaryGraph &processed,
   auto begin = Clock::now();
   const auto parts = splitWeakComponents(processed);
   stats.execution.decomposition_us = elapsed(begin);
+  recordPhase<CollectTiming>(stats.phase_timing.decomposition_us,
+                             stats.execution.decomposition_us);
   stats.execution.weak_components = parts.size();
   std::vector<std::size_t> processed_components(processed.vertex_count);
   std::size_t offset = 0;
@@ -226,7 +270,7 @@ computePartition(const UnaryProjection &canonical, const UnaryGraph &processed,
     } else {
       const auto bound =
           threshold ? *threshold : checkedMultiply(6, n, "adaptive threshold");
-      local = shallowComponents(part.graph, bound, stats);
+      local = shallowComponents<CollectTiming>(part.graph, bound, stats);
     }
     std::size_t count = 0;
     for (std::size_t v = 0; v < n; ++v) {
@@ -247,7 +291,64 @@ computePartition(const UnaryProjection &canonical, const UnaryGraph &processed,
     result.components.emplace(canonical.vertices[v], identifiers[component]);
   }
   stats.execution.lifting_us = elapsed(begin);
+  recordPhase<CollectTiming>(stats.phase_timing.output_lifting_us,
+                             stats.execution.lifting_us);
   return result;
+}
+
+template <bool CollectTiming>
+PartitionData solveAdaptive(const Graph &graph,
+                            const AdaptiveOptions &options) {
+  const auto start = Clock::now();
+  const auto canonical = projectToUnary(graph, options.input_policy);
+  const auto projection_us = elapsed(start);
+  PartitionData partition;
+  std::uint64_t preprocessing_us = 0;
+  if (options.sparsify) {
+    const auto begin = Clock::now();
+    const auto quotient = sparsifyUnaryGraph(canonical.graph);
+    preprocessing_us = elapsed(begin);
+    partition = computePartition<CollectTiming>(
+        canonical, quotient.graph, quotient.original_to_quotient,
+        std::nullopt, true);
+    partition.stats.quotient_dyck = quotient.dyck;
+    partition.stats.execution.peak_working_bytes =
+        std::max(partition.stats.execution.peak_working_bytes,
+                 quotient.dyck.peak_working_bytes);
+  } else {
+    std::vector<std::size_t> identity(canonical.graph.vertex_count);
+    std::iota(identity.begin(), identity.end(), std::size_t(0));
+    partition = computePartition<CollectTiming>(
+        canonical, canonical.graph, identity, std::nullopt, false);
+  }
+  partition.stats.phase_timing.enabled = CollectTiming;
+  recordPhase<CollectTiming>(partition.stats.phase_timing.projection_us,
+                             projection_us);
+  recordPhase<CollectTiming>(
+      partition.stats.phase_timing.quotient_sparsification_us,
+      preprocessing_us);
+  partition.stats.execution.projection_us = projection_us;
+  partition.stats.execution.preprocessing_us = preprocessing_us;
+  partition.stats.execution.total_us = elapsed(start);
+  return partition;
+}
+
+template <bool CollectTiming>
+PartitionData solveShallowAdaptive(const Graph &graph, std::size_t threshold,
+                                   const AdaptiveOptions &options) {
+  const auto start = Clock::now();
+  const auto canonical = projectToUnary(graph, options.input_policy);
+  const auto projection_us = elapsed(start);
+  std::vector<std::size_t> identity(canonical.graph.vertex_count);
+  std::iota(identity.begin(), identity.end(), std::size_t(0));
+  auto partition = computePartition<CollectTiming>(
+      canonical, canonical.graph, identity, threshold, false);
+  partition.stats.phase_timing.enabled = CollectTiming;
+  recordPhase<CollectTiming>(partition.stats.phase_timing.projection_us,
+                             projection_us);
+  partition.stats.execution.projection_us = projection_us;
+  partition.stats.execution.total_us = elapsed(start);
+  return partition;
 }
 
 } // namespace
@@ -263,54 +364,26 @@ bool AdaptiveResult::connected(Vertex first, Vertex second) const {
   return component(first) == component(second);
 }
 
-AdaptiveResult AdaptiveSolver::solve(const Graph &graph,
-                                     const AdaptiveOptions &options) const {
-  const auto start = Clock::now();
-  const auto canonical = projectToUnary(graph, options.input_policy);
-  const auto projection_us = elapsed(start);
-  PartitionData partition;
-  std::uint64_t preprocessing_us = 0;
-  if (options.sparsify) {
-    const auto begin = Clock::now();
-    const auto quotient = sparsifyUnaryGraph(canonical.graph);
-    preprocessing_us = elapsed(begin);
-    partition =
-        computePartition(canonical, quotient.graph,
-                         quotient.original_to_quotient, std::nullopt, true);
-    partition.stats.quotient_dyck = quotient.dyck;
-    partition.stats.execution.peak_working_bytes =
-        std::max(partition.stats.execution.peak_working_bytes,
-                 quotient.dyck.peak_working_bytes);
-  } else {
-    std::vector<std::size_t> identity(canonical.graph.vertex_count);
-    std::iota(identity.begin(), identity.end(), std::size_t(0));
-    partition = computePartition(canonical, canonical.graph, identity,
-                                 std::nullopt, false);
-  }
-  partition.stats.execution.projection_us = projection_us;
-  partition.stats.execution.preprocessing_us = preprocessing_us;
-  partition.stats.execution.total_us = elapsed(start);
+AdaptiveResult AdaptiveSolver::solve(
+    const Graph &graph, const AdaptiveOptions &options) const {
+  auto partition = options.collect_phase_timing
+                       ? solveAdaptive<true>(graph, options)
+                       : solveAdaptive<false>(graph, options);
   AdaptiveResult result;
   result.components_ = std::move(partition.components);
-  result.stats_ = partition.stats;
+  result.stats_ = std::move(partition.stats);
   return result;
 }
 
-AdaptiveResult
-AdaptiveSolver::solveShallow(const Graph &graph, std::size_t threshold,
-                             const AdaptiveOptions &options) const {
-  const auto start = Clock::now();
-  const auto canonical = projectToUnary(graph, options.input_policy);
-  const auto projection_us = elapsed(start);
-  std::vector<std::size_t> identity(canonical.graph.vertex_count);
-  std::iota(identity.begin(), identity.end(), std::size_t(0));
-  auto partition =
-      computePartition(canonical, canonical.graph, identity, threshold, false);
-  partition.stats.execution.projection_us = projection_us;
-  partition.stats.execution.total_us = elapsed(start);
+AdaptiveResult AdaptiveSolver::solveShallow(
+    const Graph &graph, std::size_t threshold,
+    const AdaptiveOptions &options) const {
+  auto partition = options.collect_phase_timing
+                       ? solveShallowAdaptive<true>(graph, threshold, options)
+                       : solveShallowAdaptive<false>(graph, threshold, options);
   AdaptiveResult result;
   result.components_ = std::move(partition.components);
-  result.stats_ = partition.stats;
+  result.stats_ = std::move(partition.stats);
   return result;
 }
 

@@ -7,11 +7,11 @@ Prerequisites
 -------------
 
 * LLVM 14.0.0
-* Z3 4.11
+* Z3 4.8.1+ (4.11 is the tested/recommended version)
 * CMake 3.18+
 * C++17 compatible compiler
-* Boost 1.65+ (optional — only needed when CLAM, SeaHorn, Cclyzer++, or FPsolve are enabled;
-  auto-downloaded if not found)
+* Boost 1.65+ (optional — needed when CLAM, SeaHorn, Cclyzer++, SMACK, or PDAAAL are enabled;
+  CLAM additionally requires Boost.JSON ≥ 1.80; auto-downloaded if not found)
 
 Building Lotus
 --------------
@@ -67,6 +67,15 @@ Options use a consistent ``LOTUS_*`` naming scheme.
   and enable the runtime ``wali-fwpds`` and ``wali-swpds`` WPDS backends (default: OFF)
 * ``-DLOTUS_ENABLE_PDAAAL=ON``: Build the vendored PDAAAL weighted PDS reachability library
   under third-party/PDAAAL (default: OFF)
+* ``-DLOTUS_ENABLE_BOOLEAN_PROGRAM_TOOLS=ON``: Build the Boolean-program
+  parser and normalizer tools (default: OFF)
+* ``-DLOTUS_ENABLE_DEMAND_APA=ON``: Build the independent demand-driven APA
+  executable (default: OFF)
+* ``-DLOTUS_ENABLE_FLOW_CUTTER=ON``: Build the vendored PACE treewidth and
+  treedepth tools used for tree-decomposition ordering (default: OFF)
+* ``-DLOTUS_ENABLE_IKOS=ON``: Build the IKOS analyzer and API-spec pipeline (default: OFF)
+* ``-DLOTUS_ENABLE_IKOS_API_SPEC=ON``: Install the IKOS API-spec stub generation tools (default: OFF)
+* ``-DLOTUS_IKOS_ENABLE_APRON=ON``: Enable optional APRON domains in IKOS (default: OFF)
 
 **Advanced toggles:**
 
@@ -126,13 +135,14 @@ the selected tools and tests:
 Its default is ``all``; an empty value builds no tools. Existing feature switches
 still control optional tools within a selected family.
 
-``LOTUS_TEST_SUBSYSTEMS`` selects ``alias``, ``alias-wrapper``, ``analysis``,
-``checker``, ``cfl``, ``concurrency``, ``dataflow``, ``fuzzing``, ``ir``,
-``solvers``, ``symbolicexecution``, ``utils``, and ``verification``. Its default
-is ``all``. Quote multiple selections, for example
-``-DLOTUS_TEST_SUBSYSTEMS="concurrency;alias-wrapper"``. The ``alias-wrapper``
-suite checks wrapper availability without compiling all alias-analysis tests.
-CLI regression tests are registered only when their tools are configured.
+``LOTUS_TEST_SUBSYSTEMS`` selects ``alias``, ``analysis``, ``checker``, ``cfl``,
+``concurrency``, ``dataflow``, ``fuzzing``, ``ir``, ``security``, ``solvers``,
+``symbolicexecution``, ``transform``, ``utils``, and ``verification``. Its
+default is ``all``. Quote multiple selections, for example
+``-DLOTUS_TEST_SUBSYSTEMS="concurrency;alias/aliaswrapper"``. The
+``alias/aliaswrapper`` group checks wrapper availability without compiling all
+alias-analysis tests. CLI regression tests are registered only when their tools
+are configured.
 
 For finer selection, use ``subsystem/group`` in the same option. A bare subsystem
 includes all of its groups; each selected subsystem still produces one test
@@ -150,17 +160,20 @@ binary, so full builds do not acquire a separate link step for every group.
 
 Supported groups:
 
-* ``alias``: ``gpg``, ``dda``, ``aserpta``, ``bootstrapaa``, ``flowsensitive``,
+* ``alias``: ``dda``, ``aserpta``, ``bootstrapaa``, ``flowsensitive``,
   ``lotusaa``, ``sparrowaa``, ``tpa``, ``cclyzeraa``, ``dyckaa``, ``seadsa``,
-  ``allocaa``, ``typequalifier``, ``underapproxaa``, ``ptsset``.
-* ``analysis``: ``cfg``, ``controldependence``, ``debuginfo``, ``general``,
+  ``allocaa``, ``underapproxaa``, ``ptsset``, ``aliaswrapper``.
+* ``analysis``: ``cfg``, ``controldependence``, ``debuginfo``,
   ``multiplicity``, ``nullpointer``, ``parametersummary``, ``profile``,
   ``purity``, ``sccp``, ``typehierarchy``, ``loop``.
-* ``checker``: ``ae``, ``concurrency``, ``framework``, ``kint``, ``pulse``,
-  ``saber``, ``reports``.
+* ``checker``: ``ae``, ``concurrency``, ``framework``, ``gsaf``, ``kint``,
+  ``pulse``, ``saber``, ``reports``, ``typequalifier``.
 * ``concurrency``: ``mhp``, ``lockset``, ``valueflow``, ``thread``, ``clocks``,
   ``threadapi``, ``threadlocal``, ``openmp``, ``mpi``, ``cuda``, ``linuxkernel``.
-* ``dataflow``: ``ifdside``, ``mono``, ``wpds``, ``apa``, ``npa``, ``vasco``.
+* ``dataflow``: ``ifdside``, ``mono``, ``wpds``, ``apa``, ``demandapa``, ``npa``,
+  ``vasco``.
+* ``security``: ``constanttime``, ``spectre``.
+* ``transform``: ``nisse``.
 
 Source manifests and link dependencies are restricted to the selected groups.
 TypeHierarchy and Loop IR fixtures are configured and generated only when those
@@ -189,7 +202,6 @@ The unified alias wrapper can omit heavier backends independently:
    cmake -S . -B build-concurrency \
      -DLOTUS_AA_WRAPPER_ENABLE_DDA=OFF \
      -DLOTUS_AA_WRAPPER_ENABLE_TPA=OFF \
-     -DLOTUS_AA_WRAPPER_ENABLE_GPG=OFF \
      -DLOTUS_AA_WRAPPER_ENABLE_CCLYZER=OFF
 
 These switches default to ON and affect only the wrapper. Standalone backend

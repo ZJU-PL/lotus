@@ -8,6 +8,8 @@
 #include "Checker/Tooling/CheckerReport.h"
 #include "Checker/Tooling/CheckerToolEntrypoints.h"
 
+#include "Checker/GSAF/API/VulnerabilityRegistry.h"
+
 #include <array>
 #include <string>
 #include <vector>
@@ -38,8 +40,8 @@ struct EngineDescriptor {
   int (*run)(const char *);
 };
 
-const std::array<EngineDescriptor, 9> &engineDescriptors() {
-  static const std::array<EngineDescriptor, 9> descriptors = {{
+const std::array<EngineDescriptor, 10> &engineDescriptors() {
+  static const std::array<EngineDescriptor, 10> descriptors = {{
       {"generic", "Registry-backed declarative checkers",
        lotus::checker::EngineKind::Declarative,
        lotus::checker::tooling::genericSubCommand, runGenericCheckerTool},
@@ -61,6 +63,8 @@ const std::array<EngineDescriptor, 9> &engineDescriptors() {
       {"saber", "Sparse value-flow checking",
        lotus::checker::EngineKind::Saber,
        lotus::checker::tooling::saberSubCommand, runSaberCheckerTool},
+      {"gsaf", "Guarded value-flow analysis", lotus::checker::EngineKind::GSAF,
+       lotus::checker::tooling::gsafSubCommand, runGSAFCheckerTool},
       {"symex", "Symbolic execution", lotus::checker::EngineKind::SymExec,
        lotus::checker::tooling::symexSubCommand, runSymExCheckerTool},
   }};
@@ -360,6 +364,7 @@ int main(int argc, char **argv) {
   llvm::InitLLVM init_llvm(argc, argv);
   llvm_shutdown_obj shutdown;
   report_options::initializeReportOptions();
+  lotus::gsaf::initializeBuiltinVulnerabilities();
 
   // Extract --engine=<name> from argv before cl::Parse sees it.
   std::string selectedEngine;

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -116,6 +117,47 @@ std::filesystem::path writeTemp(const std::string &name,
   std::ofstream output(path);
   output << content;
   return path;
+}
+
+// Zheng-Rugina alias grammar (aa.cfg without fields) for PEGs that store
+// reverse edges explicitly.
+Grammar explicitReverseAliasGrammar() {
+  return Grammar::parseFromText(
+      "Production:\n"
+      "M\tDV\td\nDV\tdbar\tV\n"
+      "V\tAbar\tV\nV\tV\tA\nV\tM\nV\n"
+      "A\tA\tA\nA\ta\tM\nA\ta\nA\n"
+      "Abar\tAbar\tAbar\nAbar\tM\tabar\nAbar\tabar\nAbar\n"
+      "Count:\nV\n");
+}
+
+using NodePairs = std::set<std::pair<NodeId, NodeId>>;
+
+// V of `graph` mapped onto the representatives of `simplified`, and V of the
+// simplified graph; an exact simplification makes them equal.
+std::pair<NodePairs, NodePairs>
+projectedAndReducedValueAliases(const LabeledGraph &graph,
+                                const Grammar &grammar,
+                                const GraphSimplificationResult &simplified) {
+  LabeledGraph input = graph;
+  SolverSession baseline(input, grammar, SolverBackend::SparseBitVector);
+  baseline.solve();
+  LabeledGraph reduced_graph = simplified.graph;
+  SolverSession reduced(reduced_graph, grammar,
+                        SolverBackend::SparseBitVector);
+  reduced.solve();
+
+  const SymbolId value = grammar.symbolId("V");
+  NodePairs projected;
+  for (const RelationEdge &edge : baseline.relation().edges(value)) {
+    projected.insert({simplified.representative[edge.source],
+                      simplified.representative[edge.target]});
+  }
+  NodePairs actual;
+  for (const RelationEdge &edge : reduced.relation().edges(value)) {
+    actual.insert({edge.source, edge.target});
+  }
+  return {projected, actual};
 }
 
 TEST(ClassicalArchitectureTest, PreservesStartAndInstantiatesAttributes) {
@@ -547,6 +589,120 @@ TEST(ClassicalArchitectureTest,
     actual.insert({edge.source, edge.target});
   }
   EXPECT_EQ(actual, expected);
+}
+
+TEST(ClassicalArchitectureTest,
+     AliasGraphFoldingDropsReverseSelfLoopsOfFoldedEdges) {
+  // p and s both flow into q, so *p aliases *q and *q aliases *s, but p and s
+  // do not alias. Folding merges *q with v (v = *q). Keeping the abar
+  // self-loop of the merged node would derive Abar(*p, *q) from M(*p, *q) and
+  // then the spurious V(*p, *s) from M(*q, *s).
+  LabeledGraph graph;
+  for (const char *pointer : {"p", "q", "s"}) {
+    const std::string object = std::string("*") + pointer;
+    graph.addEdge(pointer, object, "d");
+    graph.addEdge(object, pointer, "dbar");
+  }
+  graph.addEdge("p", "q", "a");
+  graph.addEdge("q", "p", "abar");
+  graph.addEdge("s", "q", "a");
+  graph.addEdge("q", "s", "abar");
+  graph.addEdge("*q", "v", "a");
+  graph.addEdge("v", "*q", "abar");
+
+  const GraphSimplificationResult simplified = simplifyGraph(
+      graph, {GraphSimplificationFlavor::Alias, true, true, false});
+  ASSERT_EQ(simplified.representative[graph.vertexId("*q")],
+            simplified.representative[graph.vertexId("v")]);
+  for (const LabeledEdge &edge : simplified.graph.edges()) {
+    EXPECT_FALSE(edge.source == edge.target && edge.label == "abar");
+  }
+  const auto [projected, actual] = projectedAndReducedValueAliases(
+      graph, explicitReverseAliasGrammar(), simplified);
+  EXPECT_EQ(actual, projected);
+}
+
+TEST(ClassicalArchitectureTest,
+     AliasGraphSimplificationKeepsSelfLoopsIntoDereferencedNodes) {
+  // p1 and p3 both flow into p2, so *p1 aliases *p2 and *p2 aliases *p3, but
+  // *p1 and *p3 do not alias. t is stored into *p1, and x is loaded from and
+  // stored back into *p2. Then t flows to *p2 (`a M`), around the cycle to x,
+  // and from x into *p2 and on to *p3 (`a M` again). Merging x with *p2 turns
+  // x -> *p2 into a self-loop that the second `a M` still needs.
+  LabeledGraph graph;
+  const std::vector<std::pair<const char *, const char *>> dereferences = {
+      {"p1", "*p1"}, {"p2", "*p2"}, {"p3", "*p3"}};
+  for (const auto &[pointer, object] : dereferences) {
+    graph.addEdge(pointer, object, "d");
+    graph.addEdge(object, pointer, "dbar");
+  }
+  const std::vector<std::pair<const char *, const char *>> assignments = {
+      {"p1", "p2"}, {"p3", "p2"}, {"t", "*p1"}, {"*p2", "x"}, {"x", "*p2"}};
+  for (const auto &[source, target] : assignments) {
+    graph.addEdge(source, target, "a");
+    graph.addEdge(target, source, "abar");
+  }
+
+  const Grammar grammar = explicitReverseAliasGrammar();
+  for (const GraphSimplificationOptions &options :
+       {GraphSimplificationOptions{GraphSimplificationFlavor::Alias, true,
+                                   false, false},
+        GraphSimplificationOptions{GraphSimplificationFlavor::Alias, false,
+                                   true, false},
+        GraphSimplificationOptions{GraphSimplificationFlavor::Alias, true,
+                                   true, false}}) {
+    const GraphSimplificationResult simplified = simplifyGraph(graph, options);
+    ASSERT_EQ(simplified.representative[graph.vertexId("x")],
+              simplified.representative[graph.vertexId("*p2")]);
+    const auto [projected, actual] =
+        projectedAndReducedValueAliases(graph, grammar, simplified);
+    EXPECT_EQ(actual, projected) << "scc=" << options.eliminate_sccs
+                                 << " fold=" << options.fold_graph;
+  }
+}
+
+TEST(ClassicalArchitectureTest,
+     AliasGraphSimplificationPreservesProjectedValueAliases) {
+  const Grammar grammar = explicitReverseAliasGrammar();
+  const std::vector<GraphSimplificationOptions> variants = {
+      {GraphSimplificationFlavor::Alias, true, false, false},
+      {GraphSimplificationFlavor::Alias, false, true, false},
+      {GraphSimplificationFlavor::Alias, true, true, false}};
+  for (std::uint64_t seed = 1; seed <= 500; ++seed) {
+    std::uint64_t state = seed;
+    auto next = [&]() {
+      state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+      return state >> 33;
+    };
+    // PEG shape: every pointer has at most one dereference node.
+    constexpr std::size_t nodes = 10;
+    LabeledGraph graph;
+    for (std::size_t node = 0; node < nodes; ++node) {
+      graph.addVertex("n" + std::to_string(node));
+    }
+    for (std::size_t node = 0; node < nodes; ++node) {
+      const std::size_t object = next() % nodes;
+      if (object != node && next() % 4 != 0) {
+        graph.addEdge(node, object, "d");
+        graph.addEdge(object, node, "dbar");
+      }
+    }
+    for (std::size_t source = 0; source < nodes; ++source) {
+      for (std::size_t target = 0; target < nodes; ++target) {
+        if (source != target && next() % 5 == 0) {
+          graph.addEdge(source, target, "a");
+          graph.addEdge(target, source, "abar");
+        }
+      }
+    }
+    for (std::size_t variant = 0; variant < variants.size(); ++variant) {
+      const GraphSimplificationResult simplified =
+          simplifyGraph(graph, variants[variant]);
+      const auto [projected, actual] =
+          projectedAndReducedValueAliases(graph, grammar, simplified);
+      EXPECT_EQ(actual, projected) << "seed=" << seed << " variant=" << variant;
+    }
+  }
 }
 
 TEST(ClassicalArchitectureTest, RejectsOutOfRangeGraphAttributes) {

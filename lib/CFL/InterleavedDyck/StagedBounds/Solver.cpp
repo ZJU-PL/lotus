@@ -20,6 +20,9 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
                     ? detail::removeValueFlowUnreachable(input)
                     : input;
   result.regularization = detail::regularization(graph, benchmark);
+  if (options.stage_completed) {
+    options.stage_completed(Method::Regularization);
+  }
   if (options.method == Method::Regularization) {
     return result;
   }
@@ -29,6 +32,9 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
   if (benchmark == BenchmarkKind::ValueFlow) {
     result.intersection =
         detail::filterBracketPaths(graph, result.intersection);
+  }
+  if (options.stage_completed) {
+    options.stage_completed(Method::Intersection);
   }
   if (options.method == Method::Intersection) {
     return result;
@@ -45,6 +51,9 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
     result.underapproximation =
         detail::filterValueFlowPairs(result.underapproximation);
   }
+  if (options.stage_completed) {
+    options.stage_completed(Method::Underapproximation);
+  }
   if (options.method == Method::Underapproximation) {
     return result;
   }
@@ -54,6 +63,9 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
       options.parity_groups, benchmark, options.factorized_tracing);
   graph = detail::retainMatchedLabels(
       detail::removeNotOnCandidatePaths(graph, result.mutual_refinement));
+  if (options.stage_completed) {
+    options.stage_completed(Method::MutualRefinement);
+  }
   if (options.method == Method::MutualRefinement) {
     return result;
   }
@@ -63,6 +75,9 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
       options.parity_groups, benchmark, options.factorized_tracing);
   graph = detail::retainMatchedLabels(
       detail::removeNotOnCandidatePaths(graph, result.stronger_grammar));
+  if (options.stage_completed) {
+    options.stage_completed(Method::StrongerGrammar);
+  }
   if (options.method == Method::StrongerGrammar) {
     return result;
   }
@@ -77,6 +92,9 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
       detail::onDemand(graph, result.underapproximation, classic_on_demand,
                        GrammarStrength::Parity, options.parity_groups,
                        benchmark, options.factorized_tracing);
+  if (options.stage_completed) {
+    options.stage_completed(Method::OnDemand);
+  }
   return result;
 }
 

@@ -7,6 +7,9 @@ the compile-time LLVM plugin used to inject directed-fuzzing targets.
 **Location**: ``include/Fuzzing/AFLGoCompiler/``,
 ``lib/Fuzzing/AFLGoCompiler/``
 
+**Build Status**: Source retained; the subdirectory is commented out as TBD in
+``lib/Fuzzing/CMakeLists.txt`` and not included in default builds.
+
 **Main components**:
 
 - ``AFLGoTargetInjectionPass`` inserts target metadata during compilation.

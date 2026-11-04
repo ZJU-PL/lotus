@@ -532,3 +532,110 @@ TEST_F(ParallelFlowSensitivePTATest, WildcardRetractionInvalidatesMissingEntryRe
   EXPECT_TRUE(solver.memoryOut(store, 500).empty());
   EXPECT_EQ(solver.memoryOut(store, 200), FlowSensitivePTA::PointsToSet{100});
 }
+
+TEST_F(ParallelFlowSensitivePTATest, IndirectCallBoundIsAppliedInBothPolicies) {
+  auto module = parseModule(R"(
+    define void @target() { ret void }
+    define void @other() { ret void }
+    define void @main(void ()** %fp) {
+    entry:
+      %f = load void ()*, void ()** %fp
+      call void %f()
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  const Function *target = module->getFunction("target");
+  const Function *other = module->getFunction("other");
+  const CallBase *call = nullptr;
+  for (const Instruction &instruction :
+       instructions(module->getFunction("main")))
+    if (const auto *candidate = dyn_cast<CallBase>(&instruction))
+      call = candidate;
+  ASSERT_NE(target, nullptr);
+  ASSERT_NE(other, nullptr);
+  ASSERT_NE(call, nullptr);
+
+  for (bool unordered : {false, true}) {
+    constexpr uint32_t targetObject = 300;
+    constexpr uint32_t otherObject = 301;
+    constexpr uint32_t functionPointerId = 400;
+    SVFG graph;
+    auto *targetAddress = new AddrSVFGNode(1, nullptr, target, targetObject);
+    targetAddress->setValueId(functionPointerId);
+    auto *otherAddress = new AddrSVFGNode(2, nullptr, other, otherObject);
+    otherAddress->setValueId(functionPointerId);
+    auto *phi = new PhiSVFGNode(3, SVFGK::IntraPhi, nullptr,
+                                static_cast<const Value *>(nullptr));
+    phi->setValueId(functionPointerId);
+    for (SVFGNode *node : std::vector<SVFGNode *>{targetAddress, otherAddress,
+                                                  phi})
+      graph.addNode(node);
+    SVFG::ObjectInfo info;
+    info.isFunction = true;
+    info.isSingleton = true;
+    graph.setObjectValue(targetObject, target);
+    graph.setObjectInfo(targetObject, info);
+    graph.setObjectValue(otherObject, other);
+    graph.setObjectInfo(otherObject, info);
+    graph.addEdge(targetAddress, phi, SVFGEdgeK::IntraDirect);
+    graph.addEdge(otherAddress, phi, SVFGEdgeK::IntraDirect);
+    graph.addIndCallSite(functionPointerId, call);
+
+    FlowSensitivePTA::Config config;
+    config.parallel = true;
+    config.workerThreads = 2;
+    config.unorderedParallel = unordered;
+    config.connectIndirectCall = [&](const CallBase *site,
+                                     const Function *callee) {
+      return graph.markConnectedCallee(site, callee);
+    };
+    config.isIndirectCallTargetAllowed = [&](const CallBase *,
+                                             const Function *callee) {
+      return callee == target;
+    };
+    FlowSensitivePTA solver(graph, config);
+    const auto &stats = solver.solve();
+    EXPECT_EQ(stats.indirectCallEdges, 1u) << "unordered=" << unordered;
+    EXPECT_GE(stats.indirectCallsRejected, 1u) << "unordered=" << unordered;
+    const auto &connected = graph.getConnectedCallees(call);
+    EXPECT_EQ(connected.count(target), 1u) << "unordered=" << unordered;
+    EXPECT_EQ(connected.count(other), 0u) << "unordered=" << unordered;
+  }
+}
+
+TEST_F(ParallelFlowSensitivePTATest, UnorderedPolicyStillReachesAFixedPoint) {
+  auto module = parseModule(R"(
+    @x = global i8 0
+    @slot = global i8* null
+    define i8* @main(i1 %again) {
+    entry:
+      br label %loop
+    loop:
+      store i8* @x, i8** @slot
+      %r = load i8*, i8** @slot
+      br i1 %again, label %loop, label %exit
+    exit:
+      ret i8* %r
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  ICFG icfg;
+  ICFGBuilder(&icfg).build(module.get());
+  SVFGBuilderConfig graphConfig;
+  graphConfig.usePointerAnalysis = true;
+  graphConfig.memoryPartition = MemoryRegionPartitionStrategy::InterDisjoint;
+  SVFGBuilder builder(graphConfig);
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  ASSERT_NE(graph, nullptr);
+
+  FlowSensitivePTA::Config config;
+  config.parallel = true;
+  config.unorderedParallel = true;
+  config.workerThreads = 4;
+  FlowSensitivePTA solver(*graph, config);
+  solver.solve();
+  std::string difference;
+  EXPECT_TRUE(solver.isFixedPoint(&difference)) << difference;
+  EXPECT_GT(solver.statistics().parallelCommits, 0U);
+}

@@ -1,15 +1,12 @@
 include(${CMAKE_CURRENT_LIST_DIR}/UnitTestHelpers.cmake)
 
 foreach(subsystem Alias Analysis Checker CFL Concurrency Dataflow Fuzzing IR
-                  Solvers SymbolicExecution Utils Verification)
+                  Security Solvers SymbolicExecution Transform Utils Verification)
   string(TOLOWER "${subsystem}" selection_name)
   if(selection_name IN_LIST LOTUS_SELECTED_TEST_ROOTS)
     add_subdirectory(${subsystem})
   endif()
 endforeach()
-if("alias-wrapper" IN_LIST LOTUS_SELECTED_TEST_SUBSYSTEMS)
-  add_subdirectory(Alias/Infrastructure/AliasAnalysisWrapper)
-endif()
 
 # Aggregate build entry point for all unit-test executables:
 # `cmake --build <dir> --target lotus_unit_tests` builds just the tests.

@@ -17,13 +17,15 @@ using namespace lotus::unittest;
 
 class SVFGMemorySSATest : public LlvmModuleTest {
 protected:
-  std::unique_ptr<SVFG> buildSVFG(Module *module, ICFG &icfg) {
+  std::unique_ptr<SVFG> buildSVFG(Module *module, ICFG &icfg,
+                                  bool pointerOnly = false) {
     ICFGBuilder icfgBuilder(&icfg);
     icfgBuilder.build(module);
 
     SVFGBuilderConfig cfg;
     cfg.usePointerAnalysis = false;
     cfg.buildMSSA = true;
+    cfg.pointerOnly = pointerOnly;
 
     SVFGBuilder builder(cfg);
     return std::unique_ptr<SVFG>(builder.build(&icfg));

@@ -22,6 +22,8 @@ const char *toString(EngineKind kind) {
     return "concur";
   case EngineKind::SymExec:
     return "symex";
+  case EngineKind::GSAF:
+    return "gsaf";
   }
   return "unknown";
 }

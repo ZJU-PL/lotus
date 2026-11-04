@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Dataflow/DemandAPA/RegEx.h"
+#include "Dataflow/DemandAPA/Support.h"
+#include "bdd.h"
 
 template <class T> class Algebra {
 public:
@@ -33,12 +35,12 @@ struct rollingHash {
     return hashVal;
   }
 };
-unordered_map<vi, vi, rollingHash> IfdsstarCache[MAX_N_THREADS];
+inline unordered_map<vi, vi, rollingHash> IfdsstarCache[MAX_N_THREADS];
 
-V<int> Ifdszero;
-V<int> Ifdsone = V<int>({-1});
+inline V<int> Ifdszero;
+inline V<int> Ifdsone = V<int>({-1});
 
-V<int> Ifdsplus(V<int> a, V<int> b) {
+inline V<int> Ifdsplus(V<int> a, V<int> b) {
   if (a.empty())
     return b;
   if (b.empty())
@@ -88,7 +90,7 @@ V<int> Ifdsplus(V<int> a, V<int> b) {
   return c;
 }
 
-V<int> Ifdsdot(V<int> a, V<int> b) {
+inline V<int> Ifdsdot(V<int> a, V<int> b) {
   if (a.empty() || b.empty())
     return Ifdszero;
   if (a[0] == -1)
@@ -129,7 +131,7 @@ V<int> Ifdsdot(V<int> a, V<int> b) {
   return c;
 }
 
-V<int> Ifdsstar(V<int> a) {
+inline V<int> Ifdsstar(V<int> a) {
   if (a.empty())
     return Ifdsone;
   if (a[0] == -1)
@@ -194,35 +196,35 @@ RegEx* REproject(RegEx* a, RegEx* b) {
         return REdot(a, b);
 }*/
 
-int SPzero = INF;
-int SPone = 0;
+inline int SPzero = INF;
+inline int SPone = 0;
 
-int SPplus(int a, int b) { return min(a, b); }
-int SPdot(int a, int b) {
+inline int SPplus(int a, int b) { return min(a, b); }
+inline int SPdot(int a, int b) {
   if (a == -INF || b == -INF)
     return -INF;
   if (a == INF || b == INF)
     return INF;
   return a + b;
 }
-int SPstar(int a) {
+inline int SPstar(int a) {
   if (a < 0)
     return -INF;
   return 0;
 }
 
-bdd PAzero = bddfalse;
-bdd PAone = bddtrue; // will be redefined in BpReader
+inline bdd PAzero = bddfalse;
+inline bdd PAone = bddtrue; // will be redefined in BpReader
 // these are global to be accessed from Algebra.h
-int G; // G = |globals|
-int L; // max_i(|locals[i]|), we'll assume all functions have L local variables,
-       // even if not all of them are used
-int GL; // G + L
-int maxGL = 0;
-string curStmtType;
-int curProc, curNode;
+inline int G; // G = |globals|
+inline int L; // max_i(|locals[i]|), we'll assume all functions have L local
+              // variables, even if not all of them are used
+inline int GL; // G + L
+inline int maxGL = 0;
+inline string curStmtType;
+inline int curProc, curNode;
 
-void allsatHandler(char *varset, int size) {
+inline void allsatHandler(char *varset, int size) {
   assert(size >= 4 * GL);
   V<string> rel(4);
   for (int v = 0; v < 4 * G; ++v) {
@@ -233,7 +235,7 @@ void allsatHandler(char *varset, int size) {
   db(rel);
 }
 
-void print(bdd a) {
+inline void print(bdd a) {
   bdd_allsat(a, allsatHandler);
   cout << "======================" << endl;
 }
@@ -242,33 +244,33 @@ template <class T> void print(T a) {}
 
 template <class T> void check(T a, T b) {}
 
-void check(bdd a, bdd b) {
+inline void check(bdd a, bdd b) {
   assert(bdd_imp(a, b) == bddtrue);
   //	assert(a != b);
 }
 
-int var(int i) { return 4 * i; }
-int varPrimed(int i) { return 4 * i + 1; }
-int varDoublePrimed(int i) { return 4 * i + 2; }
-int varTriplePrimed(int i) { return 4 * i + 3; }
+inline int var(int i) { return 4 * i; }
+inline int varPrimed(int i) { return 4 * i + 1; }
+inline int varDoublePrimed(int i) { return 4 * i + 2; }
+inline int varTriplePrimed(int i) { return 4 * i + 3; }
 
-string tabs = "";
+inline string tabs = "";
 
-void setPAone() {
+inline void setPAone() {
   // setting the value of identity transformer
   PAone = bddtrue;
   for (int i = 0; i < GL; ++i)
     PAone &= bdd_biimp(bdd_ithvar(var(i)), bdd_ithvar(varPrimed(i)));
 }
 
-bdd PAplus(bdd a, bdd b) {
+inline bdd PAplus(bdd a, bdd b) {
   //	cout << tabs << "Plus: start" << endl;
   bdd ans = a | b;
   //	cout << tabs << "Plus: finish" << endl;
   return ans;
 }
 
-bdd PAdot(bdd a, bdd b) {
+inline bdd PAdot(bdd a, bdd b) {
   //	cout << tabs << "Dot: start" << endl;
   bdd ans;
   // IMP
@@ -293,7 +295,7 @@ bdd PAdot(bdd a, bdd b) {
   return ans;
 }
 
-bdd PAstar(bdd a) {
+inline bdd PAstar(bdd a) {
   //	cout << tabs << "Star: start" << endl;
   tabs += "\t";
   assert(sz(tabs) <= 1);
@@ -315,17 +317,17 @@ bdd PAstar(bdd a) {
 }
 
 // returns the formula x'_idx = x_idx
-bdd setEq(int idx) {
+inline bdd setEq(int idx) {
   return bdd_biimp(bdd_ithvar(var(idx)), bdd_ithvar(varPrimed(idx)));
 }
 
 // returns the formula x'_idx != x_idx
-bdd setNotEq(int idx) {
+inline bdd setNotEq(int idx) {
   return bdd_biimp(bdd_nithvar(var(idx)), bdd_ithvar(varPrimed(idx)));
 }
 
 // MUST match the one in BpReader
-bdd setVar(int idx, string eType, bdd EOpL, bdd EOpR) {
+inline bdd setVar(int idx, string eType, bdd EOpL, bdd EOpR) {
   assert(idx >= 0 && idx < GL);
   if (eType == "choose") {
     bdd left = EOpL;
@@ -339,7 +341,7 @@ bdd setVar(int idx, string eType, bdd EOpL, bdd EOpR) {
 // deadIndices = {d_0 ... d_k} subset of {0, .. GL-1}
 // returns the formula (x'_a_0 = x_a_0) & (x'_a_1 = x_a_2) ...
 // where a_0 a_1 .. = {0, .. GL-1} \ deadIndices
-bdd deadTF(si deadIndices) {
+inline bdd deadTF(si deadIndices) {
   for (auto &idx : deadIndices)
     assert(idx >= 0 && idx < GL);
   bdd ans = bddtrue;
@@ -349,9 +351,8 @@ bdd deadTF(si deadIndices) {
   return ans;
 }
 
-void checkStats() {
+inline void checkStats() {
   bddStat b;
   bdd_stats(&b);
   db(b.produced);
 }
-

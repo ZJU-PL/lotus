@@ -9,3 +9,5 @@ int runFiTxCheckerTool(const char *argv0);
 int runSaberCheckerTool(const char *argv0);
 int runAECheckerTool(const char *argv0);
 int runSymExCheckerTool(const char *argv0);
+
+int runGSAFCheckerTool(const char *argv0);

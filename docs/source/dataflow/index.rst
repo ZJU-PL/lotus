@@ -1,12 +1,12 @@
 Data Flow Analysis Frameworks
 =============================
 
-Lotus implements four distinct dataflow analysis frameworks, each optimized for different problem classes and precision/performance trade-offs. This page provides an architectural overview of the frameworks, explains when to use each, and documents their core abstractions.
+Lotus implements several distinct dataflow analysis frameworks, each optimized for different problem classes and precision/performance trade-offs. This page provides an architectural overview of the frameworks, explains when to use each, and documents their core abstractions.
 
 Framework Overview
 ------------------
 
-Lotus provides four compiled libraries under ``lib/Dataflow/``, each implementing a distinct algorithmic approach:
+Lotus provides several compiled libraries under ``lib/Dataflow/``, each implementing a distinct algorithmic approach:
 
 .. list-table:: Dataflow Engines
    :widths: 15 15 25 25 20
@@ -27,16 +27,26 @@ Lotus provides four compiled libraries under ``lib/Dataflow/``, each implementin
      - ``IntraMonoSolver``, ``InterMonoSolver``
      - ``IntraSolver.h``, ``InterSolver.h``
      - Intra/Interprocedural
-   * - ``WPDS``
+   * - ``WPDSDataFlow``
      - ``wpds::``
      - ``InterProceduralDataFlowEngine``
      - ``InterProceduralDataFlow.h``
      - Interprocedural
    * - ``APADataFlow``
      - ``elimination::``
-     - ``IntraEliminationSolver``
-     - ``IntraEliminationSolver.h``
-     - Intraprocedural
+     - ``IntraEliminationSolver``, ``InterEliminationSolver``
+     - ``IntraSolver.h``
+     - Intra/Interprocedural
+   * - ``NPADataFlow``
+     - ``npa::``
+     - ``BitVectorSolver``, ``ForwardInterEngine``, ``BackwardInterEngine``
+     - ``NPALLVMDriver.h``, ``IntraEngine.h``
+     - Intra/Interprocedural
+   * - ``VASCODataFlow``
+     - ``vasco::``
+     - ``ForwardInterProceduralAnalysis``, ``BackwardInterProceduralAnalysis``
+     - ``ForwardInterProceduralAnalysis.h``
+     - Interprocedural
 
 When to Use Each Framework
 --------------------------
@@ -76,7 +86,9 @@ Selecting the right framework depends heavily on the properties of the dataflow 
      - None (Intraprocedural)
      - Meet-over-all-paths, path expressions, elimination benchmarks.
 
-The ``lotus-dfa-diff`` tool (located in ``tools/dataflow/``) can be used to perform differential testing across these different engines for a given problem class.
+The ``lotus-dfa`` tool (located in ``tools/dataflow/`` and built from
+``lotus-dfa-diff.cpp``) can be used to perform differential testing across these
+different engines for a given problem class.
 
 .. toctree::
    :maxdepth: 2

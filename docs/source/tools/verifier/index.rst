@@ -19,7 +19,7 @@ checking safety properties over LLVM bitcode.
 .. code-block:: bash
 
    # Analyze with interval domain
-   ./build/bin/clam --crab-dom=int --crab-check=assert program.bc
+   ./build/bin/clam --crab-dom=int --crab-check program.bc
 
    # Preprocess bitcode
    ./build/bin/clam-pp program.bc -o prep.bc
@@ -108,6 +108,24 @@ externalizes static functions; the ``smack`` frontend script and its helpers
 **Build status**: built only when ``LOTUS_ENABLE_SMACK=ON``.
 
 For detailed documentation, see :doc:`../../verification/smack`.
+
+Mosaic – Theory-Modular CHC Solving
+-----------------------------------
+
+Mosaic is a theory-modular Constrained Horn Clause (CHC) solver that decomposes
+proof obligations into mixed-theory sub-problems (Int/BV).
+
+**Binary**: ``lotus-verify-mosaic``  
+**Location**: ``tools/verifier/mosaic/``
+
+**Quick Start**:
+
+.. code-block:: bash
+
+   ./build/bin/lotus-verify-mosaic input.smt2
+   ./build/bin/lotus-verify-mosaic --backend=mosaic --force-preprocess input.smt2
+
+For detailed documentation, see :doc:`../../verification/mosaic`.
 
 Horn-ICE – CHC Verification with Learning
 -----------------------------------------

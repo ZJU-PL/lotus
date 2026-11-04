@@ -654,7 +654,8 @@ void AbstractState::initObjVar(const llvm::Value *objVar) {
       } else if (const llvm::ConstantFP *cfp =
                      llvm::dyn_cast<llvm::ConstantFP>(gv->getInitializer())) {
         double val = cfp->getValueAPF().convertToDouble();
-        (*this)[varId] = IntervalValue(val, val);
+        (*this)[varId] = IntervalValue(static_cast<int64_t>(val),
+                static_cast<int64_t>(val));
         return;
       } else if (gv->getInitializer()->isNullValue()) {
         (*this)[varId] =
@@ -691,7 +692,8 @@ void AbstractState::initObjVar(const llvm::Value *objVar) {
   }
   if (const llvm::ConstantFP *cfp = llvm::dyn_cast<llvm::ConstantFP>(objVar)) {
     double val = cfp->getValueAPF().convertToDouble();
-    (*this)[varId] = IntervalValue(val, val);
+    (*this)[varId] = IntervalValue(static_cast<int64_t>(val),
+                                   static_cast<int64_t>(val));
     return;
   }
   if (llvm::isa<llvm::ConstantPointerNull>(objVar)) {
@@ -739,9 +741,8 @@ AbstractState::getElementIndex(const llvm::GetElementPtrInst *gep) {
   const llvm::DataLayout &dl = gep->getModule()->getDataLayout();
 
   // Iterate over indices in reverse order (matching SVF's behavior)
-  for (int i = gep->getNumIndices() - 1; i >= 0; --i) {
-    llvm::Value *idx =
-        gep->getOperand(i + 1); // +1 because operand 0 is pointer
+  for (unsigned i = gep->getNumIndices(); i > 0; --i) {
+    llvm::Value *idx = gep->getOperand(i); // operand 0 is the pointer
     llvm::Type *idxType = srcType;
 
     int64_t idxLb, idxUb;

@@ -23,21 +23,6 @@ Main components
 - ``LLVMVFTable`` and ``LLVMVFTableData`` model virtual-function tables.
 - ``TypeHierarchyAnalysis`` packages the functionality as an analysis pass.
 
-Call Graph Construction Algorithms
-----------------------------------
-
-In addition to base hierarchy recovery, the module provides classic algorithms for
-call graph construction and devirtualization:
-
-- **CHA (Class Hierarchy Analysis)**: Statically resolves virtual calls by traversing
-  the class inheritance tree without analyzing program control flow.
-- **RTA (Rapid Type Analysis)**: Refines CHA by tracking which classes are
-  instantiated (identifying ``new`` allocations).
-- **VTA (Variable Type Analysis)**: A flow-insensitive algorithm that computes type
-  constraints for variables to refine the set of possible targets for a virtual call.
-- **OTF (On-The-Fly Call Graph Construction)**: Constructs the call graph on-the-fly
-  simultaneously with points-to analysis.
-
 Typical use cases
 -----------------
 

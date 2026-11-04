@@ -170,7 +170,7 @@ public:
   /**
    * @brief Destructor.
    */
-  ~Graph();
+  virtual ~Graph();
 
   /**
    * @brief Read graph from input stream.

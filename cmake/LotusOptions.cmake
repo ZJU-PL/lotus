@@ -17,7 +17,7 @@ set(LOTUS_UNITY_BATCH_SIZE 4 CACHE STRING "Maximum sources per selected unity ba
 # SparrowAA, DyckAA, UnderApprox and LLVM's CFL analyses remain available.
 # These switches affect the wrapper only; standalone backend libraries/tools
 # are still available and can be built explicitly.
-foreach(backend DDA TPA GPG CCLYZER)
+foreach(backend DDA TPA CCLYZER)
   option(LOTUS_AA_WRAPPER_ENABLE_${backend}
          "Include ${backend} in the unified alias-analysis wrapper" ON)
 endforeach()
@@ -27,6 +27,12 @@ set(LOTUS_COVERAGE_MINIMUM 0 CACHE STRING
     "Minimum total line coverage percentage required")
 
 # Optional analysis and verification integrations.
+option(LOTUS_ENABLE_IKOS_API_SPEC "Install the IKOS API-spec stub generation tools" OFF)
+option(LOTUS_ENABLE_IKOS "Build the IKOS analyzer and API-spec pipeline" OFF)
+option(LOTUS_IKOS_ENABLE_APRON "Enable optional APRON domains in IKOS" OFF)
+if(LOTUS_ENABLE_IKOS)
+  set(LOTUS_ENABLE_IKOS_API_SPEC ON)
+endif()
 option(LOTUS_ENABLE_CLAM "Enable CLAM abstract interpretation framework" OFF)
 option(LOTUS_ENABLE_SEAHORN "Enable SeaHorn" OFF)
 option(LOTUS_ENABLE_SMACK
@@ -110,14 +116,15 @@ function(lotus_resolve_selection option_name available out_var)
 endfunction()
 
 set(_lotus_test_roots
-  alias alias-wrapper analysis checker cfl concurrency dataflow fuzzing ir
-  solvers symbolicexecution utils verification)
+  alias analysis checker cfl concurrency dataflow fuzzing ir
+  security solvers symbolicexecution transform utils verification)
 set(_lotus_test_choices ${_lotus_test_roots})
-foreach(group gpg dda aserpta bootstrapaa flowsensitive lotusaa sparrowaa tpa
-              cclyzeraa dyckaa seadsa allocaa typequalifier underapproxaa ptsset)
+foreach(group dda aserpta bootstrapaa flowsensitive lotusaa sparrowaa tpa
+              cclyzeraa dyckaa seadsa allocaa underapproxaa ptsset
+              aliaswrapper)
   list(APPEND _lotus_test_choices "alias/${group}")
 endforeach()
-foreach(group cfg controldependence debuginfo general multiplicity nullpointer
+foreach(group cfg controldependence debuginfo multiplicity nullpointer
               parametersummary profile purity sccp typehierarchy loop)
   list(APPEND _lotus_test_choices "analysis/${group}")
 endforeach()
@@ -125,11 +132,18 @@ foreach(group mhp lockset valueflow thread clocks threadapi threadlocal openmp
               mpi cuda linuxkernel)
   list(APPEND _lotus_test_choices "concurrency/${group}")
 endforeach()
-foreach(group ae concurrency framework kint pulse saber reports)
+foreach(group ae concurrency framework gsaf kint pulse saber reports typequalifier)
   list(APPEND _lotus_test_choices "checker/${group}")
 endforeach()
-foreach(group ifdside mono wpds apa npa vasco)
+foreach(group ifdside mono wpds apa demandapa npa vasco)
   list(APPEND _lotus_test_choices "dataflow/${group}")
+endforeach()
+
+foreach(group constanttime spectre)
+  list(APPEND _lotus_test_choices "security/${group}")
+endforeach()
+foreach(group nisse)
+  list(APPEND _lotus_test_choices "transform/${group}")
 endforeach()
 
 lotus_resolve_selection(LOTUS_TOOL_FAMILIES
@@ -152,9 +166,9 @@ if(NOT LOTUS_ENABLE_CFL)
   list(REMOVE_ITEM LOTUS_SELECTED_TOOL_FAMILIES cfl)
   list(REMOVE_ITEM LOTUS_SELECTED_TEST_SUBSYSTEMS cfl)
 endif()
-if(LOTUS_BUILD_TESTS AND "alias/typequalifier" IN_LIST LOTUS_SELECTED_TEST_SUBSYSTEMS
+if(LOTUS_BUILD_TESTS AND "checker/typequalifier" IN_LIST LOTUS_SELECTED_TEST_SUBSYSTEMS
    AND NOT LOTUS_ENABLE_TYPE_QUALIFIER)
-  message(FATAL_ERROR "Selecting alias/typequalifier requires LOTUS_ENABLE_TYPE_QUALIFIER=ON")
+  message(FATAL_ERROR "Selecting checker/typequalifier requires LOTUS_ENABLE_TYPE_QUALIFIER=ON")
 endif()
 
 set(LOTUS_SELECTED_TEST_ROOTS)
@@ -197,7 +211,7 @@ function(lotus_print_build_summary)
   _lotus_summary_bool("Compilation time traces" LOTUS_ENABLE_TIME_TRACE)
   message(STATUS "  PCH targets: ${LOTUS_PCH_TARGETS}")
   message(STATUS "  Unity targets: ${LOTUS_UNITY_TARGETS}")
-  foreach(backend DDA TPA GPG CCLYZER)
+  foreach(backend DDA TPA CCLYZER)
     _lotus_summary_bool("Alias wrapper ${backend}" LOTUS_AA_WRAPPER_ENABLE_${backend})
   endforeach()
   message(STATUS "  Optional tool families:")
@@ -207,6 +221,8 @@ function(lotus_print_build_summary)
   _lotus_summary_bool("SMTStabilizer" LOTUS_ENABLE_SMT_STABILIZER)
   _lotus_summary_bool("DynAA tools" LOTUS_ENABLE_DYNAA)
   message(STATUS "  Optional integrations:")
+  _lotus_summary_bool("IKOS API-spec tools" LOTUS_ENABLE_IKOS_API_SPEC)
+  _lotus_summary_bool("IKOS analyzer" LOTUS_ENABLE_IKOS)
   _lotus_summary_bool("CLAM" LOTUS_ENABLE_CLAM)
   _lotus_summary_bool("SeaHorn" LOTUS_ENABLE_SEAHORN)
   _lotus_summary_bool("SMACK" LOTUS_ENABLE_SMACK)
