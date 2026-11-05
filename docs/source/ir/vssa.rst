@@ -136,9 +136,14 @@ Usage
 
 **Command-Line Usage**:
 
+``vSSA`` registers the legacy pass argument ``-vssa``. Lotus builds
+``CanaryvSSA`` as a static library and does not provide a loadable ``opt``
+plugin target, so link the library into an ``opt``-style driver (or build a
+plugin from it) before invoking the pass:
+
 .. code-block:: bash
 
-   opt -load libCanaryvSSA.so -vssa < input.bc > output.bc
+   opt -vssa < input.bc > output.bc
 
 **Checking for vSSA Instructions**:
 

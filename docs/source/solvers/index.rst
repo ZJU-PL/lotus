@@ -33,5 +33,5 @@ Third-Party Libraries
 Vendored libraries in ``third-party/``:
 
 * **MDE** (``third-party/mde/``) — Multilevel Deduplication Engine
-  for caching set operations in dataflow analyses. Not compiled or
-  linked (commented out in ``third-party/CMakeLists.txt``).
+  for caching set operations in dataflow analyses. Not compiled or linked:
+  ``third-party/CMakeLists.txt`` does not reference the ``mde`` subdirectory.
