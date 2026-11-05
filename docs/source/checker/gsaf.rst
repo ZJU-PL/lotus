@@ -18,10 +18,11 @@ The engine implementation is in ``lib/Checker/GSAF``. Library contracts reuse
 Organization
 ------------
 
-Public headers mirror the implementation directories:
+The tree is grouped by responsibility (public headers exist for ``API``,
+``Engine``, ``Report``, and ``Support``):
 
 * ``API``: vulnerability contracts, traces, registration and annotation model queries.
-* ``Engine``: four header/source pairs for the module checker, taint traversal,
+* ``Engine``: the module checker, inter-/intra-procedural taint traversal,
   solver and summaries.
 * ``Checkers``: the two built-in checks (use after free and taint).
 * ``Report``: diagnostic rendering and trace scoring.

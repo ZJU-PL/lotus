@@ -22,8 +22,9 @@ Main components
 
 - ``AbstractInterpretation`` drives the fixpoint analysis.
 - ``AEDetector`` and its concrete detectors implement bug-specific checks.
-- Value abstractions such as ``AbstractValue``, ``NumericValue``, and
-  ``AbstractState`` model execution state during analysis.
+- Value abstractions such as ``AbstractValue`` and ``AbstractState``, together
+  with numeric bounds such as ``BoundedDouble``, model execution state during
+  analysis.
 - ``RelationSolver`` and related utilities support symbolic reasoning in the
   abstract domain.
 

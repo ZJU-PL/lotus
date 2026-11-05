@@ -49,6 +49,7 @@ These nodes represent operations on top-level pointers (SSA variables):
 * **StoreSVFGNode**: Store instructions. Writes to memory through a pointer.
 * **GepSVFGNode**: GetElementPtr instructions. Computes derived pointers.
 * **BinaryOpSVFGNode**: Binary operations on pointer values.
+* **UnaryOpSVFGNode**: Unary operations on pointer values.
 * **CmpSVFGNode**: Comparison instructions involving pointers.
 * **BranchSVFGNode**: Branch instructions with pointer-dependent conditions.
 
@@ -69,17 +70,19 @@ These nodes track value flows through memory locations:
 * **ActualOutSVFGNode**: Memory state after call site (actual return memory).
 * **LoadMuSVFGNode**: Memory use (load from address-taken location).
 * **StoreChiSVFGNode**: Memory def (store to address-taken location).
-* **CallMuSVFGNode**: Memory use at call site (for functions that may read memory).
-* **CallChiSVFGNode**: Memory def at call site (for functions that may write memory).
-* **RetMuSVFGNode**: Memory use at function return.
 * **EntryChiSVFGNode**: Memory def at function entry.
+* **CallMuSVFGNode**, **CallChiSVFGNode**, **RetMuSVFGNode**: deprecated,
+  serializer-only legacy classes. The runtime graph uses ``ActualIn`` as the
+  call-site memory use, ``ActualOut`` as the call-site memory def, and
+  ``FormalOut`` as the function-return memory use; the corresponding
+  ``CallMu``/``CallChi``/``RetMu`` edge kinds remain in ``SVFGEdgeK``.
 
 Memory PHI Nodes
 ~~~~~~~~~~~~~~~~
 
 * **IntraMSSAPhiSVFGNode**: Intra-procedural memory PHI for merging memory states.
-* **InterMSSAPhiSVFGNode**: Inter-procedural memory PHI node kind for merged
-  interprocedural memory states.
+* **InterMSSAPhiSVFGNode**: deprecated, serializer-only legacy class. The
+  runtime SVFG does not build interprocedural memory PHI nodes.
 
 Parameter Nodes
 ---------------
@@ -100,10 +103,20 @@ Intra-Procedural Edges
 * **IntraLoad**: Load through pointer (defines loaded value).
 * **IntraStore**: Store through pointer (uses stored value).
 * **IntraGep**: GEP operation (derived pointer).
+* **IntraCmp**: Comparison value flow.
+* **IntraBranch**: Branch-condition value flow.
 * **IntraPhi**: PHI node value flow.
 * **IntraMu**: Memory use edge (LoadMu).
 * **IntraChi**: Memory def edge (StoreChi).
 * **IntraIndirect**: Indirect value flow with points-to guard.
+
+Memory SSA Edges
+----------------
+
+* **CallMu**: Memory use at a call site.
+* **CallChi**: Memory def at a call site.
+* **RetMu**: Memory use at function return.
+* **EntryChi**: Memory def at function entry.
 
 Inter-Procedural Edges
 ----------------------

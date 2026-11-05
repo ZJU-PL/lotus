@@ -120,5 +120,10 @@ The standalone driver can be invoked as:
    # Field-insensitive for faster analysis
    ./build/bin/lotus-alias-aser-aa -field-sensitive=false input.bc
 
-In Lotus, AserPTA is also accessible through the AA wrapper and configuration
-files that select it as the primary alias analysis engine.
+``AAConfig::AserPTA_*()`` and the corresponding configuration-file names are
+recognized by the unified ``AliasAnalysisWrapper``, but the wrapper backend
+currently refuses AserPTA requests (``AliasAnalysisWrapper: AserPTA config
+requested, but the wrapper backend is not integrated yet``) and leaves the
+wrapper uninitialized instead of falling back to another analysis. Use the
+standalone ``lotus-alias-aser-aa`` driver or the direct AserPTA API described
+above.

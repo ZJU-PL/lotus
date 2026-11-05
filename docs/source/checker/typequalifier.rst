@@ -19,7 +19,7 @@ Main components
 ---------------
 
 - ``QualifierAnalysis`` drives the analysis.
-- ``FunctionSummary`` stores interprocedural summaries.
+- ``Summary`` (``FunctionSummary.h``) stores interprocedural summaries.
 - ``CallGraphPass`` and related helpers manage the analysis call graph.
 - ``TaintSignature`` and annotation helpers encode qualifier effects.
 

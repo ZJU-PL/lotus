@@ -256,7 +256,7 @@ False Positives
 .. code-block:: bash
 
    ./build/bin/dynaa-instrument input.bc -o inst.bc
-   clang inst.bc libRuntime.a -o inst
+   clang inst.bc build/libRuntime.a -o inst
    LOG_DIR=logs ./inst
    ./build/bin/dynaa-check input.bc logs/pts.log basic-aa
 

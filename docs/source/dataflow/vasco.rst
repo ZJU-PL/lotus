@@ -205,9 +205,10 @@ releases the context back to the shared pool.
 Versioned Summary Replay
 ------------------------
 
-Every context carries an atomic ``SummaryVersion`` that starts at zero and
-increments each time the context publishes a changed summary (exit value for
-forward analyses, entry value for backward analyses). When a caller context
+Every context carries an atomic summary version (read through
+``Context::getSummaryVersion()``) that starts at zero and increments
+each time the context publishes a changed summary (exit value for forward
+analyses, entry value for backward analyses). When a caller context
 consumes a summary at a call site, it records the callee's current version in
 an ``ObservedSummaryVersions`` table. When the callee publishes an updated
 summary, ``wakeStaleCallers()`` iterates the caller list and re-enqueues only

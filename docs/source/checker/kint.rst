@@ -258,7 +258,12 @@ Programmatic Usage
    // Access centralized reports
    BugReportMgr& mgr = BugReportMgr::get_instance();
    mgr.print_summary(outs());
-   mgr.generate_json_report(jsonFile, BugReportMgr::ReportFilter{});
+
+   // generate_json_report writes to an llvm::raw_ostream.
+   std::error_code EC;
+   llvm::raw_fd_ostream JSON("report.json", EC);
+   if (!EC)
+     mgr.generate_json_report(JSON, BugReportMgr::ReportFilter{});
 
 SMT-based numerical reasoning
 -----------------------------

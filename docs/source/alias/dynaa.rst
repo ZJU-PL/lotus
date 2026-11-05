@@ -34,7 +34,7 @@ The typical workflow is:
 
    .. code-block:: bash
 
-      clang example.inst.bc libRuntime.a -o example.inst
+      clang example.inst.bc build/libRuntime.a -o example.inst
 
 4. **Run** the instrumented program to collect runtime pointer information:
 

@@ -63,13 +63,13 @@ The ``lib/`` directory is divided into 16 CMake subdirectories, each of which co
      - ``Framework``, ``AE``, ``KINT``, ``Pulse``, ``Saber``, ``Concurrency``, ``GSAF``, ``FiTx``, ``TypeQualifier``, ``Tooling``
      - Bug detection engines and linters
    * - ``lib/Solvers/``
-     - Z3 SMT wrapper, CUDD BDD wrapper, WPDS weights
+     - ``Datalog``, ``EGraph``, ``SMT`` (LIBSMT, TUNA, STAUB, SymAbs, SMTStabilizer, SMTSampler, QuantSimp)
      - Constraint and reachability solvers
    * - ``lib/Verification/``
-     - ``SymAbsAI``, ``Sifa``, ``Mosaic``, CLAM abstract interpreter, SeaHorn
+     - ``SymAbsAI``, ``Sifa``, ``Mosaic``, ``TraceAbstraction``, ``Automata``, backend adapters (IKOS)
      - Formal verification backends
    * - ``lib/CFL/``
-     - CFL-reachability graph engines (CSR)
+     - ``Classical``, ``DynamicDyck``, ``InterleavedDyck``, and ``CSIndex`` (CSR/FLARE indexing) engines
      - Core CFL and pushdown logic
    * - ``lib/Transform/``
      - LLVM IR transformation passes
