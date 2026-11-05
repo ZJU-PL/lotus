@@ -101,3 +101,5 @@ If you use Lotus in your research or work, please cite the following:
 - Rexxar-Jack-Remar
 - x6eull
 - hiruwaKS
+- DarkPaper2022
+- Yanhaoxi

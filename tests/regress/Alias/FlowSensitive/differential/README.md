@@ -6,11 +6,12 @@ file. Run each with LLVM 14 `lli`, with and without an extra argument where the
 input has two outcomes (for example `selected-struct-store.ll`).
 
 Results below were produced with the local SVF build
-(`~/Downloads/SVF-master/Release-build/bin/wpa`, LLVM 14) through
-`scripts/compare_svf_fspta.py` and its SVF observer
-(`scripts/svf-differential/`). SVF needs `-model-consts=true` to model separate
-constant objects; without it several string constants collapse into one object
-and spurious "only in SVF" alias pairs appear.
+(`~/Downloads/SVF-master/Release-build/bin/wpa`, LLVM 14). The former
+`scripts/compare_svf_fspta.py` and `scripts/svf-differential` harness were
+removed; the compiled SVF observer remains at
+`build/svf-differential/svf-fspta-observer`. SVF needs `-model-consts=true` to
+model separate constant objects; without it several string constants collapse
+into one object and spurious "only in SVF" alias pairs appear.
 
 | Input | Expected observation | Observed after the fixes |
 | --- | --- | --- |
@@ -35,8 +36,17 @@ comparison, record the queried value names, exact arguments, and binary/model
 hashes alongside the results:
 
 ```sh
-scripts/svf-differential/build.sh      # once per SVF build
-scripts/compare_svf_fspta.py tests/regress/Alias/FlowSensitive/differential \
-    --pattern '*.ll' --mode both --alias-pairs \
-    --svf-extra=-alias-check=false --svf-extra=-model-consts=true
+SVF_OBSERVER=build/svf-differential/svf-fspta-observer
+
+for mode in fspta vfspta; do
+  "$SVF_OBSERVER" "-$mode" -model-consts -alias-check=false -print-pts \
+    tests/regress/Alias/FlowSensitive/differential/*.ll
+  build/bin/lotus-alias-fspta "--analysis=$mode" --print-pts \
+    tests/regress/Alias/FlowSensitive/differential/*.ll
+done
+
+shasum -a 256 \
+  "$SVF_OBSERVER" \
+  ~/Downloads/SVF-master/Release-build/bin/wpa \
+  build/bin/lotus-alias-fspta
 ```
