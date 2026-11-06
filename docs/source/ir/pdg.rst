@@ -26,14 +26,20 @@ The PDG infrastructure provides several LLVM passes:
 Unified Query API
 =================
 
-The public query layer lives in ``include/IR/PDG/Analysis/Query.h`` and is
-organized around five service objects:
+The public query layer lives in ``include/IR/PDG/Analysis/Query.h``, a thin
+umbrella header over the focused query headers. The core services are:
 
 * ``SliceQuery`` – forward/backward slices, chops, and thin slices
 * ``DependenceQuery`` – reachability and shortest-path style queries
 * ``DataFlowQuery`` – reaching definitions, liveness, and control-region views
 * ``TransformQuery`` – motion legality and scheduling helpers
-* ``DiffQuery`` – structural differencing and impact summaries
+* ``DiffQuery`` – structural differencing between query results or scopes
+
+Rule-driven services cover policy and resource queries: ``SummaryQuery``
+(function summaries), ``ImpactQuery`` (change and impact ranking),
+``ResourceFlowQuery`` (resource acquire/release tracking), ``TaintQuery``,
+``LifetimeQuery``, ``StateQuery``, ``ApiQuery``, ``ArithmeticQuery``,
+``BoundsQuery``, ``CallContractQuery``, and ``RuleQuery``.
 
 All services share the same option/result model:
 

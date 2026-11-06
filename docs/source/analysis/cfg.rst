@@ -11,8 +11,17 @@ Control Flow Graph (CFG) analysis utilities for reachability and structural anal
 
 - **CFGReachability** – Control-flow reachability analysis between basic blocks
 - **CodeMetrics** – Code complexity and size metrics
-- **Dominator** – Dominator and post-dominator tree construction
-- **TopologicalOrder** – Topological ordering algorithms over the CFG
+- **Dominator** – Dominator and post-dominator tree construction, with
+  ``DominatorForest`` and ``DominatorNode`` providing the forest structures
+- **TopologicalOrder** and **SortTopo** – Topological and reverse-topological
+  ordering algorithms over the CFG
+- **SparseControlFlow** – Instruction-level sparse CFG/ICFG views for
+  flow-sensitive clients
+- **ExternCallbackModel** – Rewrites callback registrations (metadata,
+  ``pthread_create``, and OpenMP) through generated broker functions so static
+  call graph construction can see the callback targets
+- **GlobalCtorsDtorsModel** – Builds a model that invokes global constructors
+  and destructors from a synthetic entry
 
 **Typical use cases**:
 

@@ -91,7 +91,9 @@ Pulse currently registers and reports these issue types:
 * **Unnecessary Copy**
 
 The checker also tracks ``Const-Refable Parameter`` information, but that path
-is not yet emitted as a first-class ``PulseDiagnostic``.
+is not yet emitted as a first-class ``PulseDiagnostic``. ``--list-checkers``
+additionally lists the ``topl`` check, which reports user-defined temporal
+properties and requires ``--pulse.topl-properties``.
 
 Interprocedural Behavior
 ------------------------

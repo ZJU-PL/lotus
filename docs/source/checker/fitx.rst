@@ -139,9 +139,9 @@ Understanding the code
 
 **Adding a new detector**
 
-1. Define states (init, intermediate, bug) and transitions in a ``defineStates(StateManager&)`` (e.g. ``DoubleFreeDetector.cpp``).
+1. Define states (init, intermediate, bug) and transitions in a ``define_states(fitx::StateManager&)`` function inside a detector namespace (e.g. ``DoubleFree::define_states`` in ``lib/Checker/FiTx/Detector/DoubleFreeDetector.cpp``).
 2. Register Fun Arg / Store / Use / Alias transitions via ``TransitionManager``.
-3. Create a ``FrameworkPass`` subclass that overrides ``defineStates()`` and calls your ``define_states``; add it to ``FrameworkPass::passes``.
+3. Declare the function in the detector header, then add a ``--checks`` id and the function pointer to ``detectorRegistry()`` in ``tools/checker/lotus-check-fitx.cpp``. The tool's ``SelectedDetector`` pass calls every registered ``define_states`` for the selected ids.
 
 References
 ----------

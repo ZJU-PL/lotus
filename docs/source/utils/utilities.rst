@@ -271,16 +271,17 @@ Graph Utilities
 Scheduler
 ~~~~~~~~~
 
-Parallel execution scheduling:
+Parallel execution scheduling in ``include/Utils/Parallel/Scheduler/``:
 
-* **Scheduler/ParallelSchedulerPass.h** - Parallel scheduler pass
-* **Scheduler/PipelineScheduler.h** - Pipeline scheduler
-* **Task.h** - Task representation
+* **Scheduler/ParallelSchedulerPass.h** - Example module pass driving ``PipelineScheduler``
+* **Scheduler/PipelineScheduler.h** - Call-graph-ordered pipeline scheduler
+* **Scheduler/Task.h** - Scheduling task representation (function, SCC, GC, custom)
 
 Multi-threading
 ~~~~~~~~~~~~~~~
 
 * **ThreadPool.h** - Thread pool implementation for parallel execution
+  (``include/Utils/Parallel/``)
 
 **Usage**:
 
