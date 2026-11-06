@@ -1,0 +1,304 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IKOS Analyzer and API Specification Tools &mdash; Lotus Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Alias Analysis" href="../alias/index.html" />
+    <link rel="prev" title="Phoenix — Batch Analysis Runner" href="phoenix.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+              <img src="../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/architecture.html">Architecture &amp; Major Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/quickstart.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/pdg_query_language.html">PDG Query Language (Cypher)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/property_based_slicing.html">Property-Based Slicing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/verification_backends.html">Verification Driver Abstraction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/instrumentation_passes.html">Instrumentation Passes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Command-Line Tools Reference</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="index.html#tools-by-subdirectory">Tools by Subdirectory</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#common-configuration-options">Common Configuration Options</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#detailed-tool-subsections">Detailed Tool Subsections</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="index.html#scripting-tools">Scripting Tools</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="phoenix.html">Phoenix — Batch Analysis Runner</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">IKOS Analyzer and API Specification Tools</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#enable-and-install">Enable and install</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#vs-code-and-clangd">VS Code and clangd</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#offline-workflow">Offline workflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#generation-and-validation">Generation and validation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#semantic-scope">Semantic scope</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#tests-and-provenance">Tests and provenance</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../concurrency/index.html">Concurrency Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis Frameworks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html">Machine Learning Features (CanaryML)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../optimization/index.html">Optimization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../security/index.html">Security Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../symbolic_execution/index.html">Symbolic Execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../verification/index.html">Verification</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../checker/index.html">Checker Framework</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="index.html">Command-Line Tools Reference</a></li>
+      <li class="breadcrumb-item active">IKOS Analyzer and API Specification Tools</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/tools/ikos.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="ikos-analyzer-and-api-specification-tools">
+<h1>IKOS Analyzer and API Specification Tools<a class="headerlink" href="#ikos-analyzer-and-api-specification-tools" title="Link to this heading"></a></h1>
+<p>Lotus bundles the full IKOS analyzer and API-spec pipeline from the IKOS
+API-spec fork. The pipeline discovers
+external functions in LLVM 14 bitcode, scaffolds C stubs from IR declarations,
+generates candidate bodies through an LLM endpoint, and compiles and links stubs
+with signature verification.</p>
+<section id="enable-and-install">
+<h2>Enable and install<a class="headerlink" href="#enable-and-install" title="Link to this heading"></a></h2>
+<p>The full integration is optional. It uses Python 3.8+, LLVM/Clang 14, Boost
+(filesystem and thread), GMP/GMPXX, TBB, and SQLite3. Enable and build it with:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cmake</span> <span class="o">-</span><span class="n">S</span> <span class="o">.</span> <span class="o">-</span><span class="n">B</span> <span class="n">build</span> <span class="o">-</span><span class="n">DLOTUS_ENABLE_IKOS</span><span class="o">=</span><span class="n">ON</span>
+<span class="n">cmake</span> <span class="o">--</span><span class="n">build</span> <span class="n">build</span> <span class="o">--</span><span class="n">target</span> <span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span> <span class="o">-</span><span class="n">j4</span>
+<span class="n">build</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span> <span class="n">example</span><span class="o">.</span><span class="n">c</span>
+<span class="n">build</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">ikos</span><span class="o">-</span><span class="n">report</span> <span class="n">output</span><span class="o">.</span><span class="n">db</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">LOTUS_ENABLE_IKOS</span></code> also enables the API-spec commands. The native targets
+are <code class="docutils literal notranslate"><span class="pre">ikos-analyzer</span></code>, <code class="docutils literal notranslate"><span class="pre">ikos-pp</span></code>, and <code class="docutils literal notranslate"><span class="pre">ikos-import</span></code>. Reusable libraries are
+<code class="docutils literal notranslate"><span class="pre">CanaryIKOSCore</span></code>, <code class="docutils literal notranslate"><span class="pre">CanaryIKOSAR</span></code>, <code class="docutils literal notranslate"><span class="pre">CanaryIKOSFrontend</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">CanaryIKOSPreprocessor</span></code>. They build inside Lotus using C++17; no separate
+IKOS checkout, Python virtual environment, or build-time package downloads are
+required. Optional APRON domains can be enabled with
+<code class="docutils literal notranslate"><span class="pre">-DLOTUS_IKOS_ENABLE_APRON=ON</span></code> when APRON and its dependencies are installed.</p>
+<p>For only the Python pipeline, without building the analyzer:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cmake</span> <span class="o">-</span><span class="n">S</span> <span class="o">.</span> <span class="o">-</span><span class="n">B</span> <span class="n">build</span> <span class="o">-</span><span class="n">DLOTUS_ENABLE_IKOS_API_SPEC</span><span class="o">=</span><span class="n">ON</span>
+<span class="n">build</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span><span class="o">-</span><span class="n">stub</span> <span class="o">--</span><span class="n">help</span>
+<span class="n">build</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span><span class="o">-</span><span class="n">api</span><span class="o">-</span><span class="n">census</span> <span class="o">--</span><span class="n">help</span>
+<span class="n">build</span><span class="o">/</span><span class="nb">bin</span><span class="o">/</span><span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span><span class="o">-</span><span class="n">api</span><span class="o">-</span><span class="n">spec</span> <span class="o">--</span><span class="n">help</span>
+</pre></div>
+</div>
+<p>If the LLVM installation used by Lotus lacks clang, specify a complete LLVM 14
+tool directory with <code class="docutils literal notranslate"><span class="pre">-DLOTUS_IKOS_LLVM_BIN=/path/to/llvm-14/bin</span></code>. To install
+the full IKOS component, including the pipeline:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cmake</span> <span class="o">--</span><span class="n">install</span> <span class="n">build</span> <span class="o">--</span><span class="n">component</span> <span class="n">ikos</span> <span class="o">--</span><span class="n">prefix</span> <span class="o">/</span><span class="n">desired</span><span class="o">/</span><span class="n">prefix</span>
+</pre></div>
+</div>
+<p>Use <code class="docutils literal notranslate"><span class="pre">--component</span> <span class="pre">ikos-api-spec</span></code> to install only the pipeline. Compatibility
+commands <code class="docutils literal notranslate"><span class="pre">ikos</span></code>, <code class="docutils literal notranslate"><span class="pre">ikos-report</span></code>, <code class="docutils literal notranslate"><span class="pre">ikos-view</span></code>, <code class="docutils literal notranslate"><span class="pre">ikos-config</span></code>,
+<code class="docutils literal notranslate"><span class="pre">ikos-scan</span></code>, <code class="docutils literal notranslate"><span class="pre">ikos-scan-cc</span></code>, <code class="docutils literal notranslate"><span class="pre">ikos-scan-c++</span></code>, <code class="docutils literal notranslate"><span class="pre">ikos-scan-extract</span></code>,
+<code class="docutils literal notranslate"><span class="pre">ikos-stub</span></code>, and <code class="docutils literal notranslate"><span class="pre">ikos-api-census</span></code> accompany a full installation.</p>
+<p>The installed commands use a private payload under
+<code class="docutils literal notranslate"><span class="pre">share/lotus/ikos-api-spec</span></code>. They do not require the original Downloads
+directory or a system Python <code class="docutils literal notranslate"><span class="pre">ikos</span></code> package. Analysis and the pipeline use
+the Python standard library; syntax highlighting in the web viewer optionally
+uses Pygments.
+<code class="docutils literal notranslate"><span class="pre">LOTUS_IKOS_LLVM_BIN</span></code> overrides the configured tool path at runtime.</p>
+</section>
+<section id="vs-code-and-clangd">
+<h2>VS Code and clangd<a class="headerlink" href="#vs-code-and-clangd" title="Link to this heading"></a></h2>
+<p>Enable IKOS in the build used by the editor, then refresh its scoped index:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cmake</span> <span class="o">-</span><span class="n">S</span> <span class="o">.</span> <span class="o">-</span><span class="n">B</span> <span class="n">build</span> <span class="o">-</span><span class="n">DLOTUS_ENABLE_IKOS</span><span class="o">=</span><span class="n">ON</span>
+<span class="n">cmake</span> <span class="o">--</span><span class="n">build</span> <span class="n">build</span> <span class="o">--</span><span class="n">target</span> <span class="n">ikos</span><span class="o">-</span><span class="n">index</span>
+</pre></div>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">ikos-index</span></code> target does not compile the analyzer. It extracts IKOS’s
+actual compilation records into <code class="docutils literal notranslate"><span class="pre">build/ikos-index/compile_commands.json</span></code> and
+links that database under <code class="docutils literal notranslate"><span class="pre">third-party/ikos-api-spec</span></code> for clangd discovery.
+This prevents standalone IKOS headers from inheriting unrelated Lotus compile
+commands. Rerun the target after changing build options or dependency paths.</p>
+<p>For the rest of Lotus, use <code class="docutils literal notranslate"><span class="pre">build/compile_commands.json</span></code>. If keeping a
+database in the repository root, use a symlink instead of an outdated copy:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">ln</span> <span class="o">-</span><span class="n">sfn</span> <span class="n">build</span><span class="o">/</span><span class="n">compile_commands</span><span class="o">.</span><span class="n">json</span> <span class="n">compile_commands</span><span class="o">.</span><span class="n">json</span>
+</pre></div>
+</div>
+<p>After changing the database, run <code class="docutils literal notranslate"><span class="pre">clangd:</span> <span class="pre">Restart</span> <span class="pre">language</span> <span class="pre">server</span></code> from
+VS Code’s command palette. The generated databases are local, ignored files
+and are excluded from installation.</p>
+</section>
+<section id="offline-workflow">
+<h2>Offline workflow<a class="headerlink" href="#offline-workflow" title="Link to this heading"></a></h2>
+<p>Compile the program with clang 14, then inspect and scaffold missing functions:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">clang</span><span class="o">-</span><span class="mi">14</span> <span class="o">-</span><span class="n">g</span> <span class="o">-</span><span class="n">O0</span> <span class="o">-</span><span class="n">emit</span><span class="o">-</span><span class="n">llvm</span> <span class="o">-</span><span class="n">c</span> <span class="n">example</span><span class="o">.</span><span class="n">c</span> <span class="o">-</span><span class="n">o</span> <span class="n">example</span><span class="o">.</span><span class="n">bc</span>
+<span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span><span class="o">-</span><span class="n">api</span><span class="o">-</span><span class="n">census</span> <span class="n">ir</span> <span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">to</span><span class="o">/</span><span class="n">directory</span><span class="o">-</span><span class="n">containing</span><span class="o">-</span><span class="n">bitcode</span>
+<span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span><span class="o">-</span><span class="n">stub</span> <span class="n">check</span> <span class="n">example</span><span class="o">.</span><span class="n">bc</span>
+<span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span><span class="o">-</span><span class="n">stub</span> <span class="n">scaffold</span> <span class="o">-</span><span class="n">o</span> <span class="n">stubs</span> <span class="n">example</span><span class="o">.</span><span class="n">bc</span>
+</pre></div>
+</div>
+<p>Implement the generated bodies and remove their placeholder markers before
+linking:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span><span class="o">-</span><span class="n">stub</span> <span class="n">link</span> <span class="o">--</span><span class="n">stub</span><span class="o">-</span><span class="nb">dir</span> <span class="n">stubs</span> <span class="o">--</span><span class="n">fail</span><span class="o">-</span><span class="n">missing</span> <span class="o">-</span><span class="n">o</span> <span class="n">example</span><span class="o">.</span><span class="n">stubbed</span><span class="o">.</span><span class="n">bc</span> <span class="n">example</span><span class="o">.</span><span class="n">bc</span>
+<span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span> <span class="n">example</span><span class="o">.</span><span class="n">stubbed</span><span class="o">.</span><span class="n">bc</span>
+</pre></div>
+</div>
+<p>The linker rejects unfinished placeholders and mismatched signatures by
+default. Already validated database entries can be reused without an LLM call:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span><span class="o">-</span><span class="n">api</span><span class="o">-</span><span class="n">spec</span> <span class="n">prefetch</span> <span class="o">-</span><span class="n">o</span> <span class="n">stubs</span> <span class="o">--</span><span class="n">db</span><span class="o">-</span><span class="nb">dir</span> <span class="o">/</span><span class="n">path</span><span class="o">/</span><span class="n">to</span><span class="o">/</span><span class="n">stubdb</span> <span class="n">example</span><span class="o">.</span><span class="n">bc</span>
+</pre></div>
+</div>
+</section>
+<section id="generation-and-validation">
+<h2>Generation and validation<a class="headerlink" href="#generation-and-validation" title="Link to this heading"></a></h2>
+<p>Generation uses an explicitly configured provider or compatible endpoint:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">lotus</span><span class="o">-</span><span class="n">ikos</span><span class="o">-</span><span class="n">api</span><span class="o">-</span><span class="n">spec</span> <span class="n">generate</span> <span class="o">-</span><span class="n">o</span> <span class="n">stubs</span> <span class="o">--</span><span class="n">provider</span> <span class="n">deepseek</span> <span class="o">--</span><span class="n">model</span> <span class="n">MODEL</span> <span class="n">example</span><span class="o">.</span><span class="n">bc</span>
+</pre></div>
+</div>
+<p>Set the provider’s key in its documented environment variable, such as
+<code class="docutils literal notranslate"><span class="pre">DEEPSEEK_API_KEY</span></code> or <code class="docutils literal notranslate"><span class="pre">OPENAI_API_KEY</span></code>. Provider model presets come from the
+imported snapshot; use <code class="docutils literal notranslate"><span class="pre">--model</span></code> to select a model available to your account.
+No model calls occur during configuration, installation, or the Lotus tests.</p>
+<p>Default generation requires Linux and Bubblewrap for native differential
+execution. IKOS self-checks and abstract-domain judging automatically use the
+bundled analyzer in a full build. For a pipeline-only installation, supply the
+matching fork via <code class="docutils literal notranslate"><span class="pre">IKOS_PREFIX</span></code> or <code class="docutils literal notranslate"><span class="pre">ikos</span></code> on PATH. An ordinary upstream IKOS
+release may not implement the fork’s extended memory intrinsics. Census,
+scaffolding, compilation, linking, and database lookup work without that analyzer
+on macOS as well as Linux. Missing sandbox support does not cause an automatic
+fallback to unsandboxed execution.</p>
+<p>Analyzer self-checks work on macOS, where the judge omits the unsupported
+<code class="docutils literal notranslate"><span class="pre">RLIMIT_AS</span></code> memory cap while retaining analyzer and subprocess timeouts.
+Failed analyzer processes or missing/corrupt result databases provide no
+self-check evidence.</p>
+</section>
+<section id="semantic-scope">
+<h2>Semantic scope<a class="headerlink" href="#semantic-scope" title="Link to this heading"></a></h2>
+<p>The builtin classification table describes IKOS models, not the models of every
+Lotus analysis. Generated stubs use <code class="docutils literal notranslate"><span class="pre">__ikos_*</span></code> intrinsics, which the bundled
+IKOS analyzer implements, including the fork’s memory extensions. Other LLVM
+bitcode consumers must understand those intrinsics to interpret their
+assumptions, nondeterminism, and memory effects. This integration does not add
+those semantics to other Lotus checker engines. Use <code class="docutils literal notranslate"><span class="pre">--force-stub</span></code> to override
+IKOS builtin classification when preparing a particular function manually.</p>
+<p>Differential tests provide evidence over sampled inputs; they do not establish
+soundness for every input. Review generated assumptions for the intended analysis.</p>
+</section>
+<section id="tests-and-provenance">
+<h2>Tests and provenance<a class="headerlink" href="#tests-and-provenance" title="Link to this heading"></a></h2>
+<p>With <code class="docutils literal notranslate"><span class="pre">LOTUS_BUILD_TESTS=ON</span></code> and the <code class="docutils literal notranslate"><span class="pre">verification</span></code> test subsystem selected:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">ctest</span> <span class="o">--</span><span class="n">test</span><span class="o">-</span><span class="nb">dir</span> <span class="n">build</span> <span class="o">-</span><span class="n">R</span> <span class="s1">'^ikos_'</span> <span class="o">--</span><span class="n">output</span><span class="o">-</span><span class="n">on</span><span class="o">-</span><span class="n">failure</span>
+</pre></div>
+</div>
+<p>The suite includes the imported regressions and an offline workflow exercising
+the actual Lotus commands, successful bitcode linking, placeholder rejection,
+signature mismatch rejection, and empty-database prefetch. Full-build tests also
+prove intrinsic assumptions, detect division by zero, verify that linked-stub
+constraints reach callers, and exercise reporting and compiler wrappers. Tests requiring
+unavailable Linux tools, IKOS, or upstream experiment fixtures report skips.</p>
+<p>Source provenance and local modifications are recorded in
+<code class="docutils literal notranslate"><span class="pre">third-party/ikos-api-spec/README.lotus.md</span></code>. The imported code retains its
+NASA Open Source Agreement 1.3 license and copyright notices.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="phoenix.html" class="btn btn-neutral float-left" title="Phoenix — Batch Analysis Runner" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../alias/index.html" class="btn btn-neutral float-right" title="Alias Analysis" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

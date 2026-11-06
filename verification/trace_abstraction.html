@@ -1,0 +1,341 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trace Abstraction &mdash; Lotus Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=a74d790d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script async="async" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Verification Backend API" href="backend.html" />
+    <link rel="prev" title="Nested Word Automata" href="automata.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+              <img src="../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/architecture.html">Architecture &amp; Major Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/quickstart.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/pdg_query_language.html">PDG Query Language (Cypher)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/property_based_slicing.html">Property-Based Slicing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/verification_backends.html">Verification Driver Abstraction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/instrumentation_passes.html">Instrumentation Passes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../concurrency/index.html">Concurrency Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis Frameworks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html">Machine Learning Features (CanaryML)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../optimization/index.html">Optimization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../security/index.html">Security Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../symbolic_execution/index.html">Symbolic Execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Verification</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="analysis.html">Verification Support Analyses</a></li>
+<li class="toctree-l2"><a class="reference internal" href="automata.html">Nested Word Automata</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Trace Abstraction</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#usage">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#unified-transition-formulas-and-integer-arithmetic">Unified transition formulas and integer arithmetic</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#memory-and-procedure-state">Memory and procedure state</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#nested-proofs-and-generalization">Nested proofs and generalization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#current-boundaries">Current boundaries</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#tests-and-ultimate-references">Tests and Ultimate references</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="backend.html">Verification Backend API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="crab.html">CRAB - Abstract Interpretation Library</a></li>
+<li class="toctree-l2"><a class="reference internal" href="clam.html">CLAM – Abstract Interpretation Framework</a></li>
+<li class="toctree-l2"><a class="reference internal" href="mosaic.html">Mosaic</a></li>
+<li class="toctree-l2"><a class="reference internal" href="smack.html">SMACK Verification Frontend</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sifa.html">Sifa</a></li>
+<li class="toctree-l2"><a class="reference internal" href="seal.html">Seal — Symbolic Automata for Stateful Systems</a></li>
+<li class="toctree-l2"><a class="reference internal" href="symabs-ai.html">SymAbsAI – Symbolic Abstraction + Abstract Interpretation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="seahorn.html">SeaHorn Verification Framework</a></li>
+<li class="toctree-l2"><a class="reference internal" href="failure_directed_trimming.html">Failure-Directed Trimming</a></li>
+<li class="toctree-l2"><a class="reference internal" href="frontend.html">Verification Frontend</a></li>
+<li class="toctree-l2"><a class="reference internal" href="transforms.html">Verification Transformation Passes</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../checker/index.html">Checker Framework</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="index.html">Verification</a></li>
+      <li class="breadcrumb-item active">Trace Abstraction</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/verification/trace_abstraction.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="trace-abstraction">
+<h1>Trace Abstraction<a class="headerlink" href="#trace-abstraction" title="Link to this heading"></a></h1>
+<p><code class="docutils literal notranslate"><span class="pre">VerificationTraceAbstraction</span></code> implements an LLVM/ICFG safety checker using
+nested-word trace abstraction. It links Lotus’s existing automata engine with
+Z3 and follows Ultimate Automizer’s transition-formula, nested-SSA, predicate
+transformer, and hierarchical Hoare-checking architecture.</p>
+<section id="usage">
+<h2>Usage<a class="headerlink" href="#usage" title="Link to this heading"></a></h2>
+<div class="highlight-cpp notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">"Verification/TraceAbstraction/TraceAbstractionEngine.h"</span>
+<span class="k">using</span><span class="w"> </span><span class="k">namespace</span><span class="w"> </span><span class="nn">lotus</span><span class="o">::</span><span class="nn">verification</span><span class="o">::</span><span class="nn">traceabstraction</span><span class="p">;</span>
+<span class="n">TraceAbstractionOptions</span><span class="w"> </span><span class="n">options</span><span class="p">;</span>
+<span class="n">options</span><span class="p">.</span><span class="n">maxIterations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span>
+<span class="n">options</span><span class="p">.</span><span class="n">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">milliseconds</span><span class="p">(</span><span class="mi">30000</span><span class="p">);</span>
+<span class="k">auto</span><span class="w"> </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">TraceAbstractionEngine</span><span class="p">(</span><span class="n">options</span><span class="p">).</span><span class="n">verify</span><span class="p">(</span><span class="n">function</span><span class="p">);</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">verify(function,</span> <span class="pre">targetInstruction)</span></code> checks entry to a selected instruction.
+Without that argument, calls to <code class="docutils literal notranslate"><span class="pre">__assert_fail</span></code>, <code class="docutils literal notranslate"><span class="pre">abort</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">__VERIFIER_error</span></code> are error locations. The function overload starts at that
+function’s entry and follows defined callees without modifying LLVM IR.
+<code class="docutils literal notranslate"><span class="pre">verify(icfg,</span> <span class="pre">errorNode)</span></code> starts at the graph’s global root, or its function
+entries when no global root exists. A null error node enables error-call
+recognition. The supplied graph remains authoritative for control flow.</p>
+<p><code class="docutils literal notranslate"><span class="pre">Safe</span></code> means the refined error language is empty. <code class="docutils literal notranslate"><span class="pre">Unsafe</span></code> includes an
+instruction trace, call/return matching positions, and an SMT-replayed state
+valuation. Synthetic instructions are null pointers; the LLVM module must
+outlive returned instruction pointers. Assignment keys are <code class="docutils literal notranslate"><span class="pre">name#slot&#64;step</span></code>.
+Integer values are mathematical integer numerals; pointers are logical
+<code class="docutils literal notranslate"><span class="pre">Pointer(base,</span> <span class="pre">offset)</span></code> values, not fabricated native addresses.
+<code class="docutils literal notranslate"><span class="pre">Unknown</span></code> includes a reason such as unsupported semantics, solver uncertainty,
+invalid memory/poison-dependent replay, or resource exhaustion. Iterations count
+candidate traces checked, not emptiness queries.</p>
+</section>
+<section id="unified-transition-formulas-and-integer-arithmetic">
+<h2>Unified transition formulas and integer arithmetic<a class="headerlink" href="#unified-transition-formulas-and-integer-arithmetic" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">TransitionFormulaBuilder</span></code> owns one canonical vocabulary: input variables,
+output variables, and hierarchical input variables. Each immutable
+<code class="docutils literal notranslate"><span class="pre">TransitionFormula</span></code> contains the relation, guards, exact-replay condition,
+assignments, read/write sets, and havoc information. Feasibility, predicate
+construction, and Hoare checking all use this same encoding.</p>
+<p>The encoding uses <strong>Z3 Int and linear integer arithmetic, never SMT
+bit-vectors</strong>. Integer widths are retained through range constraints and
+constant-modulus normalization. For example, unflagged 8-bit addition wraps
+using arithmetic modulo 256. Signed and unsigned comparisons interpret the
+same stored integer appropriately. This preserves LLVM overflow behavior
+without silently replacing machine integers with unrestricted mathematical
+integers. Arrays and the two-integer pointer datatype extend the vocabulary
+where memory is needed.</p>
+<p>Supported scalar operations include addition, subtraction, multiplication by a
+constant, division/remainder by a constant, constant shifts, integer bitwise
+operations, comparisons, selects, integer casts, and simultaneous edge PHIs.
+Bitwise operations are expressed using division/modulo by powers of two.
+Symbolic multiplication, symbolic divisors, and symbolic shift amounts are
+explicitly unsupported by the linear-arithmetic backend. <code class="docutils literal notranslate"><span class="pre">freeze</span></code> of an
+explicit undef/poison value produces one stable nondeterministic integer.
+General poison propagation is conservatively approximated; a concrete bug must
+replay without the approximated undefined operations.</p>
+</section>
+<section id="memory-and-procedure-state">
+<h2>Memory and procedure state<a class="headerlink" href="#memory-and-procedure-state" title="Link to this heading"></a></h2>
+<p>Following Ultimate’s two-dimensional pointer model, a pointer has an integer
+object base and integer byte offset. Memory uses byte arrays and separate
+metadata for object length, validity, initialization, mutability, and owning
+activation. Byte extraction and reconstruction obey LLVM <code class="docutils literal notranslate"><span class="pre">DataLayout</span></code>,
+including endianness, structure padding, and pointer storage size. Pointer
+payload metadata preserves pointers stored in aggregates and copied as bytes;
+it is not confused with the pointer’s numeric offset.</p>
+<p>The frontend supports:</p>
+<ul class="simple">
+<li><p>Scalar, array, and structure stack objects; GEP and pointer bitcasts.</p></li>
+<li><p>Initialized globals, including aggregates and pointer initializers.</p></li>
+<li><p>Aliased loads/stores and pointer parameters/returns between defined functions.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">malloc</span></code>, <code class="docutils literal notranslate"><span class="pre">calloc</span></code>, and <code class="docutils literal notranslate"><span class="pre">free</span></code>, including allocation-failure paths.</p></li>
+<li><p>LLVM <code class="docutils literal notranslate"><span class="pre">memcpy</span></code>, <code class="docutils literal notranslate"><span class="pre">memmove</span></code>, and <code class="docutils literal notranslate"><span class="pre">memset</span></code> with constant lengths up to 4096
+bytes. Overlapping <code class="docutils literal notranslate"><span class="pre">memmove</span></code> reads from the source pre-state.</p></li>
+<li><p>Whole-object lifetime start/end, with initialization epochs preventing reuse of stale
+values after lifetime restart.</p></li>
+<li><p>Recursive activations: fresh stack objects, caller-local restoration, and
+invalidation of callee stack objects on return.</p></li>
+</ul>
+<p>A return restores <strong>only local state</strong> from its matching call. Shared memory,
+allocation counters, and callee changes to globals remain from the linear
+predecessor. Activation ownership detects escaped stack addresses after return.
+Loads require initialized, live, in-bounds memory; their initialization may
+come from different branches, not necessarily one dominating store.</p>
+<p>Invalid or imprecisely modeled operations overapproximate their written values
+for safety proofs. <code class="docutils literal notranslate"><span class="pre">Unsafe</span></code> requires a replay satisfying their exact-replay
+conditions, so an uninitialized load or invalid pointer cannot manufacture a
+concrete bug. The property remains error-location reachability; invalid memory
+is not automatically reported as a separate memory-safety violation.</p>
+</section>
+<section id="nested-proofs-and-generalization">
+<h2>Nested proofs and generalization<a class="headerlink" href="#nested-proofs-and-generalization" title="Link to this heading"></a></h2>
+<p>A predicate <code class="docutils literal notranslate"><span class="pre">P_k(V,H)</span></code> refers to current state <code class="docutils literal notranslate"><span class="pre">V</span></code> and the frozen state
+<code class="docutils literal notranslate"><span class="pre">H</span></code> at the call that entered the current activation. Internal steps preserve
+that entry context. Calls capture the caller state:</p>
+<div class="math notranslate nohighlight">
+\[P_k(V,H) \land T_{call}(V,V') \Rightarrow P_{k+1}(V',V).\]</div>
+<p>For a return at position <code class="docutils literal notranslate"><span class="pre">r</span></code> matching call <code class="docutils literal notranslate"><span class="pre">c</span></code>, the rule uses both linear
+and hierarchical predecessors:</p>
+<div class="math notranslate nohighlight">
+\[P_r(V,H) \land P_c(H,O) \land T_{ret}(V,H,V')
+\Rightarrow P_{r+1}(V',O).\]</div>
+<p>Thus recursion uses nested state contexts, not a recursion-depth cutoff or
+shared flat local registers. The return rule is a nonlinear Horn clause
+because it has two predicate premises; its <strong>arithmetic remains linear</strong>.</p>
+<p>Scalar traces use Spacer covers for this nested Horn system. Fixedpoint SAT
+means reachable and UNSAT means unreachable. Array traces use Ultimate-style
+SP/WP predicate construction: modular call contexts are tried first, with
+forward nested-SSA projection when more caller facts are required. This avoids
+the unstable array-proof path in the repository’s Z3 4.12 library.</p>
+<p>Spacer covers are independently checked by internal/call/return Hoare queries.
+SP/WP sequences are checked using the sufficient predicate-transformer
+obligations <code class="docutils literal notranslate"><span class="pre">pre</span> <span class="pre">=&gt;</span> <span class="pre">WP(T,</span> <span class="pre">post)</span></code> and, for returns, implication of the caller
+assumption by the hierarchical predicate. Only checked obligations are cached.
+Initial predicates must hold universally and final predicates must be false.</p>
+<p>Interpolant automata retain the validated spine and construct additional
+successors on demand, following Ultimate’s transition-appender pattern.
+Internal, call, and return edges can all be generalized. Return checks receive
+both predecessor predicates. For array predicates, conservative successor
+selection tries spine destinations, self-loops, and true/false states; optional
+Hoare queries have a short timeout and inconclusive candidates are omitted.
+The checker must outlive a generalized provider returned by the builder.</p>
+<p>Refinement uses existing <code class="docutils literal notranslate"><span class="pre">difference</span></code>, <code class="docutils literal notranslate"><span class="pre">reachable</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">DelayedDeadEndRemoval</span></code> APIs. A shared deadline applies to solver and automata
+work. Resource exhaustion is never interpreted as emptiness.</p>
+</section>
+<section id="current-boundaries">
+<h2>Current boundaries<a class="headerlink" href="#current-boundaries" title="Link to this heading"></a></h2>
+<p>Floating point, vectors/first-class aggregates as SSA values, exceptions,
+atomics, volatile accesses, arbitrary external calls, call operand bundles,
+range metadata, external-global initialization contracts, and non-default
+address spaces remain unsupported. Implicit parameter ABI copies (such as
+<code class="docutils literal notranslate"><span class="pre">byval</span></code>) and unmodeled alias/non-null/dereferenceability contracts are rejected.
+Root pointer inputs do not yet have a
+user-supplied heap/precondition interface. Pointer/integer conversions and
+arbitrary reinterpretation of pointer bytes require a concrete address model
+and are not supported. Cross-object comparisons involving dead or one-past
+pointers are approximated and require a valid replay.</p>
+<p>This is an adaptation of the core architecture, not a port of every Ultimate
+solver strategy or frontend feature. Difficult quantified array proofs may
+still return <code class="docutils literal notranslate"><span class="pre">Unknown</span></code>. There is no concurrency model in this engine.</p>
+</section>
+<section id="tests-and-ultimate-references">
+<h2>Tests and Ultimate references<a class="headerlink" href="#tests-and-ultimate-references" title="Link to this heading"></a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>--build<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>trace_abstraction_tests
+ctest<span class="w"> </span>--test-dir<span class="w"> </span>build<span class="w"> </span>-R<span class="w"> </span><span class="s1">'^trace_abstraction_tests\.'</span><span class="w"> </span>--output-on-failure
+</pre></div>
+</div>
+<p>The tests cover integer/overflow semantics without bit-vectors, array aliasing,
+structure layout, pointer fields, shared-memory effects, allocation/lifetime,
+byte copying, recursive frames, unbounded recursive return properties,
+hierarchical return checks, and rejected nonlinear arithmetic.</p>
+<p>The implementation follows these files in the local Ultimate checkout:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">Library-ModelCheckerUtils/.../cfg/transitions/UnmodifiableTransFormula.java</span></code>:
+input/output/assigned-variable transition representation.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Library-TraceCheckerUtils/.../singletracecheck/NestedSsaBuilder.java</span></code> and
+<code class="docutils literal notranslate"><span class="pre">NestedInterpolantsBuilder.java</span></code>: call-entry snapshots and nested contexts.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Library-ModelCheckerUtils/.../hoaretriple/IncrementalHoareTripleChecker.java</span></code>:
+separate internal, call, and hierarchical return obligations.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Library-ModelCheckerUtils/.../smt/predicates/PredicateTransformer.java</span></code> and
+<code class="docutils literal notranslate"><span class="pre">Library-TraceCheckerUtils/.../singletracecheck/TraceCheckSpWp.java</span></code>:
+strongest-postcondition and weakest-precondition construction/projection.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CACSL2BoogieTranslator/.../chandler/MemoryPointer2D.java</span></code> and
+<code class="docutils literal notranslate"><span class="pre">MemoryModel.java</span></code>: object/offset pointers and separated memory metadata.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">TraceAbstraction/.../interpolantautomata/transitionappender/</span></code>:
+on-demand, checked successor construction.</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="automata.html" class="btn btn-neutral float-left" title="Nested Word Automata" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="backend.html" class="btn btn-neutral float-right" title="Verification Backend API" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
