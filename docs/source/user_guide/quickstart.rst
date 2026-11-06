@@ -69,13 +69,17 @@ Quick-Start Example
 
 The standard workflow for running a Lotus checker on C/C++ code is:
 
-1. Compile the target program to LLVM bitcode using ``clang`` with ``-emit-llvm``.
+1. Compile the target program to LLVM bitcode using Clang 14 with ``-emit-llvm``.
 2. Run a Lotus checker tool (from ``build/bin/``) on the ``.bc`` file.
+
+Use a Clang release compatible with the LLVM version used to build Lotus.
+For the supported LLVM 14 build, use Clang 14 (for example, ``clang-14`` on
+systems that install versioned compiler binaries).
 
 .. code-block:: bash
 
    # 1. Compile C code to LLVM bitcode
-   clang -g -emit-llvm -c example.c -o example.bc
+   clang-14 -g -emit-llvm -c example.c -o example.bc
 
    # 2. Run an alias analysis pass
    ./build/bin/lotus-alias-sparrow-aa example.bc
