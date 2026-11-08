@@ -48,6 +48,11 @@ private:
 
     void onNewConstraint(CGNodeTy *src, CGNodeTy *dst,
                          Constraints constraint) override {
+      // Edges are stored on SCC representatives, but late call constraints
+      // can still pass the original parameter or return nodes here.
+      src = src->getSuperNode();
+      dst = dst->getSuperNode();
+
       switch (constraint) {
       // copy between globals / parameter passing
       case Constraints::copy: {

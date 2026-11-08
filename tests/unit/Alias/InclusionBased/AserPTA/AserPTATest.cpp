@@ -96,6 +96,61 @@ template <typename Solver> void checkLateCall() {
   }
 }
 
+template <typename Solver> void checkLateCallFromMergedReturn() {
+  LLVMContext context;
+  auto module = parseModule(context, R"(
+    @payload = global i8 0
+    @out = global i8* null
+    @fp = global i8* ()* @late
+
+    define i8* @recursive(i1 %stop) {
+    entry:
+      br i1 %stop, label %done, label %again
+    done:
+      ret i8* @payload
+    again:
+      %r = call i8* @recursive(i1 true)
+      ret i8* %r
+    }
+
+    define i8* @late() {
+      %q = call i8* @recursive(i1 false)
+      ret i8* %q
+    }
+
+    define i32 @main() {
+      %first = call i8* @recursive(i1 false)
+      %p = load i8* ()*, i8* ()** @fp
+      %result = call i8* %p()
+      store i8* %result, i8** @out
+      ret i32 0
+    }
+  )", "late-call-merged-return");
+  ASSERT_NE(module, nullptr);
+
+  // The initial direct call makes the recursive return a Copy SCC. Resolving
+  // @fp later adds a Copy from that return to @late's new call result.
+  Solver solver;
+  solver.analyze(module.get());
+  auto *late = module->getFunction("late");
+  auto *result = findInstructionByName(module->getFunction("main"), "result");
+  ASSERT_NE(result, nullptr);
+  const auto *site = solver.getInDirectCallSite(nullptr, cast<CallBase>(result));
+  ASSERT_NE(site, nullptr);
+  EXPECT_EQ(site->getResolvedTarget().size(), 1u);
+  EXPECT_EQ(site->getResolvedTarget().count(late), 1u);
+
+  for (const char *function : {"late", "main"}) {
+    const char *name = StringRef(function) == "late" ? "q" : "result";
+    auto *value = findInstructionByName(module->getFunction(function), name);
+    ASSERT_NE(value, nullptr);
+    std::vector<const typename Solver::ObjTy *> points;
+    solver.getPointsTo(nullptr, value, points);
+    ASSERT_EQ(points.size(), 1u) << function << ": " << name;
+    EXPECT_EQ(points.front()->getValue(), module->getGlobalVariable("payload"));
+  }
+}
+
 class RegistrationModel : public FS_NoCtx_Model {
 public:
   explicit RegistrationModel(llvm::Module *module) : FS_NoCtx_Model(module, "main") {}
@@ -176,6 +231,14 @@ TEST(AserPTAIndirectCalls, LateExistingPointerWaveFI) {
 }
 TEST(AserPTAIndirectCalls, LateExistingPointerDeepFI) {
   checkLateCall<DeepPropagation<FI_NoCtx_Model>>();
+}
+
+TEST(AserPTAIndirectCalls, LateCopyFromMergedReturnPartialUpdateFI) {
+  checkLateCallFromMergedReturn<FI_NoCtx_Solver>();
+}
+
+TEST(AserPTAIndirectCalls, LateCopyFromMergedReturnPartialUpdateFS) {
+  checkLateCallFromMergedReturn<FS_NoCtx_Solver>();
 }
 
 TEST(AserPTAIndirectCalls, RegistrationUsesCurrentRepresentative) {
