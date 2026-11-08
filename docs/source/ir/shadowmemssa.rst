@@ -73,7 +73,7 @@ Components
 Represents a call site with its associated memory SSA information. It gathers all
 shadow memory instructions related to actual parameters of a call instruction.
 
-* **Constructor**: ``ShadowMemSSACallSite(CallInst *ci, bool only_singleton)`` – Builds
+* **Constructor**: ``ShadowMemSSACallSite(CallBase *ci, bool only_singleton)`` – Builds
   the call site representation by scanning backwards for shadow memory instructions
 * **Query Methods**:
 
@@ -90,13 +90,16 @@ shadow memory instructions related to actual parameters of a call instruction.
 Gathers memory SSA-related input/output formal parameters of a function.
 
 * **Constructor**: ``ShadowMemSSAFunction(Function &F, Pass &P, bool only_singleton)`` –
-  Builds the function representation by scanning exit blocks for shadow.mem.in
-  instructions
+  Builds the function representation by scanning return blocks for
+  ``shadow.mem.in`` and ``shadow.mem.out`` instructions
 * **Query Methods**:
 
   * ``getInFormal(idx)`` – Returns the input formal parameter for the given index
     (returns null if not found)
-  * ``getNumInFormals()`` – Returns the number of input formal parameters
+  * ``getOutFormal(idx)`` – Returns the ``shadow.mem.out`` call for the given
+    output formal parameter (returns null if not found)
+  * ``getNumInFormals()`` / ``getNumOutFormals()`` – Return the number of
+    recorded input and output formal parameters
 
 **ShadowMemSSACallsManager** (``ShadowMemSSA.h``, ``ShadowMemSSA.cpp``):
 
@@ -106,25 +109,27 @@ Manages memory SSA information for all functions and call sites in a module.
   Builds memory SSA information for all functions and call sites in the module
 * **Query Methods**:
 
-  * ``getFunction(Function *F)`` – Returns the ShadowMemSSAFunction for the given function
-  * ``getCallSite(CallInst *CI)`` – Returns the ShadowMemSSACallSite for the given call
-    instruction
+  * ``getFunction(const Function *F)`` – Returns the ShadowMemSSAFunction for the
+    given function
+  * ``getCallSite(const CallBase *CI)`` – Returns the ShadowMemSSACallSite for the
+    given call instruction
 
 **Utility Functions** (``ShadowMemSSA.h``):
 
 * ``ShadowMemOp`` – Enumeration of shadow memory operation types
 * ``shadowMemStrToOp(StringRef name)`` – Converts shadow function name to operation type
-* ``isShadowMemLoad(CallBase *CB, bool onlySingleton)`` – Checks if instruction is a
-  memory load
-* ``isShadowMemStore(CallBase *CB, bool onlySingleton)`` – Checks if instruction is a
-  memory store
-* ``isShadowMemArgRef/ArgMod/ArgRefMod/ArgNew(CallBase *CB, bool onlySingleton)`` –
-  Checks for various parameter operation types
-* ``getShadowMemParamIdx(CallBase *CB)`` – Extracts parameter index from shadow instruction
-* ``getShadowMemParamNonPrimed/Primed(CallBase *CB, bool onlySingleton)`` – Extracts
-  non-primed/primed variables from shadow instructions
-* ``hasShadowMemLoadUser(Value *V, bool onlySingleton)`` – Checks if a value has memory
-  load users
+* ``isShadowMemLoad(const CallBase *CB, bool onlySingleton)`` – Checks if instruction
+  is a memory load
+* ``isShadowMemStore(const CallBase *CB, bool onlySingleton)`` – Checks if instruction
+  is a memory store
+* ``isShadowMemArgRef/ArgMod/ArgRefMod/ArgNew(const CallBase *CB, bool onlySingleton)``
+  – Checks for various parameter operation types
+* ``getShadowMemParamIdx(const CallBase *CB)`` – Extracts parameter index from a
+  shadow instruction
+* ``getShadowMemParamNonPrimed/Primed(const CallBase *CB, bool onlySingleton)`` –
+  Extracts non-primed/primed variables from shadow instructions
+* ``hasShadowMemLoadUser(const Value *V, bool onlySingleton)`` – Checks if a value has
+  memory load users
 
 Usage
 =====

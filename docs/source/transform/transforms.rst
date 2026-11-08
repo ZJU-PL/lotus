@@ -38,6 +38,7 @@ Normalization passes that rewrite IR into a simpler, analysis-friendly form.
   can work over a uniform instruction set.
 - **LowerSelect** – Lower ``select`` instructions into equivalent branch-based control flow.
 - **MergeReturn** – Merge multiple ``return`` instructions into a single exit block.
+- **KillVarArgFn** – Delete the bodies of variadic functions, leaving only declarations.
 
 **Typical use cases**:
 
@@ -71,6 +72,8 @@ Transformations that simplify memory layout and aggregate operations.
 - **MergeGEP** – Merge chained GEP instructions into a single GEP when possible.
 - **SimplifyExtractValue** – Simplify ``extractvalue`` instructions on aggregates.
 - **SimplifyInsertValue** – Simplify ``insertvalue`` instructions on aggregates.
+- **CastElim** – Eliminate redundant cast instructions that complicate later analyses.
+- **StripLifetime** – Remove ``llvm.lifetime.start``/``llvm.lifetime.end`` intrinsics.
 
 **Typical use cases**:
 
@@ -92,6 +95,9 @@ Transformations that restructure and clean up control flow.
   tidy up unreachable code.
 - **SimplifyLatch** – Normalize loop latch structure to a canonical form.
 - **NameBlock** – Assign stable, human-readable names to basic blocks.
+- **RemoveUnreachableBlocks** – Remove unreachable blocks from each function.
+- **DummyExitBlock** – Insert a dummy return block into functions with no return
+  instruction.
 
 **Typical use cases**:
 

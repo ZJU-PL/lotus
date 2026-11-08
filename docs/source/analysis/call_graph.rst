@@ -17,8 +17,13 @@ by resolving direct, virtual, and indirect function calls.
 Main components
 ---------------
 
-- ``CallGraph`` and ``CallGraphBuilder``: The foundational classes representing
-  and building the call graph.
+- ``CallGraph``: The graph container in ``CallGraph.h`` representing nodes,
+  edges, and call-site queries.
+- ``CallGraphBuilder.h``: Free builder functions rather than a class. It provides
+  ``buildCallGraph`` overloads that take an explicit ``Resolver``, or an
+  analysis type plus an optional type hierarchy and vtable provider, and
+  ``buildCallGraphWithModels`` for whole-module construction with the default
+  external-call models; ``getEntryPoints`` resolves the configured roots.
 - ``Resolver``: The abstract interface for resolving indirect and virtual calls.
 - ``VirtualCallUtils``: Utilities for identifying and classifying virtual calls.
 

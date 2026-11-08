@@ -112,6 +112,21 @@ both intraprocedural and interprocedural analyses.
 - ``--analysis <name>``: string, default "liveness", one of: liveness, reaching_defs, reachable, inter_liveness, inter_reaching_defs, inter_uninitialized, inter_constant_prop, inter_interval, inter_nullability
 - ``--solver <name>``: string, default "newton", newton or kleene (inter analyses require newton)
 - ``--linear-solver <name>``: string, default "scc", scc, adaptive_scc, or tensor
+- ``--newton-round <name>``: string, default "dense", one of dense, static, always_maybe, sparse; applies only to ``--solver=newton`` and also enables the Newton-round profile in the output
+- ``--print-block-results``: bool, default false, print per-block or per-node facts
+- ``--input-format <name>``: string, default "llvm", llvm or boolean
+
+Boolean programs
+~~~~~~~~~~~~~~~~
+
+``--input-format=boolean`` switches to the Boolean-program frontend. The LLVM
+analysis names do not apply there: leave ``--analysis`` unset or set
+``--analysis=predicate``. Add ``--bp-entry <procedure>`` (default ``main``) and
+``--bp-query <procedure>:<label>`` for a single label query.
+``--bp-prepare-only`` parses and builds the NPA equations without solving them.
+``--require-tensor`` fails unless a tensor linear-solve round runs, and
+``--verify-solvers`` compares Kleene, SCC Newton, and tensor Newton; both
+options apply only to Boolean input.
 
 NPA execution is serial. Shared Lotus libraries register the global
 ``-nworkers`` option in the binary, but it does not control NPA scheduling.
