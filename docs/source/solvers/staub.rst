@@ -109,7 +109,7 @@ Custom exceptions:
    namespace STAUB {
        class UnsupportedSMTTypeException;
        class UnsupportedSMTOpException;
-       class UnsupportedLLVMOpException;
+       class NotImplementedException;
    }
 
 Usage Example

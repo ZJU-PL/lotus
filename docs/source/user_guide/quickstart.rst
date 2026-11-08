@@ -19,7 +19,7 @@ Lotus has been tested on **x86/ARM Linux** and **ARM macOS**. The following depe
      - 14.x
      - Must match exactly; the build system searches for it automatically.
    * - Z3
-     - 4.11
+     - 4.8.1+ (4.11 tested)
      - SMT solver; found via ``cmake/FindZ3.cmake``.
    * - CMake
      - 3.18+
@@ -30,9 +30,10 @@ Lotus has been tested on **x86/ARM Linux** and **ARM macOS**. The following depe
    * - Boost
      - 1.65+ (optional)
      - Only required when ``LOTUS_ENABLE_SEAHORN``, ``LOTUS_ENABLE_CLAM``,
-       ``LOTUS_ENABLE_SMACK``, ``LOTUS_ENABLE_CCLYZER``, or
-       ``LOTUS_ENABLE_PDAAAL`` are enabled.
-       CLAM additionally requires Boost.JSON 1.80+.
+       ``LOTUS_ENABLE_SMACK``, ``LOTUS_ENABLE_CCLYZER``,
+       ``LOTUS_ENABLE_PDAAAL``, or ``LOTUS_ENABLE_FPSOLVE`` are enabled.
+       CLAM additionally requires Boost.JSON 1.80+. FPsolve uses an installed
+       Boost and GMP instead of the auto-download path.
 
 Build Instructions
 ------------------

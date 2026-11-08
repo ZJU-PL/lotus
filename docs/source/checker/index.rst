@@ -343,7 +343,8 @@ The framework detects the following bug categories:
 * **Reachability**: Unreachable (dead) branches, reported alongside the numerical checks
 * **Concurrency**: Data races, deadlocks, atomicity violations, lock mismatches, condition-variable misuse, OpenMP runtime misuse, MPI protocol/RMA bugs
 * **Security**: Taint errors (untrusted data flows), use-after-free, null dereferences
-* **Performance**: Unnecessary copies, const-refable parameters (planned)
+* **Performance**: Unnecessary copies (Pulse), const-refable parameters
+  (tracked by Pulse; not yet emitted as a diagnostic)
 
 All bug types are classified by importance (LOW, MEDIUM, HIGH) and category (SECURITY, ERROR, WARNING, PERFORMANCE) with CWE mappings.
 

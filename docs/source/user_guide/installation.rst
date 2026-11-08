@@ -10,8 +10,10 @@ Prerequisites
 * Z3 4.8.1+ (4.11 is the tested/recommended version)
 * CMake 3.18+
 * C++17 compatible compiler
-* Boost 1.65+ (optional — needed when CLAM, SeaHorn, Cclyzer++, SMACK, or PDAAAL are enabled;
-  CLAM additionally requires Boost.JSON ≥ 1.80; auto-downloaded if not found)
+* Boost 1.65+ (optional — needed when CLAM, SeaHorn, Cclyzer++, SMACK, PDAAAL,
+  or FPsolve are enabled; CLAM additionally requires Boost.JSON ≥ 1.80;
+  auto-downloaded if not found, except that FPsolve requires an installed
+  Boost and GMP)
 
 Building Lotus
 --------------

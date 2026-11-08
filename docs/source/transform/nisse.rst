@@ -52,7 +52,7 @@ Artifacts
 
 - ``info.prof`` records each instrumented function and the number of counters
   assigned to it.
-- ``main.prof`` is emitted by ``nisse_pass_print_data`` in ``prof.c`` and stores
+- ``main.prof`` is emitted by ``nisse_pass_print_data`` in ``Prof.c`` and stores
   counter values indexed by edge id.
 - ``<function>.graph`` is written by the analysis to describe the CFG, spanning
   tree, and instrumented edges.

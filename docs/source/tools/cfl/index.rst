@@ -13,7 +13,8 @@ context-free grammars for precise interprocedural analysis.
 **Location**: ``tools/cfl/``
 
 **Tools**: ``lotus-cfl-solve``, ``lotus-cfl-alias``, ``lotus-cfl-vf``,
-``lotus-cfl-interleaved-dyck mcfl``, ``lotus-cfl-interleaved-dyck staged-bounds``,
+``lotus-cfl-subcubic-aa``, ``lotus-cfl-interleaved-dyck mcfl``,
+``lotus-cfl-interleaved-dyck staged-bounds``,
 ``lotus-cfl-interleaved-dyck unary``, ``lotus-cfl-interleaved-dyck spds``,
 ``lotus-cfl-interleaved-dyck lcl``, ``lotus-cfl-interleaved-dyck affine-spds``,
 ``lotus-cfl-interleaved-dyck-graph-reduction.py``, ``lotus-cfl-dynamic-dyck``, and ``csr``.
@@ -96,6 +97,28 @@ interrupted JSONL run.
 See :doc:`/cfl/classical/classical`, :doc:`/cfl/classical/pearl`,
 :doc:`/cfl/classical/stg`, and :doc:`/cfl/classical/sqid` for the complete algorithm,
 option, and API descriptions.
+
+Subcubic Alias Analysis
+-----------------------
+
+``lotus-cfl-subcubic-aa`` implements the OOPSLA 2014 PEG memory- and
+value-alias analyses (Algorithms 1 and 2) over text, PEG, labeled DOT, or JSON
+graphs whose edges use ``a``/``abar``/``d``/``dbar`` labels. Every assignment
+target must have an incoming ``d`` edge.
+
+.. code-block:: bash
+
+   cmake --build build --target lotus-cfl-subcubic-aa
+   build/bin/lotus-cfl-subcubic-aa input.graph --query 'a,*d' --json-stats
+   build/bin/lotus-cfl-subcubic-aa input.graph --memory-only --print-aliases
+
+Select the reported relation with ``--relation memory|value`` (default
+``value``), restrict the run to Algorithm 1 with ``--memory-only``, and use
+``--bidirectional`` to add missing reverse ``a``/``abar``/``d``/``dbar`` edges.
+``--no-fast-sets`` selects scalar set-difference traversal and
+``--no-components`` solves the whole graph as one component. See
+:doc:`/cfl/classical/subcubic_aa` for the library API, output formats, and
+validation cases.
 
 Dynamic Bidirected Dyck Reachability
 ------------------------------------
