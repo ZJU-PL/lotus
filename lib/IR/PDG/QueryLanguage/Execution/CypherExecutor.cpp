@@ -1511,6 +1511,12 @@ std::string CypherQueryExecutor::getNodeProperty(Node *node,
           return i->getName().str();
       }
     }
+    // Function-entry nodes have no LLVM value of their own; expose the
+    // enclosing function name so documented `n.name = 'main'` queries match.
+    if (node->getNodeType() == GraphNodeType::FUNC_ENTRY) {
+      if (auto *func = node->getFunc())
+        return func->getName().str();
+    }
     return "";
   }
 

@@ -23,16 +23,16 @@ where a domain needs strongest post-conditions), and iterates to a fixpoint.
 **Abstract Domains** (in ``include/Verification/SymAbsAI/Domains/``):
 
 - **NumRels** – Numerical relations (e.g., ``x <= y + 5``)
-- **Intervals** – Value range analysis (e.g., ``x ∈ [0, 100]``)
+- **Interval** – Value range analysis (e.g., ``x ∈ [0, 100]``)
 - **Congruence** – Modular arithmetic constraints (e.g., ``x ≡ r (mod m)``)
 - **BitMask** – Bit-level tracking and alignment
 - **SimpleConstProp** – Constant propagation
-- **Boolean** – Boolean truth values and invariants
-- **Predicates** – Path predicates and assertions
+- **Equality** – Predicate-based equalities between numerical scalars
+- **NoAlias** – Whether two pointers point to distinct memory regions
 - **MemRange** – Memory access bounds in terms of function arguments
   (registered from ``lib/Verification/SymAbsAI/Domains/MemRange.cpp``; no
   public domain header)
-- **MemRegions** – Memory region and pointer analysis
+- **MemRegion** – Memory region and pointer analysis
 - **Zones** – Difference bound matrices (DBM)
 
 **Typical use cases**:

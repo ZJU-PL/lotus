@@ -396,6 +396,23 @@ TEST_F(CypherQueryTest, ScalarProjectionKeepsDuplicateRows) {
   EXPECT_EQ(result->getScalarValue(), "INST_RET\nINST_RET");
 }
 
+TEST_F(CypherQueryTest, FunctionEntryNamePropertyMatchesFunction) {
+  if (!pdg_) {
+    GTEST_SKIP() << "PDG not available";
+  }
+
+  CypherParser parser;
+  CypherQueryExecutor executor(*pdg_);
+  std::unique_ptr<CypherQuery> query = parser.parse(
+      "MATCH (n:FUNC_ENTRY) WHERE n.name = 'test_func' RETURN n.name");
+  ASSERT_NE(query, nullptr);
+
+  std::unique_ptr<CypherResult> result = executor.execute(*query);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->getType(), CypherResult::ResultType::SCALAR);
+  EXPECT_EQ(result->getScalarValue(), "test_func");
+}
+
 TEST_F(CypherQuerySyntheticTest, WhereUsesPerRowBindingsForExists) {
   Node *a1 = addNode(GraphNodeType::INST_OTHER);
   Node *a2 = addNode(GraphNodeType::INST_BR);

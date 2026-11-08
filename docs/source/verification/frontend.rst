@@ -6,7 +6,9 @@ BooleanProgram
 
 **Location**: ``lib/Verification/Frontend/``
 
-**Status**: Internal/Experimental — not exposed via any production tool.
+**Status**: Internal/Experimental — reachable through
+``lotus-dfa-npa --input-format=boolean`` and the unit test, but not as a
+dedicated end-user frontend.
 
 A parser+lowerer for a Boolean/predicate program specification language
 (Bebop/SATABS-style). Reads a textual format where programs consist of

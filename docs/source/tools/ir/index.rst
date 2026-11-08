@@ -105,7 +105,8 @@ use-after-free, memory-leak, and file-leak) over Lotus SVFG.
 Relevant options:
 
 - ``--check=double-free|use-after-free|memory-leak|file-leak`` – Run detection
-- ``--context-limit=k`` – Use a bounded call string; omit for unbounded
+- ``--context-limit=k`` – Bounded call-string depth (default 3; ``unlimited``
+  or ``--unbounded-context`` enables unbounded Dyck summaries)
 - ``--source-node=<ID>`` and ``--sink-node=<ID>`` – Query flow reachability
 - ``--format=text|json|dot`` – Select output format (default: ``text``)
 - ``--dump-svfg=<file>`` – Write the source SVFG to a DOT file

@@ -240,10 +240,10 @@ Usage example
   using namespace elimination;
 
   // Build the interprocedural CFG for the module.
-  auto ICF = dataflow::controlflow::InterCFG::build(*Module);
+  dataflow::controlflow::LLVMInterCFG ICF(Module);
 
   // Run the summary-based reachability analysis.
-  auto Result = runInterSummaryElimReachability(Main, ICF.get());
+  auto Result = runInterSummaryElimReachability(Main, &ICF);
 
   // Inspect the result at a program point.
   for (auto &Inst : instructions(*Main)) {

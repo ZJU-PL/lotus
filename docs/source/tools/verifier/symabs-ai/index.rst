@@ -118,10 +118,10 @@ Available abstract domains include:
 - **SimpleConstProp** – Constant propagation
 - **Interval** – Value range analysis
 - **NumRels** – Numerical relations (e.g., ``x <= y + 5``)
-- **Affine** – Affine relationships
+- **Equality** – Predicate-based equalities between numerical scalars
 - **BitMask** – Bit-level tracking
 - **MemRange** – Memory access bounds
-- **MemRegions** – Memory region analysis
+- **MemRegion** – Memory region analysis
 
 Multiple domains can be combined using product domains (comma-separated in config).
 

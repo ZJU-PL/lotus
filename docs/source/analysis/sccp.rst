@@ -77,8 +77,9 @@ Example
    auto result = lotus::analysis::sccp::runSCCPOnModule(M);
 
    for (const auto &[value, constant] : result.constants) {
-     value->replaceAllUsesWith(constant);
+     const_cast<llvm::Value *>(value)->replaceAllUsesWith(
+         const_cast<llvm::ConstantInt *>(constant));
    }
-   for (llvm::BasicBlock *dead : result.dead_blocks) {
-     dead->eraseFromParent();
+   for (const llvm::BasicBlock *dead : result.dead_blocks) {
+     const_cast<llvm::BasicBlock *>(dead)->eraseFromParent();
    }

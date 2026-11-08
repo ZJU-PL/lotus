@@ -152,17 +152,17 @@ Manager (``-passes=``) syntax:
 +---------------------------+-------+------------------------------------------+
 | File                      | Count | Description                              |
 +===========================+=======+==========================================+
-| ``passes-slot-old.txt``   | 9     | Core passes used by the original SLOT    |
+| ``passes-slot-old.txt``   | 10    | Core passes used by the original SLOT    |
 +---------------------------+-------+------------------------------------------+
-| ``passes-run.txt``        | 41    | Supported passes used for optimization   |
+| ``passes-run.txt``        | 42    | Supported passes used for optimization   |
 +---------------------------+-------+------------------------------------------+
-| ``passes-filter.txt``     | 25    | Subset with clear optimization benefit   |
+| ``passes-filter.txt``     | 26    | Subset with clear optimization benefit   |
 +---------------------------+-------+------------------------------------------+
 | ``passes-useful.txt``     | 33    | Optimization-related passes              |
 +---------------------------+-------+------------------------------------------+
-| ``passes-16.txt``         | 80    | Base pass list available in LLVM 16      |
+| ``passes-16.txt``         | 81    | Base pass list available in LLVM 16      |
 +---------------------------+-------+------------------------------------------+
-| ``passes-all-llvm16.txt`` | 353   | Full LLVM 16 pass list                   |
+| ``passes-all-llvm16.txt`` | 354   | Full LLVM 16 pass list                   |
 +---------------------------+-------+------------------------------------------+
 
 See ``TUNA-Opt/SMT2LLVM/FunctionPasses.md`` for pass descriptions.

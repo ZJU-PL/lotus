@@ -20,7 +20,7 @@ The language supports:
 - Pattern matching (nodes and relationships)
 - WHERE clauses for filtering
 - Variable-length pattern matching
-- Set operations (UNION, intersection via shared variables)
+- Intersection via shared variable bindings and disjunctive ``WHERE`` filters
 - Aggregations (``COUNT``) and ordering (``ORDER BY``)
 
 Getting Started
@@ -341,26 +341,22 @@ witness nodes or ``--format=dot`` to render the path.
 Set Operations
 ~~~~~~~~~~~~~~~
 
-Union
-^^^^^
+Union of Result Sets
+^^^^^^^^^^^^^^^^^^^^
 
-Union of two sets using ``UNION`` keyword.
-
-**Syntax**: ``MATCH ... RETURN ... UNION MATCH ... RETURN ...``
-
-**Example**:
+The query grammar has no ``UNION`` keyword. Use a disjunctive ``WHERE`` filter
+when both alternatives have the same shape, or run the two queries separately
+and combine their results in the caller.
 
 .. code-block:: cypher
 
-   MATCH (func1:FUNC_ENTRY)-[:PARAMETER_OUT]->(ret1:INST_RET)
-   WHERE func1.name = 'func1'
-   RETURN ret1
-   UNION
-   MATCH (func2:FUNC_ENTRY)-[:PARAMETER_OUT]->(ret2:INST_RET)
-   WHERE func2.name = 'func2'
-   RETURN ret2
+   MATCH (f:FUNC_ENTRY)-[:PARAMETER_OUT]->(ret:INST_RET)
+   WHERE f.name = 'func1' OR f.name = 'func2'
+   RETURN ret
 
-**Returns**: All nodes in either set.
+In batch mode (``-f``), a blank line or ``;`` separates independent statements;
+successive ``MATCH`` clauses belong to the same statement and are joined by
+variable binding, not by union.
 
 Intersection
 ^^^^^^^^^^^^

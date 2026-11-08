@@ -36,7 +36,7 @@ Control Flow Graph (CFG) analysis utilities for reachability and structural anal
    #include <Analysis/CFG/CFGReachability.h>
 
    llvm::Function &F = ...;
-   CFGReachability reach(&F);
+   CFGReachability reach(F);
 
    llvm::BasicBlock *From = ...;
    llvm::BasicBlock *To   = ...;

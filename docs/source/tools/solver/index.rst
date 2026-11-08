@@ -40,13 +40,17 @@ lotus-solver-owl – SMT/Model Checking Front-End
 
 .. code-block:: bash
 
-   ./build/bin/lotus-solver-owl file.smt2
+   ./build/bin/lotus-solver-owl --smt file.smt2
 
 **Example**:
 
 .. code-block:: bash
 
-   ./build/bin/lotus-solver-owl problem.smt2
+   ./build/bin/lotus-solver-owl --smt problem.smt2
+   ./build/bin/lotus-solver-owl --cnf formula.cnf --stats
+
+Select the input format with ``--smt`` or ``--cnf``; the input file is not a
+positional argument. ``--verbose`` and ``--stats`` control diagnostics.
 
 See :doc:`../../solvers/smt` for details about the solver stack.
 
