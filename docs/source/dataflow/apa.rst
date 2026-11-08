@@ -236,6 +236,8 @@ Usage example
 .. code-block:: cpp
 
   #include "Dataflow/APA/APA.h"
+  #include "Dataflow/APA/Analyses/Inter/Reachability.h"
+  #include "Dataflow/ControlFlow/InterCFG.h"
 
   using namespace elimination;
 
