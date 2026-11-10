@@ -759,6 +759,39 @@ TEST_F(PDGQueryTest, PropertyCriteriaResolverFindsReachErrorCall) {
   EXPECT_TRUE(resolved.nodes.count(call_node));
 }
 
+TEST_F(PDGQueryTest, PropertyCriteriaResolverFindsBitcastReachErrorCall) {
+  constexpr const char *IR = R"(
+    declare void @reach_error(...)
+    define void @main() {
+    entry:
+      call void bitcast (void (...)* @reach_error to void ()*)()
+      ret void
+    }
+  )";
+
+  ASSERT_TRUE(loadModule(IR));
+  Function *function = module->getFunction("main");
+  ASSERT_NE(function, nullptr);
+  CallInst *call = findInstruction<CallInst>(*function);
+  ASSERT_NE(call, nullptr);
+  ASSERT_EQ(call->getCalledFunction(), nullptr);
+  Node *call_node = addValueNode(*call, GraphNodeType::INST_FUNCALL);
+
+  PropertySpec spec;
+  std::string error;
+  ASSERT_TRUE(PropertySpec::parseFromString(
+      "CHECK( init(main()), LTL(G ! call(reach_error())) )\n", spec, error))
+      << error;
+
+  PDGCriteria criteria;
+  criteria.property_specs.push_back(spec);
+  PDGCriteriaResolver resolver(graph);
+  PDGQueryResult resolved =
+      resolver.resolve(criteria, PDGQueryOptions(), module.get());
+  EXPECT_EQ(resolved.nodes.size(), 1u);
+  EXPECT_TRUE(resolved.nodes.count(call_node));
+}
+
 TEST_F(PDGQueryTest, SummaryQueryProducesExpectedBucketsAndCaches) {
   constexpr const char *IR = R"(
     @G = global i32 0

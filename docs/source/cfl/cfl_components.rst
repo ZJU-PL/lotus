@@ -12,7 +12,7 @@ Grammar-driven CFL reachability utilities and solver backends
 **Location**: ``include/CFL/Classical/``, ``lib/CFL/Classical/``. Both trees
 use ``Core/``, ``Solvers/Engines/`` (including ``PEARL/``, ``POCR/``,
 ``SQID/``, ``STG/``, ``Skewed/``, ``EndpointQuotient/``, ``CAT/``,
-``IEOCE/``, and ``CERT/``), ``Solvers/Preprocessing/``, ``Clients/Alias/``,
+``IEOCE/``, ``CERT/``, and ``SubcubicAA/``), ``Solvers/Preprocessing/``, ``Clients/Alias/``,
 and ``Clients/ValueFlow/``.
 The two client implementations consistently use ``AliasClient.*`` and
 ``ValueFlowClient.*`` filenames.
@@ -116,6 +116,46 @@ typed underapproximation hierarchy.
 * Dimension-ordered condensation, DOT input, and command-line tool
 * Adapter from the shared typed interleaved-Dyck graph
 
+Linear Conjunctive Language Reachability
+----------------------------------------
+
+All-pairs sound upper bound for directed, typed interleaved-Dyck reachability
+using the POPL 2017 linear-conjunctive-language saturation algorithm.
+
+**Location**: ``include/CFL/InterleavedDyck/LCL/``, ``lib/CFL/InterleavedDyck/LCL/``
+
+See :doc:`/cfl/interleaved_dyck/lcl` for algorithm options and API details.
+
+Synchronized Pushdown Systems
+-----------------------------
+
+Directed, typed reachability upper bounds based on paired pushdown systems
+(POPL 2019), with post*/pre* demand queries and a value-flow client.
+
+**Location**: ``include/CFL/InterleavedDyck/SPDS/``, ``lib/CFL/InterleavedDyck/SPDS/``
+
+See :doc:`/cfl/interleaved_dyck/spds` for PDS rules, query scopes, and value-flow details.
+
+Affine SPDS Reachability
+------------------------
+
+Paired affine-weighted pushdown reachability computing separating affine
+equations between interleaved-Dyck endpoints.
+
+**Location**: ``include/CFL/InterleavedDyck/AffineSPDS/``, ``lib/CFL/InterleavedDyck/AffineSPDS/``
+
+See :doc:`/cfl/interleaved_dyck/affine_spds` for options and certificate generation.
+
+Single-Pair ILP Reachability
+----------------------------
+
+Demand-driven single-source/single-target interleaved-Dyck over-approximation
+via path expressions and integer linear programming (POPL 2023).
+
+**Location**: ``include/CFL/InterleavedDyck/ILP/``, ``lib/CFL/InterleavedDyck/ILP/``
+
+See :doc:`/cfl/interleaved_dyck/ilp` for paper-to-code mapping and solver options.
+
 Guarantee Summary
 -----------------
 
@@ -126,18 +166,36 @@ Guarantee Summary
    * - API
      - Intended use
      - Guarantee
-   * - ``interleaved_dyck::mcfl::InterleavedDyckSolver``
-     - Proven typed pairs through ``G_d``
-     - Underapproximation
-   * - ``interleaved_dyck::unary::FixedCounterSolver``
-     - POPL 2022 exact fixed-counter baseline
-     - Exact component partition
    * - ``interleaved_dyck::unary::AdaptiveSolver``
      - Bidirected unary projection
+     - Exact component partition
+   * - ``interleaved_dyck::unary::FixedCounterSolver``
+     - POPL 2022 exact fixed-counter baseline
      - Exact component partition
    * - ``interleaved_dyck::staged_bounds::Solver``
      - Typed lower/upper refinement
      - Approximation bounds
+   * - ``interleaved_dyck::lcl::Solver``
+     - POPL 2017 typed upper bound
+     - Sound upper bound
+   * - ``interleaved_dyck::spds::Solver``
+     - Directed typed reachability via call/field PDS
+     - Sound upper bound
+   * - ``interleaved_dyck::spds::ValueFlowAnalysis``
+     - SPDS value-flow client with bracket endpoints
+     - Sound upper bound
+   * - ``interleaved_dyck::affine_spds::Solver``
+     - Paired affine-weighted pushdown reachability
+     - Separating affine certificate
+   * - ``interleaved_dyck::ilp::Solver``
+     - POPL 2023 single-pair ILP parenthesis counting
+     - Over-approximation
+   * - ``interleaved_dyck::mcfl::InterleavedDyckSolver``
+     - Proven typed pairs through ``G_d``
+     - Underapproximation
+   * - ``interleaved_dyck::mcfl::Solver``
+     - Reachability for arbitrary client MCFG
+     - Exact
 
 CSIndex (Context-Sensitive Indexing)
 ------------------------------------
@@ -178,4 +236,8 @@ See also :doc:`/cfl/classical/classical`, :doc:`/cfl/indexing/csindex`,
 :doc:`/cfl/interleaved_dyck/unary`,
 :doc:`/cfl/interleaved_dyck/staged_bounds`,
 :doc:`/cfl/interleaved_dyck/graph_reduction`,
-:doc:`/cfl/interleaved_dyck/mcfl`.
+:doc:`/cfl/interleaved_dyck/mcfl`,
+:doc:`/cfl/interleaved_dyck/lcl`,
+:doc:`/cfl/interleaved_dyck/spds`,
+:doc:`/cfl/interleaved_dyck/affine_spds`,
+:doc:`/cfl/interleaved_dyck/ilp`.

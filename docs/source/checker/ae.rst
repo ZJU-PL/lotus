@@ -54,6 +54,8 @@ Important options
   passing ``--checks=all``, enables all AE checks.
 - ``--ae.recursion-mode`` chooses the recursion strategy.
 - ``--ae.widen-delay-iterations`` delays widening in loops.
+- ``--ae.checkpoint-policy=strict|permissive`` controls checkpoint strictness
+  (default: ``strict``).
 - ``--verbose`` prints more detailed traces for findings.
 
 Scope and alternatives

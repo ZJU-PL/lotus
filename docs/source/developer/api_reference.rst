@@ -208,6 +208,7 @@ Include headers:
 
    #include "IR/PDG/QueryLanguage/Cypher.h"
    #include "IR/PDG/Core/ProgramDependencyGraph.h"
+   #include "IR/PDG/Support/PDGUtils.h"
 
 Parse and execute Cypher queries:
 
@@ -226,7 +227,8 @@ Parse and execute Cypher queries:
        std::unique_ptr<CypherResult> result = executor.execute(*query);
        if (result->getType() == CypherResult::ResultType::NODES) {
            for (auto *node : result->getNodes()) {
-               errs() << "Result node: " << node->getNodeType() << "\n";
+               errs() << "Result node: "
+                      << pdgutils::getNodeTypeStr(node->getNodeType()) << "\n";
            }
        }
    }
@@ -298,6 +300,7 @@ Include headers:
 
    #include "Checker/Framework/BugReport.h"
    #include "Checker/Framework/BugReportMgr.h"
+   #include "Checker/Framework/BugTypes.h"
 
 Report bugs:
 

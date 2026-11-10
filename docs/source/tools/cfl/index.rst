@@ -305,8 +305,11 @@ reachability, supporting post*/pre* demand queries over a DOT graph.
 
    cmake --build build --target lotus-cfl-interleaved-dyck
    build/bin/lotus-cfl-interleaved-dyck spds --all-pairs graph.dot
+   build/bin/lotus-cfl-interleaved-dyck spds --analysis value-flow --all-pairs graph.dot
 
-Vertices are integer IDs. Query scopes include ``--all-pairs``,
+Vertices are integer IDs. ``--analysis dyck|value-flow`` selects general
+balanced Dyck reachability (default) or the value-flow client with bracket
+endpoints. Query scopes include ``--all-pairs``,
 ``--query SOURCE TARGET``, ``--source V`` (post*), ``--target V`` (pre*), and
 ``--queries FILE``.
 ``--call-prefix``/``--field-prefix`` allow pending calls or stores at a forward

@@ -62,7 +62,7 @@ Features
 
 * **Multiple Pointer Analysis Algorithms**: DyckAA, Sea-DSA, SparrowAA, AserPTA, TPA, FPA, CFL (via LLVM)
 * **Dynamic Analysis Validation**: DynAA for validating static analysis results
-* **Intermediate Representations**: PDG, SVFG and its sparse MemorySSA, GVFG, ICFG, ShadowMemSSA, and Gated SSA (GSA)
+* **Intermediate Representations**: PDG, SVFG and its sparse MemorySSA, GVFG, ICFG, ShadowMemSSA, UseTraceSSA, SSI, vSSA, UFG, and Gated SSA (GSA)
 * **Constraint Solving**: SMT (Z3), BDD (CUDD), WPDS, string constraints (Stingx)
 * **Data Flow Analysis Frameworks**: IFDS/IDE framework, Monotone framework, WPDS, and APA (Elimination-based)
 * **Bug Detection Checkers**: Integer overflow (Kint), memory safety (AE, Pulse, Saber), concurrency bugs, taint tracking

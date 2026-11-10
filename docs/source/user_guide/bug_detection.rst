@@ -145,6 +145,12 @@ Basic Usage
    # Set timeout for slow functions
    ./build/bin/lotus-check --engine=kint program.ll --checks=all --kint.function-timeout-seconds=60
 
+.. note::
+   KINT analyzes taint and ``main`` entry points by default. The standalone
+   examples below put the bug in a helper function, so the commands pass
+   ``--kint.analyze-all-functions``; without it those checks report no
+   findings for these files.
+
 Example 1: Integer Overflow
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -170,16 +176,22 @@ Example 1: Integer Overflow
 .. code-block:: bash
 
    clang -emit-llvm -S -g overflow.c -o overflow.ll
-   ./build/bin/lotus-check --engine=kint overflow.ll --checks=int-overflow
+   ./build/bin/lotus-check --engine=kint overflow.ll --checks=int-overflow \
+       --kint.analyze-all-functions
 
 **Expected Output**:
 
 .. code-block:: text
 
-   [Integer Overflow] Function: calculate_size
-   Location: overflow.c:4
-   Instruction: %mul = mul nsw i32 %count, %item_size
-   Reason: Multiplication may overflow
+   Findings (1)
+   ================
+
+   1. Integer Overflow
+      Location: overflow.c:5:18 in calculate_size
+      Message: Source: return count * item_size;. Access bug through mul.
+               Integer overflow detected
+      Source: return count * item_size;
+      Suggestion: Check for integer overflow before arithmetic operations
 
 **Fix**:
 
@@ -220,16 +232,22 @@ Example 2: Array Out of Bounds
 .. code-block:: bash
 
    clang -emit-llvm -S -g buffer.c -o buffer.ll
-   ./build/bin/lotus-check --engine=kint buffer.ll --checks=array-oob
+   ./build/bin/lotus-check --engine=kint buffer.ll --checks=array-oob \
+       --kint.analyze-all-functions
 
 **Expected Output**:
 
 .. code-block:: text
 
-   [Array Out of Bounds] Function: process_array
-   Location: buffer.c:2
-   Array size: 10 elements
-   Potential overflow: index may be >= 10
+   Findings (1)
+   ================
+
+   1. Array Out of Bounds
+      Location: buffer.c:2:5 in process_array
+      Message: Source: arr[index] = value;. Access bug through arrayidx.
+               Array out of bounds access detected
+      Source: arr[index] = value;
+      Suggestion: Add bounds checking before array access
 
 **Fix**:
 
@@ -264,7 +282,8 @@ Example 3: Division by Zero
 .. code-block:: bash
 
    clang -emit-llvm -S -g division.c -o division.ll
-   ./build/bin/lotus-check --engine=kint division.ll --checks=div-by-zero
+   ./build/bin/lotus-check --engine=kint division.ll --checks=div-by-zero \
+       --kint.analyze-all-functions
 
 **Fix**:
 
@@ -289,6 +308,15 @@ Capabilities
 2. **Sink Detection**: Find dangerous operations
 3. **Path Finding**: Compute flows from sources to sinks
 4. **Custom Sources/Sinks**: User-defined taint specifications
+
+.. note::
+   The bundled taint model recognizes the plain libc names (``sprintf``,
+   ``strcpy``, and so on). Fortified toolchains can rewrite these calls to
+   ``__sprintf_chk``/``__strcpy_chk``; those checked symbols are not in
+   ``config/taint.spec``. On such a toolchain, compile with
+   ``-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0`` or add the checked symbol to the
+   taint configuration. The direct source-to-sink example in
+   :doc:`tutorials` does not depend on a libc propagation model.
 
 Basic Usage
 ~~~~~~~~~~~

@@ -51,7 +51,7 @@ enables that engine's own checks.
      - Typical use
    * - Use-after-free
      - ``pulse``
-     - ``ae``, ``fitx``, ``symex``, ``gsaf``
+     - ``ae``, ``fitx``, ``symex``, ``gsaf``, ``saber``
      - Witness-oriented investigation
    * - Null-pointer dereference
      - ``pulse`` or ``ae``

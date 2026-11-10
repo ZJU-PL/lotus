@@ -145,19 +145,26 @@ Compile and Analyze
 Expected Output
 ~~~~~~~~~~~~~~~
 
-The tool will report:
+The tool reports the two definite overflow sites:
 
 .. code-block:: text
 
-   [Integer Overflow] Function: add_values
-   Line 5: return a + b;
-   Reason: Operands a and b may cause signed integer overflow
-   
-   [Integer Overflow] Function: multiply_values
-   Line 9: return a * b;
-   Reason: Operands a and b may cause signed integer overflow
+   Findings (4)
+   ================
 
-Note that ``safe_add`` is not reported because the checks prevent overflow.
+   1. Integer Overflow
+      Location: overflow.c:5:14 in add_values
+      Message: Source: return a + b;. Access bug through add.
+
+   2. Integer Overflow
+      Location: overflow.c:9:14 in multiply_values
+      Message: Source: return a * b;. Access bug through mul.
+
+``--kint.analyze-all-functions`` analyzes each function independently. In the
+current implementation the guarded arithmetic in ``safe_add`` also yields
+candidate reports (for ``INT_MIN - a`` and the final ``a + b``), so the total
+count is four rather than two. Review such reports against the surrounding
+guards; KINT can over-approximate guarded signed arithmetic.
 
 Advanced: All Checks
 ~~~~~~~~~~~~~~~~~~~~
@@ -172,10 +179,13 @@ Tutorial 3: Null Pointer Detection
 -----------------------------------
 
 Let's detect null pointer dereferences.
-This tutorial uses Pulse because it produces witness-oriented diagnostics;
-``ae``, ``fitx``, and ``symex`` also support null-pointer checks with different
-trade-offs.  See :ref:`Choosing a Checker <choosing-a-checker>` before choosing
-an engine for a production workflow.
+This tutorial uses the ``ae`` engine because it follows the callee's NULL
+return to the dereference site in ``print_person``.  ``pulse``, ``fitx``, and
+``symex`` also expose null-pointer checks with different trade-offs; for
+example, Pulse reports direct null assignments with a concrete trace but does
+not propagate this callee return into the caller in the current build.  See
+:ref:`Choosing a Checker <choosing-a-checker>` before choosing an engine for a
+production workflow.
 
 Example Program
 ~~~~~~~~~~~~~~~
@@ -184,6 +194,7 @@ Create ``nullpointer.c``:
 
 .. code-block:: c
 
+   #include <stdio.h>
    #include <stdlib.h>
    #include <string.h>
    
@@ -230,7 +241,7 @@ Compile and Analyze
 .. code-block:: bash
 
    clang -emit-llvm -c -g nullpointer.c -o nullpointer.bc
-   ./build/bin/lotus-check --engine=pulse nullpointer.bc --verbose
+   ./build/bin/lotus-check --engine=ae nullpointer.bc --checks=null-deref --verbose
 
 Expected Output
 ~~~~~~~~~~~~~~~
@@ -239,12 +250,14 @@ The analysis will report:
 
 .. code-block:: text
 
-   [Null Pointer Dereference]
-   Function: print_person
-   Line 24: printf("Person %d: %s\n", p->id, p->name);
-   Path: create_person returns NULL → print_person dereferences p
-   
-   Call site in main (line 32) passes potentially NULL pointer
+   1. AE Null Dereference
+      Location: nullpointer.c:24:34 in print_person
+      Message: Source: printf("Person %d: %s\n", p->id, p->name);.
+               Null pointer dereference at GEP instruction
+      Source: printf("Person %d: %s\n", p->id, p->name);
+
+The report points at the field access on the possibly-NULL ``p``; the caller
+at line 32 is the source of that pointer.
 
 Tutorial 4: Taint Analysis
 ---------------------------

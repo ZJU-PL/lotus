@@ -99,6 +99,12 @@ See :doc:`../ir/index` for builder APIs and code snippets.
   precise symbolic range analysis (``lib/IR/vSSA``). See :doc:`../ir/vssa`.
 * **UFG** – Universal Flow Graph, an object-expanded use-flow graph baseline for
   resource defect detection (``lib/IR/UFG``). See :doc:`../ir/ufg`.
+* **UseTraceSSA** – Ordered use-history overlay over Lotus SVFG for temporal
+  resource defect checking (``lib/IR/UseTraceSSA``). See
+  :doc:`../ir/usetracessa`.
+* **PathProgram** – Control-flow abstractions induced by concrete execution
+  paths for verification analyses (``lib/Verification/PathProgram``). See
+  :doc:`../ir/path_program`.
 
 Machine Learning Features
 -------------------------

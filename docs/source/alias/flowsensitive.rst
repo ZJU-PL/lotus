@@ -101,6 +101,18 @@ Key options:
 * ``--analysis=fspta|vfspta|vfpta`` – Select the conventional sparse
   flow-sensitive solver (default), object-versioned solver, or direct
   value-flow solver.
+* ``--cluster-objects=none|type|footprint`` – Apply object clustering before
+  solving (default ``none``). ``type`` clusters by allocation type;
+  ``footprint`` clusters versioned objects by their field footprint and is
+  supported only for ``vfspta``.
+* ``--pointer-only`` – Model only pointer-typed loads/stores in ``fspta``
+  and ``vfspta`` (default: enabled; ``--pointer-only=false`` keeps scalar
+  memory operations).
+* ``--vfspta-incremental-recursion`` – Enable incremental recursion updating
+  in ``vfspta`` to avoid full relabeling.
+* ``--vfspta-prelabel=pre-analysis|builder`` – Seed prelabels from auxiliary points-to
+  analysis (default) or the SVFG builder.
+* ``--time-limit=<seconds>`` – Set solver timeout in seconds.
 * ``--parallel --threads=N`` – Evaluate ``fspta`` transfers concurrently with
   validated snapshots and reference-order retirement. Zero workers selects
   hardware concurrency; the worker count includes the calling thread.
@@ -120,8 +132,12 @@ Key options:
 * ``--print-memory`` – Print non-empty sparse memory facts (``fspta`` and
   ``vfspta`` only).
 * ``--dump-stats`` – Print solver statistics (default on).
+* ``--stats-report`` – Print detailed statistics report on node kinds,
+  points-to set sizes, and strong updates.
 * ``--dump-svfg=<file>`` – Write the initialized SVFG as a DOT file (``fspta``
   and ``vfspta`` only).
+* ``--write-pts=<file>`` and ``--read-pts=<file>`` – Save or restore solved
+  points-to results to/from a binary file.
 * ``--validate-annotations`` – Validate ``__aser_alias__``/``__aser_no_alias__``
   calls against the analysis result.
 

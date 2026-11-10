@@ -331,6 +331,15 @@ std::string stringifyValue(const Value *value) {
   return os.str();
 }
 
+/// Resolve the callee behind pointer casts. Clang lowers calls to variadic
+/// declarations such as @reach_error through an explicit bitcast, so
+/// getCalledFunction() alone would miss reachability properties written in
+/// terms of the original declaration name.
+static const Function *getCalledFunctionIgnoringCasts(const CallBase &call) {
+  const Value *callee = call.getCalledOperand();
+  return callee ? dyn_cast<Function>(callee->stripPointerCasts()) : nullptr;
+}
+
 static bool moduleHasAnyCall(const Module &module,
                              const std::vector<std::string> &names) {
   const std::vector<std::string> lowered_names = [&names]() {
@@ -346,10 +355,11 @@ static bool moduleHasAnyCall(const Module &module,
     for (const BasicBlock &block : function) {
       for (const Instruction &inst : block) {
         const CallBase *call = dyn_cast<CallBase>(&inst);
-        if (call == nullptr || call->getCalledFunction() == nullptr)
+        const Function *callee_function =
+            call ? getCalledFunctionIgnoringCasts(*call) : nullptr;
+        if (callee_function == nullptr)
           continue;
-        const std::string callee =
-            toLower(call->getCalledFunction()->getName().str());
+        const std::string callee = toLower(callee_function->getName().str());
         if (std::find(lowered_names.begin(), lowered_names.end(), callee) !=
             lowered_names.end())
           return true;
@@ -362,10 +372,11 @@ static bool moduleHasAnyCall(const Module &module,
 static bool isCallToAny(const Instruction &inst,
                         const std::vector<std::string> &names) {
   const CallBase *call = dyn_cast<CallBase>(&inst);
-  if (call == nullptr || call->getCalledFunction() == nullptr)
+  const Function *callee_function =
+      call ? getCalledFunctionIgnoringCasts(*call) : nullptr;
+  if (callee_function == nullptr)
     return false;
-  const std::string callee =
-      toLower(call->getCalledFunction()->getName().str());
+  const std::string callee = toLower(callee_function->getName().str());
   for (size_t i = 0; i < names.size(); ++i) {
     if (callee == toLower(names[i]))
       return true;

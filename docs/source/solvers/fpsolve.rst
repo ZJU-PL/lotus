@@ -10,7 +10,7 @@ over a variety of semiring domains, supporting both Kleene iteration
 
 **Build toggle**: ``-DLOTUS_ENABLE_FPSOLVE=ON``
 
-**Dependencies**: Boost (auto-downloaded if not found)
+**Dependencies**: Boost (filesystem, program_options, system) and GMP (installed, not auto-downloaded)
 
 Overview
 --------

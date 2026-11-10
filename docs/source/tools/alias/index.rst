@@ -152,6 +152,16 @@ from LLVM IR.
 
 - ``--analysis=fspta|vfspta|vfpta`` – Conventional sparse (default),
   object-versioned, or direct value-flow analysis
+- ``--cluster-objects=none|type|footprint`` – Apply object clustering before
+  solving (``footprint`` supported for ``vfspta``)
+- ``--pointer-only`` – Model only pointer-typed loads/stores in ``fspta``
+  and ``vfspta`` (default: enabled; ``--pointer-only=false`` keeps scalar
+  memory operations)
+- ``--vfspta-incremental-recursion`` – Enable incremental recursion updating
+  in ``vfspta``
+- ``--vfspta-prelabel=pre-analysis|builder`` – Seed prelabels from auxiliary points-to
+  analysis or the SVFG builder
+- ``--time-limit=<seconds>`` – Solver timeout in seconds
 - ``--points-to-sets=mutable|hash-consed`` – Points-to set backend for ``fspta``
 - ``--memory-partition=distinct|intra-disjoint|inter-disjoint`` – MemorySSA
   region partition strategy for ``fspta`` and ``vfspta``
@@ -159,8 +169,12 @@ from LLVM IR.
 - ``--print-memory`` – Print non-empty sparse memory facts (``fspta`` and
   ``vfspta`` only)
 - ``--dump-stats`` – Print solver statistics (default on)
+- ``--stats-report`` – Print detailed statistics report on node kinds,
+  points-to set sizes, and strong updates
 - ``--dump-svfg=<file>`` – Write the initialized SVFG as a DOT file (``fspta``
   and ``vfspta`` only)
+- ``--write-pts=<file>`` / ``--read-pts=<file>`` – Save or restore solved
+  points-to results to/from a binary file
 - ``--validate-annotations`` – Validate ``__aser_alias__``/``__aser_no_alias__`` calls
 
 **Examples**:

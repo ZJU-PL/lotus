@@ -356,6 +356,7 @@ Create ``lib/Checker/MyChecker.cpp``:
 .. code-block:: cpp
 
    #include "Checker/MyChecker.h"
+   #include "Checker/Framework/BugTypes.h"
    #include "llvm/IR/Instructions.h"
    #include "llvm/Support/raw_ostream.h"
 

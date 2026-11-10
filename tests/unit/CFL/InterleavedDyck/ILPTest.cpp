@@ -125,7 +125,7 @@ TEST(InterleavedDyckILP, ResourceLimitsAreReported) {
   graph.addEdge(2, 3, Label::closeParenthesis(0));
   Options options;
   options.max_expression_nodes = 2;
-  EXPECT_THROW(Solver{}.analyze(graph, 1, 2, options), std::length_error);
+  EXPECT_THROW(Solver{}.analyze(graph, 1, 3, options), std::length_error);
 }
 
 } // namespace

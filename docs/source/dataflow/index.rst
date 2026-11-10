@@ -83,8 +83,8 @@ Selecting the right framework depends heavily on the properties of the dataflow 
      - Stack-aware analyses, demand-driven queries.
    * - APA
      - Arbitrary meet/transfer
-     - None (Intraprocedural)
-     - Meet-over-all-paths, path expressions, elimination benchmarks.
+     - Intraprocedural, K-call-string, or modular summary
+     - Meet-over-all-paths, path expressions, interprocedural elimination, and modular summaries.
 
 The ``lotus-dfa`` tool (located in ``tools/dataflow/`` and built from
 ``lotus-dfa-diff.cpp``) can be used to perform differential testing across these
