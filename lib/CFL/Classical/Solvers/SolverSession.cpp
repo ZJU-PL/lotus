@@ -581,6 +581,46 @@ public:
       stats.skewed_inserted_summary_edges =
           last_stats_.skewed_inserted_summary_edges;
       stats.skewed_output_facts = last_stats_.skewed_output_facts;
+      stats.endpoint_quotient_cells = last_stats_.endpoint_quotient_cells;
+      stats.endpoint_quotient_facts = last_stats_.endpoint_quotient_facts;
+      stats.endpoint_quotient_seed_facts =
+          last_stats_.endpoint_quotient_seed_facts;
+      stats.endpoint_quotient_inferred_facts =
+          last_stats_.endpoint_quotient_inferred_facts;
+      stats.endpoint_quotient_source_classes =
+          last_stats_.endpoint_quotient_source_classes;
+      stats.endpoint_quotient_target_classes =
+          last_stats_.endpoint_quotient_target_classes;
+      stats.endpoint_quotient_nullable_symbols =
+          last_stats_.endpoint_quotient_nullable_symbols;
+      stats.endpoint_quotient_dependency_sccs =
+          last_stats_.endpoint_quotient_dependency_sccs;
+      stats.endpoint_quotient_acyclic_sccs =
+          last_stats_.endpoint_quotient_acyclic_sccs;
+      stats.endpoint_quotient_unary_recursive_sccs =
+          last_stats_.endpoint_quotient_unary_recursive_sccs;
+      stats.endpoint_quotient_transitive_sccs =
+          last_stats_.endpoint_quotient_transitive_sccs;
+      stats.endpoint_quotient_linear_sccs =
+          last_stats_.endpoint_quotient_linear_sccs;
+      stats.endpoint_quotient_general_sccs =
+          last_stats_.endpoint_quotient_general_sccs;
+      stats.endpoint_quotient_max_scc_symbols =
+          last_stats_.endpoint_quotient_max_scc_symbols;
+      stats.endpoint_quotient_max_scc_rules =
+          last_stats_.endpoint_quotient_max_scc_rules;
+      stats.batch_stored_facts = last_stats_.batch_stored_facts;
+      stats.cat_graph_degree = last_stats_.cat_graph_degree;
+      stats.cat_context_annotations = last_stats_.cat_context_annotations;
+      stats.cat_rewrites = last_stats_.cat_rewrites;
+      stats.ieoce_quotient_nodes = last_stats_.ieoce_quotient_nodes;
+      stats.ieoce_graph_facts = last_stats_.ieoce_graph_facts;
+      stats.ieoce_meg_edges = last_stats_.ieoce_meg_edges;
+      stats.skewed_indexed_facts = last_stats_.skewed_indexed_facts;
+      stats.skewed_propagating_facts = last_stats_.skewed_propagating_facts;
+      stats.skewed_propagating_symbols = last_stats_.skewed_propagating_symbols;
+      stats.skewed_dynamic_eligible_symbols =
+          last_stats_.skewed_dynamic_eligible_symbols;
       stats.solve_time_microseconds =
           std::chrono::duration_cast<std::chrono::microseconds>(
               std::chrono::steady_clock::now() - start)

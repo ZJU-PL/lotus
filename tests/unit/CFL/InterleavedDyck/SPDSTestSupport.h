@@ -15,7 +15,18 @@ inline void require(bool condition, const char *message) {
 }
 template <class Exception, class Function> void throws(Function f) {
   bool caught = false;
-  try { f(); } catch (const Exception &) { caught = true; }
+  try {
+    f();
+  } catch (const Exception &) {
+    caught = true;
+  } catch (const std::exception &e) {
+    if (dynamic_cast<const Exception *>(&e) != nullptr ||
+        std::string(typeid(e).name()) == typeid(Exception).name()) {
+      caught = true;
+    } else {
+      throw;
+    }
+  }
   require(caught, "expected exception was not thrown");
 }
 inline d::Graph chain(const std::vector<d::Label> &word) {
@@ -560,7 +571,7 @@ inline void limitsAndValidation() {
   s::SaturationSession<> session(p,seed,s::Direction::Post,{0,0,3});
   throws<s::ResourceLimit>([&]{session.run();});
   throws<std::logic_error>([&]{session.result();});
-  throws<std::logic_error>([&]{session.run();});
+  throws<std::logic_error>([&]{(void)session.run();});
   throws<std::invalid_argument>([&]{p.addRule(0,s::Epsilon,1,{});});
   throws<std::invalid_argument>([&]{p.addRule(0,0,1,{1,2,3});});
   throws<std::out_of_range>([&]{p.addRule(99,0,1,{});});
