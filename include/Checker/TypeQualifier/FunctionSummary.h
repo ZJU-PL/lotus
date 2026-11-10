@@ -383,12 +383,14 @@ public:
     errs() << "retun idx" << getRetNodes() << ", retSize = " << getRetSize()
            << ", getRetOffset()= " << getRetOffset() << "\n";
     errs() << "args:\n";
-    for (int i = 0; i < args.size(); i++) {
-      errs() << "args[" << i << "]: idx = " << args[i].getNodeIndex() << ", ";
-      for (auto &obj : sumPtsGraph[args[i].getNodeIndex()]) {
+    for (auto &arg : args) {
+      const int i = arg.first;
+      ArgInfo &info = arg.second;
+      errs() << "args[" << i << "]: idx = " << info.getNodeIndex() << ", ";
+      for (auto &obj : sumPtsGraph[info.getNodeIndex()]) {
         errs() << "obj = " << obj << "\n";
-        errs() << "objsize = " << args[i].getObjSize()
-               << ", offset = " << args[i].getOffset() << "\n";
+        errs() << "objsize = " << info.getObjSize()
+               << ", offset = " << info.getOffset() << "\n";
       }
       errs() << "\n";
     }
