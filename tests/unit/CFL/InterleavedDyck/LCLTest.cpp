@@ -30,4 +30,12 @@ LOTUS_LCL_TEST(DotAndReuse, dotAndReuse)
 #undef LOTUS_LCL_TEST
 
 } // namespace
+TEST(InterleavedDyckLCL, ExposesNonAcceptingSummaryPairs) {
+  Graph graph;
+  graph.addEdge(10, 20, Label::openParenthesis(3));
+  const auto result = Solver{}.analyze(graph);
+  EXPECT_FALSE(result.mayReach(10, 20));
+  EXPECT_TRUE(result.summary_pairs.count({10, 20}) != 0U);
+}
+
 } // namespace lotus::cfl::interleaved_dyck::lcl

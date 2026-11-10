@@ -1,8 +1,9 @@
-# Tests mirroring lib/CFL/InterleavedDyck (SPDS, LCL, AffineSPDS, MCFL, Unary,
-# and StagedBounds engines).
+# Tests mirroring lib/CFL/InterleavedDyck (SPDS, LCL, ILP, AffineSPDS, MCFL,
+# Unary, and StagedBounds engines).
 lotus_collect_test_sources(cfl_tests
   AffineSPDSTest.cpp
   LCLTest.cpp
+  ILPTest.cpp
   MCFLTest.cpp
   SolverComparisonTest.cpp
   SPDSTest.cpp

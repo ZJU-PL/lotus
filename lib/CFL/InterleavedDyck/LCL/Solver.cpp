@@ -326,7 +326,7 @@ public:
     }
   }
 
-  void run(PairSet &upper_bound) {
+  void run(PairSet &upper_bound, PairSet &summary_pairs) {
     // Algorithm 1/2 initialization. Record in S immediately, not only on pop.
     for (const Edge &edge : graph_.edges()) {
       const Summary summary = initialSummary(edge.label);
@@ -355,6 +355,9 @@ public:
     }
     const Summary accepting{{ControlKind::Accept, 0}, Label::neutral()};
     for (const auto &entry : cells_) {
+      if (!entry.second.summaries.empty()) {
+        summary_pairs.insert(entry.first);
+      }
       const auto found = entry.second.summaries.find(accepting);
       if (found != entry.second.summaries.end() &&
           (!refined_ || found->second)) {
@@ -455,9 +458,11 @@ Result Solver::analyze(const Graph &graph, const Options &options) const {
   result.statistics.input_vertices = graph.vertices().size();
   result.statistics.input_edges = graph.edges().size();
   const Graph normalized = normalize(graph, result.upper_bound, options);
+  result.summary_pairs = result.upper_bound; // epsilon-only fragments have summaries too.
   result.statistics.normalized_edges = normalized.edges().size();
   result.statistics.epsilon_pairs = result.upper_bound.size();
-  Saturation(normalized, options, result.statistics).run(result.upper_bound);
+  Saturation(normalized, options, result.statistics)
+      .run(result.upper_bound, result.summary_pairs);
   return result;
 }
 

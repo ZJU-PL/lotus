@@ -12,6 +12,7 @@ add_lotus_collected_test_suite(cfl_tests
   LINK_LIBS
     CanaryDynamicDyck
     CanaryInterleavedDyckLCL
+    CanaryInterleavedDyckILP
     CanaryInterleavedDyckSPDS
     CanaryInterleavedDyckAffineSPDS
     CanaryInterleavedDyckUnary

@@ -71,6 +71,14 @@ int main() {
 `enable_feasibility = false` to isolate the gray-node refinement. The feasibility
 option is ignored in baseline mode.
 
+The result exposes `summary_pairs` in addition to `upper_bound`. A pair is in
+`summary_pairs` when the saturation constructed any trellis summary for it,
+regardless of whether the summary is accepting. Epsilon-only pairs are included.
+This lower-level relation is intended for clients composing expression fragments
+with unmatched boundary labels; it must not be interpreted as balanced
+reachability. The POPL 2023 ILP engine uses it when deciding whether a derived
+regular-expression fragment can contribute to a larger InterDyck word.
+
 The result also contains counters for summaries, gray summaries, promotions,
 left/right term updates, rule lookups, queue operations, epsilon pairs, and
 normalized edges. A gray summary is counted only once, whether created gray or

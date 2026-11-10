@@ -39,6 +39,10 @@ struct Result {
   /// Absence proves unreachability in the supplied directed graph.
   /// Includes empty paths at every vertex and all neutral-only paths.
   PairSet upper_bound;
+  /// Pairs for which the LCL saturation constructed at least one trellis
+  /// summary, regardless of whether that summary is accepting. This is useful
+  /// when composing path-expression fragments with unmatched boundary labels.
+  PairSet summary_pairs;
   Statistics statistics;
 
   /// Expected O(1). Vertices absent from the input return false.
