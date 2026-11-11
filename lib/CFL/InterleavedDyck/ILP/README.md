@@ -51,3 +51,18 @@ constraints instead of balanced equalities. `max_disjuncts` and
 `std::length_error`; no partial result is returned. Z3 `unknown` is reported as
 an exception, never silently treated as infeasible. The implementation requires
 the Z3 library already discovered by Lotus's root CMake configuration.
+
+## Command line
+
+Executable: `lotus-cfl-interleaved-dyck ilp`. Unlike the LCL engine, this
+engine is demand-driven, so `--query SOURCE TARGET` is required:
+
+```bash
+build/bin/lotus-cfl-interleaved-dyck ilp --query 0 4 graph.dot
+build/bin/lotus-cfl-interleaved-dyck ilp --query 0 4 \
+    --allow-unmatched-opens --max-disjuncts 10000 graph.dot
+```
+
+Use `--no-lcl-refinement` to compare against the pure counting encoding. The
+command prints the query verdict plus path-expression, disjunct, and integer
+variable/constraint counts.

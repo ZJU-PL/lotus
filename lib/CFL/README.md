@@ -23,6 +23,7 @@ module. Interleaved-Dyck tools consistently use the
 | `lotus-cfl-subcubic-aa` | Compute exact PEG memory/value aliases with the OOPSLA 2014 algorithms |
 | `lotus-cfl-dynamic-dyck` | Process an initial graph and an edge update sequence |
 | `lotus-cfl-interleaved-dyck unary` | Run the adaptive or fixed-counter exact unary analysis |
+| `lotus-cfl-interleaved-dyck ilp` | Answer a single source/target POPL 2023 ILP query |
 | `lotus-cfl-interleaved-dyck staged-bounds` | Compute staged lower and upper bounds |
 | `lotus-cfl-interleaved-dyck mcfl` | Run the dimension-indexed MCFL underapproximation hierarchy |
 | `lotus-cfl-interleaved-dyck-graph-reduction.py` | Orchestrate the graph-reduction helpers |

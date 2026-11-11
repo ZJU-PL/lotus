@@ -6,6 +6,7 @@ add_executable(lotus-cfl-interleaved-dyck
     staged-bounds/lotus-cfl-interleaved-dyck-staged-bounds.cpp
     mcfl/lotus-cfl-interleaved-dyck-mcfl.cpp
     lcl/lotus-cfl-interleaved-dyck-lcl.cpp
+    ilp/lotus-cfl-interleaved-dyck-ilp.cpp
     ${CMAKE_SOURCE_DIR}/lib/CFL/InterleavedDyck/GraphReduction/GraphAux.cpp
     ${CMAKE_SOURCE_DIR}/lib/CFL/InterleavedDyck/GraphReduction/DkMerge.cpp)
 
@@ -16,6 +17,7 @@ target_link_libraries(lotus-cfl-interleaved-dyck PRIVATE
     CanaryInterleavedDyckStagedBounds
     CanaryInterleavedDyckMCFL
     CanaryInterleavedDyckLCL
+    CanaryInterleavedDyckILP
     CanaryInterleavedDyckGraphReduction
     CanaryADT)
 

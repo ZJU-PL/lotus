@@ -7,13 +7,14 @@ int runInterleavedDyckUnary(int argc, char **argv);
 int runInterleavedDyckStagedBounds(int argc, char **argv);
 int runInterleavedDyckMCFL(int argc, char **argv);
 int runInterleavedDyckLCL(int argc, char **argv);
+int runInterleavedDyckILP(int argc, char **argv);
 int runInterleavedDyckGraphAux(int argc, char **argv);
 int runInterleavedDyckDkMerge();
 
 namespace {
 void usage(std::ostream &out) {
   out << "usage: lotus-cfl-interleaved-dyck <engine> [engine options]\n"
-         "engines: lcl, spds, affine-spds, unary, staged-bounds, mcfl\n"
+         "engines: lcl, ilp, spds, affine-spds, unary, staged-bounds, mcfl\n"
          "graph reduction helpers: graphaux, dkmerge\n"
          "run a solver engine with --help for its options\n";
 }
@@ -37,6 +38,8 @@ int main(int argc, char **argv) {
   char **engine_argv = argv + first_argument;
   if (engine == "lcl")
     return runInterleavedDyckLCL(engine_argc, engine_argv);
+  if (engine == "ilp")
+    return runInterleavedDyckILP(engine_argc, engine_argv);
   if (engine == "spds")
     return runInterleavedDyckSPDS(engine_argc, engine_argv);
   if (engine == "affine-spds")
