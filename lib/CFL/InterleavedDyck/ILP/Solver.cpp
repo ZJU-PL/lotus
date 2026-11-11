@@ -1,11 +1,8 @@
 #include "CFL/InterleavedDyck/ILP/Solver.h"
 
+#include "Backend.h"
 #include "CFL/InterleavedDyck/LCL/Solver.h"
 #include "Utils/Algorithms/PathExpressions/PathExpressionComputer.h"
-
-#include <z3.h>
-
-#include <sstream>
 
 #include <algorithm>
 #include <cstdint>
@@ -237,9 +234,10 @@ class Encoder {
 public:
   Encoder(const RegexBuilder &builder, const std::vector<Dimension> &dimensions,
           const std::vector<bool> &bad, bool allow_unmatched_opens,
-          Statistics &stats)
+          Statistics &stats, SolverBackend &backend)
       : b_(builder), dimensions_(dimensions), bad_(bad),
-        allow_unmatched_opens_(allow_unmatched_opens), stats_(stats) {}
+        allow_unmatched_opens_(allow_unmatched_opens), stats_(stats),
+        backend_(backend) {}
 
   bool feasible(int root) {
     std::vector<int> order;
@@ -258,40 +256,34 @@ public:
     const auto &final = counts_.at(static_cast<std::size_t>(root));
     if (final.bad) return false;
 
-    std::ostringstream smt;
-    smt << "(set-logic QF_LIA)\n";
-    for (std::size_t i = 0; i < variable_info_.size(); ++i) {
-      smt << "(declare-const v" << i << " Int)\n";
-      if (variable_info_[i].nonnegative) {
-        smt << "(assert (>= v" << i << " 0))\n";
-        ++stats_.integer_constraints;
-      }
+    LinearProgram program;
+    program.variables.reserve(variable_info_.size());
+    for (const Variable &variable : variable_info_) {
+      program.variables.push_back({variable.nonnegative});
+      if (variable.nonnegative) ++stats_.integer_constraints;
     }
     for (const Count &cell : final.cells) {
-      if (allow_unmatched_opens_) {
-        smt << "(assert (>= " << smtExpression(cell) << " 0))\n";
-      } else {
-        smt << "(assert (= " << smtExpression(cell) << " 0))\n";
-      }
+      LinearProgram::Constraint constraint;
+      constraint.rhs = -cell.constant;
+      constraint.sense = allow_unmatched_opens_
+                             ? LinearProgram::Sense::GreaterEqual
+                             : LinearProgram::Sense::Equal;
+      constraint.coefficients.assign(cell.variables.begin(),
+                                     cell.variables.end());
+      program.constraints.push_back(std::move(constraint));
       ++stats_.integer_constraints;
     }
-    smt << "(check-sat)\n";
-    Z3_config config = Z3_mk_config();
-    if (config == nullptr) throw std::runtime_error("cannot create Z3 config");
-    Z3_context context = Z3_mk_context(config);
-    Z3_del_config(config);
-    if (context == nullptr) throw std::runtime_error("cannot create Z3 context");
-    const char *answer = Z3_eval_smtlib2_string(context, smt.str().c_str());
-    const std::string answer_text = answer == nullptr ? "" : answer;
-    Z3_del_context(context);
     ++stats_.ilp_disjuncts;
     stats_.integer_variables += variable_info_.size();
-    if (answer_text.find("sat") == 0 && answer_text.find("unsat") != 0) return true;
-    if (answer_text.find("unsat") == 0) return false;
-    if (answer_text.find("unknown") == 0) {
+    switch (backend_.check(program)) {
+    case Feasibility::Sat:
+      return true;
+    case Feasibility::Unsat:
+      return false;
+    case Feasibility::Unknown:
       throw std::runtime_error("ILP solver returned unknown");
     }
-    throw std::runtime_error("unexpected response from Z3: " + answer_text);
+    throw std::logic_error("unhandled ILP feasibility result");
   }
 
 private:
@@ -300,6 +292,7 @@ private:
   const std::vector<bool> &bad_;
   bool allow_unmatched_opens_;
   Statistics &stats_;
+  SolverBackend &backend_;
   std::vector<NodeCount> counts_ = std::vector<NodeCount>(b_.nodes.size());
   std::vector<Variable> variable_info_;
 
@@ -307,24 +300,6 @@ private:
     const int id = static_cast<int>(variable_info_.size());
     variable_info_.push_back({nonnegative});
     return id;
-  }
-
-  static std::string smtExpression(const Count &count) {
-    std::ostringstream out;
-    std::vector<std::string> terms;
-    if (count.constant != 0 || count.variables.empty()) {
-      terms.push_back(std::to_string(count.constant));
-    }
-    for (const auto &term : count.variables) {
-      if (term.second == 1) terms.push_back("v" + std::to_string(term.first));
-      else terms.push_back("(* " + std::to_string(term.second) + " v" +
-                           std::to_string(term.first) + ")");
-    }
-    if (terms.size() == 1) return terms.front();
-    out << "(+";
-    for (const auto &term : terms) out << " " << term;
-    out << ")";
-    return out.str();
   }
 
   void compute(int id) {
@@ -544,9 +519,10 @@ Result Solver::analyze(const Graph &graph, Vertex source, Vertex target,
                                             : a.id < b.id;
             });
 
+  auto backend = makeBackend(options.backend);
   for (int disjunct : disjuncts) {
     Encoder encoder(builder, dimensions, bad, options.allow_unmatched_opens,
-                    result.statistics);
+                    result.statistics, *backend);
     if (encoder.feasible(disjunct)) {
       result.may_reach = true;
       return result;

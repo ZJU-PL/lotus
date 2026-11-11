@@ -13,7 +13,8 @@ Integer Linear Programming*, POPL 2023.
 
 The engine consumes the shared ``lotus::cfl::interleaved_dyck::Graph`` directly
 and answers directed reachability queries between a specified source and target
-vertex using Z3 integer linear arithmetic.
+vertex using an integer linear programming (ILP) backend. Z3 is the default
+backend.
 
 Overview
 --------
@@ -34,7 +35,7 @@ The implementation consists of:
   (Theorem 4.2) by distributing concatenation over alternatives and rewriting
   ``(a|b)*`` as ``(a*b*)*``.
 - **Count table encoding**: Encodes the bottom-up count table (Algorithm 2)
-  over a postorder DAG traversal into Z3 integer linear constraints.
+  over a postorder DAG traversal into an integer linear program.
 - **Cycle traversal variables**: Fresh integer variables for each star,
   shared across the parenthesis dimensions contributed by that cycle.
   Alpha-renaming ensures variable independence when combining concatenation
@@ -65,6 +66,10 @@ Options
 
 Configured through ``lotus::cfl::interleaved_dyck::ilp::Options``:
 
+* ``backend`` (default: ``Backend::Z3``) -- Select the integer-linear solver.
+  ``Backend::Gurobi`` is available only when Lotus is configured with
+  ``-DLOTUS_ENABLE_GUROBI=ON`` and Gurobi is installed. ``backendAvailable``
+  reports whether a backend is present in the current build.
 * ``enable_lcl_refinement`` (default: ``true``) -- Use LCL trellis summaries to
   prune dead subexpressions.
 * ``allow_unmatched_opens`` (default: ``false``) -- Allow non-negative final
@@ -104,6 +109,16 @@ Build and test
 
    cmake --build build --target cfl_tests
    ctest --test-dir build -R 'cfl_tests.InterleavedDyckILP' --output-on-failure
+
+The optional Gurobi backend is off by default and is not required by CI:
+
+.. code-block:: bash
+
+   cmake -S . -B build-gurobi -DLOTUS_ENABLE_GUROBI=ON
+   cmake --build build-gurobi --target lotus-cfl-interleaved-dyck
+
+Set ``GUROBI_HOME`` to the Gurobi installation. Users are responsible for
+obtaining a Gurobi commercial or academic license.
 
 See also
 --------

@@ -150,4 +150,24 @@ TEST(InterleavedDyckILP, StandardFormExpansionHonorsDisjunctLimit) {
   EXPECT_THROW(Solver{}.analyze(graph, 0, 3, options), std::length_error);
 }
 
+TEST(InterleavedDyckILP, BackendAvailabilityMatchesBuildConfiguration) {
+  EXPECT_TRUE(Options{}.backend == Backend::Z3);
+  EXPECT_TRUE(backendAvailable(Backend::Z3));
+#ifdef LOTUS_HAVE_GUROBI
+  EXPECT_TRUE(backendAvailable(Backend::Gurobi));
+#else
+  EXPECT_FALSE(backendAvailable(Backend::Gurobi));
+#endif
+}
+
+#ifndef LOTUS_HAVE_GUROBI
+TEST(InterleavedDyckILP, UnavailableGurobiBackendIsRejected) {
+  Graph graph;
+  graph.addEdge(1, 2, Label::neutral());
+  Options options;
+  options.backend = Backend::Gurobi;
+  EXPECT_THROW(Solver{}.analyze(graph, 1, 2, options), std::invalid_argument);
+}
+#endif
+
 } // namespace lotus::cfl::interleaved_dyck::ilp

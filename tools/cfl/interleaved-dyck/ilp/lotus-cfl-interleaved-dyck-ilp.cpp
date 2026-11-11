@@ -23,17 +23,37 @@ struct CommandLine {
   std::optional<dyck::Pair> query;
 };
 
+const char *backendName(ilp::Backend backend) {
+  switch (backend) {
+  case ilp::Backend::Z3:
+    return "z3";
+  case ilp::Backend::Gurobi:
+    return "gurobi";
+  }
+  return "unknown";
+}
+
 void usage(std::ostream &out) {
-  out << "usage: lotus-cfl-interleaved-dyck ilp --query SOURCE TARGET [options] <graph.dot>\n\n"
-         "POPL 2023 single-source/single-target ILP approximation for directed,\n"
+  out << "usage: lotus-cfl-interleaved-dyck ilp --query SOURCE TARGET "
+         "[options] <graph.dot>\n\n"
+         "POPL 2023 single-source/single-target ILP approximation for "
+         "directed,\n"
          "typed interleaved Dyck. A may-reach answer is a candidate, not a\n"
          "certified balanced witness; unreachable is a rejection.\n\n"
          "options:\n"
          "  --query SOURCE TARGET       required source/target pair\n"
+         "  --backend NAME              linear-programming backend: "
+#ifdef LOTUS_HAVE_GUROBI
+         "z3 (default) or gurobi\n"
+#else
+         "z3 (default); gurobi is not built in\n"
+#endif
          "  --no-lcl-refinement         disable POPL 2017 LCL pruning\n"
          "  --allow-unmatched-opens     accept nonnegative final counts\n"
-         "  --max-disjuncts N           fail above N DNF disjuncts (0: unlimited)\n"
-         "  --max-expression-nodes N    cap path-expression nodes (0: unlimited)\n"
+         "  --max-disjuncts N           fail above N DNF disjuncts (0: "
+         "unlimited)\n"
+         "  --max-expression-nodes N    cap path-expression nodes (0: "
+         "unlimited)\n"
          "  --                          end option parsing\n"
          "  -h, --help                  show this help\n";
 }
@@ -72,6 +92,21 @@ CommandLine parseCommandLine(int argc, char **argv) {
       result.options.allow_unmatched_opens = true;
       continue;
     }
+    if (!positional_only && argument == "--backend") {
+      if (++i == argc) {
+        throw std::invalid_argument("missing value for " +
+                                    std::string(argument));
+      }
+      const std::string_view value = argv[i];
+      if (value == "z3") {
+        result.options.backend = ilp::Backend::Z3;
+      } else if (value == "gurobi") {
+        result.options.backend = ilp::Backend::Gurobi;
+      } else {
+        throw std::invalid_argument("invalid --backend: " + std::string(value));
+      }
+      continue;
+    }
     if (!positional_only && argument == "--query") {
       if (argc - i <= 2 || result.query) {
         throw std::invalid_argument(
@@ -82,9 +117,8 @@ CommandLine parseCommandLine(int argc, char **argv) {
       result.query = dyck::Pair{source, target};
       continue;
     }
-    if (!positional_only &&
-        (argument == "--max-disjuncts" ||
-         argument == "--max-expression-nodes")) {
+    if (!positional_only && (argument == "--max-disjuncts" ||
+                             argument == "--max-expression-nodes")) {
       if (++i == argc) {
         throw std::invalid_argument("missing value for " +
                                     std::string(argument));
@@ -119,10 +153,18 @@ CommandLine parseCommandLine(int argc, char **argv) {
 int runInterleavedDyckILP(int argc, char **argv) {
   try {
     const auto command = parseCommandLine(argc, argv);
+#ifndef LOTUS_HAVE_GUROBI
+    if (command.options.backend == ilp::Backend::Gurobi) {
+      throw std::invalid_argument(
+          "--backend gurobi is not available in this build; configure with "
+          "-DLOTUS_ENABLE_GUROBI=ON");
+    }
+#endif
     const auto graph = dyck::Graph::parseDotFile(command.input);
     if (!graph.containsVertex(command.query->source) ||
         !graph.containsVertex(command.query->target)) {
-      throw std::invalid_argument("query vertex is absent from the input graph");
+      throw std::invalid_argument(
+          "query vertex is absent from the input graph");
     }
     const auto start = std::chrono::steady_clock::now();
     const auto result = ilp::Solver{}.analyze(
@@ -131,10 +173,12 @@ int runInterleavedDyckILP(int argc, char **argv) {
         std::chrono::steady_clock::now() - start);
     const auto &stats = result.statistics;
     std::cout << "engine: ilp\n"
+              << "backend: " << backendName(command.options.backend) << '\n'
               << "semantics: over-approximation (may-reach is not a witness)\n"
               << "input vertices: " << graph.vertices().size() << '\n'
               << "input edges: " << graph.edges().size() << '\n'
-              << "path-expression nodes: " << stats.path_expression_nodes << '\n'
+              << "path-expression nodes: " << stats.path_expression_nodes
+              << '\n'
               << "ilp disjuncts: " << stats.ilp_disjuncts << '\n'
               << "rejected bad subexpressions: "
               << stats.rejected_bad_subexpressions << '\n'
