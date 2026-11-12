@@ -74,6 +74,9 @@ public:
   bool containsVertex(Vertex vertex) const;
   bool empty() const { return vertices_.empty(); }
 
+  /// Add missing complement reverse arcs so that the graph is bidirected.
+  void makeBidirected();
+
   static Graph parseDot(std::istream &input);
   static Graph parseDotFile(const std::string &path);
 

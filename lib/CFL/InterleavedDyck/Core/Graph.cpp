@@ -185,6 +185,13 @@ bool Graph::containsVertex(Vertex vertex) const {
   return vertex_set_.count(vertex) != 0U;
 }
 
+void Graph::makeBidirected() {
+  const auto snapshot = edges_;
+  for (const auto &edge : snapshot) {
+    addEdge(edge.target, edge.source, edge.label.complement());
+  }
+}
+
 Graph Graph::parseDot(std::istream &input) {
   Graph graph;
   std::string line;

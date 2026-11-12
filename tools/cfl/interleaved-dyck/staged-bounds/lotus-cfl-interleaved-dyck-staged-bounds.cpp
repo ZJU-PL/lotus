@@ -38,6 +38,7 @@ struct CommandLine {
   bool factorized_tracing = false;
   bool stage_stats = false;
   PrintedPairs printed_pairs = PrintedPairs::None;
+  bool bidirect = false;
 };
 
 void usage(std::ostream &output) {
@@ -78,6 +79,7 @@ void usage(std::ostream &output) {
          "                     reconstruct provenance from the CFL closure\n"
          "                     instead of recording derivations eagerly;\n"
          "                     avoids storing derivation records.\n"
+         "  --bidirect         add missing complement reverse arcs\n"
          "  --stage-stats      report stage time and cumulative process peak\n"
          "                     RSS to stderr (the RSS high-water mark does\n"
          "                     not reset between stages).\n"
@@ -173,6 +175,10 @@ CommandLine parseCommandLine(int argc, char **argv) {
     }
     if (argument == "--factorized-tracing") {
       result.factorized_tracing = true;
+      continue;
+    }
+    if (argument == "--bidirect") {
+      result.bidirect = true;
       continue;
     }
     if (argument == "--stage-stats") {
@@ -348,8 +354,11 @@ void printResult(std::ostream &output, const CommandLine &command_line,
 int runInterleavedDyckStagedBounds(int argc, char **argv) {
   try {
     const CommandLine command_line = parseCommandLine(argc, argv);
-    const interleaved_dyck::Graph graph =
+    interleaved_dyck::Graph graph =
         interleaved_dyck::Graph::parseDotFile(command_line.input);
+    if (command_line.bidirect) {
+      graph.makeBidirected();
+    }
 
     approximation::Options options;
     options.method = command_line.method;
