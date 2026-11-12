@@ -24,6 +24,7 @@ struct CommandLine {
   std::string input;
   lcl::Options options;
   bool print_upper = false;
+  bool bidirect = false;
   std::optional<dyck::Pair> query;
 };
 
@@ -36,6 +37,7 @@ void usage(std::ostream &out) {
          "  --no-feasibility           disable Section 5.3 endpoint filters\n"
          "  --query SOURCE TARGET      report may-reach or unreachable\n"
          "  --print-upper              print sorted upper-bound pairs\n"
+         "  --bidirect                 add missing complement reverse arcs\n"
          "  --max-summaries N           fail above N summaries (0: unlimited)\n"
          "  --max-normalized-edges N    cap epsilon expansion (0: unlimited)\n"
          "  --                         end option parsing\n"
@@ -80,6 +82,10 @@ CommandLine parseCommandLine(int argc, char **argv) {
       result.print_upper = true;
       continue;
     }
+    if (!positional_only && argument == "--bidirect") {
+      result.bidirect = true;
+      continue;
+    }
     if (!positional_only && argument == "--query") {
       if (argc - i <= 2 || result.query) {
         throw std::invalid_argument("--query requires exactly one SOURCE TARGET pair");
@@ -121,7 +127,10 @@ CommandLine parseCommandLine(int argc, char **argv) {
 int runInterleavedDyckLCL(int argc, char **argv) {
   try {
     const auto command = parseCommandLine(argc, argv);
-    const auto graph = dyck::Graph::parseDotFile(command.input);
+    auto graph = dyck::Graph::parseDotFile(command.input);
+    if (command.bidirect) {
+      graph.makeBidirected();
+    }
     if (command.query &&
         (!graph.containsVertex(command.query->source) ||
          !graph.containsVertex(command.query->target))) {
