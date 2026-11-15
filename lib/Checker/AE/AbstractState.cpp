@@ -467,6 +467,7 @@ AddressValue AbstractState::getGepObjAddrs(uint32_t pointer,
       // Create field-sensitive GEP object ID (matching SVF's getGepObjVar)
       uint32_t gepObjId = getGepFieldObjId(baseObjId, offsetVal);
       uint32_t gepAddr = getVirtualMemAddress(gepObjId);
+      recordGepObjOffsetFromBase(gepObjId, IntervalValue(offsetVal));
       uint32_t objSize = getObjSize(baseObjId);
       if (objSize > 0) {
         setObjSize(gepObjId, objSize);
@@ -482,6 +483,7 @@ AddressValue AbstractState::getGepObjAddrs(uint32_t pointer,
         // Create field-sensitive GEP object ID for each offset
         uint32_t gepObjId = getGepFieldObjId(baseObjId, i);
         uint32_t gepAddr = getVirtualMemAddress(gepObjId);
+        recordGepObjOffsetFromBase(gepObjId, IntervalValue(i));
         uint32_t objSize = getObjSize(baseObjId);
         if (objSize > 0) {
           setObjSize(gepObjId, objSize);

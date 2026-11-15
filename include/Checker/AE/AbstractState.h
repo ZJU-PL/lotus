@@ -247,6 +247,7 @@ public:
         _varToAbsVal(rhs._varToAbsVal), _addrToAbsVal(rhs._addrToAbsVal),
         svfir_(rhs.svfir_), _objToSize(rhs._objToSize),
         _gepObjOffsetFromBase(rhs._gepObjOffsetFromBase),
+        _gepObjOffsetFromBaseByObjId(rhs._gepObjOffsetFromBaseByObjId),
         _gepFieldObjMap(rhs._gepFieldObjMap),
         _nextGepFieldId(rhs._nextGepFieldId) {}
 
@@ -263,6 +264,7 @@ public:
       _fieldInsensitiveObjs = rhs._fieldInsensitiveObjs;
       _objToSize = rhs._objToSize;
       _gepObjOffsetFromBase = rhs._gepObjOffsetFromBase;
+      _gepObjOffsetFromBaseByObjId = rhs._gepObjOffsetFromBaseByObjId;
       _gepFieldObjMap = rhs._gepFieldObjMap;
       _nextGepFieldId = rhs._nextGepFieldId;
       svfir_ = rhs.svfir_;
@@ -279,6 +281,8 @@ public:
         _addrToAbsVal(std::move(rhs._addrToAbsVal)), svfir_(rhs.svfir_),
         _objToSize(std::move(rhs._objToSize)),
         _gepObjOffsetFromBase(std::move(rhs._gepObjOffsetFromBase)),
+        _gepObjOffsetFromBaseByObjId(
+            std::move(rhs._gepObjOffsetFromBaseByObjId)),
         _gepFieldObjMap(std::move(rhs._gepFieldObjMap)),
         _nextGepFieldId(rhs._nextGepFieldId) {}
 
@@ -292,6 +296,8 @@ public:
       _heapObjs = std::move(rhs._heapObjs);
       _objToSize = std::move(rhs._objToSize);
       _gepObjOffsetFromBase = std::move(rhs._gepObjOffsetFromBase);
+      _gepObjOffsetFromBaseByObjId =
+          std::move(rhs._gepObjOffsetFromBaseByObjId);
       _gepFieldObjMap = std::move(rhs._gepFieldObjMap);
       _nextGepFieldId = rhs._nextGepFieldId;
       svfir_ = rhs.svfir_;
@@ -605,6 +611,8 @@ public:
     _addrToAbsVal.clear();
     _varToAbsVal.clear();
     _freedAddrs.clear();
+    _gepObjOffsetFromBase.clear();
+    _gepObjOffsetFromBaseByObjId.clear();
   }
 
   AbstractState bottom() const {
@@ -694,6 +702,20 @@ public:
     return it != _objToSize.end() ? it->second : 0;
   }
 
+  void recordGepObjOffsetFromBase(uint32_t objId, const IntervalValue &offset) {
+    auto [it, inserted] = _gepObjOffsetFromBaseByObjId.emplace(objId, offset);
+    if (!inserted)
+      it->second.join_with(offset);
+  }
+
+  bool getGepObjOffsetFromBase(uint32_t objId, IntervalValue &offset) const {
+    auto it = _gepObjOffsetFromBaseByObjId.find(objId);
+    if (it == _gepObjOffsetFromBaseByObjId.end())
+      return false;
+    offset = it->second;
+    return true;
+  }
+
 private:
   // Object size tracking (storage)
   std::unordered_map<uint32_t, uint32_t> _objToSize;
@@ -702,12 +724,15 @@ private:
   // Maps GEP instruction pointer -> offset from base object
   std::unordered_map<const llvm::GetElementPtrInst *, IntervalValue>
       _gepObjOffsetFromBase;
+  std::unordered_map<uint32_t, IntervalValue> _gepObjOffsetFromBaseByObjId;
 
   // GEP field-sensitive object tracking: maps (baseObjId, offset) -> field
   // object ID This maintains field sensitivity similar to SVF's getGepObjVar()
   std::map<std::pair<uint32_t, int64_t>, uint32_t> _gepFieldObjMap;
-  uint32_t _nextGepFieldId =
-      0x80000000; // Start from high IDs to avoid collision
+  // Field IDs must fit in the low 24 bits because virtual addresses are formed
+  // by adding AddressMask (0x7f000000). High-bit IDs overflow into 0xffxxxxxx
+  // and stop looking like virtual addresses.
+  uint32_t _nextGepFieldId = 0x00800000;
 
   void setGepObjOffsetFromBase(const llvm::GetElementPtrInst *gep,
                                const IntervalValue &offset) {
@@ -732,6 +757,8 @@ private:
     if (it != _gepFieldObjMap.end()) {
       return it->second;
     }
+    if (_nextGepFieldId >= 0x01000000)
+      return baseObjId;
     uint32_t newId = _nextGepFieldId++;
     _gepFieldObjMap[key] = newId;
     return newId;

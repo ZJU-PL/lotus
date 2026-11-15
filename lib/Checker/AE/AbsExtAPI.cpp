@@ -15,6 +15,7 @@
 #include <limits>
 #include <string>
 
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Operator.h>
@@ -108,6 +109,18 @@ IntervalValue allocationSizeFromAnnotation(AbstractState &as,
   return total;
 }
 
+IntervalValue getOperandInterval(AbstractState &as, const llvm::Value *operand,
+                                 const IntervalValue &fallback) {
+  if (!operand)
+    return fallback;
+  if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(operand))
+    return IntervalValue(constant->getSExtValue());
+  uint32_t valueId = AbstractInterpretation::getValueIdStatic(operand);
+  if (as.inVarToValTable(valueId))
+    return as[valueId].getInterval();
+  return fallback;
+}
+
 enum class IntegerSignedness { Unknown, Signed, Unsigned };
 
 static llvm::Module *getOwningModule(const llvm::Value *value) {
@@ -157,6 +170,9 @@ static uint32_t getElementByteSize(AbstractState &as,
 
   if (!value || !value->getType()->isPointerTy())
     return 1;
+
+  if (llvm::Type *pointee = value->getType()->getPointerElementType())
+    return getTypeByteSize(pointee, dl);
 
   uint32_t valueId = AbstractInterpretation::getValueIdStatic(value);
   if (const llvm::Type *pointee = as.getPointeeElement(valueId))
@@ -839,14 +855,14 @@ AEExtAPI::ExtAPIType AEExtAPI::getExtAPIType(const llvm::Function *fun) {
       return STRLEN;
     if (annotation.find("SCANF") != std::string::npos)
       return SCANF;
+    if (annotation.find("SNPRINTF") != std::string::npos)
+      return SNPRINTF;
     if (annotation.find("PRINTF") != std::string::npos)
       return PRINTF;
     if (annotation.find("RECV") != std::string::npos)
       return RECV;
     if (annotation.find("ITOA") != std::string::npos)
       return ITOA;
-    if (annotation.find("SNPRINTF") != std::string::npos)
-      return SNPRINTF;
     // Additional types
     if (annotation.find("STRTOK") != std::string::npos)
       return STRTOK;
@@ -1164,27 +1180,15 @@ void AEExtAPI::initExtFunMap() {
     uint32_t newAddr = AddressValue::getVirtualMemAddress(lhsId);
     as[lhsId] = AbstractValue(AddressValue(newAddr));
 
-    // calloc(nmemb, size) - total size is nmemb * size
+    // calloc(nmemb, size) - total size is nmemb * size.
     if (callNode->arg_size() >= 2) {
-      uint32_t nmembId = getValueId(callNode->getArgOperand(0));
-      uint32_t sizeId = getValueId(callNode->getArgOperand(1));
       uint32_t objId = AddressValue::getInternalID(newAddr);
       as.addHeapObject(objId);
-
-      IntervalValue nmemb(1, MaxFieldLimit);
-      IntervalValue size(1, MaxFieldLimit);
-
-      if (as.inVarToValTable(nmembId)) {
-        nmemb = as[nmembId].getInterval();
-      }
-      if (as.inVarToValTable(sizeId)) {
-        size = as[sizeId].getInterval();
-      }
-
-      // Calculate total size: nmemb * size
-      int64_t totalSize =
-          nmemb.ub().getIntNumeralOrZero() * size.ub().getIntNumeralOrZero();
-      if (totalSize > 0 && totalSize <= static_cast<int64_t>(MaxFieldLimit)) {
+      IntervalValue total =
+          allocationSizeFromAnnotation(as, callNode, "Arg0*Arg1");
+      int64_t totalSize = total.ub().getIntNumeralOrZero();
+      if (!total.is_infinite() && totalSize > 0 &&
+          totalSize <= static_cast<int64_t>(MaxFieldLimit)) {
         as.setObjSize(objId, static_cast<uint32_t>(totalSize));
       } else {
         as.setObjSize(objId, MaxFieldLimit);
@@ -1206,12 +1210,9 @@ void AEExtAPI::initExtFunMap() {
     AbstractState &as = getAbsStateFromTrace(callNode);
     uint32_t dstId = getValueId(callNode->getArgOperand(0));
     uint32_t srcId = getValueId(callNode->getArgOperand(1));
-    uint32_t lenId = getValueId(callNode->getArgOperand(2));
 
-    IntervalValue len(0, 4096);
-    if (as.inVarToValTable(lenId)) {
-      len = as[lenId].getInterval();
-    }
+    IntervalValue len = getOperandInterval(as, callNode->getArgOperand(2),
+                                           IntervalValue(0, 4096));
     handleMemcpy(as, dstId, srcId, len, 0);
 
     uint32_t lhsId = getValueId(callNode);
@@ -1239,16 +1240,13 @@ void AEExtAPI::initExtFunMap() {
     AbstractState &as = getAbsStateFromTrace(callNode);
     uint32_t dstId = getValueId(callNode->getArgOperand(0));
     uint32_t valId = getValueId(callNode->getArgOperand(1));
-    uint32_t lenId = getValueId(callNode->getArgOperand(2));
 
     IntervalValue elem(0, 255);
     if (as.inVarToValTable(valId)) {
       elem = as[valId].getInterval();
     }
-    IntervalValue len(0, 4096);
-    if (as.inVarToValTable(lenId)) {
-      len = as[lenId].getInterval();
-    }
+    IntervalValue len = getOperandInterval(as, callNode->getArgOperand(2),
+                                           IntervalValue(0, 4096));
     handleMemset(as, dstId, elem, len);
 
     uint32_t lhsId = getValueId(callNode);
@@ -1268,11 +1266,8 @@ void AEExtAPI::initExtFunMap() {
       return;
     AbstractState &as = getAbsStateFromTrace(callNode);
     uint32_t dstId = getValueId(callNode->getArgOperand(0));
-    uint32_t lenId = getValueId(callNode->getArgOperand(1));
-    IntervalValue len(0, 4096);
-    if (as.inVarToValTable(lenId)) {
-      len = as[lenId].getInterval();
-    }
+    IntervalValue len = getOperandInterval(as, callNode->getArgOperand(1),
+                                           IntervalValue(0, 4096));
     handleMemset(as, dstId, IntervalValue(0, 0), len);
   };
   func_map["bzero"] = sse_bzero;
@@ -1888,7 +1883,14 @@ void AEExtAPI::handleExtAPI(const llvm::CallBase *call,
   default: {
     AbstractState &as = getAbsStateFromTrace(call);
     uint32_t lhsId = getValueId(call);
-    as[lhsId] = AbstractValue(IntervalValue::top());
+    if (call->getType()->isPointerTy()) {
+      AddressValue::AddrSet unknownAddrs{
+          AbstractState::getVirtualMemAddress(AbstractState::BlkPtr),
+          NullMemAddr};
+      as[lhsId] = AbstractValue(AddressValue(unknownAddrs));
+    } else {
+      as[lhsId] = AbstractValue(IntervalValue::top());
+    }
   } break;
   }
 }
@@ -1899,12 +1901,9 @@ void AEExtAPI::handleExtMemcpy(const llvm::CallBase *call) {
   AbstractState &as = getAbsStateFromTrace(call);
   uint32_t dstId = getValueId(call->getArgOperand(0));
   uint32_t srcId = getValueId(call->getArgOperand(1));
-  uint32_t lenId = getValueId(call->getArgOperand(2));
 
-  IntervalValue len(0, 4096);
-  if (as.inVarToValTable(lenId)) {
-    len = as[lenId].getInterval();
-  }
+  IntervalValue len =
+      getOperandInterval(as, call->getArgOperand(2), IntervalValue(0, 4096));
   handleMemcpy(as, dstId, srcId, len, 0);
 
   uint32_t lhsId = getValueId(call);
@@ -1917,16 +1916,13 @@ void AEExtAPI::handleExtMemset(const llvm::CallBase *call) {
   AbstractState &as = getAbsStateFromTrace(call);
   uint32_t dstId = getValueId(call->getArgOperand(0));
   uint32_t valId = getValueId(call->getArgOperand(1));
-  uint32_t lenId = getValueId(call->getArgOperand(2));
 
   IntervalValue elem(0, 255);
   if (as.inVarToValTable(valId)) {
     elem = as[valId].getInterval();
   }
-  IntervalValue len(0, 4096);
-  if (as.inVarToValTable(lenId)) {
-    len = as[lenId].getInterval();
-  }
+  IntervalValue len =
+      getOperandInterval(as, call->getArgOperand(2), IntervalValue(0, 4096));
   handleMemset(as, dstId, elem, len);
 
   uint32_t lhsId = getValueId(call);
@@ -2188,6 +2184,10 @@ IntervalValue AEExtAPI::getStrlen(AbstractState &as, uint32_t strId) {
 
   const llvm::Value *strValue =
       AbstractInterpretation::getAEInstance().getValueFromIdStatic(strId);
+  llvm::StringRef constantString;
+  if (strValue && llvm::getConstantStringInfo(strValue, constantString)) {
+    return IntervalValue(static_cast<int64_t>(constantString.size()));
+  }
   uint32_t elemSize = getElementByteSize(as, strValue);
   if (elemSize == 0)
     elemSize = 1;
@@ -2303,6 +2303,22 @@ void AEExtAPI::handleMemcpy(AbstractState &as, uint32_t dstId, uint32_t srcId,
   uint32_t sizeBytes = getTrackedByteCount(len, /*useLowerBound=*/true);
   uint32_t numElements =
       std::min<uint32_t>(MaxFieldLimit, sizeBytes / elemSize);
+
+  llvm::StringRef constantString;
+  if (srcValue &&
+      llvm::getConstantStringInfo(srcValue, constantString, 0, false)) {
+    const uint32_t copyBytes =
+        std::min<uint32_t>(sizeBytes, constantString.size());
+    for (uint32_t i = 0; i < copyBytes; ++i) {
+      int64_t dstOffset = baseDstOffset + static_cast<int64_t>(start_idx) + i;
+      AddressValue dstAddrs =
+          as.getGepObjAddrs(baseDstId, IntervalValue(dstOffset));
+      const auto byte = static_cast<unsigned char>(constantString[i]);
+      for (uint32_t dstAddr : dstAddrs)
+        as.store(dstAddr, IntervalValue(static_cast<int64_t>(byte)));
+    }
+    return;
+  }
 
   // Copy byte by byte (or element by element)
   for (uint32_t i = 0; i < numElements; ++i) {

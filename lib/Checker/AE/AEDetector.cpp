@@ -243,7 +243,6 @@ void BufOverflowDetector::detect(AbstractState &as,
     uint32_t ptrId =
         AbstractInterpretation::getValueIdStatic(gep->getPointerOperand());
     uint32_t lhsId = AbstractInterpretation::getValueIdStatic(gep);
-
     if (as.inVarToAddrsTable(ptrId)) {
       // Get GEP addresses
       AddressValue gepAddrs = as[lhsId].getAddrs();
@@ -282,8 +281,7 @@ void BufOverflowDetector::detect(AbstractState &as,
         hasKnownBaseOffset = hasKnownBaseOffset ||
                              llvm::isa<llvm::AllocaInst>(base) ||
                              llvm::isa<llvm::GlobalValue>(base);
-        const bool checkLowerBound =
-            hasKnownBaseOffset && gep->hasAllConstantIndices();
+        const bool checkLowerBound = hasKnownBaseOffset;
 
         if (intervalIsOutsideObject(accessOffset, objSize, checkLowerBound)) {
           AEException bug("Buffer access outside object: offset [" +
@@ -305,12 +303,21 @@ void BufOverflowDetector::detect(AbstractState &as,
   if (const auto *call = llvm::dyn_cast<llvm::CallBase>(inst)) {
     if (const llvm::Function *direct = call->getCalledFunction()) {
       AEExtAPI *utils = AbstractInterpretation::getAEInstance().getUtils();
+      if (std::getenv("LOTUS_AE_DEBUG_SNPRINTF") &&
+          direct->getName().contains("snprintf")) {
+        llvm::errs() << "[SNP-CALL] " << direct->getName()
+                     << " decl=" << direct->isDeclaration() << " type="
+                     << (utils ? static_cast<int>(utils->getExtAPIType(direct))
+                               : -1)
+                     << "\n";
+      }
       if (direct->isDeclaration() &&
           (utils == nullptr ||
            utils->getExtAPIType(direct) == AEExtAPI::MEMCPY ||
            utils->getExtAPIType(direct) == AEExtAPI::MEMSET ||
            utils->getExtAPIType(direct) == AEExtAPI::STRCPY ||
-           utils->getExtAPIType(direct) == AEExtAPI::STRCAT)) {
+           utils->getExtAPIType(direct) == AEExtAPI::STRCAT ||
+           utils->getExtAPIType(direct) == AEExtAPI::SNPRINTF)) {
         detectExtAPI(as, call, direct);
         return;
       }
@@ -327,7 +334,8 @@ void BufOverflowDetector::detect(AbstractState &as,
       if (utils) {
         AEExtAPI::ExtAPIType extType = utils->getExtAPIType(callee);
         if (extType == AEExtAPI::MEMCPY || extType == AEExtAPI::MEMSET ||
-            extType == AEExtAPI::STRCPY || extType == AEExtAPI::STRCAT) {
+            extType == AEExtAPI::STRCPY || extType == AEExtAPI::STRCAT ||
+            extType == AEExtAPI::SNPRINTF) {
           detectExtAPI(as, call, callee);
           break;
         }
@@ -709,38 +717,68 @@ void BufOverflowDetector::detectExtAPI(AbstractState &as,
 
   // Fallback to rules map
   auto it = extAPIBufOverflowCheckRules.find(funcName);
-  if (it == extAPIBufOverflowCheckRules.end())
-    return;
-
-  for (const auto &arg : it->second) {
-    if (call->arg_size() <= arg.first || call->arg_size() <= arg.second)
-      continue;
-
-    uint32_t bufId = AbstractInterpretation::getValueIdStatic(
-        call->getArgOperand(arg.first));
-    uint32_t lenId = AbstractInterpretation::getValueIdStatic(
-        call->getArgOperand(arg.second));
-
-    IntervalValue len;
-    if (const auto *csize = llvm::dyn_cast<llvm::ConstantInt>(
-            call->getArgOperand(arg.second))) {
-      len = IntervalValue(csize->getSExtValue());
-    } else {
-      if (!as.inVarToValTable(lenId))
+  if (it != extAPIBufOverflowCheckRules.end()) {
+    for (const auto &arg : it->second) {
+      if (call->arg_size() <= arg.first || call->arg_size() <= arg.second)
         continue;
-      len = as[lenId].getInterval();
-    }
-    if (!canSafelyAccessMemory(as, bufId, byteCountToMaxAccessOffset(len))) {
-      AEException bug("Buffer overflow in " + funcName + ": access length " +
-                      len.toString() + " may exceed buffer bounds");
-      addBugToReporter(bug, call);
+
+      uint32_t bufId = AbstractInterpretation::getValueIdStatic(
+          call->getArgOperand(arg.first));
+      uint32_t lenId = AbstractInterpretation::getValueIdStatic(
+          call->getArgOperand(arg.second));
+
+      IntervalValue len;
+      if (const auto *csize = llvm::dyn_cast<llvm::ConstantInt>(
+              call->getArgOperand(arg.second))) {
+        len = IntervalValue(csize->getSExtValue());
+      } else {
+        if (!as.inVarToValTable(lenId))
+          continue;
+        len = as[lenId].getInterval();
+      }
+      if (!canSafelyAccessMemory(as, bufId, byteCountToMaxAccessOffset(len))) {
+        AEException bug("Buffer overflow in " + funcName + ": access length " +
+                        len.toString() + " may exceed buffer bounds");
+        addBugToReporter(bug, call);
+      }
     }
   }
 
   // Check for string functions
-  if (funcName.find("strcpy") != std::string::npos) {
+  if (funcName.find("snprintf") != std::string::npos ||
+      funcName.find("vsnprintf") != std::string::npos) {
+    if (call->arg_size() >= 2) {
+      uint32_t bufId =
+          AbstractInterpretation::getValueIdStatic(call->getArgOperand(0));
+      IntervalValue len;
+      if (const auto *ci =
+              llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1))) {
+        len = IntervalValue(ci->getSExtValue());
+      } else {
+        uint32_t lenId =
+            AbstractInterpretation::getValueIdStatic(call->getArgOperand(1));
+        if (as.inVarToValTable(lenId))
+          len = as[lenId].getInterval();
+      }
+      if (std::getenv("LOTUS_AE_DEBUG_SNPRINTF")) {
+        llvm::errs() << "[SNPRINTF] " << funcName << " buf=" << bufId
+                     << " hasBuf=" << as.inVarToAddrsTable(bufId)
+                     << " len=" << len.toString() << " safe="
+                     << canSafelyAccessMemory(as, bufId,
+                                              byteCountToMaxAccessOffset(len))
+                     << "\n";
+      }
+      if (!len.isBottom() &&
+          !canSafelyAccessMemory(as, bufId, byteCountToMaxAccessOffset(len))) {
+        AEException bug("Buffer overflow in " + funcName + ": size limit " +
+                        len.toString() + " exceeds destination buffer bounds");
+        addBugToReporter(bug, call);
+      }
+    }
+  } else if (funcName.find("strcpy") != std::string::npos) {
     detectStrcpy(as, call, callee);
-  } else if (funcName.find("strcat") != std::string::npos) {
+  } else if (funcName.find("strcat") != std::string::npos ||
+             funcName.find("strncat") != std::string::npos) {
     detectStrcat(as, call, callee);
   }
 }
@@ -1381,10 +1419,13 @@ bool NullptrDerefDetector::canSafelyDerefPtr(AbstractState &as,
   for (const auto &addr : absVal.getAddrs()) {
     if (AbstractState::isNullMem(addr))
       return false;
-    if (AbstractState::isInvalidMem(addr))
-      return false;
+    // Black-hole/invalid and freed addresses are not evidence of null.
+    // Use-after free and invalid-free findings are diagnosed by their dedicated
+    // detectors.
     if (as.isFreedMem(addr))
       return false;
+    if (AbstractState::isInvalidMem(addr))
+      continue;
   }
 
   return true;
@@ -1409,6 +1450,9 @@ BufOverflowDetector::getAccessOffset(AbstractState &as, uint32_t objId,
   // The pointer operand may have come through a load or select. In that case
   // its provenance is only available through the object it names: add the
   // object's offset-from-base to this GEP's local byte offset.
+  IntervalValue stateOffset;
+  if (as.getGepObjOffsetFromBase(objId, stateOffset))
+    return stateOffset + offset;
   auto objIt = gepObjOffsetFromBaseByObjId.find(objId);
   if (objIt != gepObjOffsetFromBaseByObjId.end()) {
     return objIt->second + offset;

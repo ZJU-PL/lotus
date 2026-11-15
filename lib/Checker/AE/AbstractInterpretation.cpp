@@ -133,13 +133,6 @@ AbstractValue evaluateConstantInitializer(AbstractState &state,
     AddressValue fieldAddrs =
         state.getGepObjAddrs(baseId, IntervalValue(byteOffset));
     if (!fieldAddrs.isBottom()) {
-      uint32_t baseSize = state.getObjSize(baseId);
-      if (baseSize > static_cast<uint32_t>(byteOffset)) {
-        uint32_t remaining = baseSize - static_cast<uint32_t>(byteOffset);
-        for (uint32_t addr : fieldAddrs) {
-          state.setObjSize(state.getIDFromAddr(addr), remaining);
-        }
-      }
       return AbstractValue(fieldAddrs);
     }
     return AbstractValue(
@@ -265,6 +258,14 @@ void materializeGlobalInitializer(AbstractState &state, uint32_t baseValueId,
                         evaluateConstantInitializer(state, init, dl));
 }
 
+AbstractValue unknownValueForType(llvm::Type *type) {
+  if (type && type->isPointerTy()) {
+    return AbstractValue(AddressValue(
+        AbstractState::getVirtualMemAddress(AbstractState::BlkPtr)));
+  }
+  return AbstractValue(IntervalValue::top());
+}
+
 void materializeConstantValue(AbstractState &as, const llvm::Value *val,
                               uint32_t valueId) {
   if (!val)
@@ -287,6 +288,25 @@ void materializeConstantValue(AbstractState &as, const llvm::Value *val,
 
   if (llvm::isa<llvm::ConstantPointerNull>(val)) {
     as[valueId] = AbstractValue(AddressValue(NullMemAddr));
+    return;
+  }
+
+  const auto *constant = llvm::dyn_cast<llvm::Constant>(val);
+  if (constant && val->getType()->isPointerTy()) {
+    llvm::Module *module = AbstractInterpretation::getAEInstance().getModule();
+    if (!module)
+      return;
+
+    const llvm::Value *base = nullptr;
+    int64_t byteOffset = 0;
+    if (!resolveGlobalAddress(constant, module->getDataLayout(), base,
+                              byteOffset))
+      return;
+    uint32_t baseId = AbstractInterpretation::getValueIdStatic(base);
+    if (!as.inVarToAddrsTable(baseId))
+      return;
+    AddressValue addrs = as.getGepObjAddrs(baseId, IntervalValue(byteOffset));
+    as[valueId] = AbstractValue(addrs);
   }
 }
 
@@ -1269,31 +1289,10 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
 
         // Check if this is the default case
         if (bb == switchInst->getDefaultDest()) {
-          // Default edge is feasible unless we can prove the condition equals a
-          // specific case value (singleton interval exactly on a case).
-          uint32_t condId = getValueId(switchInst->getCondition());
-          if (!tmpEs.inVarToValTable(condId)) {
-            isFeasible = true;
-          } else {
-            const IntervalValue &condVal = tmpEs[condId].getInterval();
-            if (condVal.isBottom()) {
-              isFeasible = false;
-            } else if (!condVal.is_numeral()) {
-              isFeasible = true;
-            } else {
-              const int64_t exact = condVal.getIntNumeralOrZero();
-              bool matchesCase = false;
-              for (auto caseIt = switchInst->case_begin();
-                   caseIt != switchInst->case_end(); ++caseIt) {
-                const llvm::ConstantInt *caseVal = caseIt->getCaseValue();
-                if (caseVal->getSExtValue() == exact) {
-                  matchesCase = true;
-                  break;
-                }
-              }
-              isFeasible = !matchesCase;
-            }
-          }
+          // Keep the default edge feasible. In sparse layouts a case edge may
+          // have refined the shared switch-condition def-site while processing
+          // another successor, which must not make the default path disappear.
+          isFeasible = true;
         } else {
           // Check if this block corresponds to a case value
           for (auto caseIt = switchInst->case_begin();
@@ -1324,15 +1323,24 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
     if (bb == &bb->getParent()->getEntryBlock()) {
       if (!bb->empty()) {
         const llvm::Instruction *firstInst = &bb->front();
+        AbstractState entryState = globalState;
         if (const AbstractState *existing = stateStore_.find(firstInst)) {
           // Preserve callsite-seeded entry state (args/params) and merge
           // globals.
-          AbstractState merged = globalState;
-          merged.joinWith(*existing);
-          stateStore_.set(firstInst, merged);
-        } else {
-          stateStore_.set(firstInst, globalState);
+          entryState.joinWith(*existing);
         }
+        if (callSiteStack.empty() && bb->getParent()->getName() == "main") {
+          for (const llvm::Argument &arg : bb->getParent()->args()) {
+            uint32_t argId = getValueId(&arg);
+            auto it = entryState._varToAbsVal.find(argId);
+            if (it == entryState._varToAbsVal.end() ||
+                (it->second.getInterval().isBottom() &&
+                 it->second.getAddrs().isBottom())) {
+              entryState[argId] = unknownValueForType(arg.getType());
+            }
+          }
+        }
+        stateStore_.set(firstInst, entryState);
       }
       return true;
     }
@@ -1761,6 +1769,7 @@ void AbstractInterpretation::updateStateOnLoad(const llvm::LoadInst *load) {
   uint32_t ptrId = getValueId(load->getPointerOperand());
 
   AbstractState &as = stateStore_.getOrCreate(load);
+  materializeConstantValue(as, load->getPointerOperand(), ptrId);
   AbstractValue loadedVal = as.loadValue(ptrId);
   if (stateStore_.layout() == StateLayout::Sparse) {
     AbstractValue svfgVal = getSVFGSparseLoadValue(load);
@@ -1769,10 +1778,6 @@ void AbstractInterpretation::updateStateOnLoad(const llvm::LoadInst *load) {
     const bool svfgBottom =
         svfgVal.getInterval().isBottom() && svfgVal.getAddrs().isBottom();
     if (stateBottom && !svfgBottom) {
-      loadedVal = svfgVal;
-    } else if (!stateBottom && !svfgBottom && svfgVal.isInterval() &&
-               loadedVal.isInterval() &&
-               svfgVal.getInterval().containedWithin(loadedVal.getInterval())) {
       loadedVal = svfgVal;
     }
   }
@@ -1785,9 +1790,15 @@ void AbstractInterpretation::updateStateOnStore(const llvm::StoreInst *store) {
   uint32_t valId = getValueId(store->getValueOperand());
 
   AbstractState &as = stateStore_.getOrCreate(store);
+  materializeConstantValue(as, store->getPointerOperand(), ptrId);
   materializeConstantValue(as, store->getValueOperand(), valId);
-  if (stateStore_.layout() == StateLayout::Sparse)
-    sparseObjectDefs_[store] = as[valId];
+  if (stateStore_.layout() == StateLayout::Sparse) {
+    auto it = as.getVarToVal().find(valId);
+    sparseObjectDefs_[store] =
+        it != as.getVarToVal().end()
+            ? it->second
+            : unknownValueForType(store->getValueOperand()->getType());
+  }
 
   // A store is a strong update only when the pointer names a single,
   // non-summary object; otherwise the new value has to be joined in. This is
@@ -1853,6 +1864,19 @@ void AbstractInterpretation::updateStateOnCast(const llvm::CastInst *cast) {
         int64_t signed_i64_value = static_cast<int64_t>(numVal);
         return IntervalValue(signed_i64_value, signed_i64_value);
       }
+    }
+
+    if (bits < 64) {
+      int64_t lb = val.lb().getIntNumeral();
+      int64_t ub = val.ub().getIntNumeral();
+      const int64_t modulus = int64_t{1} << bits;
+      if (lb >= 0)
+        return val;
+      if (ub < 0)
+        return IntervalValue(modulus + lb, modulus + ub);
+      // The interval crosses the signed boundary; its unsigned image contains
+      // both small non-negative values and values near 2^bits.
+      return IntervalValue(0, modulus - 1);
     }
     return IntervalValue::top();
   };
@@ -1987,6 +2011,8 @@ void AbstractInterpretation::updateStateOnCall(const llvm::CallBase *call) {
 
   if (!extCallees.empty()) {
     callSlot = baseState;
+    for (const llvm::Use &arg : call->args())
+      materializeConstantValue(callSlot, arg.get(), getValueId(arg.get()));
     handleExtCall(call, extCallees);
     joinedState = callSlot;
     hasJoinedState = true;
@@ -2104,6 +2130,7 @@ void AbstractInterpretation::updateStateOnGep(
   uint32_t ptrId = getValueId(gep->getPointerOperand());
 
   AbstractState &as = stateStore_.getOrCreate(gep);
+  materializeConstantValue(as, gep->getPointerOperand(), ptrId);
 
   // Use getElementIndex (like SVF) instead of getByteOffset: getElementIndex
   // clamps with meet_with([0, MaxFieldLimit]) so never returns infinity,
@@ -2936,6 +2963,22 @@ AbstractInterpretation::getCallees(const llvm::CallBase *callNode) const {
   }
 
   if (uniqueTargets.empty()) {
+    if (const AbstractState *state = stateStore_.find(callNode)) {
+      uint32_t calleeId =
+          getValueIdStatic(callNode->getCalledOperand()->stripPointerCasts());
+      auto calleeIt = state->_varToAbsVal.find(calleeId);
+      if (calleeIt != state->_varToAbsVal.end() && calleeIt->second.isAddr()) {
+        for (uint32_t addr : calleeIt->second.getAddrs()) {
+          uint32_t objId = state->getIDFromAddr(addr);
+          if (const auto *fun =
+                  llvm::dyn_cast_or_null<llvm::Function>(getValueFromId(objId)))
+            uniqueTargets.insert(fun);
+        }
+      }
+    }
+  }
+
+  if (uniqueTargets.empty()) {
     std::set<const llvm::Value *> visited;
     collectFunctionsFromValue(callNode->getCalledOperand(), uniqueTargets,
                               collectFunctionsFromValue, visited);
@@ -3605,7 +3648,6 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
 
   IntervalValue val0 = as[op0Id].getInterval();
   IntervalValue val1 = as[op1Id].getInterval();
-
   if (val0.isBottom() || val1.isBottom()) {
     return false;
   }

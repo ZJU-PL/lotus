@@ -267,7 +267,6 @@ public:
   uint32_t getSVFGSparseLoadQueryCount() const {
     return svfgSparseLoadQueries_;
   }
-
   const AbstractStateStore &getStateStore() const { return stateStore_; }
 
   AEExtAPI *getUtils() const { return utils; }
