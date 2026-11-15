@@ -5,7 +5,8 @@
 
 if(TARGET lotus-cfl-solve)
     foreach(classical_backend
-            sparse-set sparse-bitvector graspan sqid pearl skewed cat iea iea-ocr
+            sparse-set sparse-bitvector sparse-subset graspan sqid pearl skewed cat
+            iea iea-ocr
             transitive-closure pocr hpocr
             focr endpoint-quotient cert)
         add_test(NAME classical_cfl_cli_${classical_backend}
@@ -194,7 +195,8 @@ endif()
 
 if(TARGET lotus-cfl-vf)
     foreach(classical_backend
-            sparse-set sparse-bitvector graspan sqid pearl skewed cat iea iea-ocr
+            sparse-set sparse-bitvector sparse-subset graspan sqid pearl skewed cat
+            iea iea-ocr
             transitive-closure pocr hpocr
             focr endpoint-quotient cert)
         add_test(NAME classical_cfl_vf_${classical_backend}

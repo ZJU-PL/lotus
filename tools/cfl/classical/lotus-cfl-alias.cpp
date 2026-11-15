@@ -32,7 +32,7 @@ struct Options {
 void usage(std::ostream &stream) {
   stream << "Usage: lotus-cfl-alias [options] INPUT.{ll,bc}\n"
             "Options:\n"
-            "  --solver sparse-set|sparse-bitvector|graspan|sqid|pearl|"
+            "  --solver sparse-set|sparse-bitvector|sparse-subset|graspan|sqid|"
             "skewed|cat|iea|iea-ocr|transitive-closure|pocr|hpocr|focr|"
             "endpoint-quotient|cert\n"
             "  --encoding pag|peg|cfl-peg  Default: cfl-peg\n"

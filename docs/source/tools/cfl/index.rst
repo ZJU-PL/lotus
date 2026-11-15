@@ -24,9 +24,9 @@ Classical CFL solving and clients
 
 ``lotus-cfl-solve`` runs a supplied grammar over a text, DOT, or JSON
 graph. Select the engine with ``--solver``; the available backends include
-``sparse-set``, ``sparse-bitvector``, ``graspan``, ``transitive-closure``,
-``pocr``, ``hpocr``, ``focr``, ``pearl``, ``stg``, ``sqid``, ``skewed``,
-``endpoint-quotient``, ``cert``, ``cat``, ``iea``, and ``iea-ocr``.
+``sparse-set``, ``sparse-bitvector``, ``sparse-subset``, ``graspan``,
+``transitive-closure``, ``pocr``, ``hpocr``, ``focr``, ``pearl``, ``stg``, ``sqid``,
+``skewed``, ``endpoint-quotient``, ``cert``, ``cat``, ``iea``, and ``iea-ocr``.
 
 ``lotus-cfl-alias`` consumes LLVM IR or bitcode. It uses Aser as the constraint
 frontend but drives points-to propagation and indirect-call discovery through
@@ -75,6 +75,12 @@ See :doc:`/cfl/classical/cat_ieoce` for the algorithm and API details.
 Use ``--solver cert`` to select the cardinality-certified exact all-symbol CFL
 reachability engine. See :doc:`/cfl/classical/cert_cfl` for architecture and
 options.
+
+Use ``--solver sparse-subset`` to select the all-pairs set-pair saturation
+engine. It is a batch backend: every ``solve`` recomputes the fixed point for
+the current graph, and the result is always the complete relation. It is not
+part of the ``--all-solvers`` benchmark sweep because of that rebuild cost. See
+:doc:`/cfl/classical/sparse_subset` for the algorithm and parameters.
 
 The general solver accepts the vendored datasets under
 ``benchmarks/real-world/CFL/Classical``, POCR grammar/graph files, and exposes

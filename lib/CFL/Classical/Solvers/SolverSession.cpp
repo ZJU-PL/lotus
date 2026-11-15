@@ -8,6 +8,7 @@
 #include "CFL/Classical/Solvers/Engines/POCR/PairedTreeClosure.h"
 #include "CFL/Classical/Solvers/Engines/SQID/SqidEngine.h"
 #include "CFL/Classical/Solvers/Engines/Skewed/SkewedTabulationEngine.h"
+#include "CFL/Classical/Solvers/Engines/SparseSubset/SparseSubsetCFL.h"
 #include "CFL/Classical/Solvers/Engines/TransitiveClosure.h"
 
 #include <algorithm>
@@ -25,6 +26,16 @@
 
 namespace lotus::cfl::classical {
 namespace {
+
+// Keep the public header surface unchanged: the parsed "sparse-subset"
+// backend occupies the next private enum value after the last public backend.
+// It is intentionally exposed through parseSolverBackend()/solverBackendName().
+constexpr SolverBackend kSparseSubsetBackend =
+    static_cast<SolverBackend>(static_cast<unsigned>(SolverBackend::CertCFL) + 1U);
+
+bool isSparseSubsetBackend(SolverBackend backend) {
+  return backend == kSparseSubsetBackend;
+}
 
 bool isTransitiveRule(const BinaryRuleId &rule) {
   return rule.lhs == rule.first && rule.lhs == rule.second;
@@ -286,11 +297,12 @@ createSolverRelation(SolverBackend backend, const Grammar &grammar,
                      const engines::cert::Options &cert_options,
                      const skewed::Options &skewed_options) {
   const auto &transitive_symbols = grammar.transitiveSymbols();
+  if (isSparseSubsetBackend(backend))
+    return createRelation(RelationBackend::SparseBitVectors, node_count);
   switch (backend) {
   case SolverBackend::SparseSet:
     return createRelation(RelationBackend::SparseSets, node_count);
   case SolverBackend::SparseBitVector:
-    return createRelation(RelationBackend::SparseBitVectors, node_count);
   case SolverBackend::Graspan:
   case SolverBackend::Sqid:
   case SolverBackend::Pearl:
@@ -331,6 +343,8 @@ createSolverRelation(SolverBackend backend, const Grammar &grammar,
 } // namespace
 
 const char *solverBackendName(SolverBackend backend) {
+  if (isSparseSubsetBackend(backend))
+    return "sparse-subset";
   switch (backend) {
   case SolverBackend::SparseSet:
     return "sparse-set";
@@ -374,6 +388,9 @@ SolverBackend parseSolverBackend(std::string_view name) {
   }
   if (name == "sparse-bitvector") {
     return SolverBackend::SparseBitVector;
+  }
+  if (name == "sparse-subset") {
+    return kSparseSubsetBackend;
   }
   if (name == "graspan") {
     return SolverBackend::Graspan;
@@ -646,6 +663,7 @@ public:
     if (backend_ != SolverBackend::Pearl && backend_ != SolverBackend::Stg &&
         backend_ != SolverBackend::Sqid && backend_ != SolverBackend::Skewed &&
         !isBatchSolverBackend(backend_) &&
+        !isSparseSubsetBackend(backend_) &&
         backend_ != SolverBackend::EndpointQuotient &&
         backend_ != SolverBackend::CertCFL) {
       for (SymbolId symbol : grammar_.nullableSymbolIds()) {
@@ -657,7 +675,15 @@ public:
       nullable_seeded_nodes_ = graph_.vertexCount();
     }
 
-    if (backend_ == SolverBackend::Pearl) {
+    if (isSparseSubsetBackend(backend_)) {
+      const auto before = relation_->edgeCount();
+      relation_ = engines::sparse_subset::solveAllPairs(graph_, grammar_);
+      const auto after = relation_->edgeCount();
+      stats.added_edges += after >= before ? after - before : 0;
+      stats.processed_work_items += after;
+      worklist_.clear();
+      primary_worklist_.clear();
+    } else if (backend_ == SolverBackend::Pearl) {
       const engines::PearlStatistics pearl = pearl_engine_->solve();
       stats.classical_iterations += pearl.batch_propagations;
       stats.processed_work_items += pearl.non_transitive_items +
