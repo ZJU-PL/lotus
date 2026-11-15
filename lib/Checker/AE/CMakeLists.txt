@@ -3,6 +3,7 @@
 
 set(AE_SOURCES
   AbstractState.cpp
+  AbstractStateStore.cpp
   AbstractInterpretation.cpp
   AEDetector.cpp
   AbsExtAPI.cpp

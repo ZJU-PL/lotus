@@ -404,8 +404,8 @@ bool modelStdContainerCall(AEExtAPI &extApi, const llvm::CallBase *call,
 
 } // namespace
 
-AEExtAPI::AEExtAPI(std::map<const llvm::Instruction *, AbstractState> &traces)
-    : module_(nullptr), abstractTrace(traces) {
+AEExtAPI::AEExtAPI(AbstractStateStore &states)
+    : module_(nullptr), states_(states) {
   initAnnotationMap();
   initExtFunMap();
 }
@@ -2266,12 +2266,12 @@ IntervalValue AEExtAPI::getRangeLimitFromType(llvm::Type *type) {
 }
 
 AbstractState &AEExtAPI::getAbsStateFromTrace(const llvm::Instruction *val) {
-  auto it = abstractTrace.find(val);
-  if (it == abstractTrace.end()) {
+  AbstractState *state = states_.find(val);
+  if (!state) {
     llvm::report_fatal_error(
         "No abstract state in trace for external API call");
   }
-  return it->second;
+  return *state;
 }
 
 std::string AEExtAPI::strRead(AbstractState &as, uint32_t strId) {

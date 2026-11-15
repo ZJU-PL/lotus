@@ -158,6 +158,89 @@ Controls how many iterations to perform before applying widening:
 - `3` - Default, matches SVF's AE widening delay
 - Higher values increase precision but may slow convergence
 
+### Abstract State Retention
+
+Abstract execution keeps an `AbstractState` per interpreted instruction, owned by
+`AbstractStateStore` (see `include/Checker/AE/AbstractStateStore.h`). The
+retention policy is selectable and never changes a finding:
+
+```bash
+lotus-check --engine=ae --ae.state-store=dense  prog.bc   # default: keep every state
+lotus-check --engine=ae --ae.state-store=sparse prog.bc   # drop unobservable states
+lotus-check --engine=ae --ae.state-store-stats prog.bc    # report retention
+```
+
+- `dense` keeps a full state for every instruction and a per-instruction copy of
+  every intermediate value. Use it when client code inspects the state of an
+  arbitrary instruction (e.g. `getInstructionValue`).
+- `semi-sparse` is SVF's semi-sparse layout: intermediate values (ValVars) live
+  in a single run-wide *def-site* table instead of being copied into every
+  instruction's state, while object maps stay per instruction. Ordinary joins
+  merge only the object map (`SparseAbstractInterpretation::joinStates`); a loop
+  head instead materializes its cycle's values, widens them, and scatters them
+  back (`AbstractInterpretation::cycleValueIds`).
+- `sparse` is currently the same as `semi-sparse`: SVF's extra level also builds
+  an SVFG and stores object values at def sites, which Lotus's instruction-keyed
+  AE does not have. Both spellings are accepted so SVF command lines keep
+  working.
+
+Both sparse levels additionally drop states no later reader can observe. Pinned:
+block heads (joins, widening/narrowing), block terminators, call sites
+(checkpoints, external API models, detector queries) and allocas.
+
+`--ae.sparsity=dense|semi-sparse|sparse` is accepted as the SVF-compatible
+spelling of the same option.
+
+Measured on SPEC2006 `470.lbm`:
+
+| layout | states retained | states released | peak states | peak RSS |
+|---|---|---|---|---|
+| `dense` | 4330 | 0 | 4330 | 347 MB |
+| `semi-sparse` | 637 | 138137 | 637 | 120 MB |
+| `sparse` | 637 | 138137 | 637 | 120 MB |
+
+**Known limitation.** The def-site layout is still a work in progress on
+precision: on this benchmark it reports more findings than `dense` (3 vs 1
+buffer overflow, 253 vs 31 null dereferences). `AESparsityEquivalenceTest`
+covers the shapes where the layouts already agree -- nested loops, self and
+mutual recursion, switch diamonds and heap lifecycles -- so the invariant holds
+there, but not universally yet. The remaining gap is a value whose def-site entry
+has not been written at the point of a read: it currently reads as bottom, where
+SVF substitutes a type-directed top. Do not enable `semi-sparse`/`sparse` in
+experiments until that is fixed; `dense` remains the default.
+
+### Store update semantics
+
+A memory store is a *strong* update only when the pointer names a single,
+non-summary object; otherwise the stored value is joined into every may-alias.
+This is SVF's `AbstractInterpretation::isStrongUpdate` rule and it is
+implemented by `AbstractState::allowsStrongUpdate` (state-level checks: single
+target, not null/black-hole, not a heap object, not field-insensitive, not an
+oversized aggregate) plus
+`AbstractInterpretation::isStrongUpdateForStore` (call-graph/type-level checks:
+locals of recursive functions, array bases).
+
+`AEStoreSemanticsTest` pins each condition down individually.
+
+### Singleton reuse across modules
+
+`AbstractInterpretation` is a process-wide singleton, so a library user (or a
+test binary) can analyze several modules in one process. Each
+`runOnModule` now recreates the pointer-analysis pass: the legacy
+`PointerAnalysisPass::analyze` short-circuits when the module pointer matches the
+one it already analyzed, which silently returns the previous module's analysis
+when a freed module's address is reused. That produced wrong store targets (and
+a crash) for the second module.
+
+### Entry mode and time budget
+
+- `--ae.fun-entry=main|no-main` — analyze from `main` (default) or every defined
+  function. Mirrors SVF's `-ae-fun-entry`.
+- `--ae.timeout=<seconds>` — wall-clock budget for the whole run; `0` disables
+  it. On expiry the analysis stops and still reports the findings collected so
+  far, plus a `budget exhausted` notice. (SVF declares the equivalent
+  `-timeout` option but never checks it.)
+
 ## Implementation Details
 
 ### SVFIR Decoupling

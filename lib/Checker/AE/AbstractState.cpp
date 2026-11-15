@@ -74,6 +74,10 @@ AbstractState AbstractState::widening(const AbstractState &other) {
   // Match SVF semantics: iterate over existing keys in this, then widen with
   // other
   AbstractState result = *this;
+  // Never widen/narrow a shared def-site table in place: the caller
+  // materializes the cycle's values first, and this keeps a stray call from
+  // corrupting it.
+  result.materializeVarTable();
   for (auto it = result._varToAbsVal.begin(); it != result._varToAbsVal.end();
        ++it) {
     auto key = it->first;
@@ -115,6 +119,10 @@ AbstractState AbstractState::narrowing(const AbstractState &other) {
   // Match SVF semantics: iterate over existing keys in this, then narrow with
   // other
   AbstractState result = *this;
+  // Never widen/narrow a shared def-site table in place: the caller
+  // materializes the cycle's values first, and this keeps a stray call from
+  // corrupting it.
+  result.materializeVarTable();
   for (auto it = result._varToAbsVal.begin(); it != result._varToAbsVal.end();
        ++it) {
     auto key = it->first;
@@ -152,15 +160,22 @@ AbstractState AbstractState::narrowing(const AbstractState &other) {
 
 /// Domain join with other, important! other widen this.
 void AbstractState::joinWith(const AbstractState &other) {
-  // Match SVF semantics: only join with existing keys, otherwise emplace
-  for (auto it = other._varToAbsVal.begin(); it != other._varToAbsVal.end();
-       ++it) {
-    auto key = it->first;
-    auto oit = _varToAbsVal.find(key);
-    if (oit != _varToAbsVal.end()) {
-      oit->second.join_with(it->second);
-    } else {
-      _varToAbsVal.emplace(key, it->second);
+  // In the def-site layout every intermediate value has exactly one home, so a
+  // join only has to merge the object map. SVF's semi-sparse layout does the
+  // same (`SparseAbstractInterpretation::joinStates`). Cycle heads are the one
+  // exception and are handled by explicitly materializing the cycle's values in
+  // `AbstractInterpretation` before widening.
+  if (!_varToAbsVal.isDefSite()) {
+    // Match SVF semantics: only join with existing keys, otherwise emplace
+    for (auto it = other._varToAbsVal.begin(); it != other._varToAbsVal.end();
+         ++it) {
+      auto key = it->first;
+      auto oit = _varToAbsVal.find(key);
+      if (oit != _varToAbsVal.end()) {
+        oit->second.join_with(it->second);
+      } else {
+        _varToAbsVal.emplace(key, it->second);
+      }
     }
   }
   for (auto it = other._addrToAbsVal.begin(); it != other._addrToAbsVal.end();
@@ -242,7 +257,7 @@ void AbstractState::printAbstractState() const {
 }
 
 bool AbstractState::equals(const AbstractState &other) const {
-  return eqVarToValMap(_varToAbsVal, other._varToAbsVal) &&
+  return eqVarToValMap(_varToAbsVal.map(), other._varToAbsVal.map()) &&
          eqVarToValMap(_addrToAbsVal, other._addrToAbsVal) &&
          _freedAddrs == other._freedAddrs && _heapObjs == other._heapObjs &&
          _objToSize == other._objToSize;
@@ -350,16 +365,24 @@ AbstractValue AbstractState::loadValue(uint32_t varId) {
   return result;
 }
 
-void AbstractState::storeValue(uint32_t varId, uint32_t valId) {
+void AbstractState::storeValue(uint32_t varId, uint32_t valId,
+                               StoreKind kind) {
   AbstractValue val = _varToAbsVal[valId];
+
+  // A weak store joins into every target; a strong store replaces it.
+  const auto storeInto = [&](uint32_t addr) {
+    if (!AddressValue::isVirtualMemAddress(addr) || isFreedMem(addr))
+      return;
+    if (kind == StoreKind::Strong)
+      store(addr, val);
+    else
+      weakStore(addr, val);
+  };
 
   // Store to addresses in abstract state
   if (inVarToAddrsTable(varId)) {
-    for (auto addr : _varToAbsVal[varId].getAddrs()) {
-      if (!AddressValue::isVirtualMemAddress(addr) || isFreedMem(addr))
-        continue;
-      store(addr, val);
-    }
+    for (auto addr : _varToAbsVal[varId].getAddrs())
+      storeInto(addr);
   }
 
   const llvm::Value *valPtr =
@@ -369,11 +392,8 @@ void AbstractState::storeValue(uint32_t varId, uint32_t valId) {
         resolvePointerBaseAndOffset(*this, valPtr, varId);
     AddressValue derivedAddrs =
         getGepObjAddrs(resolved.first, IntervalValue(resolved.second));
-    for (uint32_t addr : derivedAddrs) {
-      if (!AddressValue::isVirtualMemAddress(addr) || isFreedMem(addr))
-        continue;
-      store(addr, val);
-    }
+    for (uint32_t addr : derivedAddrs)
+      storeInto(addr);
   }
 
   // Use PTA to get more precise points-to information (matching SVF's behavior)
@@ -396,9 +416,8 @@ void AbstractState::storeValue(uint32_t varId, uint32_t valId) {
         if (objId == 0) // ConstantPointerNull; getVirtualMemAddress(0) asserts
           continue;
         uint32_t objAddr = getVirtualMemAddress(objId);
-        if (!isNullMem(objAddr) && !isFreedMem(objAddr)) {
-          store(objAddr, val);
-        }
+        if (!isNullMem(objAddr) && !isFreedMem(objAddr))
+          storeInto(objAddr);
       }
     }
   }
@@ -439,6 +458,10 @@ AddressValue AbstractState::getGepObjAddrs(uint32_t pointer,
       }
       result.insert(gepAddr);
     } else {
+      // A non-numeral offset means the field cannot be identified statically:
+      // SVF marks the object field-insensitive and merges its fields into the
+      // base, which also disables strong updates through it.
+      markFieldInsensitiveObject(baseObjId);
       // For interval offset, iterate over the range (limited to MaxFieldLimit)
       for (int64_t i = lb; i <= ub; ++i) {
         // Create field-sensitive GEP object ID for each offset

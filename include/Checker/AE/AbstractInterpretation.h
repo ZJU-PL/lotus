@@ -24,10 +24,12 @@
 #pragma once
 
 #include "Checker/AE/AEDetector.h"
+#include "Checker/AE/AbstractStateStore.h"
 #include "Checker/AE/ICFGWTO.h"
 #include "Checker/AE/RelationSolver.h"
 #include "Checker/AE/SVFIRWrapper.h"
 
+#include <chrono>
 #include <cstdint>
 #include <list>
 #include <map>
@@ -201,6 +203,32 @@ public:
   void setEnableOverflowCheck(bool enable) { enableOverflowCheck_ = enable; }
   void setEnableMemLeakCheck(bool enable) { enableMemLeakCheck_ = enable; }
   void setAnalyzeAllFunctions(bool enable) { analyzeAllFunctions_ = enable; }
+
+  /// Restricts the analysis to the entry points reachable from `main` (`Main`)
+  /// or analyzes every defined function (`NoMain`). Mirrors SVF's
+  /// `-ae-fun-entry` option.
+  enum class FunEntryMode { Main, NoMain };
+
+  void setFunEntryMode(FunEntryMode mode) {
+    analyzeAllFunctions_ = (mode == FunEntryMode::NoMain);
+  }
+
+  FunEntryMode getFunEntryMode() const {
+    return analyzeAllFunctions_ ? FunEntryMode::NoMain : FunEntryMode::Main;
+  }
+
+  /// Wall-clock budget for the whole abstract execution in seconds. `0` or a
+  /// negative value disables the budget. On expiry the analysis stops with the
+  /// findings collected so far and reports the truncation through
+  /// `analysisTimedOut()`.
+  ///
+  /// SVF declares the equivalent `-timeout` option but never enforces it; the
+  /// budget here is actually checked in the interpretation loops.
+  void setTimeLimitSeconds(int64_t seconds) { timeLimitSeconds_ = seconds; }
+
+  int64_t getTimeLimitSeconds() const { return timeLimitSeconds_; }
+
+  bool analysisTimedOut() const { return timedOut_; }
   void setPrintStats(bool enable) { printStats_ = enable; }
 
   std::set<const llvm::CallBase *> checkpoints;
@@ -215,17 +243,26 @@ public:
   }
 
   AbstractState &getAbsStateFromTrace(const llvm::Instruction *val) {
-    auto it = abstractTrace.find(val);
-    if (it == abstractTrace.end()) {
+    AbstractState *state = stateStore_.find(val);
+    if (!state) {
       llvm::report_fatal_error(
           "No abstract state in trace for requested instruction");
     }
-    return it->second;
+    return *state;
   }
 
   bool hasAbsStateFromTrace(const llvm::Instruction *val) {
-    return abstractTrace.count(val) != 0;
+    return stateStore_.contains(val);
   }
+
+  /// Selects how per-instruction states are retained. Both layouts answer the
+  /// same queries; `StateLayout::Sparse` only stops retaining states that no
+  /// later reader can observe.
+  void setStateLayout(StateLayout layout) { stateStore_.setLayout(layout); }
+
+  StateLayout getStateLayout() const { return stateStore_.layout(); }
+
+  const AbstractStateStore &getStateStore() const { return stateStore_; }
 
   AEExtAPI *getUtils() const { return utils; }
 
@@ -276,21 +313,32 @@ private:
   bool enableOverflowCheck_{false};
   bool enableMemLeakCheck_{false}; // Disabled by default
   bool analyzeAllFunctions_{false};
+  int64_t timeLimitSeconds_{0};
+  bool timedOut_{false};
+  /// Per-return-site slot ids (`returnSlotId`).
+  mutable std::unordered_map<const llvm::Instruction *, uint32_t> retSlotIds_;
+  /// Cache of cycle -> value ids defined inside it (def-site layout only).
+  /// An entry whose vector is empty means "materialize everything".
+  std::map<const ICFGCycleWTO *, std::unordered_set<uint32_t>> cycleValueIds_;
+  std::chrono::steady_clock::time_point deadline_;
   bool printStats_{false};
 
   // Track which checkpoints have been checked
   std::set<const llvm::CallBase *> checkedCheckpoints_;
 
   std::vector<std::unique_ptr<AEDetector>> detectors;
-  std::map<const llvm::Instruction *, AbstractState> abstractTrace;
+  /// Per-instruction abstract states, retention policy selected by
+  /// `setStateLayout`. Replaces the historical raw state map so the sparse
+  /// layout can drop unobservable states.
+  AbstractStateStore stateStore_;
   AbstractState globalState; // State for global variables
   std::map<std::string, std::function<void(const llvm::CallBase *)>> func_map;
   std::vector<const llvm::CallBase *> callSiteStack;
 
   // Stable value ID mapping
-  std::unordered_map<const llvm::Value *, uint32_t> valueToIdMap_;
+  mutable std::unordered_map<const llvm::Value *, uint32_t> valueToIdMap_;
   std::unordered_map<uint32_t, const llvm::Value *> idToValueMap_;
-  uint32_t nextValueId_;
+  mutable uint32_t nextValueId_;
   // Dedicated slot for function return summaries (must not collide with
   // NullPtr ID 0 or regular value IDs).
   enum : uint32_t { ReturnValueId = 0xFFFFFFFEu };
@@ -366,6 +414,46 @@ private:
   void handleRecursiveSCC(const llvm::Function *seed);
   const llvm::Function *getCallee(const llvm::CallBase *callNode);
   bool shouldApplyNarrowing(const llvm::Function *fun);
+
+  /// Value ids defined inside a WTO cycle. In the def-site layout these are the
+  /// entries that must be materialized out of the run-wide table before
+  /// widening/narrowing a cycle head, and scattered back afterwards
+  /// (SVF: `initCycleValVars` + the `*CycleState` overrides).
+  ///
+  /// Returns `nullptr` when the cycle contains a call to a recursive function:
+  /// the values that matter then live in the callee, so the whole table has to
+  /// be materialized to keep the widened fixpoint identical to the dense one.
+  const std::unordered_set<uint32_t> *cycleValueIds(const ICFGCycleWTO *cycle);
+
+  /// Starts the wall-clock budget. Called once per analysis run.
+  void startTimeBudget();
+
+  /// Returns true once the budget is exhausted, and latches `timedOut_`.
+  bool timeBudgetExhausted();
+
+  /// Decides whether a store through a pointer with address set @p targets may
+  /// replace the target object instead of being joined into it.
+  ///
+  /// Completes `AbstractState::allowsStrongUpdate` with the two checks that
+  /// need call-graph and type information, matching SVF's
+  /// `AbstractInterpretation::isStrongUpdate`:
+  /// local variables of recursive functions and array bases.
+  bool isStrongUpdateForStore(const AddressValue &targets,
+                              const AbstractState &state) const;
+
+  /// Whether @p objId denotes a local object of a recursive function.
+  /// Value id under which a `ret` instruction's returned value is recorded.
+  ///
+  /// Every return site gets its own id: the historical shared sentinel
+  /// (`ReturnValueId`) is written at every `ret`, which collides as soon as
+  /// intermediate values are stored once per definition (def-site layout).
+  uint32_t returnSlotId(const llvm::Instruction *ret) const;
+
+  bool isLocalOfRecursiveFun(uint32_t objId) const;
+
+  /// Whether @p objId is the base object of an array allocation. Individual
+  /// (constant-offset) field objects are not array bases and stay updatable.
+  bool isArrayBaseObject(uint32_t objId) const;
 
   void collectCheckPoint();
   void checkPointAllSet();

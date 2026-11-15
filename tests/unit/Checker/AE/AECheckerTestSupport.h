@@ -54,7 +54,8 @@ protected:
                  AbstractInterpretation::HandleRecur recursionMode =
                      AbstractInterpretation::WIDEN_NARROW,
                  std::optional<unsigned> widenDelay = 3u,
-                 bool enableDivZero = false, bool enableIntOverflow = false) {
+                 bool enableDivZero = false, bool enableIntOverflow = false,
+                 StateLayout stateLayout = StateLayout::Dense) {
     if (!module->getFunction("main")) {
       FunctionType *MainTy =
           FunctionType::get(Type::getInt32Ty(context), false);
@@ -67,6 +68,7 @@ protected:
 
     AbstractInterpretation &ae = AbstractInterpretation::getAEInstance();
     ae.reset();
+    ae.setStateLayout(stateLayout);
     ae.setStrictCheckpoint(false);
     ae.setAnalyzeAllFunctions(analyzeAllFunctions);
     ae.setRecursionMode(recursionMode);

@@ -347,7 +347,7 @@ AbstractInterpretation::~AbstractInterpretation() {
 void AbstractInterpretation::resetAnalysisState() {
   // Clear all state to prevent leakage between module analyses while
   // preserving the configured detector set and user-selected options.
-  abstractTrace.clear();
+  stateStore_.clear();
   globalState = AbstractState();
   checkpoints.clear();
   callSiteStack.clear();
@@ -371,6 +371,8 @@ void AbstractInterpretation::resetAnalysisState() {
   recursiveSccIdMap_.clear();
   recursiveSccMembers_.clear();
   cycleHeadToCycle_.clear();
+  cycleValueIds_.clear();
+  retSlotIds_.clear();
   analyzedFunctions_.clear();
 
   // Clean up WTO objects
@@ -398,7 +400,16 @@ void AbstractInterpretation::resetAnalysisState() {
       detector->reset();
     }
   }
-  // Note: pta_ is kept (can be reused)
+
+  // Recreate the pointer-analysis pass instead of reusing it.
+  //
+  // `PointerAnalysisPass::analyze` short-circuits when the module pointer and
+  // entry name match the ones it already analyzed. When a previous module has
+  // been freed and the next one is allocated at the same address, that check
+  // hands back the *stale* analysis of the old module: its objects point into
+  // freed memory. Recreating the pass makes every run analyze its own module.
+  if (pta_)
+    pta_->pass.reset(new PTAPass());
   ptaReady_ = false;
 }
 
@@ -459,7 +470,7 @@ void AbstractInterpretation::runOnModule(llvm::Module *module) {
   if (utils) {
     delete utils;
   }
-  utils = new AEExtAPI(abstractTrace);
+  utils = new AEExtAPI(stateStore_);
 
   auto hasDetectorKind = [&](AEDetector::DetectorKind kind) {
     return std::any_of(detectors.begin(), detectors.end(),
@@ -491,8 +502,22 @@ void AbstractInterpretation::runOnModule(llvm::Module *module) {
   stat->endClk();
 
   stat->finializeStat();
-  if (!isAEQuietMode() && printStats_)
+  if (!isAEQuietMode() && printStats_) {
     stat->performStat();
+    const AbstractStateStore::Statistics &storeStats = stateStore_.stats();
+    llvm::errs() << "\n======= Abstract state store =======\n"
+                 << "layout                     : "
+                 << toString(stateStore_.layout()) << "\n"
+                 << "states retained            : " << stateStore_.size()
+                 << "\n"
+                 << "states pinned              : " << stateStore_.pinnedCount()
+                 << "\n"
+                 << "states created             : " << storeStats.created
+                 << "\n"
+                 << "states released            : " << storeStats.released
+                 << "\n"
+                 << "peak states                : " << storeStats.peak << "\n";
+  }
 
   for (auto &detector : detectors)
     detector->reportBug();
@@ -505,6 +530,8 @@ void AbstractInterpretation::runOnModule(llvm::Module *module) {
 
 /// Program entry
 void AbstractInterpretation::analyse() {
+  startTimeBudget();
+
   // Initialize call graph SCC detection
   initCallGraphSCC();
 
@@ -554,6 +581,8 @@ void AbstractInterpretation::analyse() {
       continue;
     if (analyzedFunctions_.count(func))
       continue;
+    if (timeBudgetExhausted())
+      return;
     handleFunction(func);
   }
 }
@@ -762,6 +791,13 @@ void AbstractInterpretation::initCallGraphSCC() {
         recursiveSccIdMap_[f] = rid;
         members.push_back(f);
       }
+      // SCC detection walks pointer-keyed maps, so member order can change
+      // between processes. Fixpoint iteration (and therefore the def-site
+      // layout, which overwrites shared values) must not depend on that.
+      std::sort(members.begin(), members.end(),
+                [](const llvm::Function *lhs, const llvm::Function *rhs) {
+                  return lhs->getName() < rhs->getName();
+                });
     }
   }
 
@@ -1033,6 +1069,8 @@ void AbstractInterpretation::handleCycleWTO(const ICFGCycleWTO *cycle) {
   const uint32_t widenDelay = widenDelay_;
 
   for (uint32_t curIter = 0;; curIter++) {
+    if (timeBudgetExhausted())
+      break;
     // Get the abstract state before processing the cycle head
     AbstractState prevHeadState;
     bool hadPrevState = false;
@@ -1040,8 +1078,8 @@ void AbstractInterpretation::handleCycleWTO(const ICFGCycleWTO *cycle) {
     // Try to get state from first instruction of cycle head
     if (!cycleHead->empty()) {
       const llvm::Instruction *firstInst = &cycleHead->front();
-      if (abstractTrace.find(firstInst) != abstractTrace.end()) {
-        prevHeadState = abstractTrace[firstInst];
+      if (const AbstractState *headState = stateStore_.find(firstInst)) {
+        prevHeadState = *headState;
         hadPrevState = true;
       }
     }
@@ -1053,9 +1091,19 @@ void AbstractInterpretation::handleCycleWTO(const ICFGCycleWTO *cycle) {
     AbstractState curHeadState;
     if (!cycleHead->empty()) {
       const llvm::Instruction *firstInst = &cycleHead->front();
-      if (abstractTrace.find(firstInst) != abstractTrace.end()) {
-        curHeadState = abstractTrace[firstInst];
+      if (const AbstractState *headState = stateStore_.find(firstInst)) {
+        curHeadState = *headState;
       }
+    }
+
+    // Def-site layout: widen only the values defined inside the cycle. They are
+    // pulled out of the run-wide table into these two snapshots, widened here,
+    // and scattered back by the `set()` below -- SVF's gather/scatter around
+    // `widenCycleState` (see `SparseAbstractInterpretation::widenCycleState`).
+    if (stateStore_.usesDefSiteVars()) {
+      const std::unordered_set<uint32_t> *cycleVals = cycleValueIds(cycle);
+      prevHeadState.materializeVarTable(cycleVals);
+      curHeadState.materializeVarTable(cycleVals);
     }
 
     // Match SVF: apply widening/narrowing at cycle head before processing body.
@@ -1067,7 +1115,7 @@ void AbstractInterpretation::handleCycleWTO(const ICFGCycleWTO *cycle) {
         // Update state at cycle head
         if (!cycleHead->empty()) {
           const llvm::Instruction *firstInst = &cycleHead->front();
-          abstractTrace[firstInst] = widenedState;
+          stateStore_.set(firstInst, widenedState);
           curHeadState = widenedState; // Update for comparison
         }
 
@@ -1089,7 +1137,7 @@ void AbstractInterpretation::handleCycleWTO(const ICFGCycleWTO *cycle) {
         // Update state at cycle head
         if (!cycleHead->empty()) {
           const llvm::Instruction *firstInst = &cycleHead->front();
-          abstractTrace[firstInst] = narrowedState;
+          stateStore_.set(firstInst, narrowedState);
           curHeadState = narrowedState; // Update for comparison
         }
 
@@ -1130,22 +1178,24 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
 
     // Try to get state from terminator instruction
     const llvm::Instruction *term = pred->getTerminator();
-    auto it = abstractTrace.find(term);
-    if (it != abstractTrace.end()) {
-      tmpEs = it->second;
+    if (const AbstractState *termState = stateStore_.find(term)) {
+      tmpEs = *termState;
       foundState = true;
     } else {
       // Try to get state from first instruction of block
       if (!pred->empty()) {
-        auto it2 = abstractTrace.find(&pred->front());
-        if (it2 != abstractTrace.end()) {
-          tmpEs = it2->second;
+        if (const AbstractState *frontState =
+                stateStore_.find(&pred->front())) {
+          tmpEs = *frontState;
           foundState = true;
         }
       }
     }
 
     if (foundState) {
+      // Branch refinement mutates this snapshot, so it must not alias the
+      // run-wide def-site table.
+      tmpEs.materializeVarTable();
       // Check if this is a conditional branch and if the edge is feasible
       if (const llvm::BranchInst *branch =
               llvm::dyn_cast<llvm::BranchInst>(term)) {
@@ -1221,15 +1271,14 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
     if (bb == &bb->getParent()->getEntryBlock()) {
       if (!bb->empty()) {
         const llvm::Instruction *firstInst = &bb->front();
-        auto existing = abstractTrace.find(firstInst);
-        if (existing != abstractTrace.end()) {
+        if (const AbstractState *existing = stateStore_.find(firstInst)) {
           // Preserve callsite-seeded entry state (args/params) and merge
           // globals.
           AbstractState merged = globalState;
-          merged.joinWith(existing->second);
-          abstractTrace[firstInst] = merged;
+          merged.joinWith(*existing);
+          stateStore_.set(firstInst, merged);
         } else {
-          abstractTrace[firstInst] = globalState;
+          stateStore_.set(firstInst, globalState);
         }
       }
       return true;
@@ -1237,7 +1286,7 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
 
     // No predecessors with state - initialize empty state
     if (!bb->empty()) {
-      abstractTrace[&bb->front()] = AbstractState();
+      stateStore_.set(&bb->front(), AbstractState());
     }
     return false;
   }
@@ -1250,16 +1299,19 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
 
   // Store state at first instruction of block
   if (!bb->empty()) {
-    abstractTrace[&bb->front()] = preAs;
+    stateStore_.set(&bb->front(), preAs);
   }
   return true;
 }
 
 bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
   stat->stmtCount++;
+  // Checking the clock per instruction is too expensive; sample every 256.
+  if ((stat->stmtCount & 0xFFu) == 0 && timeBudgetExhausted())
+    return false;
   this->currentInstruction_ = inst;
 
-  if (abstractTrace.find(inst) == abstractTrace.end()) {
+  if (!stateStore_.contains(inst)) {
     const llvm::BasicBlock *bb = inst->getParent();
     // First try: inherit from previous instruction in same block (intra-block
     // flow). This is critical for entry blocks and blocks with no CFG preds.
@@ -1269,29 +1321,36 @@ bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
         break;
       prevInst = &I;
     }
+    bool inherited = false;
     if (prevInst) {
-      auto prevIt = abstractTrace.find(prevInst);
-      if (prevIt != abstractTrace.end()) {
-        abstractTrace[inst] = prevIt->second;
+      if (const AbstractState *prevState = stateStore_.find(prevInst)) {
+        stateStore_.inherit(inst, *prevState);
+        inherited = true;
       }
     }
     // Fallback: inherit from CFG predecessors
-    if (abstractTrace.find(inst) == abstractTrace.end()) {
+    if (!inherited && !stateStore_.contains(inst)) {
+      bool predInherited = false;
       auto predIt = llvm::pred_begin(bb);
       if (predIt != llvm::pred_end(bb)) {
         const llvm::Instruction *predTerm = (*predIt)->getTerminator();
-        if (abstractTrace.find(predTerm) != abstractTrace.end()) {
-          abstractTrace[inst] = abstractTrace[predTerm];
-        } else {
-          abstractTrace[inst] = AbstractState();
+        if (const AbstractState *predState = stateStore_.find(predTerm)) {
+          stateStore_.inherit(inst, *predState);
+          predInherited = true;
         }
-      } else {
-        abstractTrace[inst] = AbstractState();
       }
+      if (!predInherited)
+        stateStore_.inherit(inst, AbstractState());
     }
   }
 
-  AbstractState &as = abstractTrace[inst];
+  AbstractState &as = stateStore_.getOrCreate(inst);
+  // Pin the states a later reader may observe: call sites (checkpoints, external
+  // API models, detector queries), block terminators (successor joins) and
+  // allocas (object-size bookkeeping). Everything else stays transient.
+  if (llvm::isa<llvm::CallBase>(inst) || inst->isTerminator() ||
+      llvm::isa<llvm::AllocaInst>(inst))
+    stateStore_.pin(inst);
 
   // Initialize null pointer constant in abstract state if not already present
   // NullPtr is 0, which is the ID assigned to ConstantPointerNull values
@@ -1395,11 +1454,12 @@ void AbstractInterpretation::updateStateOnAddr(const llvm::AllocaInst *addr) {
   // Use improved version that tracks VLA sizes from abstract state
   // Note: We use the state at the alloca instruction itself
   uint32_t objSize =
-      abstractTrace[addr].getAllocaInstByteSize(addr, abstractTrace[addr]);
+      stateStore_.getOrCreatePinned(addr).getAllocaInstByteSize(
+          addr, stateStore_.getOrCreatePinned(addr));
 
   AbstractValue av(AddressValue(AddressValue::getVirtualMemAddress(addrId)));
-  abstractTrace[addr][addrId] = av;
-  abstractTrace[addr].setObjSize(addrId, objSize);
+  stateStore_.getOrCreate(addr)[addrId] = av;
+  stateStore_.getOrCreate(addr).setObjSize(addrId, objSize);
 }
 
 void AbstractInterpretation::updateStateOnBinary(
@@ -1408,7 +1468,7 @@ void AbstractInterpretation::updateStateOnBinary(
   uint32_t op0Id = getValueId(binary->getOperand(0));
   uint32_t op1Id = getValueId(binary->getOperand(1));
 
-  AbstractState &as = abstractTrace[binary];
+  AbstractState &as = stateStore_.getOrCreate(binary);
 
   materializeConstantValue(as, binary->getOperand(0), op0Id);
   materializeConstantValue(as, binary->getOperand(1), op1Id);
@@ -1485,7 +1545,7 @@ void AbstractInterpretation::updateStateOnCmp(const llvm::CmpInst *cmp) {
   uint32_t op0Id = getValueId(cmp->getOperand(0));
   uint32_t op1Id = getValueId(cmp->getOperand(1));
 
-  AbstractState &as = abstractTrace[cmp];
+  AbstractState &as = stateStore_.getOrCreate(cmp);
 
   materializeConstantValue(as, cmp->getOperand(0), op0Id);
   materializeConstantValue(as, cmp->getOperand(1), op1Id);
@@ -1643,7 +1703,7 @@ void AbstractInterpretation::updateStateOnLoad(const llvm::LoadInst *load) {
   uint32_t lhsId = getValueId(load);
   uint32_t ptrId = getValueId(load->getPointerOperand());
 
-  AbstractState &as = abstractTrace[load];
+  AbstractState &as = stateStore_.getOrCreate(load);
   AbstractValue loadedVal = as.loadValue(ptrId);
 
   as[lhsId] = loadedVal;
@@ -1653,15 +1713,24 @@ void AbstractInterpretation::updateStateOnStore(const llvm::StoreInst *store) {
   uint32_t ptrId = getValueId(store->getPointerOperand());
   uint32_t valId = getValueId(store->getValueOperand());
 
-  AbstractState &as = abstractTrace[store];
+  AbstractState &as = stateStore_.getOrCreate(store);
   materializeConstantValue(as, store->getValueOperand(), valId);
-  as.storeValue(ptrId, valId);
+
+  // A store is a strong update only when the pointer names a single,
+  // non-summary object; otherwise the new value has to be joined in. This is
+  // SVF's isStrongUpdate rule (AbstractStateManager.cpp).
+  AbstractState::StoreKind kind = AbstractState::StoreKind::Weak;
+  if (as.inVarToAddrsTable(ptrId) &&
+      isStrongUpdateForStore(as[ptrId].getAddrs(), as))
+    kind = AbstractState::StoreKind::Strong;
+
+  as.storeValue(ptrId, valId, kind);
 }
 
 void AbstractInterpretation::updateStateOnCast(const llvm::CastInst *cast) {
   uint32_t lhsId = getValueId(cast);
   uint32_t opId = getValueId(cast->getOperand(0));
-  AbstractState &as = abstractTrace[cast];
+  AbstractState &as = stateStore_.getOrCreate(cast);
 
   if (as.inVarToAddrsTable(opId)) {
     // Pointer cast - preserve address
@@ -1835,44 +1904,41 @@ void AbstractInterpretation::updateStateOnCall(const llvm::CallBase *call) {
     }
   }
 
-  auto callIt = abstractTrace.find(call);
-  if (callIt == abstractTrace.end())
+  if (!stateStore_.contains(call))
     return;
 
-  const AbstractState baseState = callIt->second;
+  AbstractState &callSlot = stateStore_.getOrCreate(call);
+  const AbstractState baseState = callSlot;
   AbstractState joinedState = baseState;
   bool hasJoinedState = false;
 
   if (!extCallees.empty()) {
-    callIt->second = baseState;
+    callSlot = baseState;
     handleExtCall(call, extCallees);
-    joinedState = callIt->second;
+    joinedState = callSlot;
     hasJoinedState = true;
   }
 
   if (!intCallees.empty()) {
-    callIt->second = baseState;
+    callSlot = baseState;
     handleFunCall(call, intCallees);
     if (hasJoinedState) {
-      joinedState.joinWith(callIt->second);
+      joinedState.joinWith(callSlot);
     } else {
-      joinedState = callIt->second;
+      joinedState = callSlot;
       hasJoinedState = true;
     }
   }
 
-  if (hasJoinedState) {
-    callIt->second = joinedState;
-  } else {
-    callIt->second = baseState;
-  }
+  callSlot = hasJoinedState ? joinedState : baseState;
 }
 
 void AbstractInterpretation::updateStateOnRet(const llvm::ReturnInst *ret) {
   if (ret->getReturnValue()) {
     uint32_t retId = getValueId(ret->getReturnValue());
-    AbstractState &as = abstractTrace[ret];
-    abstractTrace[ret][AbstractInterpretation::ReturnValueId] = as[retId];
+    AbstractState &as = stateStore_.getOrCreate(ret);
+    stateStore_.pin(ret);
+    stateStore_.getOrCreate(ret)[returnSlotId(ret)] = as[retId];
   }
 }
 
@@ -1926,16 +1992,9 @@ void AbstractInterpretation::updateStateOnRetPE(const llvm::ReturnInst *ret,
   uint32_t retId = getValueId(ret->getReturnValue());
   uint32_t callId = getValueId(call);
 
-  AbstractState &calleeState = abstractTrace[ret];
+  AbstractState &calleeState = stateStore_.getOrCreate(ret);
   auto retIt = calleeState._varToAbsVal.find(retId);
   if (retIt != calleeState._varToAbsVal.end()) {
-    if (callerState._varToAbsVal.count(AbstractInterpretation::ReturnValueId) ==
-        0) {
-      callerState[AbstractInterpretation::ReturnValueId] = retIt->second;
-    } else {
-      callerState[AbstractInterpretation::ReturnValueId].join_with(
-          retIt->second);
-    }
     if (callerState._varToAbsVal.count(callId) == 0) {
       callerState[callId] = retIt->second;
     } else {
@@ -1953,7 +2012,7 @@ void AbstractInterpretation::updateStateOnCopy(const llvm::Value *dst,
   uint32_t dstId = getValueId(dst);
   uint32_t srcId = getValueId(src);
 
-  AbstractState &as = abstractTrace[curInst];
+  AbstractState &as = stateStore_.getOrCreate(curInst);
 
   if (as.inVarToValTable(srcId)) {
     as[dstId] = as[srcId];
@@ -1971,7 +2030,7 @@ void AbstractInterpretation::updateStateOnGep(
   uint32_t lhsId = getValueId(gep);
   uint32_t ptrId = getValueId(gep->getPointerOperand());
 
-  AbstractState &as = abstractTrace[gep];
+  AbstractState &as = stateStore_.getOrCreate(gep);
 
   // Use getElementIndex (like SVF) instead of getByteOffset: getElementIndex
   // clamps with meet_with([0, MaxFieldLimit]) so never returns infinity,
@@ -1993,7 +2052,7 @@ void AbstractInterpretation::updateStateOnSelect(
   uint32_t trueId = getValueId(select->getTrueValue());
   uint32_t falseId = getValueId(select->getFalseValue());
 
-  AbstractState &as = abstractTrace[select];
+  AbstractState &as = stateStore_.getOrCreate(select);
 
   AbstractValue result;
 
@@ -2033,7 +2092,7 @@ void AbstractInterpretation::updateStateOnSelect(
 
 void AbstractInterpretation::updateStateOnPhi(const llvm::PHINode *phi) {
   uint32_t resId = getValueId(phi);
-  AbstractState &as = abstractTrace[phi];
+  AbstractState &as = stateStore_.getOrCreate(phi);
   AbstractValue rhs;
   bool first = true;
 
@@ -2047,14 +2106,12 @@ void AbstractInterpretation::updateStateOnPhi(const llvm::PHINode *phi) {
     bool foundState = false;
 
     const llvm::Instruction *term = opBB->getTerminator();
-    auto it = abstractTrace.find(term);
-    if (it != abstractTrace.end()) {
-      opAs = it->second;
+    if (const AbstractState *termState = stateStore_.find(term)) {
+      opAs = *termState;
       foundState = true;
     } else if (!opBB->empty()) {
-      auto it2 = abstractTrace.find(&opBB->front());
-      if (it2 != abstractTrace.end()) {
-        opAs = it2->second;
+      if (const AbstractState *frontState = stateStore_.find(&opBB->front())) {
+        opAs = *frontState;
         foundState = true;
       }
     }
@@ -2069,6 +2126,8 @@ void AbstractInterpretation::updateStateOnPhi(const llvm::PHINode *phi) {
           // Determine which successor this edge leads to
           bool isTrueEdge = branch->getSuccessor(0) == phi->getParent();
           AbstractState testState = opAs;
+          // Refinement would otherwise write through to the def-site table.
+          testState.materializeVarTable();
           edgeFeasible = isBranchFeasible(branch, testState, isTrueEdge);
           if (edgeFeasible) {
             opAs = testState;
@@ -2156,7 +2215,7 @@ void AbstractInterpretation::updateStateOnExtractValue(
   uint32_t lhsId = getValueId(extract);
   uint32_t aggId = getValueId(extract->getAggregateOperand());
 
-  AbstractState &as = abstractTrace[extract];
+  AbstractState &as = stateStore_.getOrCreate(extract);
 
   // ExtractValue extracts a field from an aggregate value
   // For abstract interpretation, we conservatively propagate the value
@@ -2177,7 +2236,7 @@ void AbstractInterpretation::updateStateOnInsertValue(
   uint32_t aggId = getValueId(insert->getAggregateOperand());
   uint32_t valId = getValueId(insert->getInsertedValueOperand());
 
-  AbstractState &as = abstractTrace[insert];
+  AbstractState &as = stateStore_.getOrCreate(insert);
 
   // InsertValue inserts a value into an aggregate and returns the new aggregate
   // For abstract interpretation, we join the aggregate and inserted value
@@ -2212,7 +2271,7 @@ void AbstractInterpretation::updateStateOnExtractElement(
   uint32_t lhsId = getValueId(extract);
   uint32_t vecId = getValueId(extract->getVectorOperand());
 
-  AbstractState &as = abstractTrace[extract];
+  AbstractState &as = stateStore_.getOrCreate(extract);
 
   // ExtractElement extracts an element from a vector
   // For abstract interpretation, we propagate the vector's abstract value
@@ -2232,7 +2291,7 @@ void AbstractInterpretation::updateStateOnInsertElement(
   uint32_t vecId = getValueId(insert->getOperand(0));
   uint32_t valId = getValueId(insert->getOperand(2));
 
-  AbstractState &as = abstractTrace[insert];
+  AbstractState &as = stateStore_.getOrCreate(insert);
 
   // InsertElement inserts a value into a vector and returns the new vector
   // For abstract interpretation, we join the vector and inserted value
@@ -2268,7 +2327,7 @@ void AbstractInterpretation::updateStateOnShuffleVector(
   uint32_t v1Id = getValueId(shuffle->getOperand(0));
   uint32_t v2Id = getValueId(shuffle->getOperand(1));
 
-  AbstractState &as = abstractTrace[shuffle];
+  AbstractState &as = stateStore_.getOrCreate(shuffle);
 
   // ShuffleVector shuffles elements from two vectors into a new vector
   // For abstract interpretation, we join both vectors' abstract values
@@ -2341,41 +2400,42 @@ bool AbstractInterpretation::isExtCall(const llvm::CallBase *callNode) {
 void AbstractInterpretation::handleExtCall(
     const llvm::CallBase *callNode,
     const std::vector<const llvm::Function *> &callees) {
-  auto traceIt = abstractTrace.find(callNode);
-  if (traceIt == abstractTrace.end())
+  const AbstractState *traceIt = stateStore_.find(callNode);
+  if (!traceIt)
     return;
 
   callSiteStack.push_back(callNode);
-  const AbstractState baseState = traceIt->second;
+  AbstractState &callSlot = stateStore_.getOrCreate(callNode);
+  const AbstractState baseState = callSlot;
   AbstractState joinedState = baseState;
   bool hasJoinedState = false;
 
   if (callees.empty()) {
     if (const llvm::Function *direct = callNode->getCalledFunction()) {
-      traceIt->second = baseState;
+      callSlot = baseState;
       utils->handleExtAPI(callNode, direct);
-      joinedState = traceIt->second;
+      joinedState = callSlot;
       hasJoinedState = true;
     }
   } else {
     for (const llvm::Function *callee : callees) {
       if (!callee || !callee->isDeclaration())
         continue;
-      traceIt->second = baseState;
+      callSlot = baseState;
       utils->handleExtAPI(callNode, callee);
       if (hasJoinedState) {
-        joinedState.joinWith(traceIt->second);
+        joinedState.joinWith(callSlot);
       } else {
-        joinedState = traceIt->second;
+        joinedState = callSlot;
         hasJoinedState = true;
       }
     }
   }
 
   if (hasJoinedState) {
-    traceIt->second = joinedState;
+    callSlot = joinedState;
   } else {
-    traceIt->second = baseState;
+    callSlot = baseState;
   }
 
   for (auto &detector : detectors) {
@@ -2406,9 +2466,9 @@ void AbstractInterpretation::handleFunCall(
   if (callees.empty())
     return;
 
-  auto callIt = abstractTrace.find(callNode);
-  if (callIt == abstractTrace.end())
+  if (!stateStore_.contains(callNode))
     return;
+  AbstractState &callSlot = stateStore_.getOrCreate(callNode);
 
   callSiteStack.push_back(callNode);
 
@@ -2422,19 +2482,18 @@ void AbstractInterpretation::handleFunCall(
       continue;
 
     // Build call state and map actuals to formals.
-    AbstractState callState = callIt->second;
+    AbstractState callState = callSlot;
     updateStateOnCallPE(callNode, callee, callState);
 
     const llvm::BasicBlock &entryBlock = callee->getEntryBlock();
     if (!entryBlock.empty()) {
       const llvm::Instruction *entryInst = &entryBlock.front();
-      auto entryIt = abstractTrace.find(entryInst);
-      if (entryIt == abstractTrace.end()) {
-        abstractTrace[entryInst] = callState;
-      } else {
-        AbstractState merged = entryIt->second;
+      if (const AbstractState *entryIt = stateStore_.find(entryInst)) {
+        AbstractState merged = *entryIt;
         merged.joinWith(callState);
-        abstractTrace[entryInst] = merged;
+        stateStore_.set(entryInst, merged);
+      } else {
+        stateStore_.set(entryInst, callState);
       }
     }
 
@@ -2473,7 +2532,7 @@ void AbstractInterpretation::handleFunCall(
           llvm::dyn_cast<llvm::ReturnInst>(bb.getTerminator());
       if (!retInst || !retInst->getReturnValue())
         continue;
-      updateStateOnRetPE(retInst, callNode, callIt->second);
+      updateStateOnRetPE(retInst, callNode, callSlot);
     }
 
     for (const llvm::BasicBlock &bb : *callee) {
@@ -2481,14 +2540,14 @@ void AbstractInterpretation::handleFunCall(
           llvm::dyn_cast<llvm::ReturnInst>(bb.getTerminator());
       if (!retInst)
         continue;
-      auto retIt = abstractTrace.find(retInst);
-      if (retIt == abstractTrace.end())
+      const AbstractState *retIt = stateStore_.find(retInst);
+      if (!retIt)
         continue;
 
-      AbstractState postState = retIt->second;
+      AbstractState postState = *retIt;
       if (!callNode->getType()->isVoidTy()) {
         auto rvIt =
-            postState._varToAbsVal.find(AbstractInterpretation::ReturnValueId);
+            postState._varToAbsVal.find(returnSlotId(retInst));
         if (rvIt != postState._varToAbsVal.end()) {
           postState[getValueId(callNode)] = rvIt->second;
         }
@@ -2522,14 +2581,13 @@ void AbstractInterpretation::handleFunCall(
   }
 
   if (!callSiteStack.empty() && callSiteStack.back() == callNode) {
-    auto it = abstractTrace.find(callNode);
-    if (it != abstractTrace.end()) {
+    if (AbstractState *it = stateStore_.find(callNode)) {
       if (gotPostState) {
-        it->second = joinedPostState;
+        *it = joinedPostState;
       }
       if (callNode->getType()->isVoidTy() == false && gotReturn) {
         uint32_t lhsId = getValueId(callNode);
-        it->second[lhsId] = joinedReturn;
+        (*it)[lhsId] = joinedReturn;
       }
     }
   }
@@ -2544,12 +2602,12 @@ bool AbstractInterpretation::collectCalleeReturnValue(
     const auto *ret = llvm::dyn_cast<llvm::ReturnInst>(bb.getTerminator());
     if (!ret || !ret->getReturnValue())
       continue;
-    auto retIt = abstractTrace.find(ret);
-    if (retIt == abstractTrace.end())
+    const AbstractState *retIt = stateStore_.find(ret);
+    if (!retIt)
       continue;
     auto rvIt =
-        retIt->second._varToAbsVal.find(AbstractInterpretation::ReturnValueId);
-    if (rvIt == retIt->second._varToAbsVal.end())
+        retIt->_varToAbsVal.find(returnSlotId(ret));
+    if (rvIt == retIt->_varToAbsVal.end())
       continue;
     if (!calleeHasReturn) {
       joinedReturn = rvIt->second;
@@ -2588,6 +2646,8 @@ void AbstractInterpretation::handleRecursiveSCC(const llvm::Function *seed) {
 
   bool increasing = true;
   for (uint32_t iter = 0;; ++iter) {
+    if (timeBudgetExhausted())
+      break;
     bool stable = true;
 
     for (const llvm::Function *func : membersIt->second) {
@@ -2597,23 +2657,29 @@ void AbstractInterpretation::handleRecursiveSCC(const llvm::Function *seed) {
       const llvm::Instruction *entryInst = &func->getEntryBlock().front();
       AbstractState prevEntry;
       bool hadPrevEntry = false;
-      auto beforeIt = abstractTrace.find(entryInst);
-      if (beforeIt != abstractTrace.end()) {
-        prevEntry = beforeIt->second;
+      if (const AbstractState *beforeIt = stateStore_.find(entryInst)) {
+        prevEntry = *beforeIt;
         hadPrevEntry = true;
       }
 
       handleFunction(func);
 
-      auto afterIt = abstractTrace.find(entryInst);
-      if (afterIt == abstractTrace.end())
+      if (!stateStore_.contains(entryInst))
         continue;
+      AbstractState &afterState = stateStore_.getOrCreate(entryInst);
 
       if (iter >= widenDelay_) {
         if (increasing) {
           if (hadPrevEntry) {
-            AbstractState widened = prevEntry.widening(afterIt->second);
-            afterIt->second = widened;
+            // Work on copies: a store-owned state must be written through the
+            // store so that the def-site table stays in sync.
+            AbstractState curState = afterState;
+            if (stateStore_.usesDefSiteVars()) {
+              prevEntry.materializeVarTable();
+              curState.materializeVarTable();
+            }
+            AbstractState widened = prevEntry.widening(curState);
+            stateStore_.set(entryInst, widened);
             if (widened != prevEntry) {
               stable = false;
             }
@@ -2625,8 +2691,13 @@ void AbstractInterpretation::handleRecursiveSCC(const llvm::Function *seed) {
             continue;
           }
           if (hadPrevEntry) {
-            AbstractState narrowed = prevEntry.narrowing(afterIt->second);
-            afterIt->second = narrowed;
+            AbstractState curState = afterState;
+            if (stateStore_.usesDefSiteVars()) {
+              prevEntry.materializeVarTable();
+              curState.materializeVarTable();
+            }
+            AbstractState narrowed = prevEntry.narrowing(curState);
+            stateStore_.set(entryInst, narrowed);
             if (narrowed != prevEntry) {
               stable = false;
             }
@@ -2634,7 +2705,7 @@ void AbstractInterpretation::handleRecursiveSCC(const llvm::Function *seed) {
             stable = false;
           }
         }
-      } else if (!hadPrevEntry || afterIt->second != prevEntry) {
+      } else if (!hadPrevEntry || afterState != prevEntry) {
         stable = false;
       }
     }
@@ -2811,6 +2882,119 @@ AbstractInterpretation::getCallee(const llvm::CallBase *callNode) {
   return callees.front();
 }
 
+uint32_t AbstractInterpretation::
+returnSlotId(const llvm::Instruction *ret) const {
+  const auto it = retSlotIds_.find(ret);
+  if (it != retSlotIds_.end())
+    return it->second;
+  const uint32_t id = nextValueId_++;
+  retSlotIds_[ret] = id;
+  valueToIdMap_[ret] = id;
+  return id;
+}
+
+bool AbstractInterpretation::isLocalOfRecursiveFun(uint32_t objId) const {
+  const llvm::Value *obj = getValueFromId(objId);
+  if (!obj)
+    return false;
+  const llvm::Function *fun = nullptr;
+  if (const auto *inst = llvm::dyn_cast<llvm::Instruction>(obj))
+    fun = inst->getFunction();
+  else
+    fun = llvm::dyn_cast<llvm::Function>(obj);
+  return fun && isRecursiveFun(fun);
+}
+
+bool AbstractInterpretation::isArrayBaseObject(uint32_t objId) const {
+  const auto *alloca = llvm::dyn_cast_or_null<llvm::AllocaInst>(
+      getValueFromId(objId));
+  // A GEP field object has its own (synthetic) id and no defining value, so it
+  // is not an array base; only the aggregate itself is a summary.
+  return alloca && alloca->getAllocatedType()->isArrayTy();
+}
+
+bool AbstractInterpretation::isStrongUpdateForStore(
+    const AddressValue &targets, const AbstractState &state) const {
+  if (!state.allowsStrongUpdate(targets))
+    return false;
+  // The remaining SVF conditions need call-graph / type information.
+  const uint32_t objId = AddressValue::getInternalID(*targets.begin());
+  if (isLocalOfRecursiveFun(objId))
+    return false;
+  if (isArrayBaseObject(objId))
+    return false;
+  return true;
+}
+
+const std::unordered_set<uint32_t> *
+AbstractInterpretation::cycleValueIds(const ICFGCycleWTO *cycle) {
+  const auto cached = cycleValueIds_.find(cycle);
+  if (cached != cycleValueIds_.end())
+    return cached->second.empty() ? nullptr : &cached->second;
+
+  std::unordered_set<uint32_t> ids;
+  bool needsWholeTable = false;
+  // Walk the cycle's components, descending into nested cycles: every
+  // instruction defined in the cycle's blocks owns a value that may change
+  // between iterations.
+  std::function<void(const ICFGWTOComp *)> visit =
+      [&](const ICFGWTOComp *comp) {
+        if (!comp)
+          return;
+        if (const auto *singleton =
+                llvm::dyn_cast<lotus::analysis::ICFGSingletonWTO>(comp)) {
+          const llvm::BasicBlock *bb = singleton->getBlock();
+          if (!bb)
+            return;
+          for (const llvm::Instruction &inst : *bb) {
+            // A recursive call drags the callee's values into the fixpoint;
+            // they live outside this cycle's blocks, so widen with the whole
+            // table instead of a restricted snapshot.
+            if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+              if (const llvm::Function *callee = call->getCalledFunction()) {
+                if (isRecursiveFun(callee))
+                  needsWholeTable = true;
+              }
+            }
+            if (inst.getType()->isVoidTy())
+              continue;
+            ids.insert(getValueId(&inst));
+          }
+          return;
+        }
+        if (const auto *nested =
+                llvm::dyn_cast<lotus::analysis::ICFGCycleWTO>(comp)) {
+          for (const ICFGWTOComp *inner : nested->getComponents())
+            visit(inner);
+        }
+      };
+  visit(cycle);
+  if (needsWholeTable)
+    ids.clear();
+  const auto inserted = cycleValueIds_.emplace(cycle, std::move(ids)).first;
+  return inserted->second.empty() ? nullptr : &inserted->second;
+}
+
+void AbstractInterpretation::startTimeBudget() {
+  timedOut_ = false;
+  if (timeLimitSeconds_ > 0)
+    deadline_ = std::chrono::steady_clock::now() +
+                std::chrono::seconds(timeLimitSeconds_);
+}
+
+bool AbstractInterpretation::timeBudgetExhausted() {
+  if (timedOut_)
+    return true;
+  if (timeLimitSeconds_ <= 0)
+    return false;
+  if (std::chrono::steady_clock::now() < deadline_)
+    return false;
+  timedOut_ = true;
+  llvm::errs() << "AE: analysis budget of " << timeLimitSeconds_
+               << "s exhausted; reporting the findings collected so far\n";
+  return true;
+}
+
 bool AbstractInterpretation::shouldApplyNarrowing(const llvm::Function *fun) {
   // Non-recursive functions (regular loops): always apply narrowing.
   if (!fun || !isRecursiveFun(fun))
@@ -2936,7 +3120,7 @@ void AbstractInterpretation::recursiveCallPass(const llvm::CallBase *callNode,
     return;
 
   // Get the abstract state at the call site
-  AbstractState &callState = abstractTrace[callNode];
+  AbstractState &callState = stateStore_.getOrCreate(callNode);
 
   // Set all stores in the recursive function to TOP
   setTopToObjInRecursion(callNode, callee);
@@ -2953,7 +3137,7 @@ void AbstractInterpretation::setTopToObjInRecursion(
   if (!callee || !isRecursiveFun(callee))
     return;
 
-  AbstractState &callState = abstractTrace[callNode];
+  AbstractState &callState = stateStore_.getOrCreate(callNode);
   auto stripPointerProjections = [](const llvm::Value *value) {
     while (value) {
       if (const auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(value)) {
