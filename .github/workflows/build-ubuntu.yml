@@ -7,8 +7,14 @@ jobs:
     runs-on: ${{ matrix.ubuntu-version }}
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
-        ubuntu-version: [ubuntu-22.04, ubuntu-24.04, ubuntu-latest]
+        # Lotus hard-requires LLVM 14.x (see cmake/ConfigureLLVM.cmake), and the
+        # Ubuntu archive ships llvm-14 only up to noble (24.04). Do NOT use
+        # ubuntu-latest here: it now resolves to a release that no longer has
+        # llvm-14/clang-14, which makes the apt step fail with
+        # "E: Unable to locate package llvm-14". Pin explicit releases instead.
+        ubuntu-version: [ubuntu-22.04, ubuntu-24.04]
         compiler: [clang, gcc]
         build-type: [Release, Debug]
 
@@ -18,6 +24,7 @@ jobs:
 
       - name: Install dependencies and setup LLVM
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             gcc g++ cmake libgmp-dev libboost-all-dev \
@@ -25,7 +32,17 @@ jobs:
             libgtest-dev libgmock-dev ccache
           # Setup LLVM environment
           echo "LLVM_CONFIG=/usr/bin/llvm-config-14" >> $GITHUB_ENV
-          
+
+      - name: Verify LLVM 14 toolchain
+        run: |
+          set -euo pipefail
+          if [[ ! -x /usr/bin/llvm-config-14 ]]; then
+            echo "::error::llvm-config-14 not found on this runner (${{ matrix.ubuntu-version }})." \
+                 "Lotus requires LLVM 14.x; check that the runner image still ships llvm-14."
+            exit 1
+          fi
+          /usr/bin/llvm-config-14 --version
+
       - name: Setup compiler (clang)
         if: matrix.compiler == 'clang'
         run: |
