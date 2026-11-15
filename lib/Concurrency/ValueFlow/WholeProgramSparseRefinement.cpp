@@ -52,8 +52,11 @@ WholeProgramSparseRefinement::build(llvm::Module &module,
   preThreadTree_ = std::make_unique<ThreadCreationTree>(
       module, *ThreadAPI::getThreadAPI(), refinementConfig.threadContextLimit);
   stats_.preThreads = preThreadTree_->statistics();
+  ThreadAwareSVFGBuilder::Config overlayConfig;
+  overlayConfig.pruneOverwrittenStores = refinementConfig.pruneLockSpanFlow;
+  overlayConfig.pruneShadowedSinks = refinementConfig.pruneLockSpanFlow;
   overlay_ = std::make_unique<ThreadAwareSVFGBuilder>(
-      *svfg_, mhp, locks, nullptr, preThreadTree_.get());
+      *svfg_, mhp, locks, nullptr, preThreadTree_.get(), overlayConfig);
   stats_.preOverlay = overlay_->build();
 
   if (refinementConfig.mode == Mode::MultiStageSlicing) {
@@ -72,7 +75,8 @@ WholeProgramSparseRefinement::build(llvm::Module &module,
     // facts for the retained main-phase graph.
     overlay_.reset();
     overlay_ = std::make_unique<ThreadAwareSVFGBuilder>(
-        *svfg_, *mainMHP_, locks, slice_.get(), mainThreadTree_.get());
+        *svfg_, *mainMHP_, locks, slice_.get(), mainThreadTree_.get(),
+        overlayConfig);
     stats_.overlay = overlay_->build();
   } else {
     stats_.overlay = stats_.preOverlay;

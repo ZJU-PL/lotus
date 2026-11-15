@@ -58,7 +58,7 @@ The source tree is grouped by subdirectory under ``include/Concurrency/`` and
 - ``LinuxKernel/``: ``LinuxKernelAnalysis``, ``LinuxKernelLockAnalysis``,
   ``LinuxKernelOperation``, and ``LinuxKernelRCUAnalysis`` for kernel concurrency primitives
 - ``ValueFlow/``: thread-aware sparse value-flow refinement
-  (``ThreadAwareSVFG``, ``SparseValueFlowRefinement``,
+  (``ThreadAwareSVFG``, ``LockSpanReasoner``, ``SparseValueFlowRefinement``,
   ``WholeProgramSparseRefinement``, ``FSMPTA``, and ``MultiStageSlicer``)
 
 ``Concurrency/MPI/`` models MPI communication in the SPMD setting. It complements
@@ -300,6 +300,7 @@ Thread-Aware Sparse Value-Flow Refinement
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Files**: ``ValueFlow/ThreadAwareSVFG.cpp``, ``ValueFlow/ThreadAwareSVFG.h``,
+``ValueFlow/LockSpanReasoner.cpp``, ``ValueFlow/LockSpanReasoner.h``,
 ``ValueFlow/SparseValueFlowRefinement.cpp``,
 ``ValueFlow/SparseValueFlowRefinement.h``,
 ``ValueFlow/WholeProgramSparseRefinement.cpp``,
@@ -320,6 +321,34 @@ run in parallel. The base SVFG remains owned by the caller and can be restored
 with ``clear()``. A ``FilteredSVFGView`` can restrict construction to an induced
 subgraph without copying graph nodes. Fork and join memory flow is connected
 through dedicated passes (``connectForkFlow``, ``connectJoinFlow``).
+
+**Lock-span pruning** (``LockSpanReasoner.h``): a common exclusive lock makes a
+race impossible, but a value written in one critical section can still be
+observed by a later one, so the interference edge is not automatically
+redundant. ``LockSpanReasoner`` answers whether two accesses run inside the same
+critical section: a lock must be held in exclusive mode at both, the innermost
+dominating acquire must be the same instruction, the nearest post-dominating
+release must be the same instruction, and no release of that lock may be
+reachable in between. Reusing the acquire/release *pair* (rather than just the
+lock value) keeps two loop iterations, and two threads running the same worker
+function, in different spans.
+
+``ThreadAwareSVFGBuilder`` uses those queries to drop object labels from the
+guard of a lock-protected pair (``Statistics::spanPrunedObjects``) or the whole
+edge (``Statistics::spanPrunedPairs``):
+
+- *overwritten store*: a later store in the source's span that post-dominates
+  the source overwrites the same object, so the published value cannot survive
+  until the lock is released. Its own interference edge with the sink replaces
+  it, so following the overwrite chain ends at the span tail, which is never
+  pruned.
+- *shadowed sink*: a store that dominates the sink inside the sink's own span
+  already writes the object, and the base SVFG carries that flow inward, so the
+  sink never reads the published version.
+
+Both rules only ever remove flow that the base graph or another surviving
+interference edge already provides. Pruning is enabled by default and can be
+turned off with ``--concur.lock-span-pruning=false``.
 
 **SparseValueFlowRefinement** (``SparseValueFlowRefinement.h``): a lightweight
 concurrency-specific diagnostic refinement. It solves pointer-value flow over
@@ -393,7 +422,9 @@ Multi-stage slicing is enabled with:
      --concur.points-to-sets=hash-consed input.bc
 
 The sparse analysis and hash-consed backend are both opt-in; mutable ordered
-sets are the default.
+sets are the default. Lock-span pruning of redundant interference edges is
+enabled by default and can be disabled for ablation with
+``--concur.lock-span-pruning=false``.
 
 See also :doc:`../ir/svfg` for the underlying sparse value-flow graph and
 :doc:`../checker/concurrency` for the checker that consumes this refinement.

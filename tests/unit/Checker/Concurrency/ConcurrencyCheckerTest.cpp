@@ -744,8 +744,68 @@ TEST_F(ConcurrencyCheckerTest, MultiStageSparseRefinementRunsOnRacePath) {
   EXPECT_GE(stats.sparseHashConsedUnionCacheHits, 0u);
 }
 
-TEST_F(ConcurrencyCheckerTest, CUDAStatisticsAreCollected) {
-  const char *source = R"(
+TEST_F(ConcurrencyCheckerTest, SparseRefinementReportsLockSpanPruning) {
+  auto module = parseModule(R"(
+    @slot = global i32* null
+    @first = global i32 0
+    @second = global i32 0
+    @lock = global i8 0
+    declare i32 @pthread_create(i8*, i8*, i8* (i8*)*, i8*)
+    declare i32 @pthread_join(i8*, i8**)
+    declare i32 @pthread_mutex_lock(i8*)
+    declare i32 @pthread_mutex_unlock(i8*)
+
+    define i8* @writer(i8* %arg) {
+    entry:
+      call i32 @pthread_mutex_lock(i8* @lock)
+      store i32* @first, i32** @slot
+      store i32* @second, i32** @slot
+      call i32 @pthread_mutex_unlock(i8* @lock)
+      ret i8* null
+    }
+
+    define i8* @reader(i8* %arg) {
+    entry:
+      call i32 @pthread_mutex_lock(i8* @lock)
+      %value = load i32*, i32** @slot
+      call i32 @pthread_mutex_unlock(i8* @lock)
+      ret i8* null
+    }
+
+    define i32 @main() {
+    entry:
+      %t1 = alloca i8
+      %t2 = alloca i8
+      call i32 @pthread_create(i8* %t1, i8* null,
+                               i8* (i8*)* @writer, i8* null)
+      call i32 @pthread_create(i8* %t2, i8* null,
+                               i8* (i8*)* @reader, i8* null)
+      call i32 @pthread_join(i8* %t1, i8** null)
+      call i32 @pthread_join(i8* %t2, i8** null)
+      ret i32 0
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  concurrency::ConcurrencyChecker checker(*module);
+  checker.enableSparseFlowSensitiveRefinement(true);
+  checker.enableDeadlockCheck(false);
+  checker.enableAtomicityCheck(false);
+  checker.enableCondVarCheck(false);
+  checker.enableLockMismatchCheck(false);
+  checker.enableOpenMPCheck(false);
+  checker.enableMPICheck(false);
+  checker.enableCUDACheck(false);
+  EXPECT_NO_THROW(checker.runAnalyses());
+
+  const auto stats = checker.getStatistics();
+  // The writer overwrites the slot inside its critical section, so the stale
+  // Store->Load interference edge is replaced by the overwriting store.
+  EXPECT_GT(stats.sparseLockSpanPrunedPairs, 0u);
+  EXPECT_GT(stats.sparseLockSpanPrunedObjects, 0u);
+}
+
+TEST_F(ConcurrencyCheckerTest, CUDAStatisticsAreCollected) {  const char *source = R"(
     declare void @__set_CUDAConfig(i32, i32)
     declare i32 @cudaDeviceSynchronize()
     declare void @llvm.nvvm.barrier0()

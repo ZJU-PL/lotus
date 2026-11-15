@@ -59,6 +59,11 @@ static cl::opt<bool> MultiStageSlicing(
     cl::desc("Run multi-stage synchronization and points-to slicing before "
              "sparse race refinement"),
     cl::init(false), cl::sub(lotus::checker::tooling::concurrencySubCommand()));
+static cl::opt<bool> LockSpanPruning(
+    "concur.lock-span-pruning",
+    cl::desc("Prune thread-interference value-flow edges that lock-span "
+             "reasoning proves redundant"),
+    cl::init(true), cl::sub(lotus::checker::tooling::concurrencySubCommand()));
 enum class MemoryPartitionOption { Distinct, IntraDisjoint, InterDisjoint };
 static cl::opt<MemoryPartitionOption> MemoryPartition(
     "concur.memory-partition", cl::desc("Sparse MemorySSA region policy"),
@@ -133,6 +138,7 @@ int runConcurrencyCheckerTool(const char *argv0) {
     checker.addStarvationBlockingFunction(StringRef(name).trim().str());
   checker.enableSparseFlowSensitiveRefinement(SparseFlowSensitive);
   checker.enableMultiStageSlicing(MultiStageSlicing);
+  checker.enableLockSpanPruning(LockSpanPruning);
   switch (MemoryPartition) {
   case MemoryPartitionOption::Distinct:
     checker.setSparseMemoryPartition(

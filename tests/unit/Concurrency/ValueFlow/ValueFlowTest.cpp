@@ -1,7 +1,8 @@
-#include "Concurrency/Utils/ThreadFlowGraph.h"
+#include "Concurrency/LockSet/LockSetAnalysis.h"
 #include "Concurrency/MHP/IMHPAnalysis.h"
 #include "Concurrency/Thread/ThreadCreationTree.h"
 #include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/Utils/ThreadFlowGraph.h"
 #include "Concurrency/ValueFlow/MultiStageSlicer.h"
 #include "Concurrency/ValueFlow/SparseValueFlowRefinement.h"
 #include "Concurrency/ValueFlow/ThreadAwareSVFG.h"
@@ -17,16 +18,29 @@ using namespace lotus::unittest;
 
 namespace {
 
-class FixedMHP final : public mhp::IMHPAnalysis {
+class FixedMHP : public mhp::IMHPAnalysis {
 public:
   explicit FixedMHP(bool parallel) : parallel_(parallel) {}
 
-  const mhp::ThreadFlowGraph& getThreadFlowGraph() const override { static mhp::ThreadFlowGraph dummy; return dummy; }
+  const mhp::ThreadFlowGraph &getThreadFlowGraph() const override {
+    static mhp::ThreadFlowGraph dummy;
+    return dummy;
+  }
   size_t getAnalysisGeneration() const override { return 0; }
-  lotus::AliasAnalysisWrapper* getAliasAnalysis() const override { return nullptr; }
-  const OpenMP::OpenMPSemantics* getOpenMPSemantics() const override { return nullptr; }
-  bool instructionMayExecuteMultipleTimes(const llvm::Instruction*) const override { return false; }
-  bool joinEdgeMustOrderTarget(const mhp::SyncNode*, const mhp::SyncNode*) const override { return false; }
+  lotus::AliasAnalysisWrapper *getAliasAnalysis() const override {
+    return nullptr;
+  }
+  const OpenMP::OpenMPSemantics *getOpenMPSemantics() const override {
+    return nullptr;
+  }
+  bool
+  instructionMayExecuteMultipleTimes(const llvm::Instruction *) const override {
+    return false;
+  }
+  bool joinEdgeMustOrderTarget(const mhp::SyncNode *,
+                               const mhp::SyncNode *) const override {
+    return false;
+  }
 
   void analyze() override {}
   bool mayHappenInParallel(const Instruction *,
@@ -58,6 +72,18 @@ private:
 };
 
 class ValueFlowTest : public LlvmModuleTest {};
+
+/// MHP oracle that only reports accesses from different functions as
+/// concurrent, which is the two-thread shape the overlay targets.
+class CrossFunctionMHP final : public FixedMHP {
+public:
+  CrossFunctionMHP() : FixedMHP(true) {}
+
+  bool mayHappenInParallel(const Instruction *lhs,
+                           const Instruction *rhs) const override {
+    return lhs && rhs && lhs->getFunction() != rhs->getFunction();
+  }
+};
 
 TEST_F(ValueFlowTest, ThreadOverlayAddsAndClearsGuardedInterference) {
   auto module = parseModule(R"(
@@ -469,6 +495,316 @@ TEST_F(ValueFlowTest, ThreadAwareMemorySSAConnectsForkInputsAndJoinOutputs) {
       sawJoinFlow |= edge->getDstNode() == afterNode &&
                      edge->getEdgeKind() == SVFGEdgeK::IntraIndirect;
   EXPECT_TRUE(sawJoinFlow);
+}
+
+namespace {
+
+/// Owns the ICFG that a thread-aware SVFG points back into.
+struct ThreadGraph {
+  ICFG icfg;
+  std::unique_ptr<SVFG> graph;
+};
+
+std::unique_ptr<ThreadGraph> buildThreadGraph(Module &module) {
+  auto built = std::make_unique<ThreadGraph>();
+  ICFGBuilder icfgBuilder(&built->icfg);
+  icfgBuilder.build(&module);
+  SVFGBuilderConfig config;
+  config.usePointerAnalysis = true;
+  config.memoryPartition = MemoryRegionPartitionStrategy::InterDisjoint;
+  SVFGBuilder svfgBuilder(config);
+  built->graph.reset(svfgBuilder.build(&built->icfg));
+  return built;
+}
+
+template <typename NodeT>
+NodeT *findAccessNode(SVFG &graph, const Instruction *instruction) {
+  for (auto &entry : graph) {
+    if (auto *node = dyn_cast<NodeT>(entry.second))
+      if (node->getInstruction() == instruction)
+        return node;
+  }
+  return nullptr;
+}
+
+bool hasInterferenceEdge(SVFGNode *source, SVFGNode *destination) {
+  if (!source || !destination)
+    return false;
+  for (SVFGEdge *edge : source->getOutEdges())
+    if (edge->getDstNode() == destination &&
+        edge->getEdgeKind() == SVFGEdgeK::ThreadMHPIndirectVF)
+      return true;
+  return false;
+}
+
+const StoreInst *nthStore(Function &function, std::size_t index) {
+  std::size_t seen = 0;
+  for (Instruction &instruction : instructions(&function))
+    if (auto *store = dyn_cast<StoreInst>(&instruction))
+      if (seen++ == index)
+        return store;
+  return nullptr;
+}
+
+const LoadInst *firstLoad(Function &function) {
+  for (Instruction &instruction : instructions(&function))
+    if (auto *load = dyn_cast<LoadInst>(&instruction))
+      return load;
+  return nullptr;
+}
+
+} // namespace
+
+TEST_F(ValueFlowTest, ThreadOverlayPrunesValueOverwrittenInsideTheLockSpan) {
+  auto module = parseModule(R"(
+    declare i32 @pthread_mutex_lock(i8*)
+    declare i32 @pthread_mutex_unlock(i8*)
+
+    @lock = global i8 0
+    @slot = global i8* null
+    @first = global i8 0
+    @second = global i8 0
+
+    define void @writer() {
+    entry:
+      call i32 @pthread_mutex_lock(i8* @lock)
+      store i8* @first, i8** @slot
+      store i8* @second, i8** @slot
+      call i32 @pthread_mutex_unlock(i8* @lock)
+      ret void
+    }
+
+    define i8* @reader() {
+    entry:
+      call i32 @pthread_mutex_lock(i8* @lock)
+      %value = load i8*, i8** @slot
+      call i32 @pthread_mutex_unlock(i8* @lock)
+      ret i8* %value
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  auto built = buildThreadGraph(*module);
+  ASSERT_NE(built->graph, nullptr);
+
+  mhp::LockSetAnalysis locks(*module);
+  locks.analyze();
+
+  Function &writer = *module->getFunction("writer");
+  const StoreInst *overwritten = nthStore(writer, 0);
+  const StoreInst *spanTail = nthStore(writer, 1);
+  const LoadInst *load = firstLoad(*module->getFunction("reader"));
+  ASSERT_NE(overwritten, nullptr);
+  ASSERT_NE(spanTail, nullptr);
+  ASSERT_NE(load, nullptr);
+
+  auto *overwrittenNode =
+      findAccessNode<StoreSVFGNode>(*built->graph, overwritten);
+  auto *spanTailNode = findAccessNode<StoreSVFGNode>(*built->graph, spanTail);
+  auto *loadNode = findAccessNode<LoadSVFGNode>(*built->graph, load);
+  ASSERT_NE(overwrittenNode, nullptr);
+  ASSERT_NE(spanTailNode, nullptr);
+  ASSERT_NE(loadNode, nullptr);
+
+  CrossFunctionMHP parallel;
+  ThreadAwareSVFGBuilder overlay(*built->graph, parallel, &locks);
+  const auto &stats = overlay.build();
+
+  // The first store's value is overwritten before the lock is released, so the
+  // reading span can never observe it.
+  EXPECT_FALSE(hasInterferenceEdge(overwrittenNode, loadNode));
+  // The span tail still publishes the value to the reading span.
+  EXPECT_TRUE(hasInterferenceEdge(spanTailNode, loadNode));
+  EXPECT_GE(stats.lockProtectedCandidates, 2u);
+  EXPECT_GE(stats.spanPrunedObjects, 1u);
+  EXPECT_GE(stats.spanPrunedPairs, 1u);
+  EXPECT_GE(stats.edgesAdded, 1u);
+}
+
+TEST_F(ValueFlowTest, ThreadOverlayKeepsRacingStoreThatLeavesTheLock) {
+  auto module = parseModule(R"(
+    declare i32 @pthread_mutex_lock(i8*)
+    declare i32 @pthread_mutex_unlock(i8*)
+
+    @lock = global i8 0
+    @slot = global i8* null
+    @first = global i8 0
+    @second = global i8 0
+
+    define void @writer() {
+    entry:
+      call i32 @pthread_mutex_lock(i8* @lock)
+      store i8* @first, i8** @slot
+      store i8* @second, i8** @slot
+      call i32 @pthread_mutex_unlock(i8* @lock)
+      ret void
+    }
+
+    define i8* @reader() {
+    entry:
+      %value = load i8*, i8** @slot
+      ret i8* %value
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  auto built = buildThreadGraph(*module);
+  ASSERT_NE(built->graph, nullptr);
+
+  mhp::LockSetAnalysis locks(*module);
+  locks.analyze();
+
+  Function &writer = *module->getFunction("writer");
+  const StoreInst *overwritten = nthStore(writer, 0);
+  const StoreInst *spanTail = nthStore(writer, 1);
+  const LoadInst *load = firstLoad(*module->getFunction("reader"));
+  ASSERT_NE(overwritten, nullptr);
+  ASSERT_NE(spanTail, nullptr);
+  ASSERT_NE(load, nullptr);
+
+  auto *overwrittenNode =
+      findAccessNode<StoreSVFGNode>(*built->graph, overwritten);
+  auto *spanTailNode = findAccessNode<StoreSVFGNode>(*built->graph, spanTail);
+  auto *loadNode = findAccessNode<LoadSVFGNode>(*built->graph, load);
+  ASSERT_NE(overwrittenNode, nullptr);
+  ASSERT_NE(spanTailNode, nullptr);
+  ASSERT_NE(loadNode, nullptr);
+
+  CrossFunctionMHP parallel;
+  ThreadAwareSVFGBuilder overlay(*built->graph, parallel, &locks);
+  const auto &stats = overlay.build();
+
+  // The reader does not hold the lock, so both stores race with it and their
+  // values are observable.
+  EXPECT_TRUE(hasInterferenceEdge(overwrittenNode, loadNode));
+  EXPECT_TRUE(hasInterferenceEdge(spanTailNode, loadNode));
+  EXPECT_EQ(stats.spanPrunedPairs, 0u);
+}
+
+TEST_F(ValueFlowTest, ThreadOverlayKeepsFlowPastConditionalOverwrite) {
+  auto module = parseModule(R"(
+    declare i32 @pthread_mutex_lock(i8*)
+    declare i32 @pthread_mutex_unlock(i8*)
+
+    @lock = global i8 0
+    @slot = global i8* null
+    @first = global i8 0
+    @second = global i8 0
+    @maybe = global i1 false
+
+    define void @writer() {
+    entry:
+      call i32 @pthread_mutex_lock(i8* @lock)
+      store i8* @first, i8** @slot
+      %cond = load i1, i1* @maybe
+      br i1 %cond, label %then, label %done
+
+    then:
+      store i8* @second, i8** @slot
+      br label %done
+
+    done:
+      call i32 @pthread_mutex_unlock(i8* @lock)
+      ret void
+    }
+
+    define i8* @reader() {
+    entry:
+      call i32 @pthread_mutex_lock(i8* @lock)
+      %value = load i8*, i8** @slot
+      call i32 @pthread_mutex_unlock(i8* @lock)
+      ret i8* %value
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  auto built = buildThreadGraph(*module);
+  ASSERT_NE(built->graph, nullptr);
+
+  mhp::LockSetAnalysis locks(*module);
+  locks.analyze();
+
+  Function &writer = *module->getFunction("writer");
+  const StoreInst *first = nthStore(writer, 0);
+  const StoreInst *conditional = nthStore(writer, 1);
+  const LoadInst *load = firstLoad(*module->getFunction("reader"));
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(conditional, nullptr);
+  ASSERT_NE(load, nullptr);
+
+  auto *firstNode = findAccessNode<StoreSVFGNode>(*built->graph, first);
+  auto *conditionalNode =
+      findAccessNode<StoreSVFGNode>(*built->graph, conditional);
+  auto *loadNode = findAccessNode<LoadSVFGNode>(*built->graph, load);
+  ASSERT_NE(firstNode, nullptr);
+  ASSERT_NE(conditionalNode, nullptr);
+  ASSERT_NE(loadNode, nullptr);
+
+  CrossFunctionMHP parallel;
+  ThreadAwareSVFGBuilder overlay(*built->graph, parallel, &locks);
+  const auto &stats = overlay.build();
+
+  // The overwrite only executes on one path, so the first store still reaches
+  // the reading span.
+  EXPECT_TRUE(hasInterferenceEdge(firstNode, loadNode));
+  EXPECT_TRUE(hasInterferenceEdge(conditionalNode, loadNode));
+  EXPECT_EQ(stats.spanPrunedPairs, 0u);
+}
+
+TEST_F(ValueFlowTest, ThreadOverlayPrunesFlowShadowedInsideTheSinkSpan) {
+  auto module = parseModule(R"(
+    declare i32 @pthread_mutex_lock(i8*)
+    declare i32 @pthread_mutex_unlock(i8*)
+
+    @lock = global i8 0
+    @slot = global i8* null
+    @first = global i8 0
+    @second = global i8 0
+
+    define void @writer() {
+    entry:
+      call i32 @pthread_mutex_lock(i8* @lock)
+      store i8* @first, i8** @slot
+      call i32 @pthread_mutex_unlock(i8* @lock)
+      ret void
+    }
+
+    define i8* @reader() {
+    entry:
+      call i32 @pthread_mutex_lock(i8* @lock)
+      store i8* @second, i8** @slot
+      %value = load i8*, i8** @slot
+      call i32 @pthread_mutex_unlock(i8* @lock)
+      ret i8* %value
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  auto built = buildThreadGraph(*module);
+  ASSERT_NE(built->graph, nullptr);
+
+  mhp::LockSetAnalysis locks(*module);
+  locks.analyze();
+
+  const StoreInst *published = nthStore(*module->getFunction("writer"), 0);
+  const LoadInst *load = firstLoad(*module->getFunction("reader"));
+  ASSERT_NE(published, nullptr);
+  ASSERT_NE(load, nullptr);
+
+  auto *publishedNode = findAccessNode<StoreSVFGNode>(*built->graph, published);
+  auto *loadNode = findAccessNode<LoadSVFGNode>(*built->graph, load);
+  ASSERT_NE(publishedNode, nullptr);
+  ASSERT_NE(loadNode, nullptr);
+
+  CrossFunctionMHP parallel;
+  ThreadAwareSVFGBuilder overlay(*built->graph, parallel, &locks);
+  const auto &stats = overlay.build();
+
+  // The reader overwrites the slot before reading it in its own critical
+  // section, so the published value is never observed here.
+  EXPECT_FALSE(hasInterferenceEdge(publishedNode, loadNode));
+  EXPECT_GE(stats.spanPrunedObjects, 1u);
+  EXPECT_GE(stats.spanPrunedPairs, 1u);
 }
 
 } // namespace

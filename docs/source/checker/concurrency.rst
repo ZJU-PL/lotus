@@ -143,6 +143,7 @@ Command-Line Options
 * ``--concur.memory-partition=<distinct|intra-disjoint|inter-disjoint>`` – Sparse MemorySSA region policy (default: ``inter-disjoint``)
 * ``--concur.thread-context=<depth>`` – Maximum call-string depth in thread creation tree (default: 2)
 * ``--concur.points-to-sets=<mutable|hash-consed>`` – Sparse solver points-to set backend (default: ``mutable``)
+* ``--concur.lock-span-pruning=<true|false>`` – Prune thread-interference value-flow edges that lock-span reasoning proves redundant (default: ``true``)
 * ``--concur.starvation-blocking-functions=<fn1,fn2...>`` – Additional blocking function names for starvation checking
 * ``--report-json=<file>`` – Output JSON report to file
 * ``--report-sarif=<file>`` – Output SARIF report to file

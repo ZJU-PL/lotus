@@ -139,6 +139,8 @@ ConcurrencyChecker::ConcurrencyChecker(Module &module)
   m_stats.mpiBugsFound = 0;
   m_stats.cudaBugsFound = 0;
   m_stats.sparseInterferenceEdges = 0;
+  m_stats.sparseLockSpanPrunedPairs = 0;
+  m_stats.sparseLockSpanPrunedObjects = 0;
   m_stats.sparsePointsToFacts = 0;
   m_stats.sparseMemoryRegions = 0;
   m_stats.sparseOriginalNodes = 0;
@@ -183,6 +185,8 @@ void ConcurrencyChecker::runAnalyses() {
   m_stats.cudaBugsFound = 0;
   m_stats.starvationBugsFound = 0;
   m_stats.sparseInterferenceEdges = 0;
+  m_stats.sparseLockSpanPrunedPairs = 0;
+  m_stats.sparseLockSpanPrunedObjects = 0;
   m_stats.sparsePointsToFacts = 0;
   m_stats.sparseMemoryRegions = 0;
   m_stats.sparseOriginalNodes = 0;
@@ -356,9 +360,15 @@ void ConcurrencyChecker::runAnalyses() {
     sparseConfig.memoryPartition = m_sparseMemoryPartition;
     sparseConfig.threadContextLimit = m_threadContextLimit;
     sparseConfig.pointsToSetBackend = m_sparsePointsToSetBackend;
+    sparseConfig.pruneLockSpanFlow = m_enableLockSpanPruning;
     const auto &sparseStats = m_sparseRefinement->build(
         m_module, *m_mhpAnalysis, m_locksetAnalysisView, sparseConfig);
     m_stats.sparseInterferenceEdges = sparseStats.overlay.edgesAdded;
+    m_stats.sparseLockSpanPrunedPairs = sparseStats.preOverlay.spanPrunedPairs +
+                                        sparseStats.overlay.spanPrunedPairs;
+    m_stats.sparseLockSpanPrunedObjects =
+        sparseStats.preOverlay.spanPrunedObjects +
+        sparseStats.overlay.spanPrunedObjects;
     m_stats.sparsePointsToFacts = sparseStats.solver.topLevelFacts;
     m_stats.sparseMemoryRegions = sparseStats.memoryRegions.regions;
     m_stats.sparseOriginalNodes = sparseStats.slicing.originalNodes;

@@ -21,9 +21,9 @@
 #include "Concurrency/MHP/MHPAnalysis.h"
 #include "Concurrency/MHP/StaticVectorClockMHP.h"
 #include "Concurrency/MPI/MPIAnalysis.h"
+#include "Concurrency/OpenMP/OpenMPTaskGraph.h"
 #include "Concurrency/Thread/Sharing/EscapeAnalysis.h"
 #include "Concurrency/Thread/Sharing/StaticThreadSharingAnalysis.h"
-#include "Concurrency/OpenMP/OpenMPTaskGraph.h"
 #include "Concurrency/Utils/ThreadLocalAnalysis.h"
 #include "Concurrency/ValueFlow/WholeProgramSparseRefinement.h"
 
@@ -160,10 +160,12 @@ public:
   void setThreadContextLimit(std::size_t limit) {
     m_threadContextLimit = limit;
   }
-  void
-  setSparsePointsToSetBackend(lotus::alias::PointsToSetBackend backend) {
+  void setSparsePointsToSetBackend(lotus::alias::PointsToSetBackend backend) {
     m_sparsePointsToSetBackend = backend;
   }
+  /// Enable lock-span pruning of thread-interference value-flow edges inside
+  /// the sparse refinement (default: enabled).
+  void enableLockSpanPruning(bool enable) { m_enableLockSpanPruning = enable; }
 
   /**
    * @brief Get statistics about the analysis
@@ -182,6 +184,8 @@ public:
     size_t cudaBugsFound;
     size_t starvationBugsFound;
     size_t sparseInterferenceEdges;
+    size_t sparseLockSpanPrunedPairs;
+    size_t sparseLockSpanPrunedObjects;
     size_t sparsePointsToFacts;
     size_t sparseMemoryRegions;
     size_t sparseOriginalNodes;
@@ -261,6 +265,7 @@ private:
   std::size_t m_threadContextLimit = 2;
   lotus::alias::PointsToSetBackend m_sparsePointsToSetBackend =
       lotus::alias::PointsToSetBackend::Mutable;
+  bool m_enableLockSpanPruning = true;
   MHPBackendKind m_mhpBackend = MHPBackendKind::Region;
 
   // Bug type IDs (registered with BugReportMgr)
