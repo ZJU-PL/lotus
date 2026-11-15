@@ -3,8 +3,8 @@
  * @brief Dense vs def-site (semi-sparse / sparse) equivalence for AE.
  *
  * The sparsity level is a *storage* decision: intermediate values move from a
- * per-instruction copy into one run-wide def-site table, and unobservable states
- * are dropped. Neither may change a single finding.
+ * per-instruction copy into one run-wide def-site table, and unobservable
+ * states are dropped. Neither may change a single finding.
  *
  * Widening is the one place where that is not free: a loop head must still join
  * and widen its cycle's values, which are materialized out of the shared table
@@ -16,8 +16,9 @@
 #include "AECheckerTestSupport.h"
 
 #include <array>
-#include <gtest/gtest.h>
 #include <string>
+
+#include <gtest/gtest.h>
 
 using namespace llvm;
 using namespace lotus::analysis;
@@ -34,15 +35,16 @@ protected:
   };
 
   Findings run(Module *module, StateLayout layout, bool memLeak = false) {
-    const AEResult r = runAE(module, true, memLeak,
-                             AbstractInterpretation::WIDEN_NARROW, 3u, false,
-                             false, layout);
-    return {r.overflow_bugs, r.null_bugs,      r.uaf_bugs,
+    const AEResult r =
+        runAE(module, true, memLeak, AbstractInterpretation::WIDEN_NARROW, 3u,
+              false, false, layout);
+    return {r.overflow_bugs,     r.null_bugs,     r.uaf_bugs,
             r.invalid_free_bugs, r.mem_leak_bugs, r.pending_checkpoints};
   }
 
   /// Runs all three layouts and requires identical findings.
-  void expectEquivalent(Module *module, const char *what, bool memLeak = false) {
+  void expectEquivalent(Module *module, const char *what,
+                        bool memLeak = false) {
     const Findings dense = run(module, StateLayout::Dense, memLeak);
     const Findings semi = run(module, StateLayout::SemiSparse, memLeak);
     const Findings sparse = run(module, StateLayout::Sparse, memLeak);
@@ -256,8 +258,8 @@ TEST_F(AESparsityEquivalenceTest, LoopCallingARecursiveHelper) {
 
 TEST_F(AESparsityEquivalenceTest, DefSiteLayoutActuallySharesValues) {
   // Guards the mechanism itself, not just the findings: in the def-site layout
-  // the run-wide table must hold the intermediate values and the per-node states
-  // must be bound to it.
+  // the run-wide table must hold the intermediate values and the per-node
+  // states must be bound to it.
   auto module = ir(R"(
     define i32 @main() {
     entry:
@@ -286,4 +288,22 @@ TEST_F(AESparsityEquivalenceTest, DefSiteLayoutActuallySharesValues) {
   EXPECT_FALSE(store.defSiteVars().empty());
   EXPECT_LT(store.defSiteVars().size(), 64u)
       << "values must be stored per definition, not per instruction";
+}
+
+TEST_F(AESparsityEquivalenceTest, SparseBuildsSVFGGraph) {
+  auto module = ir(R"(
+    define i32 @main() {
+      %slot = alloca i32
+      store i32 1, i32* %slot
+      %value = load i32, i32* %slot
+      ret i32 %value
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  runAE(module.get(), true, false, AbstractInterpretation::WIDEN_NARROW, 3u,
+        false, false, StateLayout::Sparse);
+  AbstractInterpretation &ae = AbstractInterpretation::getAEInstance();
+  EXPECT_TRUE(ae.isSVFGBackedSparseActive());
+  EXPECT_GT(ae.getSVFGSparseLoadQueryCount(), 0u);
 }

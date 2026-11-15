@@ -216,21 +216,21 @@ TEST_F(AECheckerTest, ComplexControlFlow) {
   AEResult result = runAE(module.get());
   EXPECT_GT(result.overflow_bugs, 0u);
 }
-TEST_F(AECheckerTest, SignedGreaterEqualFalseBranchRefinement) {
+TEST_F(AECheckerTest, UnsignedLessThanTrueBranchRefinement) {
   const char *source = R"(
-    define void @test_sge_false_branch(i32 %n) {
+    define void @test_ult_true_branch(i32 %n) {
     entry:
-      %cmp = icmp sge i32 %n, 2
+      %cmp = icmp ult i32 %n, 2
       br i1 %cmp, label %safe, label %checked
 
     safe:
-      ret void
-
-    checked:
       %arr = alloca [2 x i32], align 4
       %n64 = sext i32 %n to i64
       %gep = getelementptr inbounds [2 x i32], [2 x i32]* %arr, i64 0, i64 %n64
       store i32 1, i32* %gep
+      ret void
+
+    checked:
       ret void
     }
   )";
@@ -321,6 +321,113 @@ TEST_F(AECheckerTest, LoopBufferAccess) {
 
   AEResult result = runAE(module.get());
   EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AECheckerTest, LoopCarriedIndexReachesInclusiveBound) {
+  const char *source = R"(
+    define i32 @main() {
+    entry:
+      %arr = alloca [10 x i32], align 4
+      br label %loop
+
+    loop:
+      %i = phi i32 [ 0, %entry ], [ %next, %loop ]
+      %i64 = sext i32 %i to i64
+      %gep = getelementptr inbounds [10 x i32], [10 x i32]* %arr, i64 0, i64 %i64
+      store i32 %i, i32* %gep
+      %next = add i32 %i, 1
+      %cmp = icmp sle i32 %next, 10
+      br i1 %cmp, label %loop, label %exit
+
+    exit:
+      ret i32 0
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  AEResult result = runAE(module.get());
+  EXPECT_GT(result.overflow_bugs, 0u);
+  EXPECT_EQ(result.null_bugs, 0u);
+}
+
+TEST_F(AECheckerTest, NegativeArrayIndexIsOverflow) {
+  const char *source = R"(
+    define i32 @main() {
+      %arr = alloca [10 x i32], align 4
+      %gep = getelementptr inbounds [10 x i32], [10 x i32]* %arr, i64 0, i64 -1
+      store i32 1, i32* %gep
+      ret i32 0
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  AEResult result = runAE(module.get());
+  EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AECheckerTest, OffsetThroughLoadedPointerRetainsBaseOffset) {
+  const char *source = R"(
+    define i32 @main() {
+      %arr = alloca [10 x i32], align 4
+      %base = getelementptr inbounds [10 x i32], [10 x i32]* %arr, i64 0, i64 0
+      %mid = getelementptr inbounds i32, i32* %base, i64 5
+      %slot = alloca i32*, align 8
+      store i32* %mid, i32** %slot, align 8
+      %p = load i32*, i32** %slot, align 8
+      %oob = getelementptr inbounds i32, i32* %p, i64 5
+      store i32 1, i32* %oob, align 4
+      ret i32 0
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  AEResult result = runAE(module.get());
+  EXPECT_GT(result.overflow_bugs, 0u);
+  EXPECT_EQ(result.null_bugs, 0u);
+}
+
+TEST_F(AECheckerTest, ConstantExprGlobalAccessIsOverflow) {
+  const char *source = R"(
+    @g = global [10 x i32] zeroinitializer, align 4
+
+    define i32 @main() {
+      store i32 1, i32* getelementptr inbounds ([10 x i32], [10 x i32]* @g, i64 1, i64 0), align 4
+      ret i32 0
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  AEResult result = runAE(module.get());
+  EXPECT_GT(result.overflow_bugs, 0u);
+  EXPECT_EQ(result.null_bugs, 0u);
+}
+
+TEST_F(AECheckerTest, HeapAllocUsesThirdSizeArgument) {
+  const char *source = R"(
+    declare i8* @HeapAlloc(i8*, i32, i64)
+
+    define i32 @main() {
+      %p = call i8* @HeapAlloc(i8* null, i32 0, i64 10)
+      %oob = getelementptr inbounds i8, i8* %p, i64 10
+      store i8 1, i8* %oob, align 1
+      ret i32 0
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  AEResult result = runAE(module.get());
+  EXPECT_GT(result.overflow_bugs, 0u);
+  EXPECT_EQ(result.null_bugs, 0u);
 }
 TEST_F(AECheckerTest, InterproceduralOverflow) {
   const char *source = R"(

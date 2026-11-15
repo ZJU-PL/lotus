@@ -47,10 +47,9 @@ enum class StateLayout {
   /// state, and states no later reader can observe are dropped. Object maps
   /// stay per instruction.
   SemiSparse,
-  /// Same as `SemiSparse` in Lotus. SVF's `sparse` additionally builds an SVFG
-  /// and stores object values at def sites too; Lotus's AE has no SVFG-backed
-  /// value map, so the two levels coincide. Accepted so that SVF spellings keep
-  /// working.
+  /// Full sparse: semi-sparse value storage plus SVFG-backed object-value
+  /// def-sites. Loads consult reaching SVFG memory definitions and fall back to
+  /// the flow-sensitive object map only when the graph has no answer.
   Sparse,
 };
 
@@ -58,11 +57,6 @@ enum class StateLayout {
 const char *toString(StateLayout layout);
 
 /// Parses `dense` / `sparse` / `semi-sparse`. Returns false when unknown.
-///
-/// `semi-sparse` is accepted as an alias for `sparse`: AE stores the object map
-/// and the value map in one state object, so there is no separate object-only
-/// sparsity level to select. The alias exists so that option spellings carried
-/// over from SVF (`--ae-sparsity=semi-sparse`) keep working.
 bool parseStateLayout(llvm::StringRef name, StateLayout &layout);
 
 /// Owns the abstract states of one AE run.

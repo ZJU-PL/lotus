@@ -262,6 +262,12 @@ public:
 
   StateLayout getStateLayout() const { return stateStore_.layout(); }
 
+  /// True when the SVFG required by full sparse mode has been constructed.
+  bool isSVFGBackedSparseActive() const;
+  uint32_t getSVFGSparseLoadQueryCount() const {
+    return svfgSparseLoadQueries_;
+  }
+
   const AbstractStateStore &getStateStore() const { return stateStore_; }
 
   AEExtAPI *getUtils() const { return utils; }
@@ -283,6 +289,7 @@ private:
 
   // Pointer analysis (AserPTA) - for call graph and indirect calls
   class PTAPtr; // Opaque pointer to avoid template dependencies in header
+  class SVFGSparseContext;
   std::unique_ptr<PTAPtr> pta_;
   bool ptaReady_{false};
 
@@ -322,11 +329,22 @@ private:
   std::map<const ICFGCycleWTO *, std::unordered_set<uint32_t>> cycleValueIds_;
   std::chrono::steady_clock::time_point deadline_;
   bool printStats_{false};
+  /// During a widening phase, temporary extrapolations such as [0,+inf] can
+  /// expose spurious bugs before narrowing recovers the loop bound. Findings
+  /// stay enabled for the precise pre-widening iterations and for narrowing;
+  /// detectors are suppressed only while the approximation is deliberately
+  /// accelerating toward a fixpoint.
+  bool suppressDetectors_{false};
 
   // Track which checkpoints have been checked
   std::set<const llvm::CallBase *> checkedCheckpoints_;
 
   std::vector<std::unique_ptr<AEDetector>> detectors;
+  /// SVFG-backed object-value def sites used by StateLayout::Sparse.
+  std::unique_ptr<SVFGSparseContext> svfgSparse_;
+  std::unordered_map<const llvm::Instruction *, AbstractValue>
+      sparseObjectDefs_;
+  uint32_t svfgSparseLoadQueries_{0};
   /// Per-instruction abstract states, retention policy selected by
   /// `setStateLayout`. Replaces the historical raw state map so the sparse
   /// layout can drop unobservable states.
@@ -424,6 +442,13 @@ private:
   /// the values that matter then live in the callee, so the whole table has to
   /// be materialized to keep the widened fixpoint identical to the dense one.
   const std::unordered_set<uint32_t> *cycleValueIds(const ICFGCycleWTO *cycle);
+
+  /// Builds the SVFG used by full sparse mode and initializes object-value
+  /// def-site tracking.
+  void initializeSVFGSparse(llvm::Module *module);
+
+  /// Collects the object value at a load from its SVFG memory predecessors.
+  AbstractValue getSVFGSparseLoadValue(const llvm::LoadInst *load);
 
   /// Starts the wall-clock budget. Called once per analysis run.
   void startTimeBudget();

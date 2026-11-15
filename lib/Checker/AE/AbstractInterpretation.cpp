@@ -10,6 +10,9 @@
 #include "Checker/AE/RelationSolver.h"
 #include "Checker/AE/SVFIRWrapper.h"
 #include "Checker/Framework/BugReportMgr.h"
+#include "IR/ICFG/ICFGBuilder.h"
+#include "IR/SVFG/SVFGBuilder.h"
+#include "IR/SVFG/SVFGNode.h"
 #include "Solvers/SMT/LIBSMT/Z3Expr.h"
 
 // AserPTA includes
@@ -324,6 +327,13 @@ public:
   ~PTAPtr() = default;
 };
 
+class AbstractInterpretation::SVFGSparseContext {
+public:
+  std::unique_ptr<ICFG> icfg;
+  std::unique_ptr<SVFGBuilder> builder;
+  SVFG *graph = nullptr;
+};
+
 AbstractInterpretation::AbstractInterpretation()
     : module_(nullptr), pta_(std::make_unique<PTAPtr>()),
       recursionMode_(WIDEN_NARROW), nextValueId_(3) {
@@ -373,6 +383,9 @@ void AbstractInterpretation::resetAnalysisState() {
   cycleHeadToCycle_.clear();
   cycleValueIds_.clear();
   retSlotIds_.clear();
+  svfgSparse_.reset();
+  sparseObjectDefs_.clear();
+  svfgSparseLoadQueries_ = 0;
   analyzedFunctions_.clear();
 
   // Clean up WTO objects
@@ -462,6 +475,9 @@ void AbstractInterpretation::runOnModule(llvm::Module *module) {
 
   // Create SVFIRWrapper for PTA-based queries (like SVF's SVFIR)
   svfir_ = new SVFIRWrapper(getPTAPass(), module_);
+
+  if (stateStore_.layout() == StateLayout::Sparse)
+    initializeSVFGSparse(module);
 
   // Initialize global state with SVFIRWrapper
   globalState.svfir_ = svfir_;
@@ -1067,20 +1083,51 @@ void AbstractInterpretation::handleCycleWTO(const ICFGCycleWTO *cycle) {
   // WIDEN_ONLY / WIDEN_NARROW modes: iterate until fixpoint
   bool increasing = true;
   const uint32_t widenDelay = widenDelay_;
+  const bool useCarriedHeadState = stateStore_.usesDefSiteVars();
+  struct SuppressionGuard {
+    bool &flag;
+    bool previous;
+    explicit SuppressionGuard(bool &f) : flag(f), previous(f) {}
+    ~SuppressionGuard() { flag = previous; }
+  } suppressionGuard{suppressDetectors_};
+  AbstractState carriedHeadState;
+  bool hasCarriedHeadState = false;
+  auto publishCycleHeadState = [&](const AbstractState &state) {
+    // `state` is the widened/narrowed state after interpreting the complete
+    // cycle-head block. In SVF the cycle head is one ICFG node, so writing the
+    // new state at that node is sufficient. Lotus uses LLVM basic blocks, whose
+    // later instructions are separate state keys; publish the result to the
+    // block entry (for the next iteration) and terminator (for the body) so the
+    // body observes the widened phi values instead of the pre-widening
+    // terminator snapshot.
+    if (cycleHead->empty())
+      return;
+    stateStore_.set(&cycleHead->front(), state);
+    stateStore_.set(cycleHead->getTerminator(), state);
+  };
 
   for (uint32_t curIter = 0;; curIter++) {
     if (timeBudgetExhausted())
       break;
     // Get the abstract state before processing the cycle head
     AbstractState prevHeadState;
-    bool hadPrevState = false;
+    const std::unordered_set<uint32_t> *cycleVals = nullptr;
+    if (stateStore_.usesDefSiteVars())
+      cycleVals = cycleValueIds(cycle);
 
     // Try to get state from first instruction of cycle head
     if (!cycleHead->empty()) {
       const llvm::Instruction *firstInst = &cycleHead->front();
-      if (const AbstractState *headState = stateStore_.find(firstInst)) {
+      if (useCarriedHeadState && hasCarriedHeadState) {
+        prevHeadState = carriedHeadState;
+      } else if (const AbstractState *headState = stateStore_.find(firstInst)) {
         prevHeadState = *headState;
-        hadPrevState = true;
+        // Snapshot the previous head state before interpreting the head. In the
+        // def-site layout a state copy aliases the run-wide value table, so
+        // materializing it later would observe values written by this iteration
+        // and compare the iteration with itself.
+        if (stateStore_.usesDefSiteVars())
+          prevHeadState.materializeVarTable(cycleVals);
       }
     }
 
@@ -1101,23 +1148,23 @@ void AbstractInterpretation::handleCycleWTO(const ICFGCycleWTO *cycle) {
     // and scattered back by the `set()` below -- SVF's gather/scatter around
     // `widenCycleState` (see `SparseAbstractInterpretation::widenCycleState`).
     if (stateStore_.usesDefSiteVars()) {
-      const std::unordered_set<uint32_t> *cycleVals = cycleValueIds(cycle);
-      prevHeadState.materializeVarTable(cycleVals);
       curHeadState.materializeVarTable(cycleVals);
     }
 
     // Match SVF: apply widening/narrowing at cycle head before processing body.
+    suppressDetectors_ =
+        suppressionGuard.previous || (curIter >= widenDelay && increasing);
     if (curIter >= widenDelay) {
       if (increasing) {
         // Apply widening operator
         AbstractState widenedState = prevHeadState.widening(curHeadState);
-
         // Update state at cycle head
-        if (!cycleHead->empty()) {
-          const llvm::Instruction *firstInst = &cycleHead->front();
-          stateStore_.set(firstInst, widenedState);
-          curHeadState = widenedState; // Update for comparison
+        publishCycleHeadState(widenedState);
+        if (useCarriedHeadState) {
+          carriedHeadState = widenedState;
+          hasCarriedHeadState = true;
         }
+        curHeadState = widenedState; // Update for comparison
 
         // Check if widening fixpoint reached
         if (widenedState == prevHeadState) {
@@ -1135,17 +1182,23 @@ void AbstractInterpretation::handleCycleWTO(const ICFGCycleWTO *cycle) {
         AbstractState narrowedState = prevHeadState.narrowing(curHeadState);
 
         // Update state at cycle head
-        if (!cycleHead->empty()) {
-          const llvm::Instruction *firstInst = &cycleHead->front();
-          stateStore_.set(firstInst, narrowedState);
-          curHeadState = narrowedState; // Update for comparison
+        publishCycleHeadState(narrowedState);
+        if (useCarriedHeadState) {
+          carriedHeadState = narrowedState;
+          hasCarriedHeadState = true;
         }
+        curHeadState = narrowedState; // Update for comparison
 
         // Check if narrowing fixpoint reached
         if (narrowedState == prevHeadState) {
           // Narrowing fixpoint reached, exit loop
           break;
         }
+      }
+    } else {
+      if (useCarriedHeadState) {
+        carriedHeadState = curHeadState;
+        hasCarriedHeadState = true;
       }
     }
 
@@ -1311,43 +1364,46 @@ bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
     return false;
   this->currentInstruction_ = inst;
 
-  if (!stateStore_.contains(inst)) {
-    const llvm::BasicBlock *bb = inst->getParent();
-    // First try: inherit from previous instruction in same block (intra-block
-    // flow). This is critical for entry blocks and blocks with no CFG preds.
-    const llvm::Instruction *prevInst = nullptr;
-    for (const llvm::Instruction &I : *bb) {
-      if (&I == inst)
-        break;
-      prevInst = &I;
-    }
-    bool inherited = false;
-    if (prevInst) {
-      if (const AbstractState *prevState = stateStore_.find(prevInst)) {
-        stateStore_.inherit(inst, *prevState);
-        inherited = true;
+  const llvm::BasicBlock *bb = inst->getParent();
+  const llvm::Instruction *prevInst = nullptr;
+  for (const llvm::Instruction &I : *bb) {
+    if (&I == inst)
+      break;
+    prevInst = &I;
+  }
+
+  // Intra-block flow is a state transformation, not a once-per-instruction
+  // initialization. A block may be revisited through a backedge, so every
+  // instruction after the block entry must be refreshed from the current state
+  // of its predecessor on *every* visit. Keeping the state created by the first
+  // visit makes loop-carried values stale (for example, a[i] would keep seeing
+  // the first iteration's i).
+  if (prevInst) {
+    if (const AbstractState *prevState = stateStore_.find(prevInst))
+      stateStore_.inherit(inst, *prevState);
+    else
+      stateStore_.inherit(inst, AbstractState());
+  } else if (!stateStore_.contains(inst)) {
+    // The block-entry state is normally installed by
+    // mergeStatesFromPredecessors. Keep the fallback for callers that interpret
+    // a block directly without running that merge.
+    bool predInherited = false;
+    auto predIt = llvm::pred_begin(bb);
+    if (predIt != llvm::pred_end(bb)) {
+      const llvm::Instruction *predTerm = (*predIt)->getTerminator();
+      if (const AbstractState *predState = stateStore_.find(predTerm)) {
+        stateStore_.inherit(inst, *predState);
+        predInherited = true;
       }
     }
-    // Fallback: inherit from CFG predecessors
-    if (!inherited && !stateStore_.contains(inst)) {
-      bool predInherited = false;
-      auto predIt = llvm::pred_begin(bb);
-      if (predIt != llvm::pred_end(bb)) {
-        const llvm::Instruction *predTerm = (*predIt)->getTerminator();
-        if (const AbstractState *predState = stateStore_.find(predTerm)) {
-          stateStore_.inherit(inst, *predState);
-          predInherited = true;
-        }
-      }
-      if (!predInherited)
-        stateStore_.inherit(inst, AbstractState());
-    }
+    if (!predInherited)
+      stateStore_.inherit(inst, AbstractState());
   }
 
   AbstractState &as = stateStore_.getOrCreate(inst);
-  // Pin the states a later reader may observe: call sites (checkpoints, external
-  // API models, detector queries), block terminators (successor joins) and
-  // allocas (object-size bookkeeping). Everything else stays transient.
+  // Pin the states a later reader may observe: call sites (checkpoints,
+  // external API models, detector queries), block terminators (successor joins)
+  // and allocas (object-size bookkeeping). Everything else stays transient.
   if (llvm::isa<llvm::CallBase>(inst) || inst->isTerminator() ||
       llvm::isa<llvm::AllocaInst>(inst))
     stateStore_.pin(inst);
@@ -1439,8 +1495,10 @@ bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
     break;
   }
 
-  for (auto &detector : detectors)
-    detector->detect(as, inst);
+  if (!suppressDetectors_) {
+    for (auto &detector : detectors)
+      detector->detect(as, inst);
+  }
 
   as.commitPendingFrees();
 
@@ -1453,9 +1511,8 @@ void AbstractInterpretation::updateStateOnAddr(const llvm::AllocaInst *addr) {
   uint32_t addrId = getValueId(addr);
   // Use improved version that tracks VLA sizes from abstract state
   // Note: We use the state at the alloca instruction itself
-  uint32_t objSize =
-      stateStore_.getOrCreatePinned(addr).getAllocaInstByteSize(
-          addr, stateStore_.getOrCreatePinned(addr));
+  uint32_t objSize = stateStore_.getOrCreatePinned(addr).getAllocaInstByteSize(
+      addr, stateStore_.getOrCreatePinned(addr));
 
   AbstractValue av(AddressValue(AddressValue::getVirtualMemAddress(addrId)));
   stateStore_.getOrCreate(addr)[addrId] = av;
@@ -1705,6 +1762,20 @@ void AbstractInterpretation::updateStateOnLoad(const llvm::LoadInst *load) {
 
   AbstractState &as = stateStore_.getOrCreate(load);
   AbstractValue loadedVal = as.loadValue(ptrId);
+  if (stateStore_.layout() == StateLayout::Sparse) {
+    AbstractValue svfgVal = getSVFGSparseLoadValue(load);
+    const bool stateBottom =
+        loadedVal.getInterval().isBottom() && loadedVal.getAddrs().isBottom();
+    const bool svfgBottom =
+        svfgVal.getInterval().isBottom() && svfgVal.getAddrs().isBottom();
+    if (stateBottom && !svfgBottom) {
+      loadedVal = svfgVal;
+    } else if (!stateBottom && !svfgBottom && svfgVal.isInterval() &&
+               loadedVal.isInterval() &&
+               svfgVal.getInterval().containedWithin(loadedVal.getInterval())) {
+      loadedVal = svfgVal;
+    }
+  }
 
   as[lhsId] = loadedVal;
 }
@@ -1715,6 +1786,8 @@ void AbstractInterpretation::updateStateOnStore(const llvm::StoreInst *store) {
 
   AbstractState &as = stateStore_.getOrCreate(store);
   materializeConstantValue(as, store->getValueOperand(), valId);
+  if (stateStore_.layout() == StateLayout::Sparse)
+    sparseObjectDefs_[store] = as[valId];
 
   // A store is a strong update only when the pointer names a single,
   // non-summary object; otherwise the new value has to be joined in. This is
@@ -2546,8 +2619,7 @@ void AbstractInterpretation::handleFunCall(
 
       AbstractState postState = *retIt;
       if (!callNode->getType()->isVoidTy()) {
-        auto rvIt =
-            postState._varToAbsVal.find(returnSlotId(retInst));
+        auto rvIt = postState._varToAbsVal.find(returnSlotId(retInst));
         if (rvIt != postState._varToAbsVal.end()) {
           postState[getValueId(callNode)] = rvIt->second;
         }
@@ -2605,8 +2677,7 @@ bool AbstractInterpretation::collectCalleeReturnValue(
     const AbstractState *retIt = stateStore_.find(ret);
     if (!retIt)
       continue;
-    auto rvIt =
-        retIt->_varToAbsVal.find(returnSlotId(ret));
+    auto rvIt = retIt->_varToAbsVal.find(returnSlotId(ret));
     if (rvIt == retIt->_varToAbsVal.end())
       continue;
     if (!calleeHasReturn) {
@@ -2882,8 +2953,8 @@ AbstractInterpretation::getCallee(const llvm::CallBase *callNode) {
   return callees.front();
 }
 
-uint32_t AbstractInterpretation::
-returnSlotId(const llvm::Instruction *ret) const {
+uint32_t
+AbstractInterpretation::returnSlotId(const llvm::Instruction *ret) const {
   const auto it = retSlotIds_.find(ret);
   if (it != retSlotIds_.end())
     return it->second;
@@ -2906,8 +2977,8 @@ bool AbstractInterpretation::isLocalOfRecursiveFun(uint32_t objId) const {
 }
 
 bool AbstractInterpretation::isArrayBaseObject(uint32_t objId) const {
-  const auto *alloca = llvm::dyn_cast_or_null<llvm::AllocaInst>(
-      getValueFromId(objId));
+  const auto *alloca =
+      llvm::dyn_cast_or_null<llvm::AllocaInst>(getValueFromId(objId));
   // A GEP field object has its own (synthetic) id and no defining value, so it
   // is not an array base; only the aggregate itself is a summary.
   return alloca && alloca->getAllocatedType()->isArrayTy();
@@ -2937,42 +3008,100 @@ AbstractInterpretation::cycleValueIds(const ICFGCycleWTO *cycle) {
   // Walk the cycle's components, descending into nested cycles: every
   // instruction defined in the cycle's blocks owns a value that may change
   // between iterations.
+  auto collectBlock = [&](const llvm::BasicBlock *bb) {
+    if (!bb)
+      return;
+    for (const llvm::Instruction &inst : *bb) {
+      // A recursive call drags the callee's values into the fixpoint; they live
+      // outside this cycle's blocks, so widen with the whole table instead of a
+      // restricted snapshot.
+      if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+        if (const llvm::Function *callee = call->getCalledFunction()) {
+          if (isRecursiveFun(callee))
+            needsWholeTable = true;
+        }
+      }
+      if (!inst.getType()->isVoidTy())
+        ids.insert(getValueId(&inst));
+    }
+  };
   std::function<void(const ICFGWTOComp *)> visit =
       [&](const ICFGWTOComp *comp) {
         if (!comp)
           return;
         if (const auto *singleton =
                 llvm::dyn_cast<lotus::analysis::ICFGSingletonWTO>(comp)) {
-          const llvm::BasicBlock *bb = singleton->getBlock();
-          if (!bb)
-            return;
-          for (const llvm::Instruction &inst : *bb) {
-            // A recursive call drags the callee's values into the fixpoint;
-            // they live outside this cycle's blocks, so widen with the whole
-            // table instead of a restricted snapshot.
-            if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
-              if (const llvm::Function *callee = call->getCalledFunction()) {
-                if (isRecursiveFun(callee))
-                  needsWholeTable = true;
-              }
-            }
-            if (inst.getType()->isVoidTy())
-              continue;
-            ids.insert(getValueId(&inst));
-          }
+          collectBlock(singleton->getBlock());
           return;
         }
         if (const auto *nested =
                 llvm::dyn_cast<lotus::analysis::ICFGCycleWTO>(comp)) {
+          collectBlock(nested->getEntry());
           for (const ICFGWTOComp *inner : nested->getComponents())
             visit(inner);
         }
       };
+  collectBlock(cycle->getEntry());
   visit(cycle);
   if (needsWholeTable)
     ids.clear();
   const auto inserted = cycleValueIds_.emplace(cycle, std::move(ids)).first;
   return inserted->second.empty() ? nullptr : &inserted->second;
+}
+
+void AbstractInterpretation::initializeSVFGSparse(llvm::Module *module) {
+  svfgSparse_ = std::make_unique<SVFGSparseContext>();
+  svfgSparse_->icfg = std::make_unique<ICFG>();
+  ICFGBuilder icfgBuilder(svfgSparse_->icfg.get());
+  icfgBuilder.build(module);
+
+  SVFGBuilderConfig config;
+  config.pointerOnly = false;
+  config.buildMSSA = true;
+  config.includeGlobals = true;
+  config.resolveIndirectCalls = true;
+  svfgSparse_->builder = std::make_unique<SVFGBuilder>(config);
+  svfgSparse_->graph = svfgSparse_->builder->build(svfgSparse_->icfg.get());
+}
+
+bool AbstractInterpretation::isSVFGBackedSparseActive() const {
+  return stateStore_.layout() == StateLayout::Sparse && svfgSparse_ &&
+         svfgSparse_->graph;
+}
+
+AbstractValue
+AbstractInterpretation::getSVFGSparseLoadValue(const llvm::LoadInst *load) {
+  AbstractValue result;
+  if (!svfgSparse_ || !svfgSparse_->graph)
+    return result;
+  ++svfgSparseLoadQueries_;
+
+  SVFGNode *loadNode = svfgSparse_->graph->getDef(load);
+  if (!loadNode)
+    return result;
+
+  std::unordered_set<SVFGNode *> visited;
+  std::function<void(SVFGNode *, unsigned)> collect = [&](SVFGNode *node,
+                                                          unsigned depth) {
+    if (!node || depth > 64 || !visited.insert(node).second)
+      return;
+    if (const auto *store = llvm::dyn_cast<StoreSVFGNode>(node)) {
+      const llvm::Instruction *storeInst = store->getInstruction();
+      auto def = sparseObjectDefs_.find(storeInst);
+      if (def != sparseObjectDefs_.end())
+        result.join_with(def->second);
+      return;
+    }
+    for (const SVFGEdge *edge : node->getInEdges()) {
+      if (!edge || !(edge->isMemoryEdge() || edge->isPhiEdge() ||
+                     edge->isIndirectEdge()))
+        continue;
+      collect(edge->getSrcNode(), depth + 1);
+    }
+  };
+  collect(loadNode, 0);
+
+  return result;
 }
 
 void AbstractInterpretation::startTimeBudget() {
@@ -3516,7 +3645,6 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
   case llvm::CmpInst::FCMP_ONE:
   case llvm::CmpInst::FCMP_UNE:
     break;
-  case llvm::CmpInst::ICMP_UGT:
   case llvm::CmpInst::ICMP_SGT:
   case llvm::CmpInst::FCMP_OGT:
   case llvm::CmpInst::FCMP_UGT: {
@@ -3525,7 +3653,13 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
     lhs.meet_with(IntervalValue(lb, ub));
     break;
   }
-  case llvm::CmpInst::ICMP_UGE:
+  case llvm::CmpInst::ICMP_UGT: {
+    int64_t rhsLb = rhs.lb().getIntNumeral();
+    int64_t lower = std::max<int64_t>(0, rhsLb + 1);
+    lhs.meet_with(
+        IntervalValue(BoundedInt(lower), BoundedInt::plus_infinity()));
+    break;
+  }
   case llvm::CmpInst::ICMP_SGE:
   case llvm::CmpInst::FCMP_OGE:
   case llvm::CmpInst::FCMP_UGE: {
@@ -3534,7 +3668,12 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
     lhs.meet_with(IntervalValue(lb, ub));
     break;
   }
-  case llvm::CmpInst::ICMP_ULT:
+  case llvm::CmpInst::ICMP_UGE: {
+    int64_t lower = std::max<int64_t>(0, rhs.lb().getIntNumeral());
+    lhs.meet_with(
+        IntervalValue(BoundedInt(lower), BoundedInt::plus_infinity()));
+    break;
+  }
   case llvm::CmpInst::ICMP_SLT:
   case llvm::CmpInst::FCMP_OLT:
   case llvm::CmpInst::FCMP_ULT: {
@@ -3543,13 +3682,22 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
     lhs.meet_with(IntervalValue(lb, ub));
     break;
   }
-  case llvm::CmpInst::ICMP_ULE:
+  case llvm::CmpInst::ICMP_ULT: {
+    BoundedInt ub(rhs.ub().getIntNumeral() - 1);
+    lhs.meet_with(IntervalValue(BoundedInt(0), ub));
+    break;
+  }
   case llvm::CmpInst::ICMP_SLE:
   case llvm::CmpInst::FCMP_OLE:
   case llvm::CmpInst::FCMP_ULE: {
     BoundedInt lb = BoundedInt::minus_infinity();
     BoundedInt ub(rhs.ub().getIntNumeral());
     lhs.meet_with(IntervalValue(lb, ub));
+    break;
+  }
+  case llvm::CmpInst::ICMP_ULE: {
+    BoundedInt ub(rhs.ub().getIntNumeral());
+    lhs.meet_with(IntervalValue(BoundedInt(0), ub));
     break;
   }
   case llvm::CmpInst::FCMP_FALSE:

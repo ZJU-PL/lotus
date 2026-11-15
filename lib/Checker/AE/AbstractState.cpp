@@ -69,6 +69,22 @@ resolvePointerBaseAndOffset(AbstractState &as, const llvm::Value *value,
 
 } // namespace
 
+AbstractValue &AbstractState::operator[](uint32_t varId) {
+  auto it = _varToAbsVal.find(varId);
+  if (it != _varToAbsVal.end())
+    return it->second;
+
+  AbstractValue fallback;
+  if (_varToAbsVal.isDefSite()) {
+    fallback = AbstractValue(IntervalValue::top());
+    const llvm::Value *value =
+        AbstractInterpretation::getAEInstance().getValueFromIdStatic(varId);
+    if (value && value->getType()->isPointerTy())
+      fallback = AddressValue(getVirtualMemAddress(BlkPtr));
+  }
+  return _varToAbsVal.emplace(varId, fallback).first->second;
+}
+
 /// Widen interval to ensure termination of analysis
 AbstractState AbstractState::widening(const AbstractState &other) {
   // Match SVF semantics: iterate over existing keys in this, then widen with
@@ -365,8 +381,7 @@ AbstractValue AbstractState::loadValue(uint32_t varId) {
   return result;
 }
 
-void AbstractState::storeValue(uint32_t varId, uint32_t valId,
-                               StoreKind kind) {
+void AbstractState::storeValue(uint32_t varId, uint32_t valId, StoreKind kind) {
   AbstractValue val = _varToAbsVal[valId];
 
   // A weak store joins into every target; a strong store replaces it.
@@ -677,8 +692,8 @@ void AbstractState::initObjVar(const llvm::Value *objVar) {
       } else if (const llvm::ConstantFP *cfp =
                      llvm::dyn_cast<llvm::ConstantFP>(gv->getInitializer())) {
         double val = cfp->getValueAPF().convertToDouble();
-        (*this)[varId] = IntervalValue(static_cast<int64_t>(val),
-                static_cast<int64_t>(val));
+        (*this)[varId] =
+            IntervalValue(static_cast<int64_t>(val), static_cast<int64_t>(val));
         return;
       } else if (gv->getInitializer()->isNullValue()) {
         (*this)[varId] =
@@ -715,8 +730,8 @@ void AbstractState::initObjVar(const llvm::Value *objVar) {
   }
   if (const llvm::ConstantFP *cfp = llvm::dyn_cast<llvm::ConstantFP>(objVar)) {
     double val = cfp->getValueAPF().convertToDouble();
-    (*this)[varId] = IntervalValue(static_cast<int64_t>(val),
-                                   static_cast<int64_t>(val));
+    (*this)[varId] =
+        IntervalValue(static_cast<int64_t>(val), static_cast<int64_t>(val));
     return;
   }
   if (llvm::isa<llvm::ConstantPointerNull>(objVar)) {

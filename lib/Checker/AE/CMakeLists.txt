@@ -21,5 +21,6 @@ target_link_libraries(AE
     CheckerFramework
     CanarySMT
     AserPTA
+    SVFG
     ${Z3_LIBRARIES}
 )

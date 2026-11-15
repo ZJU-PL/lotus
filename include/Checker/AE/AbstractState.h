@@ -1,4 +1,5 @@
-/** @file AbstractState.h @brief Abstract state representation for abstract execution bug detection. */
+/** @file AbstractState.h @brief Abstract state representation for abstract
+ * execution bug detection. */
 //===- AbstractState.h ----Abstract State--------------------------//
 //
 // Migrated from SVF's AE engine to Lotus.
@@ -48,13 +49,14 @@ class AbstractState;
 ///
 /// Two backings are supported, selected per analysis run:
 ///
-///  - **Local**: the table owns its map and a state copy deep-copies it. This is
+///  - **Local**: the table owns its map and a state copy deep-copies it. This
+///  is
 ///    the classic dense layout.
 ///  - **Def-site**: the table points at one run-wide map owned by
 ///    `AbstractStateStore`. A value is defined by exactly one SSA instruction,
-///    so its abstract value is the same at every program point dominated by that
-///    definition; storing it once per *value* instead of once per *node* is what
-///    SVF calls the semi-sparse layout
+///    so its abstract value is the same at every program point dominated by
+///    that definition; storing it once per *value* instead of once per *node*
+///    is what SVF calls the semi-sparse layout
 ///    (`svf/include/AE/Svfexe/SparseAbstractInterpretation.h`).
 ///
 /// The facade keeps the same member-function surface as
@@ -297,8 +299,10 @@ public:
     return *this;
   }
 
-  /// Access abstract value for a variable (mutable)
-  AbstractValue &operator[](uint32_t varId) { return _varToAbsVal[varId]; }
+  /// Access abstract value for a variable (mutable). In the def-site layout a
+  /// missing entry receives the type-directed fallback defined by
+  /// AbstractState.cpp instead of being exposed as bottom.
+  AbstractValue &operator[](uint32_t varId);
 
   /// Access abstract value for a variable (const)
   const AbstractValue &operator[](uint32_t varId) const {
@@ -371,8 +375,7 @@ public:
 
   /// Detaches from the shared table, optionally keeping only @p ids.
   /// Used by widening/narrowing, which must not mutate the shared table.
-  void materializeVarTable(
-      const std::unordered_set<uint32_t> *only = nullptr) {
+  void materializeVarTable(const std::unordered_set<uint32_t> *only = nullptr) {
     if (only)
       _varToAbsVal.detachToLocal(*only);
     else

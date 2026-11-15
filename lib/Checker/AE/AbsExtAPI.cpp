@@ -51,6 +51,63 @@ bool containsAny(const std::string &name,
   return false;
 }
 
+std::string getAnnotationArgument(const std::vector<std::string> &annotations,
+                                  llvm::StringRef prefix) {
+  for (const std::string &annotation : annotations) {
+    llvm::StringRef value(annotation);
+    if (value.consume_front(prefix))
+      return value.str();
+  }
+  return {};
+}
+
+std::vector<uint32_t> parseAllocSizeArgs(llvm::StringRef spec) {
+  std::vector<uint32_t> args;
+  while (!spec.empty()) {
+    size_t star = spec.find('*');
+    llvm::StringRef term = spec.take_front(star);
+    spec = star == llvm::StringRef::npos ? llvm::StringRef()
+                                         : spec.drop_front(star + 1);
+    if (!term.consume_front("Arg"))
+      return {};
+    unsigned index = 0;
+    if (term.getAsInteger(10, index))
+      return {};
+    args.push_back(index);
+  }
+  return args;
+}
+
+IntervalValue allocationSizeFromAnnotation(AbstractState &as,
+                                           const llvm::CallBase *call,
+                                           llvm::StringRef spec) {
+  if (spec.empty())
+    spec = "Arg0";
+  if (spec == "UNKNOWN")
+    return IntervalValue::top();
+
+  std::vector<uint32_t> args = parseAllocSizeArgs(spec);
+  if (args.empty())
+    return IntervalValue::top();
+
+  IntervalValue total(1);
+  for (uint32_t index : args) {
+    if (index >= call->arg_size())
+      return IntervalValue::top();
+    const llvm::Value *operand = call->getArgOperand(index);
+    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(operand)) {
+      total =
+          total * IntervalValue(static_cast<int64_t>(constant->getZExtValue()));
+      continue;
+    }
+    uint32_t valueId = AbstractInterpretation::getValueIdStatic(operand);
+    if (!as.inVarToValTable(valueId))
+      return IntervalValue::top();
+    total = total * as[valueId].getInterval();
+  }
+  return total;
+}
+
 enum class IntegerSignedness { Unknown, Signed, Unsigned };
 
 static llvm::Module *getOwningModule(const llvm::Value *value) {
@@ -88,7 +145,8 @@ static uint32_t getTypeByteSize(const llvm::Type *type,
   return static_cast<uint32_t>(size);
 }
 
-static uint32_t getElementByteSize(AbstractState &as, const llvm::Value *value) {
+static uint32_t getElementByteSize(AbstractState &as,
+                                   const llvm::Value *value) {
   llvm::Module *module = getOwningModule(value);
   if (!module)
     return 1;
@@ -114,8 +172,8 @@ static uint32_t getTrackedByteCount(const IntervalValue &len,
   if (len.is_infinite())
     return MaxFieldLimit;
 
-  int64_t raw =
-      useLowerBound ? len.lb().getIntNumeralOrZero() : len.ub().getIntNumeralOrZero();
+  int64_t raw = useLowerBound ? len.lb().getIntNumeralOrZero()
+                              : len.ub().getIntNumeralOrZero();
   if (raw <= 0)
     return 0;
   if (raw > static_cast<int64_t>(MaxFieldLimit))
@@ -238,9 +296,8 @@ parseScanfSignednessHints(const std::string &format) {
       ++i;
     }
 
-    if (i + 1 < format.size() &&
-        ((format[i] == 'h' && format[i + 1] == 'h') ||
-         (format[i] == 'l' && format[i + 1] == 'l'))) {
+    if (i + 1 < format.size() && ((format[i] == 'h' && format[i + 1] == 'h') ||
+                                  (format[i] == 'l' && format[i + 1] == 'l'))) {
       i += 2;
     } else if (i < format.size() &&
                (format[i] == 'h' || format[i] == 'l' || format[i] == 'j' ||
@@ -620,6 +677,110 @@ void AEExtAPI::initAnnotationMap() {
   addAnnotation("strtoll", {"STRTO"});
   addAnnotation("strtoul", {"STRTO"});
   addAnnotation("strtoull", {"STRTO"});
+
+  // Allocation/reallocation annotations mirrored from SVF's extapi.c. These
+  // override the coarser entries above and preserve each function's size
+  // operand, including UNKNOWN-size APIs that must use a conservative cap.
+  addAnnotation("malloc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("HeapAlloc", {"ALLOC", "ALLOC_SIZE:Arg2"});
+  addAnnotation("LocalAlloc", {"ALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("GlobalAlloc", {"ALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("_malloc_dbg", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_aligned_malloc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("HeapReAlloc", {"REALLOC", "ALLOC_SIZE:Arg3"});
+  addAnnotation("LocalReAlloc", {"REALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("fopen", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("fopen64", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("fdopen", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("readdir64", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("tmpvoid64", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("calloc", {"ALLOC", "ALLOC_SIZE:Arg0*Arg1"});
+  addAnnotation("zmalloc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("gzdopen", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("iconv_open", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("lalloc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("lalloc_clear", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("nhalloc", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("oballoc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("popen", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("pthread_getspecific", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("readdir", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("safe_calloc", {"ALLOC", "ALLOC_SIZE:Arg0*Arg1"});
+  addAnnotation("safe_malloc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("safecalloc", {"ALLOC", "ALLOC_SIZE:Arg0*Arg1"});
+  addAnnotation("safemalloc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("setmntent", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("shmat", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("__sysv_signal", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("tempnam", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("tmpvoid", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("xcalloc", {"ALLOC", "ALLOC_SIZE:Arg0*Arg1"});
+  addAnnotation("xmalloc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("__cxa_allocate_exception", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("aligned_alloc", {"ALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("memalign", {"ALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("valloc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("pvalloc", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("mmap64", {"ALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("XSetLocaleModifiers", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("__strdup", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("crypt", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("dlerror", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("dlopen", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("gai_strerror", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("gcry_cipher_algo_name", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("svfgcry_md_algo_name_", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("getlogin", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("getpass", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("gnutls_strerror", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("gpg_strerror", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("gzerror", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("inet_ntoa", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("initscr", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("llvm_stacksave", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("mmap", {"ALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("newwin", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("nl_langinfo", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("opendir", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("sbrk", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("strdup", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("strndup", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("strerror", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("strsignal", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("textdomain", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("tgetstr", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("tigetstr", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("tmpnam", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("ttyname", {"ALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("getcwd", {"REALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("mem_realloc", {"REALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("realloc", {"REALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("reallocarray", {"REALLOC", "ALLOC_SIZE:Arg1*Arg2"});
+  addAnnotation("safe_realloc", {"REALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("saferealloc", {"REALLOC", "ALLOC_SIZE:Arg1*Arg2"});
+  addAnnotation("safexrealloc", {"REALLOC", "ALLOC_SIZE:UNKNOWN"});
+  addAnnotation("xrealloc", {"REALLOC", "ALLOC_SIZE:Arg1"});
+  addAnnotation("_Znwj", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnwjRKSt9nothrow_t", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnwjSt11align_val_t", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnwjSt11align_val_tRKSt9nothrow_t",
+                {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_Znaj", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnajRKSt9nothrow_t", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnajSt11align_val_t", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnajSt11align_val_tRKSt9nothrow_t",
+                {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_Znwm", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnwmRKSt9nothrow_t", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnwmSt11align_val_t", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnwmSt11align_val_tRKSt9nothrow_t",
+                {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_Znam", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnamRKSt9nothrow_t", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnamSt11align_val_t", {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("_ZnamSt11align_val_tRKSt9nothrow_t",
+                {"ALLOC", "ALLOC_SIZE:Arg0"});
+  addAnnotation("SyGetmem", {"ALLOC", "ALLOC_SIZE:Arg0"});
 }
 
 void AEExtAPI::addAnnotation(const std::string &funcName,
@@ -1561,7 +1722,7 @@ void AEExtAPI::initExtFunMap() {
   func_map["reallocarray"] = sse_reallocarray;
 
   // strdup/strndup
-  auto sse_strdup = [this, sse_malloc](const llvm::CallBase *callNode) {
+  auto sse_strdup = [this](const llvm::CallBase *callNode) {
     // Similar to malloc - allocates and copies string
     if (callNode->arg_size() < 1)
       return;
@@ -1581,10 +1742,9 @@ void AEExtAPI::initExtFunMap() {
       uint32_t elemSize = getElementByteSize(as, callNode->getArgOperand(0));
       uint64_t totalSize =
           static_cast<uint64_t>(len.ub().getIntNumeralOrZero()) + elemSize;
-      as.setObjSize(
-          objId,
-          totalSize > MaxFieldLimit ? MaxFieldLimit
-                                    : static_cast<uint32_t>(totalSize));
+      as.setObjSize(objId, totalSize > MaxFieldLimit
+                               ? MaxFieldLimit
+                               : static_cast<uint32_t>(totalSize));
     } else {
       uint32_t objId = AddressValue::getInternalID(newAddr);
       as.addHeapObject(objId);
@@ -1725,13 +1885,11 @@ void AEExtAPI::handleExtAPI(const llvm::CallBase *call,
     handleExtStrto(call);
     break;
   case UNCLASSIFIED:
-  default:
-    {
-      AbstractState &as = getAbsStateFromTrace(call);
-      uint32_t lhsId = getValueId(call);
-      as[lhsId] = AbstractValue(IntervalValue::top());
-    }
-    break;
+  default: {
+    AbstractState &as = getAbsStateFromTrace(call);
+    uint32_t lhsId = getValueId(call);
+    as[lhsId] = AbstractValue(IntervalValue::top());
+  } break;
   }
 }
 
@@ -1799,31 +1957,22 @@ void AEExtAPI::handleExtAlloc(const llvm::CallBase *call) {
   uint32_t newAddr = AddressValue::getVirtualMemAddress(lhsId);
   as[lhsId] = AbstractValue(AddressValue(newAddr));
 
-  uint32_t sizeId = getValueId(call->getArgOperand(0));
+  const llvm::Function *callee = call->getCalledFunction();
+  const std::string sizeSpec =
+      getAnnotationArgument(getExtFuncAnnotations(callee), "ALLOC_SIZE:");
+  IntervalValue size = allocationSizeFromAnnotation(as, call, sizeSpec);
   uint32_t objId = AddressValue::getInternalID(newAddr);
   as.addHeapObject(objId);
 
-  if (const auto *csize =
-          llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(0))) {
-    as.setObjSize(objId, static_cast<uint32_t>(csize->getZExtValue()));
-  } else if (as.inVarToValTable(sizeId)) {
-    IntervalValue size = as[sizeId].getInterval();
-    if (size.is_infinite()) {
-      // Bounds are unbounded; getIntNumeral() would assert. Use conservative
-      // limit.
-      as.setObjSize(objId, MaxFieldLimit);
-    } else if (size.is_numeral()) {
-      as.setObjSize(objId, static_cast<uint32_t>(size.getIntNumeralOrZero()));
-    } else {
-      int64_t ub = size.ub().getIntNumeralOrZero();
-      if (ub > 0 && ub <= static_cast<int64_t>(MaxFieldLimit)) {
-        as.setObjSize(objId, static_cast<uint32_t>(ub));
-      } else {
-        as.setObjSize(objId, MaxFieldLimit);
-      }
-    }
-  } else {
+  if (size.is_infinite() || size.isBottom()) {
     as.setObjSize(objId, MaxFieldLimit);
+  } else if (size.is_numeral()) {
+    as.setObjSize(objId, static_cast<uint32_t>(size.getIntNumeralOrZero()));
+  } else {
+    int64_t ub = size.ub().getIntNumeralOrZero();
+    as.setObjSize(objId, ub > 0 && ub <= static_cast<int64_t>(MaxFieldLimit)
+                             ? static_cast<uint32_t>(ub)
+                             : MaxFieldLimit);
   }
 }
 
@@ -1835,31 +1984,22 @@ void AEExtAPI::handleExtRealloc(const llvm::CallBase *call) {
   uint32_t newAddr = AddressValue::getVirtualMemAddress(lhsId);
   as[lhsId] = AbstractValue(AddressValue(newAddr));
 
-  uint32_t sizeId = getValueId(call->getArgOperand(1));
+  const llvm::Function *callee = call->getCalledFunction();
+  const std::string sizeSpec =
+      getAnnotationArgument(getExtFuncAnnotations(callee), "ALLOC_SIZE:");
+  IntervalValue size = allocationSizeFromAnnotation(as, call, sizeSpec);
   uint32_t objId = AddressValue::getInternalID(newAddr);
   as.addHeapObject(objId);
 
-  if (const auto *csize =
-          llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1))) {
-    as.setObjSize(objId, static_cast<uint32_t>(csize->getZExtValue()));
-  } else if (as.inVarToValTable(sizeId)) {
-    IntervalValue size = as[sizeId].getInterval();
-    if (size.is_infinite()) {
-      // Bounds are unbounded; getIntNumeral() would assert. Use conservative
-      // limit.
-      as.setObjSize(objId, MaxFieldLimit);
-    } else if (size.is_numeral()) {
-      as.setObjSize(objId, static_cast<uint32_t>(size.getIntNumeralOrZero()));
-    } else {
-      int64_t ub = size.ub().getIntNumeralOrZero();
-      if (ub > 0 && ub <= static_cast<int64_t>(MaxFieldLimit)) {
-        as.setObjSize(objId, static_cast<uint32_t>(ub));
-      } else {
-        as.setObjSize(objId, MaxFieldLimit);
-      }
-    }
-  } else {
+  if (size.is_infinite() || size.isBottom()) {
     as.setObjSize(objId, MaxFieldLimit);
+  } else if (size.is_numeral()) {
+    as.setObjSize(objId, static_cast<uint32_t>(size.getIntNumeralOrZero()));
+  } else {
+    int64_t ub = size.ub().getIntNumeralOrZero();
+    as.setObjSize(objId, ub > 0 && ub <= static_cast<int64_t>(MaxFieldLimit)
+                             ? static_cast<uint32_t>(ub)
+                             : MaxFieldLimit);
   }
 }
 
@@ -2032,10 +2172,9 @@ void AEExtAPI::handleStrcat(const llvm::CallBase *call) {
   handleMemcpy(as, dstId, srcId, srcLen,
                static_cast<uint32_t>(dstLen.ub().getIntNumeralOrZero()));
   if (dstLen.is_numeral() && srcLen.is_numeral()) {
-    storeStringTerminator(
-        as, dstId,
-        static_cast<uint32_t>(dstLen.getIntNumeralOrZero() +
-                              srcLen.getIntNumeralOrZero()));
+    storeStringTerminator(as, dstId,
+                          static_cast<uint32_t>(dstLen.getIntNumeralOrZero() +
+                                                srcLen.getIntNumeralOrZero()));
   }
 }
 
@@ -2168,9 +2307,8 @@ void AEExtAPI::handleMemcpy(AbstractState &as, uint32_t dstId, uint32_t srcId,
   // Copy byte by byte (or element by element)
   for (uint32_t i = 0; i < numElements; ++i) {
     int64_t srcOffset = baseSrcOffset + static_cast<int64_t>(i * elemSize);
-    int64_t dstOffset =
-        baseDstOffset + static_cast<int64_t>(start_idx) +
-        static_cast<int64_t>(i * elemSize);
+    int64_t dstOffset = baseDstOffset + static_cast<int64_t>(start_idx) +
+                        static_cast<int64_t>(i * elemSize);
 
     // Get source addresses at this offset
     AddressValue srcAddrs =

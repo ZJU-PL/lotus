@@ -173,41 +173,28 @@ lotus-check --engine=ae --ae.state-store-stats prog.bc    # report retention
 - `dense` keeps a full state for every instruction and a per-instruction copy of
   every intermediate value. Use it when client code inspects the state of an
   arbitrary instruction (e.g. `getInstructionValue`).
-- `semi-sparse` is SVF's semi-sparse layout: intermediate values (ValVars) live
-  in a single run-wide *def-site* table instead of being copied into every
-  instruction's state, while object maps stay per instruction. Ordinary joins
-  merge only the object map (`SparseAbstractInterpretation::joinStates`); a loop
-  head instead materializes its cycle's values, widens them, and scatters them
-  back (`AbstractInterpretation::cycleValueIds`).
-- `sparse` is currently the same as `semi-sparse`: SVF's extra level also builds
-  an SVFG and stores object values at def sites, which Lotus's instruction-keyed
-  AE does not have. Both spellings are accepted so SVF command lines keep
-  working.
+- `semi-sparse` puts intermediate values in a run-wide def-site table while
+  object maps remain per instruction. Ordinary joins merge only the object map;
+  a cycle carries an immutable head snapshot, widens or narrows it, and
+  publishes the result back to the cycle head before interpreting the body.
+- `sparse` adds an SVFG-backed object-value layer to `semi-sparse`. Store values
+  are retained at their memory definitions; loads collect reaching definitions
+  through memory/phi edges and use the flow-sensitive object map only when the
+  graph cannot provide a value.
 
 Both sparse levels additionally drop states no later reader can observe. Pinned:
 block heads (joins, widening/narrowing), block terminators, call sites
 (checkpoints, external API models, detector queries) and allocas.
 
-`--ae.sparsity=dense|semi-sparse|sparse` is accepted as the SVF-compatible
-spelling of the same option.
+`--ae.sparsity=dense|semi-sparse|sparse` is accepted as an alias of the same
+option. `--ae.state-store-stats` reports the observed retention counts; they are
+program-dependent and are not hard-coded here.
 
-Measured on SPEC2006 `470.lbm`:
-
-| layout | states retained | states released | peak states | peak RSS |
-|---|---|---|---|---|
-| `dense` | 4330 | 0 | 4330 | 347 MB |
-| `semi-sparse` | 637 | 138137 | 637 | 120 MB |
-| `sparse` | 637 | 138137 | 637 | 120 MB |
-
-**Known limitation.** The def-site layout is still a work in progress on
-precision: on this benchmark it reports more findings than `dense` (3 vs 1
-buffer overflow, 253 vs 31 null dereferences). `AESparsityEquivalenceTest`
-covers the shapes where the layouts already agree -- nested loops, self and
-mutual recursion, switch diamonds and heap lifecycles -- so the invariant holds
-there, but not universally yet. The remaining gap is a value whose def-site entry
-has not been written at the point of a read: it currently reads as bottom, where
-SVF substitutes a type-directed top. Do not enable `semi-sparse`/`sparse` in
-experiments until that is fixed; `dense` remains the default.
+Detector execution is suppressed only during the widening phase, where a
+temporary abstraction such as `[0, +inf]` is intentionally less precise than the
+eventual narrowed fixpoint. Precise pre-widening iterations and narrowing still
+run detectors. `AESparsityEquivalenceTest` covers nested loops, inclusive loop
+bounds, recursion, switches, and heap lifecycles.
 
 ### Store update semantics
 
@@ -221,6 +208,16 @@ oversized aggregate) plus
 locals of recursive functions, array bases).
 
 `AEStoreSemanticsTest` pins each condition down individually.
+
+### External API model
+
+Allocation/reallocation names and their size operands are embedded in
+`AEExtAPI` using the same `ALLOC_HEAP_RET`, `REALLOC_HEAP_RET`, and
+`AllocSize:ArgN` information as SVF's `extapi` database, so AE does not need a
+separate `extapi.bc` input at runtime. This includes functions whose size is not
+argument zero, such as `HeapAlloc`, `LocalAlloc`, `GlobalAlloc`, `HeapReAlloc`,
+`mmap`, and `reallocarray`. APIs whose allocation size is unknown use the
+conservative field limit rather than inventing a precise bound.
 
 ### Singleton reuse across modules
 

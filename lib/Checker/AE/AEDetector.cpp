@@ -17,6 +17,7 @@
 
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/DebugInfo.h>
+#include <llvm/IR/Operator.h>
 #include <llvm/Support/raw_ostream.h>
 
 namespace lotus {
@@ -45,6 +46,15 @@ const llvm::Value *stripPointerProjections(const llvm::Value *value) {
 
 IntervalValue byteCountToMaxAccessOffset(const IntervalValue &byteCount) {
   return byteCount - IntervalValue(1);
+}
+
+bool intervalIsOutsideObject(const IntervalValue &offset, uint32_t objectSize,
+                             bool checkLowerBound = true) {
+  if (objectSize == 0 || offset.isBottom())
+    return false;
+  // getIntNumeral() maps infinities to INT64_MIN/MAX respectively.
+  return (checkLowerBound && offset.lb().getIntNumeral() < 0) ||
+         offset.ub().getIntNumeral() >= static_cast<int64_t>(objectSize);
 }
 
 uint32_t getRemainingByteCapacity(
@@ -90,9 +100,9 @@ uint32_t getRemainingByteCapacity(
   return minRemaining;
 }
 
-std::vector<uint32_t> getExtAPIPointerArgIndices(
-    const llvm::CallBase *call, const llvm::Function *callee,
-    AEExtAPI *utils) {
+std::vector<uint32_t> getExtAPIPointerArgIndices(const llvm::CallBase *call,
+                                                 const llvm::Function *callee,
+                                                 AEExtAPI *utils) {
   std::vector<uint32_t> pointerArgs;
   if (!call || !callee || !utils) {
     return pointerArgs;
@@ -106,10 +116,12 @@ std::vector<uint32_t> getExtAPIPointerArgIndices(
       if (isIconvLike) {
         pointerArgs.insert(pointerArgs.end(), {1, 2, 3, 4});
       } else {
-        if (call->arg_size() > 0 && call->getArgOperand(0)->getType()->isPointerTy()) {
+        if (call->arg_size() > 0 &&
+            call->getArgOperand(0)->getType()->isPointerTy()) {
           pointerArgs.push_back(0);
         }
-        if (call->arg_size() > 1 && call->getArgOperand(1)->getType()->isPointerTy()) {
+        if (call->arg_size() > 1 &&
+            call->getArgOperand(1)->getType()->isPointerTy()) {
           pointerArgs.push_back(1);
         }
       }
@@ -159,8 +171,7 @@ int getOrRegisterAEBugType(AEDetector::DetectorKind kind) {
   case AEDetector::INT_OVERFLOW: {
     int id = mgr.find_bug_type("AE Integer Overflow");
     if (id < 0) {
-      id = mgr.register_bug_type("AE Integer Overflow",
-                                 BugDescription::BI_HIGH,
+      id = mgr.register_bug_type("AE Integer Overflow", BugDescription::BI_HIGH,
                                  BugDescription::BC_SECURITY, "CWE-190");
     }
     return id;
@@ -264,10 +275,18 @@ void BufOverflowDetector::detect(AbstractState &as,
         // sensitivity.
         IntervalValue accessOffset = getAccessOffset(as, objId, gep);
         uint32_t objSize = as.getObjSize(objId);
+        bool hasKnownBaseOffset = gepObjOffsetFromBaseByObjId.count(objId) != 0;
+        const llvm::Value *base = gep->getPointerOperand();
+        while (const auto *gepOp = llvm::dyn_cast<llvm::GEPOperator>(base))
+          base = gepOp->getPointerOperand();
+        hasKnownBaseOffset = hasKnownBaseOffset ||
+                             llvm::isa<llvm::AllocaInst>(base) ||
+                             llvm::isa<llvm::GlobalValue>(base);
+        const bool checkLowerBound =
+            hasKnownBaseOffset && gep->hasAllConstantIndices();
 
-        if (objSize > 0 && accessOffset.ub().getIntNumeral() >=
-                               static_cast<int64_t>(objSize)) {
-          AEException bug("Buffer overflow: access offset [" +
+        if (intervalIsOutsideObject(accessOffset, objSize, checkLowerBound)) {
+          AEException bug("Buffer access outside object: offset [" +
                           accessOffset.toString() + "] exceeds object size " +
                           std::to_string(objSize));
           addBugToReporter(bug, inst);
@@ -275,6 +294,11 @@ void BufOverflowDetector::detect(AbstractState &as,
       }
     }
   }
+
+  if (const auto *load = llvm::dyn_cast<llvm::LoadInst>(inst))
+    detectConstantExprAccess(as, inst, load->getPointerOperand());
+  else if (const auto *store = llvm::dyn_cast<llvm::StoreInst>(inst))
+    detectConstantExprAccess(as, inst, store->getPointerOperand());
 
   // Check for buffer overflow in external API calls
   // Use annotation-based classification from AEExtAPI
@@ -321,6 +345,45 @@ void BufOverflowDetector::detect(AbstractState &as,
           break;
         }
       }
+    }
+  }
+}
+
+void BufOverflowDetector::detectConstantExprAccess(
+    AbstractState &as, const llvm::Instruction *inst,
+    const llvm::Value *pointer) {
+  if (!pointer || !llvm::isa<llvm::ConstantExpr>(pointer))
+    return;
+
+  const llvm::DataLayout &dl = inst->getModule()->getDataLayout();
+  const llvm::Value *base = pointer;
+  IntervalValue totalOffset(0);
+  bool sawGep = false;
+
+  while (const auto *gep = llvm::dyn_cast<llvm::GEPOperator>(base)) {
+    llvm::APInt constantOffset(64, 0);
+    if (!gep->accumulateConstantOffset(dl, constantOffset))
+      return;
+    totalOffset = totalOffset + IntervalValue(constantOffset.getSExtValue());
+    base = gep->getPointerOperand();
+    sawGep = true;
+  }
+  if (!sawGep)
+    return;
+
+  uint32_t baseId = AbstractInterpretation::getValueIdStatic(base);
+  if (!as.inVarToAddrsTable(baseId))
+    return;
+
+  for (uint32_t addr : as[baseId].getAddrs()) {
+    uint32_t objId = as.getIDFromAddr(addr);
+    uint32_t objSize = as.getObjSize(objId);
+    if (intervalIsOutsideObject(totalOffset, objSize)) {
+      AEException bug("Buffer access outside object: offset [" +
+                      totalOffset.toString() + "] exceeds object size " +
+                      std::to_string(objSize));
+      addBugToReporter(bug, inst);
+      return;
     }
   }
 }
@@ -420,7 +483,8 @@ void BufOverflowDetector::addBugToReporter(const AEException &e,
   std::string loc;
   if (const llvm::DILocation *debugLoc = inst->getDebugLoc()) {
     loc = debugLoc->getFilename().str() + ":" +
-          std::to_string(debugLoc->getLine());
+          std::to_string(debugLoc->getLine()) + ":" +
+          std::to_string(debugLoc->getColumn());
   } else {
     loc = "unknown location";
   }
@@ -451,8 +515,7 @@ bool BufOverflowDetector::canSafelyAccessMemory(AbstractState &as,
 
       uint32_t objId = as.getIDFromAddr(addr);
       uint32_t objSize = as.getObjSize(objId);
-      if (objSize > 0 &&
-          accessOffset.ub().getIntNumeral() >= static_cast<int64_t>(objSize)) {
+      if (intervalIsOutsideObject(accessOffset, objSize)) {
         return false;
       }
     }
@@ -473,7 +536,8 @@ bool BufOverflowDetector::canSafelyAccessMemory(AbstractState &as,
         hasExplicitOffset = true;
         continue;
       }
-      if (const auto *bitcast = llvm::dyn_cast<llvm::BitCastOperator>(baseVal)) {
+      if (const auto *bitcast =
+              llvm::dyn_cast<llvm::BitCastOperator>(baseVal)) {
         baseVal = bitcast->getOperand(0);
         continue;
       }
@@ -517,7 +581,7 @@ bool BufOverflowDetector::canSafelyAccessMemory(AbstractState &as,
     }
 
     if (effectiveCapacity > 0 &&
-        len.ub().getIntNumeral() >= static_cast<int64_t>(effectiveCapacity)) {
+        intervalIsOutsideObject(len, effectiveCapacity)) {
       return false;
     }
   }
@@ -783,13 +847,14 @@ bool BufOverflowDetector::detectStrcat(AbstractState &as,
   IntervalValue totalLen = dstLen + srcLen;
   if (callee) {
     const std::string funcName = callee->getName().str();
-    if (funcName.find("strncat") != std::string::npos && call->arg_size() >= 3) {
+    if (funcName.find("strncat") != std::string::npos &&
+        call->arg_size() >= 3) {
       uint32_t lenId =
           AbstractInterpretation::getValueIdStatic(call->getArgOperand(2));
       if (as.inVarToValTable(lenId)) {
         totalLen = dstLen + as[lenId].getInterval();
-      } else if (const auto *ci =
-                     llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(2))) {
+      } else if (const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(
+                     call->getArgOperand(2))) {
         totalLen = dstLen + IntervalValue(ci->getSExtValue());
       }
     }
@@ -826,7 +891,7 @@ void NullptrDerefDetector::detect(AbstractState &as,
   auto hasDefiniteNonNullBase = [](const llvm::Value *ptrVal) -> bool {
     const llvm::Value *base = ptrVal;
     while (true) {
-      if (const auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(base)) {
+      if (const auto *gep = llvm::dyn_cast<llvm::GEPOperator>(base)) {
         base = gep->getPointerOperand();
         continue;
       }
@@ -1034,7 +1099,8 @@ void NullptrDerefDetector::addBugToReporter(const AEException &e,
   std::string loc;
   if (const llvm::DILocation *debugLoc = inst->getDebugLoc()) {
     loc = debugLoc->getFilename().str() + ":" +
-          std::to_string(debugLoc->getLine());
+          std::to_string(debugLoc->getLine()) + ":" +
+          std::to_string(debugLoc->getColumn());
   } else {
     // Fallback location for stripped/no-debug IR: use a stable
     // per-instruction textual key so multiple unknown-location bugs do not
@@ -1150,8 +1216,8 @@ bool DivZeroDetector::mayDivideByZero(AbstractState &as,
       as[divisorId] = AbstractValue(IntervalValue(ci->getSExtValue()));
     } else if (const auto *cfp = llvm::dyn_cast<llvm::ConstantFP>(divisor)) {
       double num = cfp->getValueAPF().convertToDouble();
-      as[divisorId] = AbstractValue(IntervalValue(static_cast<int64_t>(num),
-                                                  static_cast<int64_t>(num)));
+      as[divisorId] = AbstractValue(
+          IntervalValue(static_cast<int64_t>(num), static_cast<int64_t>(num)));
     }
   }
   if (!as.inVarToValTable(divisorId))
@@ -1185,7 +1251,8 @@ void DivZeroDetector::addBugToReporter(const AEException &e,
   emitAEBugReport(kind, inst, std::string(e.what()));
 }
 
-void OverflowDetector::detect(AbstractState &as, const llvm::Instruction *inst) {
+void OverflowDetector::detect(AbstractState &as,
+                              const llvm::Instruction *inst) {
   if (!mayOverflow(as, inst))
     return;
 
@@ -1329,13 +1396,8 @@ BufOverflowDetector::getAccessOffset(AbstractState &as, uint32_t objId,
   // Get the offset from the GEP instruction
   IntervalValue offset = as.getByteOffset(gep);
 
-  // If we have tracked offset from base for this GEP, use it
-  // (it already includes accumulated offsets from nested GEPs)
-  if (hasGepObjOffsetFromBase(gep)) {
-    return getGepObjOffsetFromBase(gep);
-  }
-
-  // Otherwise, check if the pointer operand is a GEP and accumulate
+  // Direct GEP chains retain their accumulated offset in the per-instruction
+  // cache.
   if (const auto *prevGep =
           llvm::dyn_cast<llvm::GetElementPtrInst>(gep->getPointerOperand())) {
     if (hasGepObjOffsetFromBase(prevGep)) {
@@ -1344,10 +1406,12 @@ BufOverflowDetector::getAccessOffset(AbstractState &as, uint32_t objId,
     }
   }
 
-  // Fallback to object-level cache only when we have no GEP-local information.
+  // The pointer operand may have come through a load or select. In that case
+  // its provenance is only available through the object it names: add the
+  // object's offset-from-base to this GEP's local byte offset.
   auto objIt = gepObjOffsetFromBaseByObjId.find(objId);
   if (objIt != gepObjOffsetFromBaseByObjId.end()) {
-    return objIt->second;
+    return objIt->second + offset;
   }
 
   return offset;
@@ -1671,7 +1735,8 @@ void MemLeakDetector::detect(AbstractState &as, const llvm::Instruction *inst) {
   // Check for leaks at function return points
   if (const auto *ret = llvm::dyn_cast<llvm::ReturnInst>(inst)) {
     auto escapesFunction = [&](uint32_t objId) -> bool {
-      if (ret->getReturnValue() && ret->getReturnValue()->getType()->isPointerTy()) {
+      if (ret->getReturnValue() &&
+          ret->getReturnValue()->getType()->isPointerTy()) {
         uint32_t retId =
             AbstractInterpretation::getValueIdStatic(ret->getReturnValue());
         if (as.inVarToAddrsTable(retId)) {
@@ -1687,7 +1752,8 @@ void MemLeakDetector::detect(AbstractState &as, const llvm::Instruction *inst) {
         const llvm::Value *root =
             AbstractInterpretation::getAEInstance().getValueFromIdStatic(
                 pair.first);
-        if (!root || !llvm::isa<llvm::GlobalValue>(root) || !pair.second.isAddr()) {
+        if (!root || !llvm::isa<llvm::GlobalValue>(root) ||
+            !pair.second.isAddr()) {
           continue;
         }
         for (uint64_t addr : pair.second.getAddrs().getVals()) {
@@ -1753,7 +1819,8 @@ void MemLeakDetector::detect(AbstractState &as, const llvm::Instruction *inst) {
     if (store->getValueOperand()->getType()->isPointerTy()) {
       const llvm::Value *root =
           stripPointerProjections(store->getPointerOperand());
-      if (llvm::isa<llvm::Argument>(root) || llvm::isa<llvm::GlobalValue>(root)) {
+      if (llvm::isa<llvm::Argument>(root) ||
+          llvm::isa<llvm::GlobalValue>(root)) {
         uint32_t storedId =
             AbstractInterpretation::getValueIdStatic(store->getValueOperand());
         if (as.inVarToAddrsTable(storedId)) {
