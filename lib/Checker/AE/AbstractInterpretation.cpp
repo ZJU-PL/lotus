@@ -35,6 +35,7 @@
 #include <unordered_set>
 
 #include <llvm/ADT/GraphTraits.h>
+#include <llvm/Analysis/ConstantFolding.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
@@ -1455,6 +1456,26 @@ void AbstractInterpretation::handleCycleWTO(const ICFGCycleWTO *cycle) {
 
     // Process the cycle head node
     handleSingletonWTO(cycleHead);
+    if (cycleHead->empty() || !stateStore_.contains(&cycleHead->front())) {
+      // Widening an absent state into a published empty state would revive an
+      // unreachable loop. Its body outputs are unreachable as well.
+      std::function<void(const ICFGCycleWTO *)> invalidate =
+          [&](const ICFGCycleWTO *current) {
+            for (const llvm::Instruction &inst : *current->getEntry())
+              stateStore_.erase(&inst);
+            for (const ICFGWTOComp *comp : current->getComponents()) {
+              if (const auto *single = llvm::dyn_cast<ICFGSingletonWTO>(comp)) {
+                for (const llvm::Instruction &inst : *single->getBlock())
+                  stateStore_.erase(&inst);
+              } else if (const auto *nested =
+                             llvm::dyn_cast<ICFGCycleWTO>(comp)) {
+                invalidate(nested);
+              }
+            }
+          };
+      invalidate(cycle);
+      return;
+    }
 
     // Get current state after processing
     AbstractState curHeadState;
@@ -1622,10 +1643,10 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
       return true;
     }
 
-    // No predecessors with state - initialize empty state
-    if (!bb->empty()) {
-      stateStore_.set(&bb->front(), AbstractState());
-    }
+    // An empty placeholder is not a reachable state. Remove stale outputs too:
+    // otherwise unconditional successors and PHIs can revive this dead path.
+    for (const llvm::Instruction &inst : *bb)
+      stateStore_.erase(&inst);
     return false;
   }
 
@@ -1844,6 +1865,76 @@ void AbstractInterpretation::updateStateOnBinary(
   IntervalValue val0 = as[op0Id].getInterval();
   IntervalValue val1 = as[op1Id].getInterval();
   IntervalValue result;
+
+  if (binary->getType()->isIntegerTy() &&
+      binary->getType()->getIntegerBitWidth() <= 64 && val0.is_numeral() &&
+      val1.is_numeral()) {
+    const unsigned bits = binary->getType()->getIntegerBitWidth();
+    const llvm::APInt a(bits, val0.getIntNumeral()),
+        b(bits, val1.getIntNumeral());
+    bool signedOverflow = false, unsignedOverflow = false;
+    switch (binary->getOpcode()) {
+    case llvm::Instruction::Add:
+      (void)a.sadd_ov(b, signedOverflow);
+      (void)a.uadd_ov(b, unsignedOverflow);
+      break;
+    case llvm::Instruction::Sub:
+      (void)a.ssub_ov(b, signedOverflow);
+      (void)a.usub_ov(b, unsignedOverflow);
+      break;
+    case llvm::Instruction::Mul:
+      (void)a.smul_ov(b, signedOverflow);
+      (void)a.umul_ov(b, unsignedOverflow);
+      break;
+    case llvm::Instruction::Shl:
+      if (b.ult(bits)) {
+        (void)a.sshl_ov(b, signedOverflow);
+        (void)a.ushl_ov(b, unsignedOverflow);
+      }
+      break;
+    default:
+      break;
+    }
+    bool poison = false;
+    if (llvm::isa<llvm::OverflowingBinaryOperator>(binary))
+      poison = (binary->hasNoSignedWrap() && signedOverflow) ||
+               (binary->hasNoUnsignedWrap() && unsignedOverflow);
+    if (llvm::isa<llvm::PossiblyExactOperator>(binary) && binary->isExact()) {
+      switch (binary->getOpcode()) {
+      case llvm::Instruction::UDiv:
+        poison |= !b.isZero() && !a.urem(b).isZero();
+        break;
+      case llvm::Instruction::SDiv:
+        poison |= !b.isZero() && !a.srem(b).isZero();
+        break;
+      case llvm::Instruction::LShr:
+      case llvm::Instruction::AShr:
+        poison |= b.ult(bits) && a.countTrailingZeros() < b.getLimitedValue();
+        break;
+      default:
+        break;
+      }
+    }
+    llvm::Constant *folded = llvm::ConstantFoldBinaryOpOperands(
+        binary->getOpcode(), llvm::ConstantInt::get(binary->getContext(), a),
+        llvm::ConstantInt::get(binary->getContext(), b),
+        module_->getDataLayout());
+    if (const auto *integer =
+            llvm::dyn_cast_or_null<llvm::ConstantInt>(folded)) {
+      if (!poison) {
+        // i1 is represented by Boolean 0/1; wider integers by signed bit
+        // patterns.
+        const int64_t number =
+            bits == 1 ? static_cast<int64_t>(integer->getZExtValue())
+                      : integer->getSExtValue();
+        as[lhsId] = AbstractValue(IntervalValue(number));
+        return;
+      }
+    }
+    // LLVM poison/undef or an unsupported fold must not become a definite fact.
+    as[lhsId] = unknownValueForType(binary->getType());
+    return;
+  }
 
   auto getNonNegativeConstant = [](const llvm::Value *value,
                                    uint64_t &constant) -> bool {
@@ -2600,9 +2691,11 @@ void AbstractInterpretation::updateStateOnRetPE(const llvm::ReturnInst *ret,
   uint32_t retId = getValueId(ret->getReturnValue());
   uint32_t callId = getValueId(call);
 
-  AbstractState &calleeState = stateStore_.getOrCreate(ret);
-  auto retIt = calleeState._varToAbsVal.find(retId);
-  if (retIt != calleeState._varToAbsVal.end()) {
+  const AbstractState *calleeState = stateStore_.find(ret);
+  if (!calleeState)
+    return;
+  auto retIt = calleeState->_varToAbsVal.find(retId);
+  if (retIt != calleeState->_varToAbsVal.end()) {
     if (callerState._varToAbsVal.count(callId) == 0) {
       callerState[callId] = retIt->second;
     } else {

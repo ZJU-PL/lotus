@@ -1761,6 +1761,38 @@ bool OverflowDetector::mayOverflow(AbstractState &as,
     return false;
   }
 
+  // Execution stores wrapped LLVM values. Diagnose mathematical overflow from
+  // the operands so a precise wrapped result does not hide the overflow.
+  if (bin->getType()->getIntegerBitWidth() <= 64) {
+    const IntervalValue lhs = getCallArgumentInterval(as, bin->getOperand(0));
+    const IntervalValue rhs = getCallArgumentInterval(as, bin->getOperand(1));
+    if (lhs.is_numeral() && rhs.is_numeral()) {
+      const unsigned bits = bin->getType()->getIntegerBitWidth();
+      const llvm::APInt a(bits, lhs.getIntNumeral()),
+          b(bits, rhs.getIntNumeral());
+      bool overflow = false;
+      switch (bin->getOpcode()) {
+      case llvm::Instruction::Add:
+        (void)a.sadd_ov(b, overflow);
+        break;
+      case llvm::Instruction::Sub:
+        (void)a.ssub_ov(b, overflow);
+        break;
+      case llvm::Instruction::Mul:
+        (void)a.smul_ov(b, overflow);
+        break;
+      case llvm::Instruction::Shl:
+        if (b.uge(bits))
+          return true;
+        (void)a.sshl_ov(b, overflow);
+        break;
+      default:
+        break;
+      }
+      return overflow;
+    }
+  }
+
   uint32_t lhsId = AbstractInterpretation::getValueIdStatic(inst);
   auto it = as.getVarToVal().find(lhsId);
   if (it == as.getVarToVal().end() || !it->second.isInterval())

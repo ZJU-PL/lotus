@@ -1,5 +1,6 @@
 #include "AECheckerTestSupport.h"
 
+#include <bitset>
 #include <cstdint>
 
 class AETransferSafetyTest : public AECheckerTest {
@@ -17,6 +18,199 @@ protected:
     }
   }
 };
+
+TEST_F(AETransferSafetyTest, HackersDelightParallelPopulationCount) {
+  // The 32-bit mask/add/multiply reduction also depends on modular multiply.
+  const std::string function = R"(
+    define i32 @pop(i32 %x) {
+      %a = lshr i32 %x, 1
+      %b = and i32 %a, 1431655765
+      %c = sub i32 %x, %b
+      %d = and i32 %c, 858993459
+      %e = lshr i32 %c, 2
+      %f = and i32 %e, 858993459
+      %g = add i32 %d, %f
+      %h = lshr i32 %g, 4
+      %i = add i32 %g, %h
+      %j = and i32 %i, 252645135
+      %k = mul i32 %j, 16843009
+      %r = lshr i32 %k, 24
+      ret i32 %r
+    }
+  )";
+  for (uint32_t value : {0u, 1u, 0x12345678u, 0x80000000u, UINT32_MAX})
+    expectReturn(function + "define i32 @main() { %r = call i32 @pop(i32 " +
+                     std::to_string(value) + ") ret i32 %r }",
+                 IntervalValue(static_cast<int64_t>(std::bitset<32>(value).count())));
+}
+
+TEST_F(AETransferSafetyTest, HackersDelightCeilingPowerOfTwo) {
+  const std::string function = R"(
+    define i32 @clp2(i32 %x) {
+      %a = sub i32 %x, 1
+      %b = lshr i32 %a, 1
+      %c = or i32 %a, %b
+      %d = lshr i32 %c, 2
+      %e = or i32 %c, %d
+      %f = lshr i32 %e, 4
+      %g = or i32 %e, %f
+      %h = lshr i32 %g, 8
+      %i = or i32 %g, %h
+      %j = lshr i32 %i, 16
+      %k = or i32 %i, %j
+      %r = add i32 %k, 1
+      ret i32 %r
+    }
+  )";
+  for (uint32_t value :
+       {0u, 1u, 3u, 7u, 0x7fffffffu, 0x80000000u, 0x80000001u, UINT32_MAX}) {
+    uint64_t next = value ? 1 : 0;
+    while (next < value)
+      next <<= 1;
+    const int64_t expected = llvm::APInt(32, next).getSExtValue();
+    expectReturn(function + "define i32 @main() { %r = call i32 @clp2(i32 " +
+                     std::to_string(value) + ") ret i32 %r }",
+                 IntervalValue(expected));
+  }
+}
+
+TEST_F(AETransferSafetyTest, ExactMasksKeepConcreteValues) {
+  expectReturn("define i32 @main() { %v = and i32 5, 3 ret i32 %v }",
+               IntervalValue(1));
+  expectReturn("define i32 @main() { %v = and i32 -1, 255 ret i32 %v }",
+               IntervalValue(255));
+}
+
+TEST_F(AETransferSafetyTest, ConcreteArithmeticWrapsAtTheLLVMWidth) {
+  expectReturn("define i8 @main() { %v = add i8 127, 1 ret i8 %v }",
+               IntervalValue(-128));
+  expectReturn("define i8 @main() { %v = sub i8 -128, 1 ret i8 %v }",
+               IntervalValue(127));
+  expectReturn("define i8 @main() { %v = mul i8 64, 4 ret i8 %v }",
+               IntervalValue(0));
+  expectReturn("define i32 @main() { %v = add i32 -1, 1 ret i32 %v }",
+               IntervalValue(0));
+  expectReturn("define i32 @main() { %v = mul i32 65536, 65536 ret i32 %v }",
+               IntervalValue(0));
+  expectReturn(
+      "define i64 @main() { %v = add i64 9223372036854775807, 1 ret i64 %v }",
+      IntervalValue(INT64_MIN));
+  expectReturn("define i1 @main() { %v = add i1 true, true ret i1 %v }",
+               IntervalValue(0));
+}
+
+TEST_F(AETransferSafetyTest, WideConcreteShiftsRespectBitPatterns) {
+  expectReturn("define i64 @main() { %v = shl i64 1, 63 ret i64 %v }",
+               IntervalValue(INT64_MIN));
+  expectReturn("define i64 @main() { %v = ashr i64 -1, 63 ret i64 %v }",
+               IntervalValue(-1));
+  expectReturn("define i32 @main() { %v = shl i32 1, 31 ret i32 %v }",
+               IntervalValue(INT32_MIN));
+}
+
+TEST_F(AETransferSafetyTest, PoisonArithmeticDoesNotBecomeADefiniteFact) {
+  for (const char *operation :
+       {"add nsw i8 127, 1", "add nuw i8 -1, 1", "shl nsw i8 64, 1",
+        "udiv exact i8 7, 2", "lshr exact i8 3, 1", "sdiv i8 -128, -1",
+        "shl i8 1, 8", "sdiv i8 1, 0"})
+    expectReturn("define i8 @main() { %v = " + std::string(operation) +
+                     " ret i8 %v }",
+                 IntervalValue::top());
+}
+
+TEST_F(AETransferSafetyTest, OverflowDetectorStillSeesWrappedArithmetic) {
+  const char *source = "define i8 @main() { %v = add i8 127, 1 ret i8 %v }";
+  for (StateLayout layout :
+       {StateLayout::Dense, StateLayout::SemiSparse, StateLayout::Sparse}) {
+    auto module = parseModule(source);
+    ASSERT_NE(module, nullptr);
+    const auto result =
+        runAE(module.get(), true, false, AbstractInterpretation::WIDEN_NARROW,
+              3u, false, true, layout);
+    EXPECT_GT(result.int_overflow_bugs, 0u);
+    EXPECT_TRUE(getFunctionReturnInterval(module.get(), "main")
+                    .equals(IntervalValue(-128)));
+  }
+}
+
+TEST_F(AETransferSafetyTest, UnreachableChainDoesNotReviveThroughEmptyStates) {
+  const char *source = R"(
+    define i32 @main() {
+      %a = alloca [1 x i32]
+      br i1 false, label %dead, label %live
+    dead:
+      br label %tail
+    tail:
+      br label %bad
+    bad:
+      %p = getelementptr [1 x i32], [1 x i32]* %a, i32 0, i32 1
+      store i32 1, i32* %p
+      ret i32 0
+    live:
+      ret i32 0
+    }
+  )";
+  for (StateLayout layout :
+       {StateLayout::Dense, StateLayout::SemiSparse, StateLayout::Sparse}) {
+    auto module = parseModule(source);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(runAE(module.get(), true, false,
+                    AbstractInterpretation::WIDEN_NARROW, 3u, false, false,
+                    layout)
+                  .overflow_bugs,
+              0u);
+  }
+}
+
+TEST_F(AETransferSafetyTest, DeadReturnPathsDoNotPolluteCalleeResult) {
+  expectReturn(R"(
+    define i32 @count(i32 %x) {
+      %zero = icmp eq i32 %x, 0
+      br i1 %zero, label %early, label %work
+    early:
+      br label %exit
+    work:
+      br label %tail
+    tail:
+      br label %exit
+    exit:
+      %r = phi i32 [32, %early], [99, %tail]
+      ret i32 %r
+    }
+    define i32 @main() {
+      %r = call i32 @count(i32 0)
+      ret i32 %r
+    }
+  )",
+               IntervalValue(32));
+}
+
+TEST_F(AETransferSafetyTest, WideningDoesNotReviveAnUnreachableLoop) {
+  const char *source = R"(
+    define i32 @main() {
+      %a = alloca [1 x i32]
+      br i1 false, label %head, label %exit
+    head:
+      br label %body
+    body:
+      %p = getelementptr [1 x i32], [1 x i32]* %a, i32 0, i32 1
+      store i32 1, i32* %p
+      br label %head
+    exit:
+      ret i32 0
+    }
+  )";
+  for (StateLayout layout :
+       {StateLayout::Dense, StateLayout::SemiSparse, StateLayout::Sparse}) {
+    auto module = parseModule(source);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(runAE(module.get(), true, false,
+                    AbstractInterpretation::WIDEN_NARROW, 3u, false, false,
+                    layout)
+                  .overflow_bugs,
+              0u);
+  }
+}
 
 TEST_F(AETransferSafetyTest, VectorInsertionUsesElementAndIndexOperands) {
   for (int element : {0, 1, 4})

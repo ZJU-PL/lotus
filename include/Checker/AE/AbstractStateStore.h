@@ -171,6 +171,12 @@ public:
     ++stats_.released;
   }
 
+  /// Invalidates a semantically unreachable state, even when it was pinned.
+  void erase(Node node) {
+    pinned_.erase(node);
+    release(node);
+  }
+
   /// The state for @p node, inserting and pinning an empty one when absent.
   AbstractState &getOrCreatePinned(Node node) {
     AbstractState &state = getOrCreate(node);
