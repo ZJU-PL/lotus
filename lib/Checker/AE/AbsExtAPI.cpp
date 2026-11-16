@@ -10,7 +10,9 @@
 #include "Checker/AE/AbstractState.h"
 
 #include <cctype>
+#include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -888,24 +890,39 @@ AEExtAPI::ExtAPIType AEExtAPI::getExtAPIType(const llvm::Function *fun) {
 }
 
 void AEExtAPI::initExtFunMap() {
-  // Ctype functions - return [0, 1] for character classification
-  auto sse_isalnum = [this](const llvm::CallBase *callNode) {
-    AbstractState &as = getAbsStateFromTrace(callNode);
-    uint32_t lhsId = getValueId(callNode);
-    as[lhsId] = AbstractValue(IntervalValue(0, 1));
+  // Preserve the actual libc result, which is zero or nonzero, not necessarily
+  // 0 or 1. Calling ctype outside unsigned-char/EOF is undefined; never pass
+  // an abstract or out-of-domain argument to the host implementation.
+  auto addCtype = [this](const char *name, int (*classify)(int)) {
+    func_map[name] = [this, classify](const llvm::CallBase *callNode) {
+      AbstractState &as = getAbsStateFromTrace(callNode);
+      IntervalValue result(INT_MIN, INT_MAX);
+      if (callNode->arg_size() >= 1) {
+        const uint32_t argId = getValueId(callNode->getArgOperand(0));
+        if (as.inVarToValTable(argId)) {
+          const IntervalValue arg = as[argId].getInterval();
+          if (arg.is_numeral()) {
+            const int64_t value = arg.getIntNumeral();
+            if (value == EOF || (value >= 0 && value <= UCHAR_MAX))
+              result = IntervalValue(classify(static_cast<int>(value)));
+          }
+        }
+      }
+      as[getValueId(callNode)] = AbstractValue(result);
+    };
   };
-  func_map["isalnum"] = sse_isalnum;
-  func_map["isalpha"] = sse_isalnum;
-  func_map["isdigit"] = sse_isalnum;
-  func_map["isprint"] = sse_isalnum;
-  func_map["isupper"] = sse_isalnum;
-  func_map["islower"] = sse_isalnum;
-  func_map["isblank"] = sse_isalnum;
-  func_map["isspace"] = sse_isalnum;
-  func_map["iscntrl"] = sse_isalnum;
-  func_map["isgraph"] = sse_isalnum;
-  func_map["ispunct"] = sse_isalnum;
-  func_map["isxdigit"] = sse_isalnum;
+  addCtype("isalnum", std::isalnum);
+  addCtype("isalpha", std::isalpha);
+  addCtype("isdigit", std::isdigit);
+  addCtype("isprint", std::isprint);
+  addCtype("isupper", std::isupper);
+  addCtype("islower", std::islower);
+  addCtype("isblank", std::isblank);
+  addCtype("isspace", std::isspace);
+  addCtype("iscntrl", std::iscntrl);
+  addCtype("isgraph", std::isgraph);
+  addCtype("ispunct", std::ispunct);
+  addCtype("isxdigit", std::isxdigit);
 
   // Math functions - match SVF's SSE_FUNC_PROCESS macro behavior
   // Each math function is explicitly defined (matching SVF's approach)

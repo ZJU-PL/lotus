@@ -1,6 +1,8 @@
 #include "AECheckerTestSupport.h"
 
 #include <array>
+#include <cctype>
+#include <climits>
 
 #include <gtest/gtest.h>
 
@@ -25,6 +27,379 @@ protected:
     return results;
   }
 };
+
+TEST_F(AEInstructionParityTest, EqualPointerAlternativesMayCompareUnequal) {
+  const char *source = R"(
+    define i32 @main(i1 %c, i1 %d) {
+      %x = alloca i32
+      %y = alloca i32
+      %a = alloca [4 x i32]
+      %p = select i1 %c, i32* %x, i32* %y
+      %q = select i1 %d, i32* %x, i32* %y
+      %different = icmp ne i32* %p, %q
+      %bit = zext i1 %different to i32
+      %index = mul i32 %bit, 4
+      %ptr = getelementptr [4 x i32], [4 x i32]* %a, i32 0, i32 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, EqualPointerAlternativesMayCompareEqual) {
+  const char *source = R"(
+    define i32 @main(i1 %c, i1 %d) {
+      %x = alloca i32
+      %y = alloca i32
+      %p = select i1 %c, i32* %x, i32* %y
+      %q = select i1 %d, i32* %x, i32* %y
+      %equal = icmp eq i32* %p, %q
+      %value = zext i1 %equal to i32
+      ret i32 %value
+    }
+  )";
+  for (StateLayout layout :
+       {StateLayout::Dense, StateLayout::SemiSparse, StateLayout::Sparse}) {
+    auto module = parseModule(source);
+    ASSERT_NE(module, nullptr);
+    runAE(module.get(), true, false, AbstractInterpretation::WIDEN_NARROW, 3u,
+          false, false, layout);
+    EXPECT_TRUE(getFunctionReturnInterval(module.get(), "main")
+                    .equals(IntervalValue(0, 1)));
+  }
+}
+
+TEST_F(AEInstructionParityTest, UnknownPointerTargetsDoNotProveEquality) {
+  const char *source = R"(
+    define i32 @main(i32* %p, i32* %q) {
+      %equal = icmp eq i32* %p, %q
+      %value = zext i1 %equal to i32
+      ret i32 %value
+    }
+  )";
+  for (StateLayout layout :
+       {StateLayout::Dense, StateLayout::SemiSparse, StateLayout::Sparse}) {
+    auto module = parseModule(source);
+    ASSERT_NE(module, nullptr);
+    runAE(module.get(), true, false, AbstractInterpretation::WIDEN_NARROW, 3u,
+          false, false, layout);
+    EXPECT_TRUE(getFunctionReturnInterval(module.get(), "main")
+                    .equals(IntervalValue(0, 1)));
+  }
+}
+
+TEST_F(AEInstructionParityTest, UnknownPointerMayReachNullEqualityBranch) {
+  const char *source = R"(
+    define i32 @main(i32* %p) {
+      %isnull = icmp eq i32* %p, null
+      br i1 %isnull, label %body, label %exit
+    body:
+      %value = load i32, i32* %p
+      ret i32 %value
+    exit:
+      ret i32 0
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.null_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, CastsMaterializeDirectConstantOperands) {
+  const char *source = R"(
+    define i32 @main() {
+      %array = alloca [4 x i32]
+      %index = trunc i64 4294967299 to i32
+      %wide = sext i32 %index to i64
+      %ptr = getelementptr [4 x i32], [4 x i32]* %array, i64 0, i64 %wide
+      store i32 1, i32* %ptr
+      ret i32 %index
+    }
+  )";
+  for (StateLayout layout :
+       {StateLayout::Dense, StateLayout::SemiSparse, StateLayout::Sparse}) {
+    auto module = parseModule(source);
+    ASSERT_NE(module, nullptr);
+    const auto result =
+        runAE(module.get(), true, false, AbstractInterpretation::WIDEN_NARROW,
+              3u, false, false, layout);
+    EXPECT_EQ(result.overflow_bugs, 0u);
+    EXPECT_TRUE(getFunctionReturnInterval(module.get(), "main")
+                    .equals(IntervalValue(3)));
+  }
+}
+
+TEST_F(AEInstructionParityTest, GuardedSiblingExtensionsShareBranchFacts) {
+  const char *source = R"(
+    define i32 @main(i32 %n) {
+      %array = alloca [4 x i32]
+      %i = trunc i32 %n to i8
+      %index = sext i8 %i to i64
+      %first = sext i8 %i to i32
+      %nonnegative = icmp sge i32 %first, 0
+      br i1 %nonnegative, label %upper, label %exit
+    upper:
+      %second = sext i8 %i to i32
+      %bounded = icmp slt i32 %second, 4
+      br i1 %bounded, label %body, label %exit
+    body:
+      %ptr = getelementptr [4 x i32], [4 x i32]* %array, i64 0, i64 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+    exit:
+      ret i32 0
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, GuardedZeroExtensionRefinesLaterIndex) {
+  const char *source = R"(
+    define i32 @main(i8 %n) {
+      %array = alloca [8 x i32]
+      %guard = zext i8 %n to i32
+      %bounded = icmp slt i32 %guard, 8
+      br i1 %bounded, label %body, label %exit
+    body:
+      %index = zext i8 %n to i64
+      %ptr = getelementptr [8 x i32], [8 x i32]* %array, i64 0, i64 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+    exit:
+      ret i32 0
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, StaleLoopBodyExtensionCannotConstrainNextPhi) {
+  const char *source = R"(
+    define i32 @main() {
+    entry:
+      %array = alloca [4 x i32]
+      br label %head
+    head:
+      %i = phi i32 [0, %entry], [%next, %body]
+      %condition = icmp sle i32 %i, 4
+      br i1 %condition, label %body, label %exit
+    body:
+      %index = sext i32 %i to i64
+      %ptr = getelementptr [4 x i32], [4 x i32]* %array, i64 0, i64 %index
+      store i32 1, i32* %ptr
+      %next = add i32 %i, 1
+      br label %head
+    exit:
+      ret i32 0
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest,
+       HighUnsignedExtensionKeepsNegativeSignedSource) {
+  const char *source = R"(
+    define i32 @main(i8 %n) {
+      %array = alloca [8 x i32]
+      %guard = zext i8 %n to i32
+      %high = icmp sge i32 %guard, 250
+      br i1 %high, label %body, label %exit
+    body:
+      %index = sext i8 %n to i64
+      %ptr = getelementptr [8 x i32], [8 x i32]* %array, i64 0, i64 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+    exit:
+      ret i32 0
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, WideUnsignedExtensionInverseDoesNotOverflow) {
+  const char *source = R"(
+    define i32 @main(i63 %n) {
+      %array = alloca [8 x i32]
+      %guard = zext i63 %n to i64
+      %high = icmp sge i64 %guard, 9223372036854775806
+      br i1 %high, label %body, label %exit
+    body:
+      %index = sext i63 %n to i64
+      %ptr = getelementptr [8 x i32], [8 x i32]* %array, i64 0, i64 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+    exit:
+      ret i32 0
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, SignedI1GuardRefinesBooleanSiblingExtension) {
+  const char *source = R"(
+    define i32 @main(i1 %flag) {
+      %array = alloca [1 x i32]
+      %index = zext i1 %flag to i64
+      %signed = sext i1 %flag to i32
+      %negative = icmp eq i32 %signed, -1
+      br i1 %negative, label %body, label %exit
+    body:
+      %ptr = getelementptr [1 x i32], [1 x i32]* %array, i64 0, i64 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+    exit:
+      ret i32 0
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, UnsignedRangeAcrossSignBoundaryKeepsBothSides) {
+  const char *source = R"(
+    define i32 @main(i8 %n) {
+      %array = alloca [128 x i32]
+      %guard = zext i8 %n to i32
+      %lower = icmp sge i32 %guard, 120
+      br i1 %lower, label %upper, label %exit
+    upper:
+      %bound = icmp sle i32 %guard, 140
+      br i1 %bound, label %body, label %exit
+    body:
+      %index = sext i8 %n to i64
+      %ptr = getelementptr [128 x i32], [128 x i32]* %array, i64 0, i64 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+    exit:
+      ret i32 0
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, NoMainModeStartsWithCallerInsteadOfHelper) {
+  const char *source = R"(
+    define void @helper(i32 %i) {
+      %array = alloca [4 x i32]
+      %ptr = getelementptr [4 x i32], [4 x i32]* %array, i32 0, i32 %i
+      store i32 1, i32* %ptr
+      ret void
+    }
+    define void @root() {
+      call void @helper(i32 0)
+      ret void
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, NoMainModeVisitsIndependentRootSCCs) {
+  const char *source = R"(
+    define void @safe_root() {
+      ret void
+    }
+    define void @unsafe_root() {
+      %array = alloca [4 x i32]
+      %ptr = getelementptr [4 x i32], [4 x i32]* %array, i32 0, i32 4
+      store i32 1, i32* %ptr
+      ret void
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, NoMainModeDoesNotStartAtMainWithACaller) {
+  const char *source = R"(
+    define i32 @main(i32 %i) {
+      %array = alloca [4 x i32]
+      %ptr = getelementptr [4 x i32], [4 x i32]* %array, i32 0, i32 %i
+      store i32 1, i32* %ptr
+      ret i32 0
+    }
+    define void @root() {
+      %v = call i32 @main(i32 0)
+      ret void
+    }
+  )";
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, NoMainModeSelectsOneEntryForRootRecursiveSCC) {
+  const char *source = R"(
+    define i32 @left() {
+    entry:
+      ret i32 42
+    unreachable:
+      %v = call i32 @right()
+      ret i32 %v
+    }
+    define i32 @right() {
+      %v = call i32 @left()
+      ret i32 %v
+    }
+  )";
+  for (StateLayout layout :
+       {StateLayout::Dense, StateLayout::SemiSparse, StateLayout::Sparse}) {
+    auto module = parseModule(source);
+    ASSERT_NE(module, nullptr);
+    runAE(module.get(), true, false, AbstractInterpretation::WIDEN_NARROW, 3u,
+          false, false, layout);
+    const auto *right = findNamedInstruction(module.get(), "right", "v");
+    ASSERT_NE(right, nullptr);
+    EXPECT_FALSE(
+        AbstractInterpretation::getAEInstance().hasAbsStateFromTrace(right));
+    EXPECT_TRUE(getFunctionReturnInterval(module.get(), "left")
+                    .equals(IntervalValue(42)));
+  }
+}
+
+TEST_F(AEInstructionParityTest, CtypeConstantsPreserveLibcClassification) {
+  for (const auto &item : {std::make_pair("isdigit", std::isdigit(65)),
+                           std::make_pair("isalpha", std::isalpha(65)),
+                           std::make_pair("isspace", std::isspace(65))}) {
+    const std::string source =
+        "declare i32 @" + std::string(item.first) +
+        "(i32)\ndefine i32 @main() { %result = call i32 @" + item.first +
+        "(i32 65) ret i32 %result }";
+    for (StateLayout layout :
+         {StateLayout::Dense, StateLayout::SemiSparse, StateLayout::Sparse}) {
+      auto module = parseModule(source.c_str());
+      ASSERT_NE(module, nullptr);
+      runAE(module.get(), true, false, AbstractInterpretation::WIDEN_NARROW, 3u,
+            false, false, layout);
+      EXPECT_TRUE(getFunctionReturnInterval(module.get(), "main")
+                      .equals(IntervalValue(item.second)));
+    }
+  }
+}
+
+TEST_F(AEInstructionParityTest,
+       CtypeUnknownAndInvalidArgumentsAreConservative) {
+  for (const char *argument : {"%n", "256", "-2"}) {
+    const std::string source =
+        "declare i32 @isdigit(i32)\n"
+        "define i32 @main(i32 %n) { %result = call i32 @isdigit(i32 " +
+        std::string(argument) + ") ret i32 %result }";
+    for (StateLayout layout :
+         {StateLayout::Dense, StateLayout::SemiSparse, StateLayout::Sparse}) {
+      auto module = parseModule(source.c_str());
+      ASSERT_NE(module, nullptr);
+      runAE(module.get(), true, false, AbstractInterpretation::WIDEN_NARROW, 3u,
+            false, false, layout);
+      EXPECT_TRUE(getFunctionReturnInterval(module.get(), "main")
+                      .equals(IntervalValue(INT_MIN, INT_MAX)));
+    }
+  }
+}
 
 TEST_F(AEInstructionParityTest, FloatingPointAddRefinesArrayIndex) {
   const char *source = R"(

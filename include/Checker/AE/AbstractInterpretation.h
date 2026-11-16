@@ -44,6 +44,10 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
 
+namespace llvm {
+class DominatorTree;
+}
+
 // Forward declarations for AserPTA
 namespace aser {
 template <typename ctx> class CallGraph;
@@ -202,10 +206,11 @@ public:
   void setEnableDivZeroCheck(bool enable) { enableDivZeroCheck_ = enable; }
   void setEnableOverflowCheck(bool enable) { enableOverflowCheck_ = enable; }
   void setEnableMemLeakCheck(bool enable) { enableMemLeakCheck_ = enable; }
+  /// Legacy spelling of selecting root-SCC entry mode.
   void setAnalyzeAllFunctions(bool enable) { analyzeAllFunctions_ = enable; }
 
   /// Restricts the analysis to the entry points reachable from `main` (`Main`)
-  /// or analyzes every defined function (`NoMain`). Mirrors SVF's
+  /// or starts from each call-graph root SCC (`NoMain`). Mirrors SVF's
   /// `-ae-fun-entry` option.
   enum class FunEntryMode { Main, NoMain };
 
@@ -308,6 +313,9 @@ private:
   std::unordered_map<const llvm::Function *, uint32_t> recursiveSccIdMap_;
   std::unordered_map<uint32_t, std::vector<const llvm::Function *>>
       recursiveSccMembers_;
+  std::vector<const llvm::Function *> rootSccEntries_;
+  std::map<const llvm::Function *, std::unique_ptr<llvm::DominatorTree>>
+      dominatorTrees_;
   HandleRecur recursionMode_; // Recursion handling mode (default: WIDEN_NARROW)
   uint32_t widenDelay_{3};
   bool strictCheckpoint_{true};
@@ -493,7 +501,13 @@ private:
   bool isBranchFeasible(const llvm::BranchInst *branch, AbstractState &as,
                         bool isTrueEdge);
   bool isCmpBranchFeasible(const llvm::CmpInst *cmpInst, bool succ,
-                           AbstractState &as);
+                           AbstractState &as,
+                           const llvm::Instruction *branchPoint);
+  void refineMemoryFromLoad(const llvm::Value *value, AbstractState &as,
+                            const llvm::Instruction *branchPoint);
+  bool refineIntegerExtensions(const llvm::Value *value,
+                               const IntervalValue &range, AbstractState &as,
+                               const llvm::Instruction *guard);
   bool isSwitchSuccessorFeasible(const llvm::SwitchInst *switchInst,
                                  const llvm::BasicBlock *successor,
                                  AbstractState &as);

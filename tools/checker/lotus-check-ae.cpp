@@ -63,13 +63,13 @@ static cl::opt<bool> StateStoreStatsOpt(
 
 enum class FunEntryMode { Main, NoMain };
 static cl::opt<FunEntryMode> FunEntryOpt(
-    "ae.fun-entry",
-    cl::desc("Where abstract execution starts (default: main)"),
+    "ae.fun-entry", cl::desc("Where abstract execution starts (default: main)"),
     cl::values(clEnumValN(FunEntryMode::Main, "main",
                           "Analyze entry points reachable from main"),
                clEnumValN(FunEntryMode::NoMain, "no-main",
-                          "Analyze every defined function")),
-    cl::init(FunEntryMode::Main), cl::sub(lotus::checker::tooling::aeSubCommand()));
+                          "Analyze each call-graph root SCC")),
+    cl::init(FunEntryMode::Main),
+    cl::sub(lotus::checker::tooling::aeSubCommand()));
 
 static cl::opt<int64_t> TimeoutOpt(
     "ae.timeout",
@@ -106,6 +106,16 @@ int runAECheckerTool(const char *argv0) {
   if (!M) {
     Err.print(argv0, errs());
     return lotus::checker::tooling::EXIT_ERROR;
+  }
+  if (FunEntryOpt == FunEntryMode::Main) {
+    const Function *entry = M->getFunction("main");
+    if (!entry || entry->isDeclaration())
+      entry = M->getFunction("svf.main");
+    if (!entry || entry->isDeclaration()) {
+      errs() << "AE requires a defined main/svf.main entry; use "
+                "--ae.fun-entry=no-main for a library module\n";
+      return lotus::checker::tooling::EXIT_ERROR;
+    }
   }
   BugReportMgr &mgr = BugReportMgr::get_instance();
   lotus::checker::tooling::AnalysisStatsRecorder stats("ae", *M, mgr);

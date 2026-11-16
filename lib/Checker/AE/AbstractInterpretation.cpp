@@ -366,15 +366,63 @@ std::pair<uint64_t, uint64_t> unsignedIntervalBounds(const IntervalValue &value,
 
   const __uint128_t modulus = static_cast<__uint128_t>(1) << bits;
   const uint64_t maxValue = static_cast<uint64_t>(modulus - 1);
-  const int64_t lb = value.lb().getIntNumeral();
-  const int64_t ub = value.ub().getIntNumeral();
-  if (lb >= 0)
-    return {static_cast<uint64_t>(lb), static_cast<uint64_t>(ub)};
-  if (ub < 0)
-    return {static_cast<uint64_t>(modulus + static_cast<__int128>(lb)),
-            static_cast<uint64_t>(modulus + static_cast<__int128>(ub))};
-  // The signed interval crosses zero, so its unsigned image wraps.
-  return {0, maxValue};
+  const __int128 lb = value.lb().getIntNumeral();
+  const __int128 ub = value.ub().getIntNumeral();
+  if (static_cast<__uint128_t>(ub - lb) >= modulus - 1)
+    return {0, maxValue};
+  const auto normalize = [&](const __int128 bound) {
+    const __int128 mod = static_cast<__int128>(modulus);
+    return static_cast<uint64_t>((bound % mod + mod) % mod);
+  };
+  const uint64_t lower = normalize(lb), upper = normalize(ub);
+  return lower <= upper ? std::make_pair(lower, upper)
+                        : std::make_pair(uint64_t{0}, maxValue);
+}
+
+IntervalValue signedIntervalFromUnsigned(uint64_t lower, uint64_t upper,
+                                         unsigned bits) {
+  // Boolean SSA values use 0/1; other integers use signed bit-pattern values.
+  if (bits == 1)
+    return IntervalValue(static_cast<int64_t>(lower),
+                         static_cast<int64_t>(upper));
+  const uint64_t sign = uint64_t{1} << (bits - 1);
+  if (lower < sign && upper >= sign) {
+    if (bits == 64)
+      return IntervalValue(std::numeric_limits<int64_t>::min(),
+                           std::numeric_limits<int64_t>::max());
+    return IntervalValue(-static_cast<int64_t>(sign),
+                         static_cast<int64_t>(sign - 1));
+  }
+  return IntervalValue(llvm::APInt(bits, lower).getSExtValue(),
+                       llvm::APInt(bits, upper).getSExtValue());
+}
+
+IntervalValue unsignedBinaryInterval(unsigned opcode, const IntervalValue &lhs,
+                                     const IntervalValue &rhs, unsigned bits) {
+  if (lhs.isBottom() || rhs.isBottom())
+    return IntervalValue::bottom();
+  if (bits > 64)
+    return IntervalValue::top();
+  const auto a = unsignedIntervalBounds(lhs, bits);
+  const auto b = unsignedIntervalBounds(rhs, bits);
+  const uint64_t max = bits == 64 ? std::numeric_limits<uint64_t>::max()
+                                  : (uint64_t{1} << bits) - 1;
+  if (opcode == llvm::Instruction::LShr) {
+    if (b.first >= bits)
+      return signedIntervalFromUnsigned(0, max, bits);
+    const uint64_t lastShift = std::min<uint64_t>(b.second, bits - 1);
+    return signedIntervalFromUnsigned(a.first >> lastShift, a.second >> b.first,
+                                      bits);
+  }
+  if (b.first == 0)
+    return signedIntervalFromUnsigned(0, max, bits);
+  if (opcode == llvm::Instruction::UDiv)
+    return signedIntervalFromUnsigned(a.first / b.second, a.second / b.first,
+                                      bits);
+  if (a.first == a.second && b.first == b.second)
+    return signedIntervalFromUnsigned(a.first % b.first, a.first % b.first,
+                                      bits);
+  return signedIntervalFromUnsigned(0, std::min(a.second, b.second - 1), bits);
 }
 
 bool unsignedPredicatePossible(int predicate, const IntervalValue &lhs,
@@ -488,6 +536,8 @@ void AbstractInterpretation::resetAnalysisState() {
   nonRecursiveCallSites_.clear();
   recursiveSccIdMap_.clear();
   recursiveSccMembers_.clear();
+  rootSccEntries_.clear();
+  dominatorTrees_.clear();
   cycleHeadToCycle_.clear();
   cycleValueIds_.clear();
   retSlotIds_.clear();
@@ -705,13 +755,10 @@ void AbstractInterpretation::analyse() {
   handleGlobalNode();
 
   // Collect module-level statistics once (static counts).
-  std::vector<const llvm::Function *> functions;
-  functions.reserve(module_->size());
   for (const llvm::Function &func : *module_) {
     if (func.isDeclaration()) {
       continue;
     }
-    functions.push_back(&func);
     stat->funcNum++;
     for (const llvm::BasicBlock &bb : func) {
       for (const llvm::Instruction &inst : bb) {
@@ -729,22 +776,18 @@ void AbstractInterpretation::analyse() {
     }
   }
 
-  // Match SVF by default: start from main when present.
-  // Whole-module analysis remains available for testing/debugging.
-  const llvm::Function *mainFunc = module_->getFunction("main");
-  if (mainFunc && !mainFunc->isDeclaration()) {
-    handleFunction(mainFunc);
-  }
-
-  if (mainFunc && !analyzeAllFunctions_) {
+  if (!analyzeAllFunctions_) {
+    const llvm::Function *mainFunc = module_->getFunction("main");
+    if (!mainFunc || mainFunc->isDeclaration())
+      mainFunc = module_->getFunction("svf.main");
+    if (mainFunc && !mainFunc->isDeclaration())
+      handleFunction(mainFunc);
     return;
   }
 
-  for (const llvm::Function *func : functions) {
-    if (!func || func == mainFunc)
-      continue;
-    if (analyzedFunctions_.count(func))
-      continue;
+  // Select roots of the resolved call graph, not every definition. Otherwise
+  // a helper visited before its caller is analyzed with unconstrained inputs.
+  for (const llvm::Function *func : rootSccEntries_) {
     if (timeBudgetExhausted())
       return;
     handleFunction(func);
@@ -924,7 +967,38 @@ void AbstractInterpretation::initCallGraphSCC() {
     visit(&F);
   }
 
-  // Identify recursive SCCs: multi-function SCCs + self-recursive functions
+  // Select root SCCs after resolving both direct and indirect call edges.
+  std::unordered_map<const llvm::Function *, size_t> sccIds;
+  for (size_t i = 0; i < sccs.size(); ++i)
+    for (const llvm::Function *func : sccs[i])
+      sccIds[func] = i;
+  std::unordered_set<size_t> hasCaller;
+  for (const auto &entry : callGraph) {
+    for (const llvm::Function *callee : entry.second) {
+      if (sccIds.at(entry.first) != sccIds.at(callee))
+        hasCaller.insert(sccIds.at(callee));
+    }
+  }
+  std::unordered_set<size_t> selected;
+  for (const llvm::Function &func : *module_) {
+    if (func.isDeclaration())
+      continue;
+    const size_t id = sccIds.at(&func);
+    if (hasCaller.count(id) || !selected.insert(id).second)
+      continue;
+    const llvm::Function *entry = &func;
+    for (const llvm::Function *member : sccs[id]) {
+      if (member->getName() == "main") {
+        entry = member;
+        break;
+      }
+      if (member->getName() == "svf.main")
+        entry = member;
+    }
+    rootSccEntries_.push_back(entry);
+  }
+
+  // Identify recursive SCCs: multi-function SCCs + self-recursive functions.
   std::unordered_set<size_t> recursiveSccIds;
   for (size_t i = 0; i < sccs.size(); ++i) {
     if (sccs[i].size() > 1) {
@@ -1400,7 +1474,8 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
       // Check if this is a conditional branch and if the edge is feasible
       if (const llvm::BranchInst *branch =
               llvm::dyn_cast<llvm::BranchInst>(term)) {
-        if (branch->isConditional()) {
+        if (branch->isConditional() &&
+            branch->getSuccessor(0) != branch->getSuccessor(1)) {
           // Determine which successor this edge leads to
           bool isTrueEdge = branch->getSuccessor(0) == bb;
           if (isBranchFeasible(branch, tmpEs, isTrueEdge)) {
@@ -1431,7 +1506,7 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
           // globals.
           entryState.joinWith(*existing);
         }
-        if (callSiteStack.empty() && bb->getParent()->getName() == "main") {
+        if (callSiteStack.empty()) {
           for (const llvm::Argument &arg : bb->getParent()->args()) {
             uint32_t argId = getValueId(&arg);
             auto it = entryState._varToAbsVal.find(argId);
@@ -1693,7 +1768,6 @@ void AbstractInterpretation::updateStateOnBinary(
     result = val0 * val1;
     break;
   case llvm::Instruction::SDiv:
-  case llvm::Instruction::UDiv:
   case llvm::Instruction::FDiv:
     if (val1.contains(0)) {
       // Division by zero - result is top
@@ -1702,17 +1776,21 @@ void AbstractInterpretation::updateStateOnBinary(
       result = val0 / val1;
     }
     break;
-  case llvm::Instruction::SRem:
-  case llvm::Instruction::URem: {
+  case llvm::Instruction::UDiv:
+  case llvm::Instruction::URem:
+  case llvm::Instruction::LShr:
+    result =
+        binary->getType()->isIntegerTy()
+            ? unsignedBinaryInterval(binary->getOpcode(), val0, val1,
+                                     binary->getType()->getIntegerBitWidth())
+            : IntervalValue::top();
+    break;
+  case llvm::Instruction::SRem: {
     uint64_t divisor = 0;
     if (getNonNegativeConstant(binary->getOperand(1), divisor) &&
         divisor != 0) {
-      if (binary->getOpcode() == llvm::Instruction::URem) {
-        result = IntervalValue(0, static_cast<int64_t>(divisor - 1));
-      } else {
-        const int64_t bound = static_cast<int64_t>(divisor - 1);
-        result = IntervalValue(-bound, bound);
-      }
+      const int64_t bound = static_cast<int64_t>(divisor - 1);
+      result = IntervalValue(-bound, bound);
       break;
     }
     if (val1.contains(0)) {
@@ -1734,7 +1812,6 @@ void AbstractInterpretation::updateStateOnBinary(
   case llvm::Instruction::Shl:
     result = val0 << val1;
     break;
-  case llvm::Instruction::LShr:
   case llvm::Instruction::AShr:
     result = val0 >> val1;
     break;
@@ -1796,13 +1873,19 @@ void AbstractInterpretation::updateStateOnCmp(const llvm::CmpInst *cmp) {
     AddressValue addrOp0 = as[op0Id].getAddrs();
     AddressValue addrOp1 = as[op1Id].getAddrs();
     IntervalValue resVal;
+    const bool unknownTarget = addrOp0.empty() || addrOp1.empty() ||
+                               addrOp0.contains(InvalidMemAddr) ||
+                               addrOp1.contains(InvalidMemAddr);
+    const bool mayEqual = addrOp0.hasIntersect(addrOp1);
+    const bool mustEqual = !unknownTarget && mayEqual && addrOp0.size() == 1 &&
+                           addrOp1.size() == 1;
 
     switch (cmp->getPredicate()) {
     case llvm::CmpInst::ICMP_EQ:
-      if (addrOp0.equals(addrOp1)) {
+      if (mustEqual) {
         resVal =
             IntervalValue(static_cast<int64_t>(1), static_cast<int64_t>(1));
-      } else if (addrOp0.hasIntersect(addrOp1)) {
+      } else if (unknownTarget || mayEqual) {
         resVal =
             IntervalValue(static_cast<int64_t>(0), static_cast<int64_t>(1));
       } else {
@@ -1811,10 +1894,10 @@ void AbstractInterpretation::updateStateOnCmp(const llvm::CmpInst *cmp) {
       }
       break;
     case llvm::CmpInst::ICMP_NE:
-      if (addrOp0.equals(addrOp1)) {
+      if (mustEqual) {
         resVal =
             IntervalValue(static_cast<int64_t>(0), static_cast<int64_t>(0));
-      } else if (addrOp0.hasIntersect(addrOp1)) {
+      } else if (unknownTarget || mayEqual) {
         resVal =
             IntervalValue(static_cast<int64_t>(0), static_cast<int64_t>(1));
       } else {
@@ -2014,6 +2097,7 @@ void AbstractInterpretation::updateStateOnCast(const llvm::CastInst *cast) {
   uint32_t lhsId = getValueId(cast);
   uint32_t opId = getValueId(cast->getOperand(0));
   AbstractState &as = stateStore_.getOrCreate(cast);
+  materializeConstantValue(as, cast->getOperand(0), opId);
 
   if (as.inVarToAddrsTable(opId)) {
     // Pointer cast - preserve address
@@ -2447,7 +2531,8 @@ void AbstractInterpretation::updateStateOnPhi(const llvm::PHINode *phi) {
 
       if (const llvm::BranchInst *branch =
               llvm::dyn_cast<llvm::BranchInst>(term)) {
-        if (branch->isConditional()) {
+        if (branch->isConditional() &&
+            branch->getSuccessor(0) != branch->getSuccessor(1)) {
           // Determine which successor this edge leads to
           bool isTrueEdge = branch->getSuccessor(0) == phi->getParent();
           AbstractState testState = opAs;
@@ -3747,7 +3832,7 @@ bool AbstractInterpretation::isBranchFeasible(const llvm::BranchInst *branch,
   // Try to extract comparison from condition
   if (const llvm::CmpInst *cmp = llvm::dyn_cast<llvm::CmpInst>(cond)) {
     // Use the full predicate handling for cmp instructions
-    return isCmpBranchFeasible(cmp, isTrueEdge, as);
+    return isCmpBranchFeasible(cmp, isTrueEdge, as, branch);
   }
 
   // For non-cmp conditions (e.g., phi, select), do simple check
@@ -3776,8 +3861,189 @@ bool AbstractInterpretation::isBranchFeasible(const llvm::BranchInst *branch,
   }
 }
 
-bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
-                                                 bool succ, AbstractState &as) {
+// Refine an extension and its source together. Separate sext/zext instructions
+// of the same SSA source must see the same branch fact, even without a backing
+// alloca after mem2reg. Do not invert truncation: it is not injective.
+bool AbstractInterpretation::refineIntegerExtensions(
+    const llvm::Value *value, const IntervalValue &range, AbstractState &as,
+    const llvm::Instruction *guard) {
+  std::queue<std::pair<const llvm::Value *, IntervalValue>> pending;
+  std::unordered_set<const llvm::Value *> seen;
+  pending.push({value, range});
+
+  auto sourceOf = [](const llvm::Value *v) -> const llvm::Value * {
+    if (const auto *cast = llvm::dyn_cast<llvm::CastInst>(v)) {
+      if ((cast->getOpcode() == llvm::Instruction::SExt ||
+           cast->getOpcode() == llvm::Instruction::ZExt) &&
+          cast->getDestTy()->getIntegerBitWidth() <= 64)
+        return cast->getOperand(0);
+    }
+    if (const auto *freeze = llvm::dyn_cast<llvm::FreezeInst>(v))
+      if (freeze->getType()->isIntegerTy())
+        return freeze->getOperand(0);
+    return nullptr;
+  };
+
+  while (!pending.empty()) {
+    const auto item = pending.front();
+    pending.pop();
+    const llvm::Value *current = item.first;
+    const uint32_t id = getValueId(current);
+    if (!current->getType()->isIntegerTy() || !as.inVarToValTable(id))
+      continue;
+    const IntervalValue old = as[id].getInterval();
+    IntervalValue narrowed = old;
+    narrowed.meet_with(item.second);
+    if (narrowed.isBottom())
+      return false;
+    if (!seen.insert(current).second && narrowed.equals(old))
+      continue;
+    as[id] = AbstractValue(narrowed);
+
+    if (const llvm::Value *source = sourceOf(current)) {
+      IntervalValue inverse = narrowed;
+      if (const auto *cast = llvm::dyn_cast<llvm::CastInst>(current)) {
+        const unsigned bits = source->getType()->getIntegerBitWidth();
+        const int64_t half = int64_t{1} << (bits - 1);
+        if (cast->getOpcode() == llvm::Instruction::ZExt) {
+          const __int128 modulus = static_cast<__int128>(1) << bits;
+          inverse.meet_with(
+              IntervalValue(0, static_cast<int64_t>(modulus - 1)));
+          if (inverse.isBottom())
+            return false;
+          const int64_t lb = inverse.lb().getIntNumeral();
+          const int64_t ub = inverse.ub().getIntNumeral();
+          if (bits == 1 || ub < half) {
+            // i1 values are represented as 0/1, including comparison results.
+          } else if (lb >= half) {
+            inverse = IntervalValue(static_cast<int64_t>(lb - modulus),
+                                    static_cast<int64_t>(ub - modulus));
+          } else {
+            // Unsigned interval straddles the signed boundary: its inverse
+            // is disjoint, so keep the full signed hull.
+            inverse = IntervalValue(-half, half - 1);
+          }
+        } else {
+          inverse.meet_with(IntervalValue(-half, half - 1));
+          if (inverse.isBottom())
+            return false;
+          if (bits == 1)
+            inverse = IntervalValue(-inverse.ub(), -inverse.lb());
+        }
+      }
+      pending.push({source, inverse});
+    }
+
+    // Update already evaluated sibling extensions as well as future ones.
+    for (const llvm::User *user : current->users()) {
+      if (sourceOf(user) != current || !as.inVarToValTable(getValueId(user)))
+        continue;
+      auto &dt = dominatorTrees_[guard->getFunction()];
+      if (!dt)
+        dt = std::make_unique<llvm::DominatorTree>(
+            *const_cast<llvm::Function *>(guard->getFunction()));
+      // A non-dominating definition in the snapshot can be stale from a prior
+      // loop iteration. It must not constrain the current PHI through its cast.
+      if (!dt->dominates(llvm::cast<llvm::Instruction>(user), guard))
+        continue;
+      IntervalValue image = narrowed;
+      if (const auto *cast = llvm::dyn_cast<llvm::CastInst>(user)) {
+        const unsigned bits = current->getType()->getIntegerBitWidth();
+        const int64_t half = int64_t{1} << (bits - 1);
+        if (bits == 1) {
+          image.meet_with(IntervalValue(0, 1));
+          if (cast->getOpcode() == llvm::Instruction::SExt)
+            image = IntervalValue(-image.ub(), -image.lb());
+        } else {
+          image.meet_with(IntervalValue(-half, half - 1));
+          if (cast->getOpcode() == llvm::Instruction::ZExt) {
+            const __int128 modulus = static_cast<__int128>(1) << bits;
+            if (image.ub().getIntNumeral() < 0)
+              image = IntervalValue(
+                  static_cast<int64_t>(modulus + image.lb().getIntNumeral()),
+                  static_cast<int64_t>(modulus + image.ub().getIntNumeral()));
+            else if (image.lb().getIntNumeral() < 0)
+              image = IntervalValue(0, static_cast<int64_t>(modulus - 1));
+          }
+        }
+      }
+      pending.push({user, image});
+    }
+  }
+  return true;
+}
+
+// A branch fact about a load may refine the current memory only if the load
+// names one concrete cell and that cell cannot have changed since the load.
+void AbstractInterpretation::refineMemoryFromLoad(
+    const llvm::Value *value, AbstractState &as,
+    const llvm::Instruction *branchPoint) {
+  while (true) {
+    if (const auto *cast = llvm::dyn_cast<llvm::CastInst>(value)) {
+      if ((cast->getOpcode() == llvm::Instruction::SExt ||
+           cast->getOpcode() == llvm::Instruction::ZExt) &&
+          cast->getDestTy()->getIntegerBitWidth() <= 64) {
+        value = cast->getOperand(0);
+        continue;
+      }
+    }
+    if (const auto *freeze = llvm::dyn_cast<llvm::FreezeInst>(value)) {
+      if (freeze->getType()->isIntegerTy()) {
+        value = freeze->getOperand(0);
+        continue;
+      }
+    }
+    break;
+  }
+  const auto *load = llvm::dyn_cast<llvm::LoadInst>(value);
+  if (!load || load->isVolatile() || load->isAtomic())
+    return;
+  const uint32_t loadId = getValueId(load);
+  const uint32_t ptrId = getValueId(load->getPointerOperand());
+  if (!as.inVarToAddrsTable(ptrId) ||
+      !isStrongUpdateForStore(as[ptrId].getAddrs(), as) ||
+      (!as.inVarToValTable(loadId) && !as.inVarToAddrsTable(loadId)))
+    return;
+
+  // Scan every CFG path backwards from the actual branch, including writes
+  // between the comparison and its terminator. Any possible write blocks this
+  // refinement; using a stale load to constrain a newer store is unsound.
+  std::vector<const llvm::BasicBlock *> pending{branchPoint->getParent()};
+  std::unordered_set<const llvm::BasicBlock *> visited;
+  bool foundLoad = false;
+  while (!pending.empty()) {
+    const llvm::BasicBlock *block = pending.back();
+    pending.pop_back();
+    if (!visited.insert(block).second)
+      continue;
+    bool reachedLoad = false;
+    for (auto it = block->rbegin(); it != block->rend(); ++it) {
+      if (&*it == load) {
+        foundLoad = reachedLoad = true;
+        break;
+      }
+      if (it->mayWriteToMemory())
+        return;
+    }
+    if (reachedLoad)
+      continue;
+    if (llvm::pred_empty(block))
+      return;
+    for (const llvm::BasicBlock *pred : llvm::predecessors(block))
+      pending.push_back(pred);
+  }
+  if (!foundLoad)
+    return;
+  // Use the load's own (possibly inverse-refined) value, not the interval of
+  // its extension. For example zext i8 -56 is 200, but the cell still holds
+  // -56.
+  const AbstractValue refined = as[loadId];
+  as.store(*as[ptrId].getAddrs().begin(), refined);
+}
+
+bool AbstractInterpretation::isCmpBranchFeasible(
+    const llvm::CmpInst *cmpInst, bool succ, AbstractState &as,
+    const llvm::Instruction *branchPoint) {
   uint32_t op0Id = getValueId(cmpInst->getOperand(0));
   uint32_t op1Id = getValueId(cmpInst->getOperand(1));
   const llvm::Value *op0Val = cmpInst->getOperand(0);
@@ -3818,7 +4084,7 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
         if (predicate == llvm::CmpInst::ICMP_NE) {
           vals.erase(NullMemAddr); // true edge of (p != null)
         } else {
-          if (vals.count(NullMemAddr) != 0) {
+          if (vals.count(NullMemAddr) != 0 || vals.count(InvalidMemAddr) != 0) {
             vals = {NullMemAddr}; // true edge of (p == null)
           } else {
             vals.clear();
@@ -3834,75 +4100,9 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
       }
       as[ptrId] = AbstractValue(AddressValue(refined));
 
-      // If compared pointer value comes from a load, refine pointed memory too.
-      // This propagates branch facts from `%x = load ...; icmp %x, null` back
-      // to the backing variable, so subsequent loads in the guarded block are
-      // narrowed.
       const llvm::Value *ptrVal = (ptrId == op0Id) ? op0Val : op1Val;
-      if (const auto *load = llvm::dyn_cast<llvm::LoadInst>(ptrVal)) {
-        uint32_t basePtrId = getValueId(load->getPointerOperand());
-        if (as.inVarToAddrsTable(basePtrId)) {
-          bool anyFeasible = false;
-          for (auto addr : as[basePtrId].getAddrs()) {
-            uint32_t objId = as.getIDFromAddr(addr);
-            if (!as.inAddrToAddrsTable(objId)) {
-              continue;
-            }
-            AbstractValue &memVal = as.load(addr);
-            AddressValue::AddrSet memRefined =
-                refineAddrSet(memVal.getAddrs().getVals());
-            if (memRefined.empty()) {
-              continue;
-            }
-            memVal = AbstractValue(AddressValue(memRefined));
-            anyFeasible = true;
-          }
-          if (!anyFeasible) {
-            return false;
-          }
-        }
-      }
+      refineMemoryFromLoad(ptrVal, as, branchPoint);
       return true;
-    }
-  }
-
-  // Check if operands come from load instructions and handle them
-  const llvm::LoadInst *loadOp0 = nullptr;
-  const llvm::LoadInst *loadOp1 = nullptr;
-
-  auto getUnderlyingLoad = [](const llvm::Value *value)
-      -> const llvm::LoadInst * {
-    while (value) {
-      if (const auto *cast = llvm::dyn_cast<llvm::CastInst>(value)) {
-        value = cast->getOperand(0);
-        continue;
-      }
-      if (const auto *freeze = llvm::dyn_cast<llvm::FreezeInst>(value)) {
-        value = freeze->getOperand(0);
-        continue;
-      }
-      break;
-    }
-    return llvm::dyn_cast_or_null<llvm::LoadInst>(value);
-  };
-
-  // Integer comparisons often operate on a casted reload of the same memory
-  // cell. Strip the casts so branch facts can be propagated back to that cell.
-  loadOp0 = getUnderlyingLoad(op0Val);
-  loadOp1 = getUnderlyingLoad(op1Val);
-
-  // Get addresses from loaded pointers for memory refinement
-  AddressValue addrOp0, addrOp1;
-  if (loadOp0) {
-    uint32_t ptrId = getValueId(loadOp0->getPointerOperand());
-    if (as.inVarToAddrsTable(ptrId)) {
-      addrOp0 = as[ptrId].getAddrs();
-    }
-  }
-  if (loadOp1) {
-    uint32_t ptrId = getValueId(loadOp1->getPointerOperand());
-    if (as.inVarToAddrsTable(ptrId)) {
-      addrOp1 = as[ptrId].getAddrs();
     }
   }
 
@@ -3923,10 +4123,6 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
   AbstractState newEs = as;
   uint32_t lhsId = op0Id;
   uint32_t rhsId = op1Id;
-  const llvm::LoadInst *lhsLoadOp = loadOp0;
-  const llvm::LoadInst *rhsLoadOp = loadOp1;
-  AddressValue lhsAddrs = addrOp0;
-  AddressValue rhsAddrs = addrOp1;
 
   bool b0 = val0.is_numeral();
   bool b1 = val1.is_numeral();
@@ -3960,8 +4156,6 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
 
   if (b0 && !b1) {
     std::swap(lhsId, rhsId);
-    std::swap(lhsLoadOp, rhsLoadOp);
-    std::swap(lhsAddrs, rhsAddrs);
     predicate = getSwitchLhsRhsPredicate()[predicate];
   } else if (!b0 && !b1) {
     if ((predicate == llvm::CmpInst::ICMP_SLT ||
@@ -3978,17 +4172,9 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
                                       BoundedInt(upper)));
       if (refined.isBottom())
         return false;
-      as[lhsId] = AbstractValue(refined);
-      if (lhsLoadOp && !lhsAddrs.getVals().empty()) {
-        for (uint32_t addr : lhsAddrs.getVals()) {
-          uint32_t objId = as.getIDFromAddr(addr);
-          if (!as.inAddrToValTable(objId))
-            continue;
-          AbstractValue memValue = as.load(addr);
-          memValue.getInterval().meet_with(refined);
-          as.store(addr, memValue);
-        }
-      }
+      if (!refineIntegerExtensions(op0Val, refined, as, cmpInst))
+        return false;
+      refineMemoryFromLoad(op0Val, as, branchPoint);
     }
     return true;
   } else if (b0 && b1) {
@@ -4105,29 +4291,12 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
     return false;
   }
   newEs[lhsId] = AbstractValue(lhs);
+  if (cmpInst->getOperand(0)->getType()->isIntegerTy() &&
+      !refineIntegerExtensions(lhsId == op0Id ? op0Val : op1Val, lhs, newEs,
+                               cmpInst))
+    return false;
 
-  // Refine memory for loaded pointers (matching SVF's behavior)
-  // If operand comes from a load, also refine the memory it points to
-  if (lhsLoadOp && !lhsAddrs.getVals().empty()) {
-    for (const auto &addr : lhsAddrs.getVals()) {
-      uint32_t objId = newEs.getIDFromAddr(addr);
-      if (newEs.inAddrToValTable(objId)) {
-        AbstractValue memVal = newEs.load(addr);
-        memVal.getInterval().meet_with(lhs);
-        newEs.store(addr, memVal);
-      }
-    }
-  }
-  if (rhsLoadOp && !rhsAddrs.getVals().empty()) {
-    for (const auto &addr : rhsAddrs.getVals()) {
-      uint32_t objId = newEs.getIDFromAddr(addr);
-      if (newEs.inAddrToValTable(objId)) {
-        AbstractValue memVal = newEs.load(addr);
-        memVal.getInterval().meet_with(rhs);
-        newEs.store(addr, memVal);
-      }
-    }
-  }
+  refineMemoryFromLoad(lhsId == op0Id ? op0Val : op1Val, newEs, branchPoint);
 
   as = newEs;
   return true;

@@ -27,7 +27,7 @@ AbstractInterpretation
 │   ├── IntervalValue        numeric intervals
 │   └── AddressValue         points-to sets
 ├── ICFGWTO                  loop/recursion fixpoint iteration
-├── RelationSolver           Z3-assisted interval refinement
+├── RelationSolver           Z3 solver utilities (outside normal execution)
 ├── SVFIRWrapper             AserPTA interface
 └── AEDetector               bug detectors and reporting
 ```
@@ -55,8 +55,10 @@ Useful options:
 --ae.state-store-stats
 ```
 
-`--ae.fun-entry=main` analyzes the `main`-rooted call graph.
-`no-main` starts from every defined function without an external caller.
+`--ae.fun-entry=main` analyzes the `main`-rooted call graph (`svf.main` is also
+accepted). The CLI rejects modules without a defined entry in this mode.
+`no-main` starts from one representative of every call-graph root SCC, using
+resolved indirect-call edges as well as direct calls.
 On timeout, findings collected so far are still reported.
 
 ## State Layouts
@@ -108,12 +110,11 @@ subobject bounds. Additional regressions cover vector-GEP lane offsets, bounds
 from masks and unsigned remainders, casted branch reloads, bounded-memory libc
 searches, and the no-definition module case.
 
-A local 150-program SVF differential corpus currently has 30 reviewed boolean
-finding differences. SVF reports guarded null paths and classifies some
-`snprintf`/`strncpy` calls as null dereferences. Lotus additionally reports
-negative subobject offsets, indirect-table overflows, and precise
-`snprintf`/`strncpy` buffer overflows. Re-run both engines after changing branch
-refinement, detector precision, or external-API models.
+The [migration audit](MIGRATION_AUDIT.md) records a 223-input differential run
+against the local LLVM 14 SVF build, plus reduced AE-specific bug examples.
+The reusable runner is `scripts/verification/ae_differential.py`. Re-run both
+engines after changing transfer functions, branch refinement, detector precision,
+or external-API models. Output differences alone do not establish a Lotus bug.
 
 ## Limitations
 
@@ -122,6 +123,8 @@ refinement, detector precision, or external-API models.
 - Complex ownership transfer can limit memory-leak precision.
 - Unmodeled external functions return conservative unknown values.
 - Findings require manual review.
+- Constant ctype calls use the analyzer host's libc and locale; cross-target
+  libc behavior and program-driven locale changes are not modeled.
 
 ## References
 
