@@ -38,6 +38,7 @@ namespace analysis {
 
 // Forward declaration (SVFIRWrapper only needs pointer)
 class SVFIRWrapper;
+class AbstractInterpretation;
 
 /// Maximum field limit for GEP offset calculations to prevent explosion
 /// in field-sensitive analysis. Fields beyond this limit are merged.
@@ -247,9 +248,7 @@ public:
         _varToAbsVal(rhs._varToAbsVal), _addrToAbsVal(rhs._addrToAbsVal),
         svfir_(rhs.svfir_), _objToSize(rhs._objToSize),
         _gepObjOffsetFromBase(rhs._gepObjOffsetFromBase),
-        _gepObjOffsetFromBaseByObjId(rhs._gepObjOffsetFromBaseByObjId),
-        _gepFieldObjMap(rhs._gepFieldObjMap),
-        _nextGepFieldId(rhs._nextGepFieldId) {}
+        pathLocalVarTable_(rhs.pathLocalVarTable_) {}
 
   virtual ~AbstractState() = default;
 
@@ -264,10 +263,8 @@ public:
       _fieldInsensitiveObjs = rhs._fieldInsensitiveObjs;
       _objToSize = rhs._objToSize;
       _gepObjOffsetFromBase = rhs._gepObjOffsetFromBase;
-      _gepObjOffsetFromBaseByObjId = rhs._gepObjOffsetFromBaseByObjId;
-      _gepFieldObjMap = rhs._gepFieldObjMap;
-      _nextGepFieldId = rhs._nextGepFieldId;
       svfir_ = rhs.svfir_;
+      pathLocalVarTable_ = rhs.pathLocalVarTable_;
     }
     return *this;
   }
@@ -281,10 +278,7 @@ public:
         _addrToAbsVal(std::move(rhs._addrToAbsVal)), svfir_(rhs.svfir_),
         _objToSize(std::move(rhs._objToSize)),
         _gepObjOffsetFromBase(std::move(rhs._gepObjOffsetFromBase)),
-        _gepObjOffsetFromBaseByObjId(
-            std::move(rhs._gepObjOffsetFromBaseByObjId)),
-        _gepFieldObjMap(std::move(rhs._gepFieldObjMap)),
-        _nextGepFieldId(rhs._nextGepFieldId) {}
+        pathLocalVarTable_(rhs.pathLocalVarTable_) {}
 
   /// Move assignment operator
   AbstractState &operator=(AbstractState &&rhs) {
@@ -296,11 +290,8 @@ public:
       _heapObjs = std::move(rhs._heapObjs);
       _objToSize = std::move(rhs._objToSize);
       _gepObjOffsetFromBase = std::move(rhs._gepObjOffsetFromBase);
-      _gepObjOffsetFromBaseByObjId =
-          std::move(rhs._gepObjOffsetFromBaseByObjId);
-      _gepFieldObjMap = std::move(rhs._gepFieldObjMap);
-      _nextGepFieldId = rhs._nextGepFieldId;
       svfir_ = rhs.svfir_;
+      pathLocalVarTable_ = rhs.pathLocalVarTable_;
     }
     return *this;
   }
@@ -375,9 +366,11 @@ public:
   /// Rebinds the variable table to the run-wide def-site map.
   void bindDefSiteVarTable(VarToAbsValMap *shared) {
     _varToAbsVal.bindDefSite(shared);
+    pathLocalVarTable_ = false;
   }
 
   bool usesDefSiteVarTable() const { return _varToAbsVal.isDefSite(); }
+  bool usesPathLocalVarTable() const { return pathLocalVarTable_; }
 
   /// Detaches from the shared table, optionally keeping only @p ids.
   /// Used by widening/narrowing, which must not mutate the shared table.
@@ -386,6 +379,7 @@ public:
       _varToAbsVal.detachToLocal(*only);
     else
       _varToAbsVal.detachToLocal();
+    pathLocalVarTable_ = true;
   }
 
   /// Get the address-to-value mapping (read-only)
@@ -612,7 +606,6 @@ public:
     _varToAbsVal.clear();
     _freedAddrs.clear();
     _gepObjOffsetFromBase.clear();
-    _gepObjOffsetFromBaseByObjId.clear();
   }
 
   AbstractState bottom() const {
@@ -697,24 +690,17 @@ public:
 
   // Object size tracking (public for AE use)
   void setObjSize(uint32_t objId, uint32_t size) { _objToSize[objId] = size; }
+  bool hasKnownObjSize(uint32_t objId) const {
+    return _objToSize.find(objId) != _objToSize.end();
+  }
   uint32_t getObjSize(uint32_t objId) const {
     auto it = _objToSize.find(objId);
     return it != _objToSize.end() ? it->second : 0;
   }
 
-  void recordGepObjOffsetFromBase(uint32_t objId, const IntervalValue &offset) {
-    auto [it, inserted] = _gepObjOffsetFromBaseByObjId.emplace(objId, offset);
-    if (!inserted)
-      it->second.join_with(offset);
-  }
+  void recordGepObjOffsetFromBase(uint32_t objId, const IntervalValue &offset);
 
-  bool getGepObjOffsetFromBase(uint32_t objId, IntervalValue &offset) const {
-    auto it = _gepObjOffsetFromBaseByObjId.find(objId);
-    if (it == _gepObjOffsetFromBaseByObjId.end())
-      return false;
-    offset = it->second;
-    return true;
-  }
+  bool getGepObjOffsetFromBase(uint32_t objId, IntervalValue &offset) const;
 
 private:
   // Object size tracking (storage)
@@ -724,16 +710,9 @@ private:
   // Maps GEP instruction pointer -> offset from base object
   std::unordered_map<const llvm::GetElementPtrInst *, IntervalValue>
       _gepObjOffsetFromBase;
-  std::unordered_map<uint32_t, IntervalValue> _gepObjOffsetFromBaseByObjId;
-
-  // GEP field-sensitive object tracking: maps (baseObjId, offset) -> field
-  // object ID This maintains field sensitivity similar to SVF's getGepObjVar()
-  std::map<std::pair<uint32_t, int64_t>, uint32_t> _gepFieldObjMap;
-  // Field IDs must fit in the low 24 bits because virtual addresses are formed
-  // by adding AddressMask (0x7f000000). High-bit IDs overflow into 0xffxxxxxx
-  // and stop looking like virtual addresses.
-  uint32_t _nextGepFieldId = 0x00800000;
-
+  /// Def-site snapshots carrying path-specific refinements stay local so the
+  /// shared SSA table is not polluted by a sibling edge.
+  bool pathLocalVarTable_ = false;
   void setGepObjOffsetFromBase(const llvm::GetElementPtrInst *gep,
                                const IntervalValue &offset) {
     _gepObjOffsetFromBase[gep] = offset;
@@ -750,19 +729,10 @@ private:
     return IntervalValue(0, 0);
   }
 
-  // Get or create a field-sensitive GEP object ID (matching SVF's getGepObjVar)
-  uint32_t getGepFieldObjId(uint32_t baseObjId, int64_t offset) {
-    auto key = std::make_pair(baseObjId, offset);
-    auto it = _gepFieldObjMap.find(key);
-    if (it != _gepFieldObjMap.end()) {
-      return it->second;
-    }
-    if (_nextGepFieldId >= 0x01000000)
-      return baseObjId;
-    uint32_t newId = _nextGepFieldId++;
-    _gepFieldObjMap[key] = newId;
-    return newId;
-  }
+  // Get the run-wide field-sensitive GEP object ID for (base, offset). SVF
+  // models these as SVFIR objects, so all control-flow paths must agree on the
+  // same identity for a given base/offset pair.
+  uint32_t getGepFieldObjId(uint32_t baseObjId, int64_t offset);
 
   AbstractState sliceState(std::set<uint32_t> &sl) const {
     AbstractState inv;

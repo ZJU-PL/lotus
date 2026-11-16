@@ -310,6 +310,91 @@ void materializeConstantValue(AbstractState &as, const llvm::Value *val,
   }
 }
 
+const llvm::Value *resolveAggregateElement(const llvm::Value *aggregate,
+                                           llvm::ArrayRef<unsigned> indices) {
+  if (!aggregate)
+    return nullptr;
+
+  if (const auto *insert = llvm::dyn_cast<llvm::InsertValueInst>(aggregate)) {
+    llvm::ArrayRef<unsigned> insertedIndices = insert->getIndices();
+    const bool insertedPathIsPrefix =
+        insertedIndices.size() <= indices.size() &&
+        std::equal(insertedIndices.begin(), insertedIndices.end(),
+                   indices.begin());
+    if (insertedPathIsPrefix) {
+      if (insertedIndices.size() == indices.size())
+        return insert->getInsertedValueOperand();
+      return resolveAggregateElement(insert->getInsertedValueOperand(),
+                                     indices.slice(insertedIndices.size()));
+    }
+    return resolveAggregateElement(insert->getAggregateOperand(), indices);
+  }
+
+  if (const auto *insert = llvm::dyn_cast<llvm::InsertElementInst>(aggregate)) {
+    if (indices.size() == 1) {
+      if (const auto *lane =
+              llvm::dyn_cast<llvm::ConstantInt>(insert->getOperand(1))) {
+        if (lane->getZExtValue() == indices.front())
+          return insert->getOperand(2);
+      }
+    }
+    return resolveAggregateElement(insert->getOperand(0), indices);
+  }
+
+  const auto *constant = llvm::dyn_cast<llvm::Constant>(aggregate);
+  if (!constant)
+    return nullptr;
+  for (unsigned index : indices) {
+    constant = constant->getAggregateElement(index);
+    if (!constant)
+      return nullptr;
+  }
+  return constant;
+}
+
+std::pair<uint64_t, uint64_t> unsignedIntervalBounds(const IntervalValue &value,
+                                                     unsigned bits) {
+  if (value.isBottom())
+    return {1, 0};
+  if (bits > 64 || value.is_infinite()) {
+    const uint64_t maxValue =
+        bits >= 64
+            ? std::numeric_limits<uint64_t>::max()
+            : static_cast<uint64_t>((static_cast<__uint128_t>(1) << bits) - 1);
+    return {0, maxValue};
+  }
+
+  const __uint128_t modulus = static_cast<__uint128_t>(1) << bits;
+  const uint64_t maxValue = static_cast<uint64_t>(modulus - 1);
+  const int64_t lb = value.lb().getIntNumeral();
+  const int64_t ub = value.ub().getIntNumeral();
+  if (lb >= 0)
+    return {static_cast<uint64_t>(lb), static_cast<uint64_t>(ub)};
+  if (ub < 0)
+    return {static_cast<uint64_t>(modulus + static_cast<__int128>(lb)),
+            static_cast<uint64_t>(modulus + static_cast<__int128>(ub))};
+  // The signed interval crosses zero, so its unsigned image wraps.
+  return {0, maxValue};
+}
+
+bool unsignedPredicatePossible(int predicate, const IntervalValue &lhs,
+                               const IntervalValue &rhs, unsigned bits) {
+  const auto [lhsMin, lhsMax] = unsignedIntervalBounds(lhs, bits);
+  const auto [rhsMin, rhsMax] = unsignedIntervalBounds(rhs, bits);
+  switch (predicate) {
+  case llvm::CmpInst::ICMP_UGT:
+    return lhsMax > rhsMin;
+  case llvm::CmpInst::ICMP_UGE:
+    return lhsMax >= rhsMin;
+  case llvm::CmpInst::ICMP_ULT:
+    return lhsMin < rhsMax;
+  case llvm::CmpInst::ICMP_ULE:
+    return lhsMin <= rhsMax;
+  default:
+    return true;
+  }
+}
+
 void clearAEBugReports() {
   static constexpr const char *AEBugTypeNames[] = {
       "AE Buffer Overflow",  "AE Null Dereference", "AE Divide By Zero",
@@ -388,6 +473,9 @@ void AbstractInterpretation::resetAnalysisState() {
   // Clear value ID mappings
   valueToIdMap_.clear();
   idToValueMap_.clear();
+  gepFieldObjMap_.clear();
+  nextGepFieldId_ = 0x00800000;
+  gepObjOffsetFromBaseByObjId_.clear();
   // Reserve low IDs used by special memory sentinels:
   //   0 -> null pointer
   //   2 -> InvalidMemAddr internal ID
@@ -467,6 +555,35 @@ void *AbstractInterpretation::getPTAPass() const {
     return pta_->pass.get();
   }
   return nullptr;
+}
+
+uint32_t AbstractInterpretation::getOrCreateGepFieldObjId(uint32_t baseObjId,
+                                                          int64_t offset) {
+  const auto key = std::make_pair(baseObjId, offset);
+  auto it = gepFieldObjMap_.find(key);
+  if (it != gepFieldObjMap_.end())
+    return it->second;
+  if (nextGepFieldId_ >= 0x01000000)
+    return baseObjId;
+  const uint32_t newId = nextGepFieldId_++;
+  gepFieldObjMap_.emplace(key, newId);
+  return newId;
+}
+
+void AbstractInterpretation::recordGepObjOffsetFromBase(
+    uint32_t objId, const IntervalValue &offset) {
+  auto [it, inserted] = gepObjOffsetFromBaseByObjId_.emplace(objId, offset);
+  if (!inserted)
+    it->second.join_with(offset);
+}
+
+bool AbstractInterpretation::getGepObjOffsetFromBase(
+    uint32_t objId, IntervalValue &offset) const {
+  auto it = gepObjOffsetFromBaseByObjId_.find(objId);
+  if (it == gepObjOffsetFromBaseByObjId_.end())
+    return false;
+  offset = it->second;
+  return true;
 }
 
 void AbstractInterpretation::runOnModule(llvm::Module *module) {
@@ -1283,34 +1400,8 @@ bool AbstractInterpretation::mergeStatesFromPredecessors(
         }
       } else if (const llvm::SwitchInst *switchInst =
                      llvm::dyn_cast<llvm::SwitchInst>(term)) {
-        // Handle switch statement - check if this successor corresponds to a
-        // feasible case
-        bool isFeasible = false;
-
-        // Check if this is the default case
-        if (bb == switchInst->getDefaultDest()) {
-          // Keep the default edge feasible. In sparse layouts a case edge may
-          // have refined the shared switch-condition def-site while processing
-          // another successor, which must not make the default path disappear.
-          isFeasible = true;
-        } else {
-          // Check if this block corresponds to a case value
-          for (auto caseIt = switchInst->case_begin();
-               caseIt != switchInst->case_end(); ++caseIt) {
-            if (caseIt->getCaseSuccessor() == bb) {
-              const llvm::ConstantInt *caseVal = caseIt->getCaseValue();
-              int64_t caseValue = caseVal->getSExtValue();
-              if (isSwitchBranchFeasible(switchInst, caseValue, tmpEs)) {
-                isFeasible = true;
-                break;
-              }
-            }
-          }
-        }
-
-        if (isFeasible) {
+        if (isSwitchSuccessorFeasible(switchInst, bb, tmpEs))
           workList.push_back(tmpEs);
-        }
       } else {
         // Other terminator types (unconditional branches, returns, etc.)
         workList.push_back(tmpEs);
@@ -1429,12 +1520,17 @@ bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
     updateStateOnAddr(llvm::cast<llvm::AllocaInst>(inst));
     break;
   case llvm::Instruction::Add:
+  case llvm::Instruction::FAdd:
   case llvm::Instruction::Sub:
+  case llvm::Instruction::FSub:
   case llvm::Instruction::Mul:
+  case llvm::Instruction::FMul:
   case llvm::Instruction::SDiv:
   case llvm::Instruction::UDiv:
+  case llvm::Instruction::FDiv:
   case llvm::Instruction::SRem:
   case llvm::Instruction::URem:
+  case llvm::Instruction::FRem:
   case llvm::Instruction::Shl:
   case llvm::Instruction::LShr:
   case llvm::Instruction::AShr:
@@ -1442,6 +1538,13 @@ bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
   case llvm::Instruction::Or:
   case llvm::Instruction::Xor:
     updateStateOnBinary(llvm::cast<llvm::BinaryOperator>(inst));
+    break;
+  case llvm::Instruction::FNeg:
+    updateStateOnFNeg(llvm::cast<llvm::UnaryOperator>(inst));
+    break;
+  case llvm::Instruction::AtomicRMW:
+  case llvm::Instruction::AtomicCmpXchg:
+    as[getValueId(inst)] = unknownValueForType(inst->getType());
     break;
   case llvm::Instruction::ICmp:
   case llvm::Instruction::FCmp:
@@ -1458,6 +1561,7 @@ bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
     break;
   case llvm::Instruction::Call:
   case llvm::Instruction::Invoke:
+  case llvm::Instruction::CallBr:
     updateStateOnCall(llvm::cast<llvm::CallBase>(inst));
     break;
   case llvm::Instruction::Select:
@@ -1482,6 +1586,12 @@ bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
   case llvm::Instruction::ShuffleVector:
     updateStateOnShuffleVector(llvm::cast<llvm::ShuffleVectorInst>(inst));
     break;
+  case llvm::Instruction::Freeze:
+    updateStateOnCopy(inst, inst->getOperand(0));
+    break;
+  case llvm::Instruction::VAArg:
+    updateStateOnCopy(inst, inst->getOperand(0));
+    break;
   case llvm::Instruction::Ret:
     updateStateOnRet(llvm::cast<llvm::ReturnInst>(inst));
     break;
@@ -1497,6 +1607,7 @@ bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
   case llvm::Instruction::PtrToInt:
   case llvm::Instruction::IntToPtr:
   case llvm::Instruction::BitCast:
+  case llvm::Instruction::AddrSpaceCast:
     updateStateOnCast(llvm::cast<llvm::CastInst>(inst));
     break;
   default:
@@ -1605,6 +1716,25 @@ void AbstractInterpretation::updateStateOnBinary(
   as[lhsId] = AbstractValue(result);
 }
 
+void AbstractInterpretation::updateStateOnFNeg(const llvm::UnaryOperator *neg) {
+  uint32_t lhsId = getValueId(neg);
+  uint32_t opId = getValueId(neg->getOperand(0));
+  AbstractState &as = stateStore_.getOrCreate(neg);
+  materializeConstantValue(as, neg->getOperand(0), opId);
+
+  if (!as.inVarToValTable(opId)) {
+    as[lhsId] = AbstractValue(IntervalValue::top());
+    return;
+  }
+
+  const IntervalValue value = as[opId].getInterval();
+  if (value.isBottom()) {
+    as[lhsId] = AbstractValue(IntervalValue::bottom());
+    return;
+  }
+  as[lhsId] = AbstractValue(IntervalValue(-value.ub(), -value.lb()));
+}
+
 void AbstractInterpretation::updateStateOnCmp(const llvm::CmpInst *cmp) {
   uint32_t resId = getValueId(cmp);
   uint32_t op0Id = getValueId(cmp->getOperand(0));
@@ -1672,6 +1802,27 @@ void AbstractInterpretation::updateStateOnCmp(const llvm::CmpInst *cmp) {
   IntervalValue val1 = as[op1Id].getInterval();
   IntervalValue resVal;
 
+  const auto predicate = cmp->getPredicate();
+  const bool isUnsignedCmp = predicate == llvm::CmpInst::ICMP_UGT ||
+                             predicate == llvm::CmpInst::ICMP_UGE ||
+                             predicate == llvm::CmpInst::ICMP_ULT ||
+                             predicate == llvm::CmpInst::ICMP_ULE;
+  if (isUnsignedCmp && cmp->getOperand(0)->getType()->isIntegerTy()) {
+    const unsigned bits = cmp->getOperand(0)->getType()->getIntegerBitWidth();
+    const bool mayBeTrue =
+        unsignedPredicatePossible(predicate, val0, val1, bits);
+    const bool mayBeFalse = unsignedPredicatePossible(
+        llvm::CmpInst::getInversePredicate(predicate), val0, val1, bits);
+    if (!mayBeTrue)
+      resVal = IntervalValue(0, 0);
+    else if (!mayBeFalse)
+      resVal = IntervalValue(1, 1);
+    else
+      resVal = IntervalValue(0, 1);
+    as[resId] = AbstractValue(resVal);
+    return;
+  }
+
   // getIntNumeral() asserts on infinity; use conservative [0,1] when bounds
   // are unbounded
   if (val0.is_infinite() || val1.is_infinite()) {
@@ -1696,6 +1847,8 @@ void AbstractInterpretation::updateStateOnCmp(const llvm::CmpInst *cmp) {
   case llvm::CmpInst::FCMP_UNE:
     if (val0.is_numeral() && val1.is_numeral() && !val0.equals(val1)) {
       resVal = IntervalValue(1, 1);
+    } else if (val0.is_numeral() && val1.is_numeral() && val0.equals(val1)) {
+      resVal = IntervalValue(0, 0);
     } else if (!val0.hasIntersect(val1)) {
       resVal = IntervalValue(1, 1);
     } else {
@@ -1890,48 +2043,61 @@ void AbstractInterpretation::updateStateOnCast(const llvm::CastInst *cast) {
     if (val.is_infinite() || !dstType->isIntegerTy())
       return IntervalValue::top();
 
-    int64_t int_lb = val.lb().getIntNumeral();
-    int64_t int_ub = val.ub().getIntNumeral();
-    unsigned dst_bits = dstType->getIntegerBitWidth();
+    const unsigned dstBits = dstType->getIntegerBitWidth();
+    if (dstBits >= 64)
+      return val;
 
-    if (dst_bits == 8) {
-      int8_t s8_lb = static_cast<int8_t>(int_lb);
-      int8_t s8_ub = static_cast<int8_t>(int_ub);
-      if (s8_lb > s8_ub) {
-        // Overflow detected - return range limit for type
-        if (utils) {
-          return utils->getRangeLimitFromType(dstType);
-        }
-        return IntervalValue(std::numeric_limits<int8_t>::min(),
-                             std::numeric_limits<int8_t>::max());
-      }
-      return IntervalValue(s8_lb, s8_ub);
-    } else if (dst_bits == 16) {
-      int16_t s16_lb = static_cast<int16_t>(int_lb);
-      int16_t s16_ub = static_cast<int16_t>(int_ub);
-      if (s16_lb > s16_ub) {
-        // Overflow detected - return range limit for type
-        if (utils) {
-          return utils->getRangeLimitFromType(dstType);
-        }
-        return IntervalValue(std::numeric_limits<int16_t>::min(),
-                             std::numeric_limits<int16_t>::max());
-      }
-      return IntervalValue(s16_lb, s16_ub);
-    } else if (dst_bits == 32) {
-      int32_t s32_lb = static_cast<int32_t>(int_lb);
-      int32_t s32_ub = static_cast<int32_t>(int_ub);
-      if (s32_lb > s32_ub) {
-        // Overflow detected - return range limit for type
-        if (utils) {
-          return utils->getRangeLimitFromType(dstType);
-        }
-        return IntervalValue(std::numeric_limits<int32_t>::min(),
-                             std::numeric_limits<int32_t>::max());
-      }
-      return IntervalValue(s32_lb, s32_ub);
+    const int64_t intLb = val.lb().getIntNumeral();
+    const int64_t intUb = val.ub().getIntNumeral();
+    auto truncateNum = [&](int64_t value) {
+      llvm::APInt source(64, static_cast<uint64_t>(value),
+                         /*isSigned=*/false);
+      return source.trunc(dstBits).sext(64).getSExtValue();
+    };
+    auto fullRange = [&]() {
+      const int64_t minSigned = -(int64_t{1} << (dstBits - 1));
+      const int64_t maxSigned = (int64_t{1} << (dstBits - 1)) - 1;
+      return IntervalValue(minSigned, maxSigned);
+    };
+
+    if (val.is_numeral())
+      return IntervalValue(truncateNum(intLb));
+
+    const __int128 span =
+        static_cast<__int128>(intUb) - static_cast<__int128>(intLb);
+    const __int128 modulus = static_cast<__int128>(1) << dstBits;
+    if (span + 1 >= modulus)
+      return fullRange();
+
+    const int64_t truncatedLb = truncateNum(intLb);
+    const int64_t truncatedUb = truncateNum(intUb);
+    if (truncatedLb <= truncatedUb)
+      return IntervalValue(truncatedLb, truncatedUb);
+    return fullRange();
+  };
+
+  auto getSExtValue = [&](const IntervalValue &val,
+                          llvm::Type *srcType) -> IntervalValue {
+    if (!srcType->isIntegerTy())
+      return IntervalValue::top();
+    if (val.is_infinite())
+      return IntervalValue::top();
+
+    const unsigned bits = srcType->getIntegerBitWidth();
+    if (val.is_numeral()) {
+      llvm::APInt source(bits, static_cast<uint64_t>(val.getIntNumeral()),
+                         /*isSigned=*/false);
+      return IntervalValue(source.sext(64).getSExtValue());
     }
-    return IntervalValue::top();
+
+    if (bits >= 64)
+      return val;
+    const int64_t minSigned = -(int64_t{1} << (bits - 1));
+    const int64_t maxSigned = (int64_t{1} << (bits - 1)) - 1;
+    if (val.lb().getIntNumeral() >= minSigned &&
+        val.ub().getIntNumeral() <= maxSigned)
+      return val;
+    return IntervalValue(minSigned, maxSigned);
   };
 
   // Handle integer casts
@@ -1943,8 +2109,7 @@ void AbstractInterpretation::updateStateOnCast(const llvm::CastInst *cast) {
       // Zero extend: convert signed to unsigned properly
       as[lhsId] = AbstractValue(getZExtValue(srcVal, srcType));
     } else if (cast->getOpcode() == llvm::Instruction::SExt) {
-      // Sign extend: preserve value, extend sign bit
-      as[lhsId] = AbstractValue(srcVal);
+      as[lhsId] = AbstractValue(getSExtValue(srcVal, srcType));
     } else {
       as[lhsId] = AbstractValue(srcVal);
     }
@@ -2037,6 +2202,7 @@ void AbstractInterpretation::updateStateOnRet(const llvm::ReturnInst *ret) {
     uint32_t retId = getValueId(ret->getReturnValue());
     AbstractState &as = stateStore_.getOrCreate(ret);
     stateStore_.pin(ret);
+    materializeConstantValue(as, ret->getReturnValue(), retId);
     stateStore_.getOrCreate(ret)[returnSlotId(ret)] = as[retId];
   }
 }
@@ -2051,7 +2217,7 @@ void AbstractInterpretation::updateStateOnCallPE(const llvm::CallBase *call,
     const llvm::Value *argOp = call->getArgOperand(i);
     uint32_t argId = getValueId(argOp);
     uint32_t paramId = getValueId(callee->getArg(i));
-
+    materializeConstantValue(callState, argOp, argId);
     AbstractValue argVal;
     bool hasArgVal = false;
 
@@ -2112,11 +2278,14 @@ void AbstractInterpretation::updateStateOnCopy(const llvm::Value *dst,
   uint32_t srcId = getValueId(src);
 
   AbstractState &as = stateStore_.getOrCreate(curInst);
+  materializeConstantValue(as, src, srcId);
 
   if (as.inVarToValTable(srcId)) {
     as[dstId] = as[srcId];
   } else if (as.inVarToAddrsTable(srcId)) {
     as[dstId] = as[srcId];
+  } else {
+    as[dstId] = unknownValueForType(dst->getType());
   }
 }
 
@@ -2154,39 +2323,33 @@ void AbstractInterpretation::updateStateOnSelect(
 
   AbstractState &as = stateStore_.getOrCreate(select);
 
-  AbstractValue result;
+  materializeConstantValue(as, select->getCondition(), condId);
+  materializeConstantValue(as, select->getTrueValue(), trueId);
+  materializeConstantValue(as, select->getFalseValue(), falseId);
+
+  auto hasValue = [&](uint32_t id) {
+    return as.inVarToValTable(id) || as.inVarToAddrsTable(id);
+  };
+  auto unknown = [&]() { return unknownValueForType(select->getType()); };
 
   if (as.inVarToValTable(condId)) {
     IntervalValue cond = as[condId].getInterval();
     if (cond.is_numeral()) {
-      if (cond.getIntNumeral() != 0 && as.inVarToValTable(trueId)) {
-        result = as[trueId];
-      } else if (cond.getIntNumeral() == 0 && as.inVarToValTable(falseId)) {
-        result = as[falseId];
-      }
-    } else {
-      // Join both branches if condition is unknown
-      if (as.inVarToValTable(trueId) && as.inVarToValTable(falseId)) {
-        result = as[trueId];
-        result.join_with(as[falseId]);
-      } else if (as.inVarToValTable(trueId)) {
-        result = as[trueId];
-      } else if (as.inVarToValTable(falseId)) {
-        result = as[falseId];
-      }
-    }
-  } else {
-    // Condition unknown, join both
-    if (as.inVarToValTable(trueId) && as.inVarToValTable(falseId)) {
-      result = as[trueId];
-      result.join_with(as[falseId]);
-    } else if (as.inVarToValTable(trueId)) {
-      result = as[trueId];
-    } else if (as.inVarToValTable(falseId)) {
-      result = as[falseId];
+      uint32_t selectedId = cond.getIntNumeral() != 0 ? trueId : falseId;
+      as[lhsId] = hasValue(selectedId) ? as[selectedId] : unknown();
+      return;
     }
   }
 
+  // A missing arm is unknown, not bottom: silently dropping it can make a
+  // later branch unreachable or turn the selected pointer into an uninitialized
+  // value. Join both arms when both are available.
+  if (!hasValue(trueId) || !hasValue(falseId)) {
+    as[lhsId] = unknown();
+    return;
+  }
+  AbstractValue result = as[trueId];
+  result.join_with(as[falseId]);
   as[lhsId] = result;
 }
 
@@ -2195,6 +2358,7 @@ void AbstractInterpretation::updateStateOnPhi(const llvm::PHINode *phi) {
   AbstractState &as = stateStore_.getOrCreate(phi);
   AbstractValue rhs;
   bool first = true;
+  bool incomplete = false;
 
   for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
     llvm::Value *val = phi->getIncomingValue(i);
@@ -2235,54 +2399,12 @@ void AbstractInterpretation::updateStateOnPhi(const llvm::PHINode *phi) {
         }
       } else if (const llvm::SwitchInst *switchInst =
                      llvm::dyn_cast<llvm::SwitchInst>(term)) {
-        // Check if this PHI incoming edge corresponds to a feasible switch case
-        // The switch is in opBB, and we're checking if the edge from opBB to
-        // phi->getParent() is feasible
-        edgeFeasible = false;
-
-        // Check if phi->getParent() is the default destination
-        if (phi->getParent() == switchInst->getDefaultDest()) {
-          // Default edge is feasible unless we can prove the condition equals a
-          // specific case value (singleton interval exactly on a case).
-          uint32_t condId = getValueId(switchInst->getCondition());
-          if (!opAs.inVarToValTable(condId)) {
-            edgeFeasible = true;
-          } else {
-            const IntervalValue &condVal = opAs[condId].getInterval();
-            if (condVal.isBottom()) {
-              edgeFeasible = false;
-            } else if (!condVal.is_numeral()) {
-              edgeFeasible = true;
-            } else {
-              const int64_t exact = condVal.getIntNumeralOrZero();
-              bool matchesCase = false;
-              for (auto caseIt = switchInst->case_begin();
-                   caseIt != switchInst->case_end(); ++caseIt) {
-                const llvm::ConstantInt *caseVal = caseIt->getCaseValue();
-                if (caseVal->getSExtValue() == exact) {
-                  matchesCase = true;
-                  break;
-                }
-              }
-              edgeFeasible = !matchesCase;
-            }
-          }
-        } else {
-          // Check if phi->getParent() corresponds to a case value
-          for (auto caseIt = switchInst->case_begin();
-               caseIt != switchInst->case_end(); ++caseIt) {
-            if (caseIt->getCaseSuccessor() == phi->getParent()) {
-              const llvm::ConstantInt *caseVal = caseIt->getCaseValue();
-              int64_t caseValue = caseVal->getSExtValue();
-              AbstractState testState = opAs;
-              if (isSwitchBranchFeasible(switchInst, caseValue, testState)) {
-                opAs = testState;
-                edgeFeasible = true;
-                break;
-              }
-            }
-          }
-        }
+        AbstractState testState = opAs;
+        testState.materializeVarTable();
+        edgeFeasible =
+            isSwitchSuccessorFeasible(switchInst, phi->getParent(), testState);
+        if (edgeFeasible)
+          opAs = testState;
       }
 
       if (!edgeFeasible) {
@@ -2298,35 +2420,54 @@ void AbstractInterpretation::updateStateOnPhi(const llvm::PHINode *phi) {
         } else {
           rhs.join_with(opAs[curId]);
         }
+      } else if (llvm::isa<llvm::UndefValue>(val) ||
+                 llvm::isa<llvm::PoisonValue>(val)) {
+        // An explicit undef/poison value is unknown. A missing materialized
+        // value can instead be a normal transient state during loop fixpoint
+        // iteration and must not permanently widen the PHI.
+        incomplete = true;
       }
     }
   }
 
-  if (!first) {
+  if (incomplete) {
+    as[resId] = unknownValueForType(phi->getType());
+  } else if (!first) {
     as[resId] = rhs;
   } else {
-    // No feasible predecessors - initialize to top
-    as[resId] = AbstractValue(IntervalValue::top());
+    as[resId] = unknownValueForType(phi->getType());
   }
 }
 
 void AbstractInterpretation::updateStateOnExtractValue(
     const llvm::ExtractValueInst *extract) {
   uint32_t lhsId = getValueId(extract);
-  uint32_t aggId = getValueId(extract->getAggregateOperand());
+  const llvm::Value *aggregate = extract->getAggregateOperand();
+  uint32_t aggId = getValueId(aggregate);
 
   AbstractState &as = stateStore_.getOrCreate(extract);
+
+  llvm::SmallVector<unsigned, 4> indices(extract->idx_begin(),
+                                         extract->idx_end());
+  if (const llvm::Value *selected =
+          resolveAggregateElement(aggregate, indices)) {
+    uint32_t selectedId = getValueId(selected);
+    materializeConstantValue(as, selected, selectedId);
+    if (as.inVarToValTable(selectedId) || as.inVarToAddrsTable(selectedId)) {
+      as[lhsId] = as[selectedId];
+      return;
+    }
+  }
 
   // ExtractValue extracts a field from an aggregate value
   // For abstract interpretation, we conservatively propagate the value
   // In SVF, this would be a CopyStmt from aggregate field to result
   if (as.inVarToValTable(aggId)) {
-    updateStateOnCopy(extract, extract->getAggregateOperand());
+    updateStateOnCopy(extract, aggregate);
   } else if (as.inVarToAddrsTable(aggId)) {
-    updateStateOnCopy(extract, extract->getAggregateOperand());
+    updateStateOnCopy(extract, aggregate);
   } else {
-    // Conservative: set to top
-    as[lhsId] = AbstractValue(IntervalValue::top());
+    as[lhsId] = unknownValueForType(extract->getType());
   }
 }
 
@@ -2337,6 +2478,8 @@ void AbstractInterpretation::updateStateOnInsertValue(
   uint32_t valId = getValueId(insert->getInsertedValueOperand());
 
   AbstractState &as = stateStore_.getOrCreate(insert);
+  materializeConstantValue(as, insert->getAggregateOperand(), aggId);
+  materializeConstantValue(as, insert->getInsertedValueOperand(), valId);
 
   // InsertValue inserts a value into an aggregate and returns the new aggregate
   // For abstract interpretation, we join the aggregate and inserted value
@@ -2362,26 +2505,40 @@ void AbstractInterpretation::updateStateOnInsertValue(
   if (hasValue) {
     as[lhsId] = result;
   } else {
-    as[lhsId] = AbstractValue(IntervalValue::top());
+    as[lhsId] = unknownValueForType(insert->getType());
   }
 }
 
 void AbstractInterpretation::updateStateOnExtractElement(
     const llvm::ExtractElementInst *extract) {
   uint32_t lhsId = getValueId(extract);
-  uint32_t vecId = getValueId(extract->getVectorOperand());
+  const llvm::Value *vector = extract->getVectorOperand();
+  uint32_t vecId = getValueId(vector);
 
   AbstractState &as = stateStore_.getOrCreate(extract);
+
+  if (const auto *index =
+          llvm::dyn_cast<llvm::ConstantInt>(extract->getIndexOperand())) {
+    unsigned lane = static_cast<unsigned>(index->getZExtValue());
+    if (const llvm::Value *selected = resolveAggregateElement(vector, {lane})) {
+      uint32_t selectedId = getValueId(selected);
+      materializeConstantValue(as, selected, selectedId);
+      if (as.inVarToValTable(selectedId) || as.inVarToAddrsTable(selectedId)) {
+        as[lhsId] = as[selectedId];
+        return;
+      }
+    }
+  }
 
   // ExtractElement extracts an element from a vector
   // For abstract interpretation, we propagate the vector's abstract value
   // In SVF, this would be a CopyStmt from vector element to result
   if (as.inVarToValTable(vecId)) {
-    updateStateOnCopy(extract, extract->getVectorOperand());
+    updateStateOnCopy(extract, vector);
   } else if (as.inVarToAddrsTable(vecId)) {
-    updateStateOnCopy(extract, extract->getVectorOperand());
+    updateStateOnCopy(extract, vector);
   } else {
-    as[lhsId] = AbstractValue(IntervalValue::top());
+    as[lhsId] = unknownValueForType(extract->getType());
   }
 }
 
@@ -2392,6 +2549,8 @@ void AbstractInterpretation::updateStateOnInsertElement(
   uint32_t valId = getValueId(insert->getOperand(2));
 
   AbstractState &as = stateStore_.getOrCreate(insert);
+  materializeConstantValue(as, insert->getOperand(0), vecId);
+  materializeConstantValue(as, insert->getOperand(2), valId);
 
   // InsertElement inserts a value into a vector and returns the new vector
   // For abstract interpretation, we join the vector and inserted value
@@ -2417,7 +2576,7 @@ void AbstractInterpretation::updateStateOnInsertElement(
   if (hasValue) {
     as[lhsId] = result;
   } else {
-    as[lhsId] = AbstractValue(IntervalValue::top());
+    as[lhsId] = unknownValueForType(insert->getType());
   }
 }
 
@@ -2428,6 +2587,50 @@ void AbstractInterpretation::updateStateOnShuffleVector(
   uint32_t v2Id = getValueId(shuffle->getOperand(1));
 
   AbstractState &as = stateStore_.getOrCreate(shuffle);
+  materializeConstantValue(as, shuffle->getOperand(0), v1Id);
+  materializeConstantValue(as, shuffle->getOperand(1), v2Id);
+
+  const auto *firstConstant =
+      llvm::dyn_cast<llvm::Constant>(shuffle->getOperand(0));
+  const auto *secondConstant =
+      llvm::dyn_cast<llvm::Constant>(shuffle->getOperand(1));
+  if (firstConstant && secondConstant) {
+    AbstractValue resolved;
+    bool firstLane = true;
+    bool complete = true;
+    const auto *sourceType = llvm::dyn_cast<llvm::FixedVectorType>(
+        shuffle->getOperand(0)->getType());
+    const unsigned sourceWidth = sourceType ? sourceType->getNumElements() : 0;
+    for (int mask : shuffle->getShuffleMask()) {
+      if (mask < 0)
+        continue;
+      const auto *source = static_cast<unsigned>(mask) < sourceWidth
+                               ? firstConstant
+                               : secondConstant;
+      const unsigned lane = static_cast<unsigned>(mask) % sourceWidth;
+      const llvm::Constant *element = source->getAggregateElement(lane);
+      if (!element) {
+        complete = false;
+        break;
+      }
+      uint32_t elementId = getValueId(element);
+      materializeConstantValue(as, element, elementId);
+      if (!as.inVarToValTable(elementId) && !as.inVarToAddrsTable(elementId)) {
+        complete = false;
+        break;
+      }
+      if (firstLane) {
+        resolved = as[elementId];
+        firstLane = false;
+      } else {
+        resolved.join_with(as[elementId]);
+      }
+    }
+    if (complete && !firstLane) {
+      as[lhsId] = resolved;
+      return;
+    }
+  }
 
   // ShuffleVector shuffles elements from two vectors into a new vector
   // For abstract interpretation, we join both vectors' abstract values
@@ -2453,7 +2656,7 @@ void AbstractInterpretation::updateStateOnShuffleVector(
   if (hasValue) {
     as[lhsId] = result;
   } else {
-    as[lhsId] = AbstractValue(IntervalValue::top());
+    as[lhsId] = unknownValueForType(shuffle->getType());
   }
 }
 
@@ -2583,6 +2786,10 @@ void AbstractInterpretation::handleFunCall(
 
     // Build call state and map actuals to formals.
     AbstractState callState = callSlot;
+    // Formal parameters are activation-specific. A recursive callee reuses the
+    // same parameter value IDs, so writing them into the run-wide def-site
+    // table would make an inner activation overwrite its caller's arguments.
+    callState.materializeVarTable();
     updateStateOnCallPE(callNode, callee, callState);
 
     const llvm::BasicBlock &entryBlock = callee->getEntryBlock();
@@ -3663,6 +3870,33 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
   bool b0 = val0.is_numeral();
   bool b1 = val1.is_numeral();
 
+  const bool isUnsignedCmp = predicate == llvm::CmpInst::ICMP_UGT ||
+                             predicate == llvm::CmpInst::ICMP_UGE ||
+                             predicate == llvm::CmpInst::ICMP_ULT ||
+                             predicate == llvm::CmpInst::ICMP_ULE;
+  if (isUnsignedCmp && !(b0 && b1) &&
+      cmpInst->getOperand(0)->getType()->isIntegerTy()) {
+    const unsigned bits =
+        cmpInst->getOperand(0)->getType()->getIntegerBitWidth();
+    if (!unsignedPredicatePossible(predicate, val0, val1, bits))
+      return false;
+
+    const int64_t maxSigned =
+        bits >= 64 ? std::numeric_limits<int64_t>::max()
+                   : static_cast<int64_t>((int64_t{1} << (bits - 1)) - 1);
+    const bool refinable = !val0.is_infinite() && !val1.is_infinite() &&
+                           val0.lb().getIntNumeral() >= 0 &&
+                           val0.ub().getIntNumeral() <= maxSigned &&
+                           val1.lb().getIntNumeral() >= 0 &&
+                           val1.ub().getIntNumeral() <= maxSigned;
+    const bool unsignedUpperBound = !b0 && b1 &&
+                                    (predicate == llvm::CmpInst::ICMP_ULT ||
+                                     predicate == llvm::CmpInst::ICMP_ULE) &&
+                                    val1.lb().getIntNumeral() >= 0;
+    if (!refinable && !unsignedUpperBound)
+      return true;
+  }
+
   if (b0 && !b1) {
     std::swap(lhsId, rhsId);
     std::swap(lhsLoadOp, rhsLoadOp);
@@ -3671,11 +3905,41 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
   } else if (!b0 && !b1) {
     return true;
   } else if (b0 && b1) {
-    return true;
+    if (!cmpInst->getOperand(0)->getType()->isIntegerTy())
+      return true;
+
+    const int64_t left = val0.getIntNumeral();
+    const int64_t right = val1.getIntNumeral();
+    const uint64_t uleft = static_cast<uint64_t>(left);
+    const uint64_t uright = static_cast<uint64_t>(right);
+    switch (predicate) {
+    case llvm::CmpInst::ICMP_EQ:
+      return left == right;
+    case llvm::CmpInst::ICMP_NE:
+      return left != right;
+    case llvm::CmpInst::ICMP_SGT:
+      return left > right;
+    case llvm::CmpInst::ICMP_SGE:
+      return left >= right;
+    case llvm::CmpInst::ICMP_SLT:
+      return left < right;
+    case llvm::CmpInst::ICMP_SLE:
+      return left <= right;
+    case llvm::CmpInst::ICMP_UGT:
+      return uleft > uright;
+    case llvm::CmpInst::ICMP_UGE:
+      return uleft >= uright;
+    case llvm::CmpInst::ICMP_ULT:
+      return uleft < uright;
+    case llvm::CmpInst::ICMP_ULE:
+      return uleft <= uright;
+    default:
+      return true;
+    }
   }
 
-  IntervalValue &lhs = newEs[lhsId].getInterval();
-  IntervalValue &rhs = newEs[rhsId].getInterval();
+  IntervalValue lhs = newEs[lhsId].getInterval();
+  const IntervalValue rhs = newEs[rhsId].getInterval();
 
   switch (predicate) {
   case llvm::CmpInst::ICMP_EQ:
@@ -3753,6 +4017,7 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
   if (lhs.isBottom()) {
     return false;
   }
+  newEs[lhsId] = AbstractValue(lhs);
 
   // Refine memory for loaded pointers (matching SVF's behavior)
   // If operand comes from a load, also refine the memory it points to
@@ -3781,59 +4046,82 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
   return true;
 }
 
-bool AbstractInterpretation::isSwitchBranchFeasible(
-    const llvm::SwitchInst *switchInst, int64_t caseValue, AbstractState &as) {
-  // Get the switch condition value
-  llvm::Value *cond = switchInst->getCondition();
-  uint32_t condId = getValueId(cond);
+bool AbstractInterpretation::isSwitchSuccessorFeasible(
+    const llvm::SwitchInst *switchInst, const llvm::BasicBlock *successor,
+    AbstractState &as) {
+  llvm::Value *condition = switchInst->getCondition();
+  uint32_t condId = getValueId(condition);
+  materializeConstantValue(as, condition, condId);
 
-  if (!as.inVarToValTable(condId)) {
-    // Unknown condition - assume feasible (conservative)
+  if (!as.inVarToValTable(condId))
     return true;
-  }
 
-  // Get the interval for the switch condition
-  IntervalValue &switchCond = as[condId].getInterval();
-
-  if (switchCond.isBottom()) {
+  const IntervalValue switchCond = as[condId].getInterval();
+  if (switchCond.isBottom())
     return false;
-  }
+  if (switchCond.is_infinite())
+    return true;
 
-  // Check if the case value is within the switch condition's interval
-  IntervalValue caseVal(caseValue, caseValue);
+  const int64_t lower = switchCond.lb().getIntNumeral();
+  const int64_t upper = switchCond.ub().getIntNumeral();
+  const bool isDefault = successor == switchInst->getDefaultDest();
+  bool hasCaseEdgeToSuccessor = false;
+  uint32_t matchingCaseCount = 0;
+  int64_t matchingCase = 0;
+  uint32_t matchedCasesInRange = 0;
 
-  // If the switch condition can equal the case value, the branch is feasible
-  if (switchCond.hasIntersect(caseVal)) {
-    // Update the abstract state: meet the switch condition with the case value
-    // This refines the state for this branch
-    AbstractState newState = as;
-    newState[condId].getInterval().meet_with(caseVal);
-
-    // If the meet doesn't result in bottom, the branch is feasible
-    if (!newState[condId].getInterval().isBottom()) {
-      // Update the state for this branch
-      as = newState;
-
-      // Also update memory locations if the condition comes from a load
-      // This matches SVF's behavior of propagating switch values through memory
-      if (const llvm::LoadInst *load = llvm::dyn_cast<llvm::LoadInst>(cond)) {
-        uint32_t ptrId = getValueId(load->getPointerOperand());
-        if (as.inVarToAddrsTable(ptrId)) {
-          AddressValue addrs = as[ptrId].getAddrs();
-          for (auto addr : addrs) {
-            uint32_t objId = as.getIDFromAddr(addr);
-            if (as.inAddrToValTable(objId)) {
-              as.load(addr).getInterval().meet_with(caseVal);
-            }
-          }
-        }
-      }
-
-      return true;
+  for (auto caseIt = switchInst->case_begin(); caseIt != switchInst->case_end();
+       ++caseIt) {
+    const int64_t caseValue = caseIt->getCaseValue()->getSExtValue();
+    const bool inRange = lower <= caseValue && caseValue <= upper;
+    if (inRange)
+      ++matchedCasesInRange;
+    if (caseIt->getCaseSuccessor() != successor)
+      continue;
+    hasCaseEdgeToSuccessor = true;
+    if (inRange) {
+      ++matchingCaseCount;
+      matchingCase = caseValue;
     }
   }
 
-  return false;
+  if (!isDefault) {
+    if (!hasCaseEdgeToSuccessor || matchingCaseCount == 0)
+      return false;
+
+    // Refine only when this destination has one case label. Several labels may
+    // share a destination, in which case selecting one would be unsound.
+    if (matchingCaseCount == 1) {
+      IntervalValue caseVal(matchingCase, matchingCase);
+      IntervalValue narrowed = switchCond;
+      narrowed.meet_with(caseVal);
+      if (narrowed.isBottom())
+        return false;
+      as[condId] = AbstractValue(narrowed);
+      if (const auto *load = llvm::dyn_cast<llvm::LoadInst>(condition)) {
+        uint32_t ptrId = getValueId(load->getPointerOperand());
+        if (as.inVarToAddrsTable(ptrId)) {
+          for (uint32_t addr : as[ptrId].getAddrs()) {
+            uint32_t objId = as.getIDFromAddr(addr);
+            if (as.inAddrToValTable(objId))
+              as.load(addr).getInterval().meet_with(caseVal);
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  // If a case also targets the default block, the destination is reachable
+  // without requiring the default edge itself.
+  if (matchingCaseCount != 0)
+    return true;
+
+  // The default edge is feasible exactly when the finite condition range has
+  // at least one value that no case label consumes.
+  const __int128 valueCount =
+      static_cast<__int128>(upper) - static_cast<__int128>(lower) + 1;
+  return valueCount > static_cast<__int128>(matchedCasesInRange);
 }
 
 bool AbstractInterpretation::checkPathFeasibilityWithSolver(

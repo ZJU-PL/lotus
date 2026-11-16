@@ -349,6 +349,9 @@ private:
   /// layout can drop unobservable states.
   AbstractStateStore stateStore_;
   AbstractState globalState; // State for global variables
+  std::map<std::pair<uint32_t, int64_t>, uint32_t> gepFieldObjMap_;
+  uint32_t nextGepFieldId_{0x00800000};
+  std::unordered_map<uint32_t, IntervalValue> gepObjOffsetFromBaseByObjId_;
   std::map<std::string, std::function<void(const llvm::CallBase *)>> func_map;
   std::vector<const llvm::CallBase *> callSiteStack;
 
@@ -385,6 +388,7 @@ private:
 private:
   void updateStateOnAddr(const llvm::AllocaInst *addr);
   void updateStateOnBinary(const llvm::BinaryOperator *binary);
+  void updateStateOnFNeg(const llvm::UnaryOperator *neg);
   void updateStateOnCmp(const llvm::CmpInst *cmp);
   void updateStateOnLoad(const llvm::LoadInst *load);
   void updateStateOnStore(const llvm::StoreInst *store);
@@ -490,8 +494,9 @@ private:
                         bool isTrueEdge);
   bool isCmpBranchFeasible(const llvm::CmpInst *cmpInst, bool succ,
                            AbstractState &as);
-  bool isSwitchBranchFeasible(const llvm::SwitchInst *switchInst,
-                              int64_t caseValue, AbstractState &as);
+  bool isSwitchSuccessorFeasible(const llvm::SwitchInst *switchInst,
+                                 const llvm::BasicBlock *successor,
+                                 AbstractState &as);
 
   // Relational solver integration
   bool checkPathFeasibilityWithSolver(const AbstractState &as,
@@ -515,16 +520,26 @@ private:
         {llvm::CmpInst::FCMP_OGE, llvm::CmpInst::FCMP_OLT},
         {llvm::CmpInst::FCMP_OLT, llvm::CmpInst::FCMP_OGE},
         {llvm::CmpInst::FCMP_OLE, llvm::CmpInst::FCMP_OGT},
+        {llvm::CmpInst::FCMP_UGT, llvm::CmpInst::FCMP_ULE},
+        {llvm::CmpInst::FCMP_UGE, llvm::CmpInst::FCMP_ULT},
+        {llvm::CmpInst::FCMP_ULT, llvm::CmpInst::FCMP_UGE},
+        {llvm::CmpInst::FCMP_ULE, llvm::CmpInst::FCMP_UGT},
         {llvm::CmpInst::FCMP_ONE, llvm::CmpInst::FCMP_OEQ},
         {llvm::CmpInst::FCMP_UNE, llvm::CmpInst::FCMP_UEQ},
+        {llvm::CmpInst::FCMP_ORD, llvm::CmpInst::FCMP_UNO},
+        {llvm::CmpInst::FCMP_UNO, llvm::CmpInst::FCMP_ORD},
+        {llvm::CmpInst::FCMP_TRUE, llvm::CmpInst::FCMP_FALSE},
+        {llvm::CmpInst::FCMP_FALSE, llvm::CmpInst::FCMP_TRUE},
         {llvm::CmpInst::ICMP_EQ, llvm::CmpInst::ICMP_NE},
         {llvm::CmpInst::ICMP_NE, llvm::CmpInst::ICMP_EQ},
         {llvm::CmpInst::ICMP_UGT, llvm::CmpInst::ICMP_ULE},
         {llvm::CmpInst::ICMP_ULT, llvm::CmpInst::ICMP_UGE},
         {llvm::CmpInst::ICMP_UGE, llvm::CmpInst::ICMP_ULT},
+        {llvm::CmpInst::ICMP_ULE, llvm::CmpInst::ICMP_UGT},
         {llvm::CmpInst::ICMP_SGT, llvm::CmpInst::ICMP_SLE},
         {llvm::CmpInst::ICMP_SLT, llvm::CmpInst::ICMP_SGE},
         {llvm::CmpInst::ICMP_SGE, llvm::CmpInst::ICMP_SLT},
+        {llvm::CmpInst::ICMP_SLE, llvm::CmpInst::ICMP_SGT},
     };
     return _reverse_predicate;
   }
@@ -537,16 +552,26 @@ private:
         {llvm::CmpInst::FCMP_OGE, llvm::CmpInst::FCMP_OLE},
         {llvm::CmpInst::FCMP_OLT, llvm::CmpInst::FCMP_OGT},
         {llvm::CmpInst::FCMP_OLE, llvm::CmpInst::FCMP_OGE},
+        {llvm::CmpInst::FCMP_UGT, llvm::CmpInst::FCMP_ULT},
+        {llvm::CmpInst::FCMP_UGE, llvm::CmpInst::FCMP_ULE},
+        {llvm::CmpInst::FCMP_ULT, llvm::CmpInst::FCMP_UGT},
+        {llvm::CmpInst::FCMP_ULE, llvm::CmpInst::FCMP_UGE},
         {llvm::CmpInst::FCMP_ONE, llvm::CmpInst::FCMP_ONE},
         {llvm::CmpInst::FCMP_UNE, llvm::CmpInst::FCMP_UNE},
+        {llvm::CmpInst::FCMP_ORD, llvm::CmpInst::FCMP_ORD},
+        {llvm::CmpInst::FCMP_UNO, llvm::CmpInst::FCMP_UNO},
+        {llvm::CmpInst::FCMP_TRUE, llvm::CmpInst::FCMP_TRUE},
+        {llvm::CmpInst::FCMP_FALSE, llvm::CmpInst::FCMP_FALSE},
         {llvm::CmpInst::ICMP_EQ, llvm::CmpInst::ICMP_EQ},
         {llvm::CmpInst::ICMP_NE, llvm::CmpInst::ICMP_NE},
         {llvm::CmpInst::ICMP_UGT, llvm::CmpInst::ICMP_ULT},
         {llvm::CmpInst::ICMP_ULT, llvm::CmpInst::ICMP_UGT},
         {llvm::CmpInst::ICMP_UGE, llvm::CmpInst::ICMP_ULE},
+        {llvm::CmpInst::ICMP_ULE, llvm::CmpInst::ICMP_UGE},
         {llvm::CmpInst::ICMP_SGT, llvm::CmpInst::ICMP_SLT},
         {llvm::CmpInst::ICMP_SLT, llvm::CmpInst::ICMP_SGT},
         {llvm::CmpInst::ICMP_SGE, llvm::CmpInst::ICMP_SLE},
+        {llvm::CmpInst::ICMP_SLE, llvm::CmpInst::ICMP_SGE},
     };
     return _switch_lhsrhs_predicate;
   }
@@ -566,6 +591,13 @@ public:
   // Get all possible callees for a call (direct + indirect resolved via PTA)
   std::vector<const llvm::Function *>
   getCallees(const llvm::CallBase *callNode) const;
+
+  /// Return the run-wide synthetic object id for a GEP (base object, byte
+  /// offset) pair. Sharing this registry across states mirrors SVF's global
+  /// field-object map and prevents branch-local id collisions.
+  uint32_t getOrCreateGepFieldObjId(uint32_t baseObjId, int64_t offset);
+  void recordGepObjOffsetFromBase(uint32_t objId, const IntervalValue &offset);
+  bool getGepObjOffsetFromBase(uint32_t objId, IntervalValue &offset) const;
 };
 
 } // namespace analysis

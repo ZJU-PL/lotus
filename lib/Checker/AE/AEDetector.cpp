@@ -48,6 +48,30 @@ IntervalValue byteCountToMaxAccessOffset(const IntervalValue &byteCount) {
   return byteCount - IntervalValue(1);
 }
 
+bool isZeroByteCount(const IntervalValue &byteCount) {
+  return byteCount.is_numeral() && byteCount.getIntNumeral() == 0;
+}
+
+IntervalValue getCallArgumentInterval(AbstractState &as,
+                                      const llvm::Value *argument) {
+  if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(argument))
+    return IntervalValue(constant->getSExtValue());
+  uint32_t valueId = AbstractInterpretation::getValueIdStatic(argument);
+  if (as.inVarToValTable(valueId))
+    return as[valueId].getInterval();
+  return IntervalValue::top();
+}
+
+bool hasNullOrInvalidTarget(AbstractState &as, uint32_t ptrId) {
+  if (!as.inVarToAddrsTable(ptrId))
+    return false;
+  for (uint32_t addr : as[ptrId].getAddrs()) {
+    if (AbstractState::isNullMem(addr) || AbstractState::isInvalidMem(addr))
+      return true;
+  }
+  return false;
+}
+
 bool intervalIsOutsideObject(const IntervalValue &offset, uint32_t objectSize,
                              bool checkLowerBound = true) {
   if (objectSize == 0 || offset.isBottom())
@@ -131,7 +155,115 @@ std::vector<uint32_t> getExtAPIPointerArgIndices(const llvm::CallBase *call,
                annotation.find("STRCAT") != std::string::npos) {
       pointerArgs.push_back(0);
       pointerArgs.push_back(1);
+    } else if (annotation.find("RECV") != std::string::npos) {
+      if (call->arg_size() > 1 &&
+          call->getArgOperand(1)->getType()->isPointerTy()) {
+        pointerArgs.push_back(1);
+      }
+    } else if (annotation.find("STRLEN") != std::string::npos ||
+               annotation.find("STRCHR") != std::string::npos ||
+               annotation.find("STRSTR") != std::string::npos) {
+      if (call->arg_size() > 0 &&
+          call->getArgOperand(0)->getType()->isPointerTy()) {
+        pointerArgs.push_back(0);
+      }
+      if (annotation.find("STRSTR") != std::string::npos &&
+          call->arg_size() > 1 &&
+          call->getArgOperand(1)->getType()->isPointerTy()) {
+        pointerArgs.push_back(1);
+      }
+    } else if (annotation.find("FGETS") != std::string::npos ||
+               annotation.find("FREAD") != std::string::npos ||
+               annotation.find("FWRITE") != std::string::npos) {
+      if (call->arg_size() > 0 &&
+          call->getArgOperand(0)->getType()->isPointerTy()) {
+        pointerArgs.push_back(0);
+      }
+    } else if (annotation.find("SCANF") != std::string::npos) {
+      uint32_t outputStart = 1;
+      if (funcName.find("fscanf") != std::string::npos ||
+          funcName.find("sscanf") != std::string::npos) {
+        outputStart = 2;
+        if (call->arg_size() > 0 &&
+            call->getArgOperand(0)->getType()->isPointerTy()) {
+          pointerArgs.push_back(0);
+        }
+      }
+      for (uint32_t i = outputStart; i < call->arg_size(); ++i) {
+        if (call->getArgOperand(i)->getType()->isPointerTy())
+          pointerArgs.push_back(i);
+      }
+    } else if (annotation.find("SNPRINTF") != std::string::npos) {
+      if (call->arg_size() > 2 &&
+          call->getArgOperand(2)->getType()->isPointerTy()) {
+        pointerArgs.push_back(2);
+      }
+    } else if (annotation.find("PRINTF") != std::string::npos) {
+      if (funcName.find("sprintf") != std::string::npos ||
+          funcName.find("sprintf_chk") != std::string::npos) {
+        if (call->arg_size() > 0 &&
+            call->getArgOperand(0)->getType()->isPointerTy()) {
+          pointerArgs.push_back(0);
+        }
+        if (call->arg_size() > 1 &&
+            call->getArgOperand(1)->getType()->isPointerTy()) {
+          pointerArgs.push_back(1);
+        }
+      } else if (funcName.find("fprintf") != std::string::npos) {
+        if (call->arg_size() > 1 &&
+            call->getArgOperand(1)->getType()->isPointerTy()) {
+          pointerArgs.push_back(1);
+        }
+      } else if (call->arg_size() > 0 &&
+                 call->getArgOperand(0)->getType()->isPointerTy()) {
+        pointerArgs.push_back(0);
+      }
+    } else if (annotation.find("ITOA") != std::string::npos) {
+      if (call->arg_size() > 1 &&
+          call->getArgOperand(1)->getType()->isPointerTy()) {
+        pointerArgs.push_back(1);
+      }
+    } else if (annotation.find("STRTO") != std::string::npos ||
+               annotation.find("ENV") != std::string::npos) {
+      if (call->arg_size() > 0 &&
+          call->getArgOperand(0)->getType()->isPointerTy()) {
+        pointerArgs.push_back(0);
+      }
     }
+  }
+
+  auto addPointerArg = [&](uint32_t index) {
+    if (call->arg_size() > index &&
+        call->getArgOperand(index)->getType()->isPointerTy()) {
+      pointerArgs.push_back(index);
+    }
+  };
+  if (funcName == "memcmp" || funcName == "strcmp" || funcName == "strncmp") {
+    addPointerArg(0);
+    addPointerArg(1);
+  } else if (funcName == "memchr" || funcName == "puts" ||
+             funcName == "fputs") {
+    addPointerArg(0);
+  } else if (funcName == "strdup" || funcName == "strndup") {
+    addPointerArg(0);
+  } else if (funcName == "strxfrm" || funcName == "wcsxfrm") {
+    addPointerArg(0);
+    addPointerArg(1);
+  } else if (funcName == "strcoll" || funcName == "strpbrk" ||
+             funcName == "strspn" || funcName == "strcspn") {
+    addPointerArg(0);
+    addPointerArg(1);
+  } else if (funcName == "posix_memalign" || funcName == "asprintf" ||
+             funcName == "vasprintf") {
+    addPointerArg(0);
+  } else if (funcName == "getline" || funcName == "getdelim") {
+    addPointerArg(0);
+    addPointerArg(1);
+  } else if (funcName == "read" || funcName == "pread" || funcName == "write" ||
+             funcName == "pwrite" || funcName == "send" ||
+             funcName == "sendto" || funcName == "recvfrom" ||
+             funcName == "readlink") {
+    addPointerArg(1);
   }
 
   std::sort(pointerArgs.begin(), pointerArgs.end());
@@ -268,12 +400,66 @@ void BufOverflowDetector::detect(AbstractState &as,
       // Update GEP offset tracking (for compatibility with existing code)
       updateGepObjOffsetFromBase(as, gepAddrs, objAddrs, accumulatedOffset);
 
+      // Record the absolute end offset of the selected subobject. Struct-field
+      // GEPs can select an array/struct member whose size is smaller than the
+      // enclosing aggregate; subsequent GEPs through that field must honor the
+      // member boundary.
+      uint32_t resultCapacity = 0;
+      for (uint32_t objAddr : objAddrs) {
+        uint32_t baseObjId = as.getIDFromAddr(objAddr);
+        uint32_t baseCapacity = as.getObjSize(baseObjId);
+        auto capIt = gepObjCapacityByObjId.find(baseObjId);
+        if (capIt != gepObjCapacityByObjId.end())
+          baseCapacity = std::min(baseCapacity, capIt->second);
+        if (baseCapacity > 0)
+          resultCapacity = resultCapacity == 0
+                               ? baseCapacity
+                               : std::min(resultCapacity, baseCapacity);
+      }
+      if (gep->getSourceElementType()->isStructTy() && offset.is_numeral()) {
+        llvm::Type *resultType = gep->getResultElementType();
+        const auto *resultArrayType =
+            llvm::dyn_cast_or_null<llvm::ArrayType>(resultType);
+        const bool flexibleArray =
+            resultArrayType && resultArrayType->getNumElements() == 0;
+        if (resultType && resultType->isSized() && !flexibleArray) {
+          uint64_t fieldEnd =
+              static_cast<uint64_t>(std::max<int64_t>(
+                  0, accumulatedOffset.getIntNumeralOrZero())) +
+              gep->getModule()->getDataLayout().getTypeAllocSize(resultType);
+          uint32_t fieldCapacity =
+              fieldEnd > std::numeric_limits<uint32_t>::max()
+                  ? std::numeric_limits<uint32_t>::max()
+                  : static_cast<uint32_t>(fieldEnd);
+          resultCapacity = resultCapacity == 0
+                               ? fieldCapacity
+                               : std::min(resultCapacity, fieldCapacity);
+        }
+      }
+      if (resultCapacity > 0) {
+        for (uint32_t gepAddr : gepAddrs) {
+          uint32_t gepObjId = as.getIDFromAddr(gepAddr);
+          auto [it, inserted] =
+              gepObjCapacityByObjId.emplace(gepObjId, resultCapacity);
+          if (!inserted)
+            it->second = std::min(it->second, resultCapacity);
+        }
+      }
+
       for (auto addr : as[ptrId].getAddrs()) {
         uint32_t objId = as.getIDFromAddr(addr);
         // Compute access offset per object to preserve field/object
         // sensitivity.
         IntervalValue accessOffset = getAccessOffset(as, objId, gep);
         uint32_t objSize = as.getObjSize(objId);
+        auto capacityIt = gepObjCapacityByObjId.find(objId);
+        if (capacityIt != gepObjCapacityByObjId.end())
+          objSize = std::min(objSize, capacityIt->second);
+        if (objSize == 0 && as.hasKnownObjSize(objId)) {
+          AEException bug("Buffer access outside zero-sized object");
+          addBugToReporter(bug, inst);
+          continue;
+        }
         bool hasKnownBaseOffset = gepObjOffsetFromBaseByObjId.count(objId) != 0;
         const llvm::Value *base = gep->getPointerOperand();
         while (const auto *gepOp = llvm::dyn_cast<llvm::GEPOperator>(base))
@@ -292,6 +478,57 @@ void BufOverflowDetector::detect(AbstractState &as,
       }
     }
   }
+
+  auto detectDirectMemoryAccess = [&](const llvm::Value *pointer,
+                                      llvm::Type *valueType,
+                                      const char *description) {
+    if (!pointer || !valueType || !valueType->isSized())
+      return;
+
+    // Accesses through an explicit GEP are diagnosed at that GEP, which has
+    // more precise provenance information.
+    const llvm::Value *base = pointer->stripPointerCasts();
+    if (llvm::isa<llvm::GEPOperator>(pointer) ||
+        llvm::isa<llvm::GEPOperator>(base))
+      return;
+
+    uint32_t ptrId = AbstractInterpretation::getValueIdStatic(pointer);
+    if (!as.inVarToAddrsTable(ptrId))
+      return;
+
+    for (uint32_t addr : as[ptrId].getAddrs()) {
+      // Null, invalid, and freed pointers belong to the dedicated detectors.
+      if (AbstractState::isNullMem(addr) || AbstractState::isInvalidMem(addr) ||
+          as.isFreedMem(addr)) {
+        return;
+      }
+    }
+
+    uint64_t accessSize =
+        inst->getModule()->getDataLayout().getTypeStoreSize(valueType);
+    if (accessSize == 0)
+      return;
+    if (!canSafelyAccessMemory(as, ptrId,
+                               byteCountToMaxAccessOffset(IntervalValue(
+                                   static_cast<int64_t>(accessSize))))) {
+      AEException bug(std::string("Buffer overflow at ") + description);
+      addBugToReporter(bug, inst);
+    }
+  };
+
+  if (const auto *load = llvm::dyn_cast<llvm::LoadInst>(inst))
+    detectDirectMemoryAccess(load->getPointerOperand(), load->getType(),
+                             "load");
+  else if (const auto *store = llvm::dyn_cast<llvm::StoreInst>(inst))
+    detectDirectMemoryAccess(store->getPointerOperand(),
+                             store->getValueOperand()->getType(), "store");
+  else if (const auto *atomic = llvm::dyn_cast<llvm::AtomicRMWInst>(inst))
+    detectDirectMemoryAccess(atomic->getPointerOperand(),
+                             atomic->getValOperand()->getType(), "atomicrmw");
+  else if (const auto *cmpxchg = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(inst))
+    detectDirectMemoryAccess(cmpxchg->getPointerOperand(),
+                             cmpxchg->getCompareOperand()->getType(),
+                             "cmpxchg");
 
   if (const auto *load = llvm::dyn_cast<llvm::LoadInst>(inst))
     detectConstantExprAccess(as, inst, load->getPointerOperand());
@@ -317,7 +554,16 @@ void BufOverflowDetector::detect(AbstractState &as,
            utils->getExtAPIType(direct) == AEExtAPI::MEMSET ||
            utils->getExtAPIType(direct) == AEExtAPI::STRCPY ||
            utils->getExtAPIType(direct) == AEExtAPI::STRCAT ||
-           utils->getExtAPIType(direct) == AEExtAPI::SNPRINTF)) {
+           utils->getExtAPIType(direct) == AEExtAPI::SNPRINTF ||
+           utils->getExtAPIType(direct) == AEExtAPI::FGETS ||
+           utils->getExtAPIType(direct) == AEExtAPI::FREAD ||
+           utils->getExtAPIType(direct) == AEExtAPI::FWRITE ||
+           utils->getExtAPIType(direct) == AEExtAPI::RECV ||
+           direct->getName() == "read" || direct->getName() == "pread" ||
+           direct->getName() == "write" || direct->getName() == "pwrite" ||
+           direct->getName() == "send" || direct->getName() == "sendto" ||
+           direct->getName() == "recvfrom" || direct->getName() == "readlink" ||
+           direct->getName() == "strxfrm" || direct->getName() == "wcsxfrm")) {
         detectExtAPI(as, call, direct);
         return;
       }
@@ -335,7 +581,14 @@ void BufOverflowDetector::detect(AbstractState &as,
         AEExtAPI::ExtAPIType extType = utils->getExtAPIType(callee);
         if (extType == AEExtAPI::MEMCPY || extType == AEExtAPI::MEMSET ||
             extType == AEExtAPI::STRCPY || extType == AEExtAPI::STRCAT ||
-            extType == AEExtAPI::SNPRINTF) {
+            extType == AEExtAPI::SNPRINTF || extType == AEExtAPI::FGETS ||
+            extType == AEExtAPI::FREAD || extType == AEExtAPI::FWRITE ||
+            extType == AEExtAPI::RECV || callee->getName() == "read" ||
+            callee->getName() == "pread" || callee->getName() == "write" ||
+            callee->getName() == "pwrite" || callee->getName() == "send" ||
+            callee->getName() == "sendto" || callee->getName() == "recvfrom" ||
+            callee->getName() == "readlink" || callee->getName() == "strxfrm" ||
+            callee->getName() == "wcsxfrm") {
           detectExtAPI(as, call, callee);
           break;
         }
@@ -484,6 +737,7 @@ void BufOverflowDetector::reset() {
   instToBugInfo.clear();
   gepObjOffsetFromBase.clear();
   gepObjOffsetFromBaseByObjId.clear();
+  gepObjCapacityByObjId.clear();
 }
 
 void BufOverflowDetector::addBugToReporter(const AEException &e,
@@ -523,6 +777,11 @@ bool BufOverflowDetector::canSafelyAccessMemory(AbstractState &as,
 
       uint32_t objId = as.getIDFromAddr(addr);
       uint32_t objSize = as.getObjSize(objId);
+      auto capacityIt = gepObjCapacityByObjId.find(objId);
+      if (capacityIt != gepObjCapacityByObjId.end())
+        objSize = std::min(objSize, capacityIt->second);
+      if (objSize == 0 && as.hasKnownObjSize(objId))
+        return false;
       if (intervalIsOutsideObject(accessOffset, objSize)) {
         return false;
       }
@@ -536,10 +795,31 @@ bool BufOverflowDetector::canSafelyAccessMemory(AbstractState &as,
     const llvm::Value *baseVal = ptrVal;
     IntervalValue accumulatedOffset(0);
     bool hasExplicitOffset = false;
+    uint32_t subobjectCapacity = 0;
 
     while (baseVal) {
       if (const auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(baseVal)) {
         accumulatedOffset = accumulatedOffset + as.getByteOffset(gep);
+        if (gep->getSourceElementType()->isStructTy() &&
+            accumulatedOffset.is_numeral()) {
+          llvm::Type *resultType = gep->getResultElementType();
+          const auto *resultArrayType =
+              llvm::dyn_cast_or_null<llvm::ArrayType>(resultType);
+          const bool flexibleArray =
+              resultArrayType && resultArrayType->getNumElements() == 0;
+          if (resultType && resultType->isSized() && !flexibleArray) {
+            uint64_t fieldEnd =
+                static_cast<uint64_t>(
+                    std::max<int64_t>(0, accumulatedOffset.getIntNumeral())) +
+                gep->getModule()->getDataLayout().getTypeAllocSize(resultType);
+            uint32_t capacity = fieldEnd > std::numeric_limits<uint32_t>::max()
+                                    ? std::numeric_limits<uint32_t>::max()
+                                    : static_cast<uint32_t>(fieldEnd);
+            subobjectCapacity = subobjectCapacity == 0
+                                    ? capacity
+                                    : std::min(subobjectCapacity, capacity);
+          }
+        }
         baseVal = gep->getPointerOperand();
         hasExplicitOffset = true;
         continue;
@@ -558,6 +838,9 @@ bool BufOverflowDetector::canSafelyAccessMemory(AbstractState &as,
     }
 
     if (hasExplicitOffset && baseVal) {
+      if (subobjectCapacity > 0)
+        return !intervalIsOutsideObject(accumulatedOffset + len,
+                                        subobjectCapacity);
       uint32_t basePtrId = AbstractInterpretation::getValueIdStatic(baseVal);
       return checkAccessAgainstBase(basePtrId, accumulatedOffset + len);
     }
@@ -578,6 +861,11 @@ bool BufOverflowDetector::canSafelyAccessMemory(AbstractState &as,
 
     uint32_t objId = as.getIDFromAddr(addr);
     uint32_t objSize = as.getObjSize(objId);
+    auto capacityIt = gepObjCapacityByObjId.find(objId);
+    if (capacityIt != gepObjCapacityByObjId.end())
+      objSize = std::min(objSize, capacityIt->second);
+    if (objSize == 0 && as.hasKnownObjSize(objId))
+      return false;
     uint32_t effectiveCapacity = objSize;
     auto offsetIt = gepObjOffsetFromBaseByObjId.find(objId);
     if (offsetIt != gepObjOffsetFromBaseByObjId.end()) {
@@ -636,6 +924,8 @@ void BufOverflowDetector::initExtAPIBufOverflowCheckRules() {
   extAPIBufOverflowCheckRules["__strncpy_chk"] = {{0, 2}, {1, 2}};
   extAPIBufOverflowCheckRules["__strcat_chk"] = {{0, 1}};
   extAPIBufOverflowCheckRules["__strncat_chk"] = {{0, 2}};
+  extAPIBufOverflowCheckRules["strxfrm"] = {{0, 2}, {1, 2}};
+  extAPIBufOverflowCheckRules["wcsxfrm"] = {{0, 2}, {1, 2}};
 
   // Wide string functions
   extAPIBufOverflowCheckRules["wcscpy"] = {{0, 1}};
@@ -651,6 +941,16 @@ void BufOverflowDetector::initExtAPIBufOverflowCheckRules() {
   extAPIBufOverflowCheckRules["fgets"] = {{0, 2}};
   extAPIBufOverflowCheckRules["fread"] = {{0, 2}};
   extAPIBufOverflowCheckRules["fwrite"] = {{0, 2}};
+  extAPIBufOverflowCheckRules["recv"] = {{1, 2}};
+  extAPIBufOverflowCheckRules["__recv"] = {{1, 2}};
+  extAPIBufOverflowCheckRules["read"] = {{1, 2}};
+  extAPIBufOverflowCheckRules["pread"] = {{1, 2}};
+  extAPIBufOverflowCheckRules["write"] = {{1, 2}};
+  extAPIBufOverflowCheckRules["pwrite"] = {{1, 2}};
+  extAPIBufOverflowCheckRules["send"] = {{1, 2}};
+  extAPIBufOverflowCheckRules["sendto"] = {{1, 2}};
+  extAPIBufOverflowCheckRules["recvfrom"] = {{1, 2}};
+  extAPIBufOverflowCheckRules["readlink"] = {{1, 2}};
 
   // iconv
   extAPIBufOverflowCheckRules["iconv"] = {{1, 2}, {3, 4}};
@@ -695,6 +995,10 @@ void BufOverflowDetector::detectExtAPI(AbstractState &as,
                   continue;
                 len = as[lenId].getInterval();
               }
+              if (isZeroByteCount(len))
+                continue;
+              if (hasNullOrInvalidTarget(as, bufId))
+                continue;
               if (!canSafelyAccessMemory(as, bufId,
                                          byteCountToMaxAccessOffset(len))) {
                 AEException bug("Buffer overflow in " + funcName +
@@ -716,6 +1020,28 @@ void BufOverflowDetector::detectExtAPI(AbstractState &as,
   }
 
   // Fallback to rules map
+  if ((funcName.find("fread") != std::string::npos ||
+       funcName.find("fwrite") != std::string::npos) &&
+      call->arg_size() >= 3) {
+    uint32_t bufId =
+        AbstractInterpretation::getValueIdStatic(call->getArgOperand(0));
+    IntervalValue total = getCallArgumentInterval(as, call->getArgOperand(1)) *
+                          getCallArgumentInterval(as, call->getArgOperand(2));
+    if (total.isBottom())
+      return;
+    if (isZeroByteCount(total))
+      return;
+    if (hasNullOrInvalidTarget(as, bufId))
+      return;
+    if (!canSafelyAccessMemory(as, bufId, byteCountToMaxAccessOffset(total))) {
+      AEException bug("Buffer overflow in " + funcName +
+                      ": total access size " + total.toString() +
+                      " exceeds buffer bounds");
+      addBugToReporter(bug, call);
+    }
+    return;
+  }
+
   auto it = extAPIBufOverflowCheckRules.find(funcName);
   if (it != extAPIBufOverflowCheckRules.end()) {
     for (const auto &arg : it->second) {
@@ -736,6 +1062,10 @@ void BufOverflowDetector::detectExtAPI(AbstractState &as,
           continue;
         len = as[lenId].getInterval();
       }
+      if (isZeroByteCount(len))
+        continue;
+      if (hasNullOrInvalidTarget(as, bufId))
+        continue;
       if (!canSafelyAccessMemory(as, bufId, byteCountToMaxAccessOffset(len))) {
         AEException bug("Buffer overflow in " + funcName + ": access length " +
                         len.toString() + " may exceed buffer bounds");
@@ -768,7 +1098,8 @@ void BufOverflowDetector::detectExtAPI(AbstractState &as,
                                               byteCountToMaxAccessOffset(len))
                      << "\n";
       }
-      if (!len.isBottom() &&
+      if (!isZeroByteCount(len) && !len.isBottom() &&
+          !hasNullOrInvalidTarget(as, bufId) &&
           !canSafelyAccessMemory(as, bufId, byteCountToMaxAccessOffset(len))) {
         AEException bug("Buffer overflow in " + funcName + ": size limit " +
                         len.toString() + " exceeds destination buffer bounds");
@@ -1003,6 +1334,27 @@ void NullptrDerefDetector::detect(AbstractState &as,
     }
   }
 
+  if (const auto *atomic = llvm::dyn_cast<llvm::AtomicRMWInst>(inst)) {
+    if (!hasDefiniteNonNullBase(atomic->getPointerOperand())) {
+      uint32_t ptrId =
+          AbstractInterpretation::getValueIdStatic(atomic->getPointerOperand());
+      if (!canSafelyDerefPtr(as, ptrId)) {
+        AEException bug("Null pointer dereference at atomicrmw instruction");
+        addBugToReporter(bug, inst);
+      }
+    }
+  } else if (const auto *cmpxchg =
+                 llvm::dyn_cast<llvm::AtomicCmpXchgInst>(inst)) {
+    if (!hasDefiniteNonNullBase(cmpxchg->getPointerOperand())) {
+      uint32_t ptrId = AbstractInterpretation::getValueIdStatic(
+          cmpxchg->getPointerOperand());
+      if (!canSafelyDerefPtr(as, ptrId)) {
+        AEException bug("Null pointer dereference at cmpxchg instruction");
+        addBugToReporter(bug, inst);
+      }
+    }
+  }
+
   if (const auto *call = llvm::dyn_cast<llvm::CallBase>(inst)) {
     AbstractInterpretation &ae = AbstractInterpretation::getAEInstance();
     std::vector<const llvm::Function *> callees = ae.getCallees(call);
@@ -1012,19 +1364,49 @@ void NullptrDerefDetector::detect(AbstractState &as,
         continue;
       AEExtAPI *utils = ae.getUtils();
       bool shouldCheck = false;
+      const std::string funcName = callee->getName().str();
+      const bool nameBasedCheck =
+          funcName == "memcmp" || funcName == "strcmp" ||
+          funcName == "strncmp" || funcName == "memchr" || funcName == "puts" ||
+          funcName == "fputs" || funcName == "strdup" ||
+          funcName == "strndup" || funcName == "strxfrm" ||
+          funcName == "wcsxfrm" || funcName == "strcoll" ||
+          funcName == "strpbrk" || funcName == "strspn" ||
+          funcName == "strcspn" || funcName == "posix_memalign" ||
+          funcName == "asprintf" || funcName == "vasprintf" ||
+          funcName == "getline" || funcName == "getdelim" ||
+          funcName == "read" || funcName == "pread" || funcName == "write" ||
+          funcName == "pwrite" || funcName == "send" || funcName == "sendto" ||
+          funcName == "recvfrom" || funcName == "readlink";
 
       if (utils) {
         AEExtAPI::ExtAPIType extType = utils->getExtAPIType(callee);
         shouldCheck =
             (extType == AEExtAPI::MEMCPY || extType == AEExtAPI::MEMSET ||
-             extType == AEExtAPI::STRCPY || extType == AEExtAPI::STRCAT);
+             extType == AEExtAPI::STRCPY || extType == AEExtAPI::STRCAT ||
+             extType == AEExtAPI::RECV || extType == AEExtAPI::FGETS ||
+             extType == AEExtAPI::FREAD || extType == AEExtAPI::FWRITE ||
+             extType == AEExtAPI::STRLEN || extType == AEExtAPI::STRCHR ||
+             extType == AEExtAPI::STRSTR || extType == AEExtAPI::SCANF ||
+             extType == AEExtAPI::PRINTF || extType == AEExtAPI::SNPRINTF ||
+             extType == AEExtAPI::ITOA || extType == AEExtAPI::STRTO ||
+             extType == AEExtAPI::ENV || nameBasedCheck);
       } else {
         // Fallback to string matching
-        std::string funcName = callee->getName().str();
-        shouldCheck = (funcName.find("memcpy") != std::string::npos ||
-                       funcName.find("memset") != std::string::npos ||
-                       funcName.find("strcpy") != std::string::npos ||
-                       funcName.find("strcat") != std::string::npos);
+        shouldCheck =
+            (funcName.find("memcpy") != std::string::npos ||
+             funcName.find("memset") != std::string::npos ||
+             funcName.find("strcpy") != std::string::npos ||
+             funcName.find("strcat") != std::string::npos ||
+             funcName.find("recv") != std::string::npos ||
+             funcName.find("fread") != std::string::npos ||
+             funcName.find("fwrite") != std::string::npos ||
+             funcName.find("fgets") != std::string::npos ||
+             funcName.find("strlen") != std::string::npos ||
+             funcName.find("strchr") != std::string::npos ||
+             funcName.find("strstr") != std::string::npos ||
+             funcName.find("scanf") != std::string::npos ||
+             funcName.find("printf") != std::string::npos || nameBasedCheck);
       }
 
       if (shouldCheck) {

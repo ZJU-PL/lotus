@@ -168,6 +168,7 @@ private:
   std::map<const llvm::Instruction *, std::string> instToBugInfo;
   std::map<const llvm::GetElementPtrInst *, IntervalValue> gepObjOffsetFromBase;
   std::map<uint32_t, IntervalValue> gepObjOffsetFromBaseByObjId;
+  std::map<uint32_t, uint32_t> gepObjCapacityByObjId;
 };
 
 /// Detector for identifying null pointer dereference issues

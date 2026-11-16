@@ -1187,7 +1187,7 @@ void AEExtAPI::initExtFunMap() {
       IntervalValue total =
           allocationSizeFromAnnotation(as, callNode, "Arg0*Arg1");
       int64_t totalSize = total.ub().getIntNumeralOrZero();
-      if (!total.is_infinite() && totalSize > 0 &&
+      if (!total.isBottom() && !total.is_infinite() && totalSize >= 0 &&
           totalSize <= static_cast<int64_t>(MaxFieldLimit)) {
         as.setObjSize(objId, static_cast<uint32_t>(totalSize));
       } else {
@@ -1976,6 +1976,15 @@ void AEExtAPI::handleExtRealloc(const llvm::CallBase *call) {
   if (call->arg_size() < 2)
     return;
   AbstractState &as = getAbsStateFromTrace(call);
+  uint32_t oldPtr = getValueId(call->getArgOperand(0));
+  if (as.inVarToAddrsTable(oldPtr)) {
+    for (uint32_t addr : as[oldPtr].getAddrs()) {
+      if (!AbstractState::isInvalidMem(addr) &&
+          !AbstractState::isNullMem(addr)) {
+        as.addToPendingFreedAddrs(addr);
+      }
+    }
+  }
   uint32_t lhsId = getValueId(call);
   uint32_t newAddr = AddressValue::getVirtualMemAddress(lhsId);
   as[lhsId] = AbstractValue(AddressValue(newAddr));

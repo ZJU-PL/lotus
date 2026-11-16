@@ -21,6 +21,23 @@
 namespace lotus {
 namespace analysis {
 
+uint32_t AbstractState::getGepFieldObjId(uint32_t baseObjId, int64_t offset) {
+  return AbstractInterpretation::getAEInstance().getOrCreateGepFieldObjId(
+      baseObjId, offset);
+}
+
+void AbstractState::recordGepObjOffsetFromBase(uint32_t objId,
+                                               const IntervalValue &offset) {
+  AbstractInterpretation::getAEInstance().recordGepObjOffsetFromBase(objId,
+                                                                     offset);
+}
+
+bool AbstractState::getGepObjOffsetFromBase(uint32_t objId,
+                                            IntervalValue &offset) const {
+  return AbstractInterpretation::getAEInstance().getGepObjOffsetFromBase(
+      objId, offset);
+}
+
 namespace {
 
 int64_t clampFieldOffset(int64_t offset) {
@@ -176,6 +193,11 @@ AbstractState AbstractState::narrowing(const AbstractState &other) {
 
 /// Domain join with other, important! other widen this.
 void AbstractState::joinWith(const AbstractState &other) {
+  // A path-local snapshot has SSA values that must not be rebound to the
+  // run-wide table. Materialize the destination before joining it so those
+  // values remain observable on this path.
+  if (other.pathLocalVarTable_)
+    materializeVarTable();
   // In the def-site layout every intermediate value has exactly one home, so a
   // join only has to merge the object map. SVF's semi-sparse layout does the
   // same (`SparseAbstractInterpretation::joinStates`). Cycle heads are the one
@@ -594,6 +616,14 @@ uint32_t AbstractState::getAllocaInstByteSize(const llvm::AllocaInst *alloca) {
   const llvm::DataLayout &dl = alloca->getModule()->getDataLayout();
   uint32_t typeSize = dl.getTypeAllocSize(allocType);
 
+  if (alloca->isArrayAllocation()) {
+    if (const auto *count =
+            llvm::dyn_cast<llvm::ConstantInt>(alloca->getArraySize())) {
+      uint64_t total = static_cast<uint64_t>(typeSize) * count->getZExtValue();
+      return static_cast<uint32_t>(std::min<uint64_t>(total, MaxFieldLimit));
+    }
+  }
+
   // Try to get more accurate size from PTA first
   if (svfir_ && svfir_->isPTAReady()) {
     uint32_t ptaSize = getObjectSize(alloca);
@@ -604,15 +634,10 @@ uint32_t AbstractState::getAllocaInstByteSize(const llvm::AllocaInst *alloca) {
 
   // Handle array allocation
   if (alloca->isArrayAllocation()) {
-    const llvm::Value *arraySize = alloca->getArraySize();
-    if (const llvm::ConstantInt *csize =
-            llvm::dyn_cast<llvm::ConstantInt>(arraySize)) {
-      return typeSize * static_cast<uint32_t>(csize->getZExtValue());
-    } else {
-      // Variable-sized array - use MaxFieldLimit as upper bound
-      // This matches SVF's behavior for non-constant array sizes
-      return typeSize * MaxFieldLimit;
-    }
+    // Variable-sized array - use MaxFieldLimit as upper bound
+    // This matches SVF's behavior for non-constant array sizes
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        static_cast<uint64_t>(typeSize) * MaxFieldLimit, MaxFieldLimit));
   }
 
   return typeSize;
@@ -624,6 +649,14 @@ uint32_t AbstractState::getAllocaInstByteSize(const llvm::AllocaInst *alloca,
   const llvm::DataLayout &dl = alloca->getModule()->getDataLayout();
   uint32_t typeSize = dl.getTypeAllocSize(allocType);
 
+  if (alloca->isArrayAllocation()) {
+    if (const auto *count =
+            llvm::dyn_cast<llvm::ConstantInt>(alloca->getArraySize())) {
+      uint64_t total = static_cast<uint64_t>(typeSize) * count->getZExtValue();
+      return static_cast<uint32_t>(std::min<uint64_t>(total, MaxFieldLimit));
+    }
+  }
+
   // Try to get more accurate size from PTA first
   if (svfir_ && svfir_->isPTAReady()) {
     uint32_t ptaSize = getObjectSize(alloca);
@@ -635,44 +668,38 @@ uint32_t AbstractState::getAllocaInstByteSize(const llvm::AllocaInst *alloca,
   // Handle array allocation
   if (alloca->isArrayAllocation()) {
     const llvm::Value *arraySize = alloca->getArraySize();
-    if (const llvm::ConstantInt *csize =
-            llvm::dyn_cast<llvm::ConstantInt>(arraySize)) {
-      // Constant array size
-      return typeSize * static_cast<uint32_t>(csize->getZExtValue());
-    } else {
-      // Variable-sized array - try to get size from abstract state
-      uint32_t arraySizeId =
-          AbstractInterpretation::getValueIdStatic(arraySize);
+    // Variable-sized array - try to get size from abstract state
+    uint32_t arraySizeId = AbstractInterpretation::getValueIdStatic(arraySize);
 
-      if (as.inVarToValTable(arraySizeId)) {
-        // Array size is tracked in abstract state
-        IntervalValue sizeInterval = as[arraySizeId].getInterval();
+    if (as.inVarToValTable(arraySizeId)) {
+      // Array size is tracked in abstract state
+      IntervalValue sizeInterval = as[arraySizeId].getInterval();
 
-        if (!sizeInterval.isBottom() && !sizeInterval.isTop()) {
-          // Use upper bound of interval, clamped to MaxFieldLimit
-          int64_t ub = sizeInterval.ub().getIntNumeral();
-          if (ub < 0) {
-            ub = 0;
-          }
-          if (ub > static_cast<int64_t>(MaxFieldLimit)) {
-            ub = MaxFieldLimit;
-          }
-          // Default element size is 1 (matching SVF's behavior)
-          uint32_t elementSize = typeSize > 0 ? typeSize : 1;
-          uint64_t res =
-              static_cast<uint64_t>(elementSize) * static_cast<uint64_t>(ub);
-          // Clamp result to MaxFieldLimit if needed
-          if (res > MaxFieldLimit) {
-            res = MaxFieldLimit;
-          }
-          return static_cast<uint32_t>(res);
+      if (!sizeInterval.isBottom() && !sizeInterval.isTop()) {
+        // Use upper bound of interval, clamped to MaxFieldLimit
+        int64_t ub = sizeInterval.ub().getIntNumeral();
+        if (ub < 0) {
+          ub = 0;
         }
+        if (ub > static_cast<int64_t>(MaxFieldLimit)) {
+          ub = MaxFieldLimit;
+        }
+        // Default element size is 1 (matching SVF's behavior)
+        uint32_t elementSize = typeSize > 0 ? typeSize : 1;
+        uint64_t res =
+            static_cast<uint64_t>(elementSize) * static_cast<uint64_t>(ub);
+        // Clamp result to MaxFieldLimit if needed
+        if (res > MaxFieldLimit) {
+          res = MaxFieldLimit;
+        }
+        return static_cast<uint32_t>(res);
       }
-
-      // Fallback: use MaxFieldLimit as conservative upper bound
-      // This happens when array size is not tracked in abstract state yet
-      return typeSize * MaxFieldLimit;
     }
+
+    // Fallback: use MaxFieldLimit as conservative upper bound
+    // This happens when array size is not tracked in abstract state yet
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        static_cast<uint64_t>(typeSize) * MaxFieldLimit, MaxFieldLimit));
   }
 
   return typeSize;
@@ -834,11 +861,8 @@ AbstractState::getElementIndex(const llvm::GetElementPtrInst *gep) {
       else
         idxUb *= elemSize;
     } else if (idxType->isArrayTy()) {
-      uint32_t arraySize = idxType->getArrayNumElements();
-      if (idxUb >= static_cast<int64_t>(arraySize) || idxLb < 0) {
-        idxLb = idxUb = 0;
-      }
-      // For arrays, element index is just the index value
+      // Preserve the access index. Collapsing an out-of-range dynamic index to
+      // zero hides real OOB accesses and makes negative indices look safe.
     } else if (idxType->isStructTy()) {
       llvm::StructType *structType = llvm::cast<llvm::StructType>(idxType);
       uint32_t numElements = structType->getNumElements();
@@ -863,8 +887,8 @@ AbstractState::getElementIndex(const llvm::GetElementPtrInst *gep) {
     }
   }
 
-  // Ensure result is within [0, MaxFieldLimit]
-  res.meet_with(IntervalValue(static_cast<int64_t>(0),
+  // Bound field-object expansion while retaining finite negative offsets.
+  res.meet_with(IntervalValue(-static_cast<int64_t>(MaxFieldLimit),
                               static_cast<int64_t>(MaxFieldLimit)));
   if (res.isBottom()) {
     res = IntervalValue(static_cast<int64_t>(0));

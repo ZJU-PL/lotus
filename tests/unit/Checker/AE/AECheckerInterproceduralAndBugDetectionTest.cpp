@@ -48,7 +48,9 @@ TEST_F(AECheckerTest,
   EXPECT_EQ(result.null_bugs, 0u);
 
   IntervalValue ret = getFunctionReturnInterval(module.get(), "main");
-  EXPECT_EQ(ret.lb().getIntNumeral(), 5) << ret.toString();
+  // dispatch() may call helper(), which returns 0; demo() contributes the
+  // recursive [5, +inf] summary to the same join.
+  EXPECT_EQ(ret.lb().getIntNumeral(), 0) << ret.toString();
   EXPECT_TRUE(ret.ub().is_infinity()) << ret.toString();
 }
 TEST_F(AECheckerTest, DefaultWidenDelayMatchesExplicitThree) {

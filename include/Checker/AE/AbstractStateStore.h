@@ -200,10 +200,11 @@ private:
       slot = state;
       return;
     }
-    if (!state.usesDefSiteVarTable())
+    if (!state.usesDefSiteVarTable() && !state.usesPathLocalVarTable())
       state.varTable().scatterTo(defSiteVars_);
     slot = state;
-    slot.bindDefSiteVarTable(&defSiteVars_);
+    if (!state.usesPathLocalVarTable())
+      slot.bindDefSiteVarTable(&defSiteVars_);
   }
 
   StateLayout layout_;
