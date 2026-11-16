@@ -11,8 +11,8 @@ classical CFL-reachability algorithms:
 
 Both engines share the input vocabulary and the compressed result
 representation of the ``Skewed`` engine through
-``Solvers/Engines/Common/Reachability.h``. No import or conversion is
-necessary between the three solvers.
+``include/CFL/Classical/Solvers/Engines/Common/Reachability.h``. No import or
+conversion is necessary between the three solvers.
 
 CAT: Context-Aware Tabulation
 -----------------------------

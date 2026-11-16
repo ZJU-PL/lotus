@@ -53,17 +53,18 @@ Z3 Not Found
    # macOS
    brew install z3
    
-   # Or build from source
+   # Or build from source (modern Z3 builds with CMake, not scripts/mk_make.py)
    git clone https://github.com/Z3Prover/z3
-   cd z3
-   python scripts/mk_make.py
-   cd build && make && sudo make install
+   cmake -S z3 -B z3/build -DCMAKE_BUILD_TYPE=Release
+   cmake --build z3/build -j$(nproc)
+   sudo cmake --install z3/build
 
 2. Specify Z3 path:
 
 .. code-block:: bash
 
-   cmake ../ -DZ3_ROOT=/path/to/z3/install
+   cmake ../ -DZ3_DIR=/path/to/z3/install
+   # Z3_ROOT is also accepted by cmake/FindZ3.cmake
 
 Boost Not Found
 ~~~~~~~~~~~~~~~

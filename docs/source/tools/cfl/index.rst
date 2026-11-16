@@ -17,6 +17,7 @@ context-free grammars for precise interprocedural analysis.
 ``lotus-cfl-interleaved-dyck staged-bounds``,
 ``lotus-cfl-interleaved-dyck unary``, ``lotus-cfl-interleaved-dyck spds``,
 ``lotus-cfl-interleaved-dyck lcl``, ``lotus-cfl-interleaved-dyck affine-spds``,
+``lotus-cfl-interleaved-dyck ilp``,
 ``lotus-cfl-interleaved-dyck-graph-reduction.py``, ``lotus-cfl-dynamic-dyck``, and ``csr``.
 
 Classical CFL solving and clients
@@ -348,6 +349,25 @@ and a shared observer map can be loaded or dumped with
 ``--observer``/``--dump-observer``. See
 :doc:`/cfl/interleaved_dyck/affine_spds` for the library API and algorithm
 details.
+
+ILP Reachability
+----------------
+
+Encodes interleaved-Dyck reachability as an integer linear program over the
+path expression. The default backend is Z3; an optional Gurobi backend can be
+enabled with ``-DLOTUS_ENABLE_GUROBI=ON`` (see :doc:`/cfl/interleaved_dyck/ilp`).
+
+**Command**: ``lotus-cfl-interleaved-dyck ilp``
+
+**Location**: ``tools/cfl/interleaved-dyck/ilp/lotus-cfl-interleaved-dyck-ilp.cpp``
+
+.. code-block:: bash
+
+   cmake --build build --target lotus-cfl-interleaved-dyck
+   build/bin/lotus-cfl-interleaved-dyck ilp --query 0 3 graph.dot
+
+Select the solver with ``--backend z3|gurobi`` (default: ``z3``), and adjust
+resource limits with ``--max-disjuncts`` / ``--max-expression-nodes``.
 
 Interleaved-Dyck Graph Reduction
 --------------------------------

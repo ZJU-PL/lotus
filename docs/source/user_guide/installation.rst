@@ -58,6 +58,8 @@ Options use a consistent ``LOTUS_*`` naming scheme.
 
 * ``-DLOTUS_ENABLE_CFL=OFF``: Disable CFL reachability solvers (default: ON)
 * ``-DLOTUS_ENABLE_CSR=ON``: Build the indexing context-sensitive reachability solver (default: OFF)
+* ``-DLOTUS_ENABLE_GUROBI=ON``: Build the optional Gurobi ILP backend for interleaved-Dyck
+  reachability (requires a Gurobi license and ``GUROBI_HOME``; default: OFF)
 * ``-DLOTUS_ENABLE_OWL=ON``: Build the Owl SMT solver (default: OFF)
 * ``-DLOTUS_ENABLE_SMT_STABILIZER=ON``: Build the SMTStabilizer SMT-LIB
   normalization library and tool (needs GMP, GMPXX, and MPFR; default: OFF)
@@ -182,7 +184,7 @@ TypeHierarchy and Loop IR fixtures are configured and generated only when those
 analysis groups are selected. Production libraries retain their own dependencies;
 for example CUDA tests still need the aggregate Concurrency library.
 
-Non-template functions in ``TestUtils/LLVMHelpers.h`` are implemented in a shared
+Non-template functions in ``tests/unit/TestUtils/LLVMHelpers.h`` are implemented in a shared
 test support library, so each test source does not compile their bodies again.
 Templates remain in the header. KINT's shared fixture similarly compiles its
 PassBuilder initialization once rather than exposing it through every test
@@ -312,10 +314,11 @@ Z3 Installation
    # macOS with Homebrew
    brew install z3
 
-   # Or build from source
+   # Or build from source (modern Z3 builds with CMake, not scripts/mk_make.py)
    git clone https://github.com/Z3Prover/z3.git
-   cd z3 && python scripts/mk_make.py
-   cd build && make && sudo make install
+   cmake -S z3 -B z3/build -DCMAKE_BUILD_TYPE=Release
+   cmake --build z3/build -j$(nproc)
+   sudo cmake --install z3/build
 
 
 Troubleshooting
@@ -324,6 +327,6 @@ Troubleshooting
 * **LLVM not found**: Install LLVM 14.x via your package manager (or from source).
   If you use a non-standard installation location, set ``LLVM_BUILD_PATH`` to the directory
   that contains ``LLVMConfig.cmake`` and re-run CMake.
-* **Z3 not found**: Install Z3 or set ``Z3_DIR``
+* **Z3 not found**: Install Z3 or set ``Z3_DIR`` / ``Z3_ROOT``
 * **Boost issues**: Use ``LOTUS_CUSTOM_BOOST_ROOT`` or let Lotus auto-download Boost
 * **Build errors**: Use supported LLVM version (14.x)
