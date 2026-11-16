@@ -104,9 +104,11 @@ previously diverged from SVF or between storage layouts, including floating
 binary operators, `addrspacecast`, `freeze`, constant selects/aggregates and
 vectors, signed/unsigned casts and comparisons, switch-default pruning,
 constant call arguments, pointer offsets joined through PHIs, and struct-member
-subobject bounds.
+subobject bounds. Additional regressions cover vector-GEP lane offsets, bounds
+from masks and unsigned remainders, casted branch reloads, bounded-memory libc
+searches, and the no-definition module case.
 
-A local 150-program SVF differential corpus currently has 27 reviewed boolean
+A local 150-program SVF differential corpus currently has 30 reviewed boolean
 finding differences. SVF reports guarded null paths and classifies some
 `snprintf`/`strncpy` calls as null dereferences. Lotus additionally reports
 negative subobject offsets, indirect-table overflows, and precise

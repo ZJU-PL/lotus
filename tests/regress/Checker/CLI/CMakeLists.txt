@@ -5,6 +5,7 @@ set(CHECKER_CLI_TAINT ${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/taint.ll)
 set(CHECKER_CLI_TAINT_INVOKE
     ${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/taint_invoke.ll)
 set(CHECKER_CLI_AE_LEAK ${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/ae_leak.ll)
+set(CHECKER_CLI_AE_EMPTY ${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/ae_empty.ll)
 
 function(add_checker_cli_test test_name expected_result expected_output)
   set(args ${ARGN})
@@ -49,6 +50,9 @@ endfunction()
 add_checker_cli_test(checker_cli_ae_defaults_include_mem_leak 0
                      "Running memory leak checker"
                      --engine=ae --log-level=info ${CHECKER_CLI_MINIMAL})
+add_checker_cli_test_without_output(checker_cli_ae_empty_module_is_noop 0
+                     "No findings" "Fatal Error|Stack dump"
+                     --engine=ae ${CHECKER_CLI_AE_EMPTY})
 foreach(check IN ITEMS double-free memory-leak use-after-free)
   string(REPLACE "-" "_" check_name ${check})
   add_checker_cli_test(checker_cli_fitx_${check_name}_selection 0

@@ -242,7 +242,7 @@ std::vector<uint32_t> getExtAPIPointerArgIndices(const llvm::CallBase *call,
     addPointerArg(0);
     addPointerArg(1);
   } else if (funcName == "memchr" || funcName == "puts" ||
-             funcName == "fputs") {
+             funcName == "fputs" || funcName == "strnlen") {
     addPointerArg(0);
   } else if (funcName == "strdup" || funcName == "strndup") {
     addPointerArg(0);
@@ -259,6 +259,7 @@ std::vector<uint32_t> getExtAPIPointerArgIndices(const llvm::CallBase *call,
   } else if (funcName == "getline" || funcName == "getdelim") {
     addPointerArg(0);
     addPointerArg(1);
+    addPointerArg(funcName == "getline" ? 2 : 3);
   } else if (funcName == "read" || funcName == "pread" || funcName == "write" ||
              funcName == "pwrite" || funcName == "send" ||
              funcName == "sendto" || funcName == "recvfrom" ||
@@ -502,6 +503,20 @@ void BufOverflowDetector::detect(AbstractState &as,
           as.isFreedMem(addr)) {
         return;
       }
+
+      // A pointer already outside its base object is diagnosed when the GEP is
+      // formed. Do not report the same defect again at a later indirect access.
+      uint32_t objId = as.getIDFromAddr(addr);
+      auto offsetIt = gepObjOffsetFromBaseByObjId.find(objId);
+      if (offsetIt != gepObjOffsetFromBaseByObjId.end()) {
+        const int64_t baseOffset = offsetIt->second.ub().getIntNumeralOrZero();
+        uint32_t objSize = as.getObjSize(objId);
+        auto capacityIt = gepObjCapacityByObjId.find(objId);
+        if (capacityIt != gepObjCapacityByObjId.end())
+          objSize = std::min(objSize, capacityIt->second);
+        if (baseOffset < 0 || baseOffset >= static_cast<int64_t>(objSize))
+          return;
+      }
     }
 
     uint64_t accessSize =
@@ -563,7 +578,9 @@ void BufOverflowDetector::detect(AbstractState &as,
            direct->getName() == "write" || direct->getName() == "pwrite" ||
            direct->getName() == "send" || direct->getName() == "sendto" ||
            direct->getName() == "recvfrom" || direct->getName() == "readlink" ||
-           direct->getName() == "strxfrm" || direct->getName() == "wcsxfrm")) {
+           direct->getName() == "strxfrm" || direct->getName() == "wcsxfrm" ||
+           direct->getName() == "memchr" || direct->getName() == "memcmp" ||
+           direct->getName() == "strnlen")) {
         detectExtAPI(as, call, direct);
         return;
       }
@@ -588,7 +605,8 @@ void BufOverflowDetector::detect(AbstractState &as,
             callee->getName() == "pwrite" || callee->getName() == "send" ||
             callee->getName() == "sendto" || callee->getName() == "recvfrom" ||
             callee->getName() == "readlink" || callee->getName() == "strxfrm" ||
-            callee->getName() == "wcsxfrm") {
+            callee->getName() == "wcsxfrm" || callee->getName() == "memchr" ||
+            callee->getName() == "memcmp" || callee->getName() == "strnlen") {
           detectExtAPI(as, call, callee);
           break;
         }
@@ -601,7 +619,9 @@ void BufOverflowDetector::detect(AbstractState &as,
             funName.find("strcpy") != std::string::npos ||
             funName.find("strcat") != std::string::npos ||
             funName.find("strncpy") != std::string::npos ||
-            funName.find("strncat") != std::string::npos) {
+            funName.find("strncat") != std::string::npos ||
+            funName == "memchr" || funName == "memcmp" ||
+            funName == "strnlen") {
           detectExtAPI(as, call, callee);
           break;
         }
@@ -869,11 +889,10 @@ bool BufOverflowDetector::canSafelyAccessMemory(AbstractState &as,
     uint32_t effectiveCapacity = objSize;
     auto offsetIt = gepObjOffsetFromBaseByObjId.find(objId);
     if (offsetIt != gepObjOffsetFromBaseByObjId.end()) {
-      int64_t baseOffset =
-          std::max<int64_t>(0, offsetIt->second.ub().getIntNumeralOrZero());
-      if (baseOffset < static_cast<int64_t>(objSize)) {
-        effectiveCapacity = objSize - static_cast<uint32_t>(baseOffset);
-      }
+      const int64_t baseOffset = offsetIt->second.ub().getIntNumeralOrZero();
+      if (baseOffset < 0 || baseOffset >= static_cast<int64_t>(objSize))
+        return false;
+      effectiveCapacity = objSize - static_cast<uint32_t>(baseOffset);
     }
 
     if (effectiveCapacity > 0 &&
@@ -951,6 +970,12 @@ void BufOverflowDetector::initExtAPIBufOverflowCheckRules() {
   extAPIBufOverflowCheckRules["sendto"] = {{1, 2}};
   extAPIBufOverflowCheckRules["recvfrom"] = {{1, 2}};
   extAPIBufOverflowCheckRules["readlink"] = {{1, 2}};
+
+  // Bounded memory/string searches read exactly the supplied byte count from
+  // each searched buffer.
+  extAPIBufOverflowCheckRules["memchr"] = {{0, 2}};
+  extAPIBufOverflowCheckRules["memcmp"] = {{0, 2}, {1, 2}};
+  extAPIBufOverflowCheckRules["strnlen"] = {{0, 1}};
 
   // iconv
   extAPIBufOverflowCheckRules["iconv"] = {{1, 2}, {3, 4}};
@@ -1377,7 +1402,8 @@ void NullptrDerefDetector::detect(AbstractState &as,
           funcName == "getline" || funcName == "getdelim" ||
           funcName == "read" || funcName == "pread" || funcName == "write" ||
           funcName == "pwrite" || funcName == "send" || funcName == "sendto" ||
-          funcName == "recvfrom" || funcName == "readlink";
+          funcName == "recvfrom" || funcName == "readlink" ||
+          funcName == "strnlen";
 
       if (utils) {
         AEExtAPI::ExtAPIType extType = utils->getExtAPIType(callee);
@@ -1406,7 +1432,8 @@ void NullptrDerefDetector::detect(AbstractState &as,
              funcName.find("strchr") != std::string::npos ||
              funcName.find("strstr") != std::string::npos ||
              funcName.find("scanf") != std::string::npos ||
-             funcName.find("printf") != std::string::npos || nameBasedCheck);
+             funcName.find("printf") != std::string::npos ||
+             funcName.find("strnlen") != std::string::npos || nameBasedCheck);
       }
 
       if (shouldCheck) {

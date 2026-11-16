@@ -13,6 +13,7 @@
 #include "Checker/AE/SVFIRWrapper.h"
 
 #include <algorithm>
+#include <limits>
 
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Operator.h>
@@ -54,6 +55,35 @@ int64_t clampFieldOffset(const BoundedInt &bound) {
   if (bound.is_plus_infinity())
     return static_cast<int64_t>(MaxFieldLimit);
   return clampFieldOffset(bound.getIntNumeral());
+}
+
+bool getConstantIntegerBounds(const llvm::Value *value, int64_t &lower,
+                              int64_t &upper) {
+  if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(value)) {
+    lower = upper = constant->getSExtValue();
+    return true;
+  }
+
+  const auto *fixedVector = llvm::dyn_cast<llvm::FixedVectorType>(
+      value ? value->getType() : nullptr);
+  const auto *constant = llvm::dyn_cast_or_null<llvm::Constant>(value);
+  if (!fixedVector || !constant)
+    return false;
+
+  bool found = false;
+  lower = std::numeric_limits<int64_t>::max();
+  upper = std::numeric_limits<int64_t>::min();
+  for (unsigned lane = 0; lane < fixedVector->getNumElements(); ++lane) {
+    const auto *element = llvm::dyn_cast_or_null<llvm::ConstantInt>(
+        constant->getAggregateElement(lane));
+    if (!element)
+      return false;
+    const int64_t elementValue = element->getSExtValue();
+    lower = std::min(lower, elementValue);
+    upper = std::max(upper, elementValue);
+    found = true;
+  }
+  return found;
 }
 
 std::pair<uint32_t, int64_t>
@@ -528,8 +558,10 @@ IntervalValue AbstractState::getByteOffset(const llvm::GetElementPtrInst *gep) {
 
     // Get index value
     IntervalValue idxVal(0);
-    if (llvm::ConstantInt *cidx = llvm::dyn_cast<llvm::ConstantInt>(idx)) {
-      idxVal = IntervalValue(cidx->getSExtValue());
+    int64_t constantLower = 0;
+    int64_t constantUpper = 0;
+    if (getConstantIntegerBounds(idx, constantLower, constantUpper)) {
+      idxVal = IntervalValue(constantLower, constantUpper);
     } else {
       // Use stable ID from AbstractInterpretation
       uint32_t idxId = AbstractInterpretation::getValueIdStatic(idx);
@@ -815,8 +847,7 @@ AbstractState::getElementIndex(const llvm::GetElementPtrInst *gep) {
     int64_t idxLb, idxUb;
 
     // Get index value bounds
-    if (llvm::ConstantInt *cidx = llvm::dyn_cast<llvm::ConstantInt>(idx)) {
-      idxLb = idxUb = cidx->getSExtValue();
+    if (getConstantIntegerBounds(idx, idxLb, idxUb)) {
     } else {
       // Use stable ID from AbstractInterpretation
       uint32_t idxId = AbstractInterpretation::getValueIdStatic(idx);

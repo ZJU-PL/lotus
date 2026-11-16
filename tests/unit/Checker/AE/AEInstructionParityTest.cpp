@@ -1175,3 +1175,262 @@ TEST_F(AEInstructionParityTest, StrxfrmChecksBothBuffersAgainstLength) {
   for (const AEResult &result : runLayouts(source))
     EXPECT_GT(result.overflow_bugs, 0u);
 }
+
+TEST_F(AEInstructionParityTest, EmptyModuleReturnsWithoutPointerAnalysis) {
+  llvm::Module module("empty", context);
+  AbstractInterpretation &ae = AbstractInterpretation::getAEInstance();
+  ae.reset();
+  EXPECT_NO_THROW(ae.runOnModule(&module));
+}
+
+TEST_F(AEInstructionParityTest, CastedReloadBranchRefinesBackingMemory) {
+  const char *source = R"(
+    define i32 @main(i32 %value) {
+    entry:
+      %array = alloca [8 x i32]
+      %slot = alloca i8
+      %low = trunc i32 %value to i8
+      store i8 %low, i8* %slot
+      %first = load i8, i8* %slot
+      %first.ext = zext i8 %first to i32
+      %in.bounds = icmp ult i32 %first.ext, 8
+      br i1 %in.bounds, label %body, label %exit
+
+    body:
+      %second = load i8, i8* %slot
+      %index = zext i8 %second to i64
+      %ptr = getelementptr inbounds [8 x i32], [8 x i32]* %array, i64 0, i64 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+
+    exit:
+      ret i32 0
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, SignedCastedReloadsShareBranchFacts) {
+  const char *source = R"(
+    define i32 @main(i32 %value) {
+    entry:
+      %array = alloca [8 x i32]
+      %slot = alloca i8
+      %low = trunc i32 %value to i8
+      store i8 %low, i8* %slot
+      %first = load i8, i8* %slot
+      %first.ext = sext i8 %first to i32
+      %nonnegative = icmp sge i32 %first.ext, 0
+      br i1 %nonnegative, label %upper, label %exit
+
+    upper:
+      %second = load i8, i8* %slot
+      %second.ext = sext i8 %second to i32
+      %bounded = icmp slt i32 %second.ext, 8
+      br i1 %bounded, label %body, label %exit
+
+    body:
+      %third = load i8, i8* %slot
+      %index = sext i8 %third to i64
+      %ptr = getelementptr inbounds [8 x i32], [8 x i32]* %array, i64 0, i64 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+
+    exit:
+      ret i32 0
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, AndMaskBoundsUnknownIndex) {
+  const char *source = R"(
+    define i32 @main(i32 %value) {
+    entry:
+      %array = alloca [8 x i32]
+      %index = and i32 %value, 7
+      %ptr = getelementptr inbounds [8 x i32], [8 x i32]* %array, i64 0, i32 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, UnsignedRemainderBoundsUnknownIndex) {
+  const char *source = R"(
+    define i32 @main(i32 %value) {
+    entry:
+      %array = alloca [8 x i32]
+      %index = urem i32 %value, 8
+      %ptr = getelementptr inbounds [8 x i32], [8 x i32]* %array, i64 0, i32 %index
+      store i32 1, i32* %ptr
+      ret i32 0
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, BoundedLoopUpperBoundRefinesReloadedIndex) {
+  const char *source = R"(
+    define i32 @main(i32 %value) {
+    entry:
+      %array = alloca [8 x i32]
+      %bound = alloca i32
+      %index = alloca i32
+      store i32 %value, i32* %bound
+      %first.bound = load i32, i32* %bound
+      %negative = icmp slt i32 %first.bound, 0
+      br i1 %negative, label %exit, label %check.upper
+
+    check.upper:
+      %second.bound = load i32, i32* %bound
+      %too.large = icmp sgt i32 %second.bound, 8
+      br i1 %too.large, label %exit, label %loop.entry
+
+    loop.entry:
+      store i32 0, i32* %index
+      br label %loop
+
+    loop:
+      %current = load i32, i32* %index
+      %limit = load i32, i32* %bound
+      %continue = icmp slt i32 %current, %limit
+      br i1 %continue, label %body, label %exit
+
+    body:
+      %access.index = load i32, i32* %index
+      %ptr = getelementptr inbounds [8 x i32], [8 x i32]* %array, i64 0, i32 %access.index
+      store i32 1, i32* %ptr
+      %next = add i32 %access.index, 1
+      store i32 %next, i32* %index
+      br label %loop
+
+    exit:
+      ret i32 0
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, VectorGepLaneTracksOutOfBoundsOffset) {
+  const char *source = R"(
+    define i32 @main() {
+    entry:
+      %array = alloca [8 x i32]
+      %lanes = getelementptr inbounds [8 x i32], [8 x i32]* %array, i64 0, <2 x i64> <i64 7, i64 8>
+      %ptr = extractelement <2 x i32*> %lanes, i32 1
+      store i32 1, i32* %ptr
+      ret i32 0
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, VectorGepInBoundsLaneStaysSafe) {
+  const char *source = R"(
+    define i32 @main() {
+    entry:
+      %array = alloca [8 x i32]
+      %lanes = getelementptr inbounds [8 x i32], [8 x i32]* %array, i64 0, <2 x i64> <i64 6, i64 7>
+      %ptr = extractelement <2 x i32*> %lanes, i32 1
+      store i32 1, i32* %ptr
+      ret i32 0
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_EQ(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, MemchrChecksSearchedByteCount) {
+  const char *source = R"(
+    declare i8* @memchr(i8*, i32, i64)
+
+    define i32 @main() {
+    entry:
+      %buffer = alloca [4 x i8]
+      %ptr = bitcast [4 x i8]* %buffer to i8*
+      %found = call i8* @memchr(i8* %ptr, i32 0, i64 5)
+      %isnull = icmp eq i8* %found, null
+      %result = zext i1 %isnull to i32
+      ret i32 %result
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, MemcmpChecksBothByteRanges) {
+  const char *source = R"(
+    declare i32 @memcmp(i8*, i8*, i64)
+
+    define i32 @main() {
+    entry:
+      %left = alloca [4 x i8]
+      %right = alloca [4 x i8]
+      %left.ptr = bitcast [4 x i8]* %left to i8*
+      %right.ptr = bitcast [4 x i8]* %right to i8*
+      %result = call i32 @memcmp(i8* %left.ptr, i8* %right.ptr, i64 5)
+      ret i32 %result
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.overflow_bugs, 0u);
+}
+
+TEST_F(AEInstructionParityTest, StrnlenChecksLengthAndNullPointer) {
+  const char *source = R"(
+    declare i64 @strnlen(i8*, i64)
+
+    define i32 @main() {
+    entry:
+      %buffer = alloca [4 x i8]
+      %ptr = bitcast [4 x i8]* %buffer to i8*
+      %length = call i64 @strnlen(i8* %ptr, i64 5)
+      %null.length = call i64 @strnlen(i8* null, i64 4)
+      %combined = add i64 %length, %null.length
+      %result = trunc i64 %combined to i32
+      ret i32 %result
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source)) {
+    EXPECT_GT(result.overflow_bugs, 0u);
+    EXPECT_GT(result.null_bugs, 0u);
+  }
+}
+
+TEST_F(AEInstructionParityTest, GetlineChecksStreamPointer) {
+  const char *source = R"(
+    declare i64 @getline(i8**, i64*, i8*)
+
+    define i32 @main() {
+    entry:
+      %line = alloca i8*
+      %capacity = alloca i64
+      store i8* null, i8** %line
+      store i64 0, i64* %capacity
+      %length = call i64 @getline(i8** %line, i64* %capacity, i8* null)
+      %result = trunc i64 %length to i32
+      ret i32 %result
+    }
+  )";
+
+  for (const AEResult &result : runLayouts(source))
+    EXPECT_GT(result.null_bugs, 0u);
+}

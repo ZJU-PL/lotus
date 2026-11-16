@@ -606,6 +606,17 @@ void AbstractInterpretation::runOnModule(llvm::Module *module) {
   pruneDetector(AEDetector::INT_OVERFLOW, enableOverflowCheck_);
   pruneDetector(AEDetector::MEMORY_LEAK, enableMemLeakCheck_);
 
+  const bool hasDefinedFunction =
+      std::any_of(module->begin(), module->end(), [](const llvm::Function &F) {
+        return !F.isDeclaration() && !F.isIntrinsic();
+      });
+  if (!hasDefinedFunction) {
+    if (!isAEQuietMode()) {
+      llvm::errs() << "AE: module contains no function definitions\n";
+    }
+    return;
+  }
+
   // Always run pointer analysis (required for AE)
   pta_->pass->analyze(module);
   ptaReady_ = true;
@@ -1659,6 +1670,15 @@ void AbstractInterpretation::updateStateOnBinary(
   IntervalValue val1 = as[op1Id].getInterval();
   IntervalValue result;
 
+  auto getNonNegativeConstant = [](const llvm::Value *value,
+                                   uint64_t &constant) -> bool {
+    const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(value);
+    if (!ci || ci->isNegative())
+      return false;
+    constant = ci->getZExtValue();
+    return constant <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  };
+
   switch (binary->getOpcode()) {
   case llvm::Instruction::Add:
   case llvm::Instruction::FAdd:
@@ -1683,7 +1703,26 @@ void AbstractInterpretation::updateStateOnBinary(
     }
     break;
   case llvm::Instruction::SRem:
-  case llvm::Instruction::URem:
+  case llvm::Instruction::URem: {
+    uint64_t divisor = 0;
+    if (getNonNegativeConstant(binary->getOperand(1), divisor) &&
+        divisor != 0) {
+      if (binary->getOpcode() == llvm::Instruction::URem) {
+        result = IntervalValue(0, static_cast<int64_t>(divisor - 1));
+      } else {
+        const int64_t bound = static_cast<int64_t>(divisor - 1);
+        result = IntervalValue(-bound, bound);
+      }
+      break;
+    }
+    if (val1.contains(0)) {
+      // Modulo by zero - result is top
+      result = IntervalValue::top();
+    } else {
+      result = val0 % val1;
+    }
+    break;
+  }
   case llvm::Instruction::FRem:
     if (val1.contains(0)) {
       // Modulo by zero - result is top
@@ -1699,9 +1738,16 @@ void AbstractInterpretation::updateStateOnBinary(
   case llvm::Instruction::AShr:
     result = val0 >> val1;
     break;
-  case llvm::Instruction::And:
-    result = val0 & val1;
+  case llvm::Instruction::And: {
+    uint64_t mask = 0;
+    if (getNonNegativeConstant(binary->getOperand(1), mask) ||
+        getNonNegativeConstant(binary->getOperand(0), mask)) {
+      result = IntervalValue(0, static_cast<int64_t>(mask));
+    } else {
+      result = val0 & val1;
+    }
     break;
+  }
   case llvm::Instruction::Or:
     result = val0 | val1;
     break;
@@ -1995,10 +2041,14 @@ void AbstractInterpretation::updateStateOnCast(const llvm::CastInst *cast) {
     if (!srcType->isIntegerTy())
       return IntervalValue::top();
 
-    if (val.is_infinite())
-      return IntervalValue::top();
-
     unsigned bits = srcType->getIntegerBitWidth();
+    if (val.is_infinite()) {
+      if (bits >= 64)
+        return IntervalValue::top();
+      const uint64_t upper = (uint64_t{1} << bits) - 1;
+      return IntervalValue(0, static_cast<int64_t>(upper));
+    }
+
     if (val.is_numeral()) {
       int64_t numVal = val.getIntNumeral();
       if (bits == 8) {
@@ -2040,10 +2090,17 @@ void AbstractInterpretation::updateStateOnCast(const llvm::CastInst *cast) {
     if (val.isBottom())
       return val;
 
-    if (val.is_infinite() || !dstType->isIntegerTy())
+    if (!dstType->isIntegerTy())
       return IntervalValue::top();
 
     const unsigned dstBits = dstType->getIntegerBitWidth();
+    if (val.is_infinite()) {
+      if (dstBits >= 64)
+        return IntervalValue::top();
+      const int64_t minSigned = -(int64_t{1} << (dstBits - 1));
+      const int64_t maxSigned = (int64_t{1} << (dstBits - 1)) - 1;
+      return IntervalValue(minSigned, maxSigned);
+    }
     if (dstBits >= 64)
       return val;
 
@@ -2080,10 +2137,14 @@ void AbstractInterpretation::updateStateOnCast(const llvm::CastInst *cast) {
                           llvm::Type *srcType) -> IntervalValue {
     if (!srcType->isIntegerTy())
       return IntervalValue::top();
-    if (val.is_infinite())
-      return IntervalValue::top();
-
     const unsigned bits = srcType->getIntegerBitWidth();
+    if (val.is_infinite()) {
+      if (bits >= 64)
+        return IntervalValue::top();
+      const int64_t minSigned = -(int64_t{1} << (bits - 1));
+      const int64_t maxSigned = (int64_t{1} << (bits - 1)) - 1;
+      return IntervalValue(minSigned, maxSigned);
+    }
     if (val.is_numeral()) {
       llvm::APInt source(bits, static_cast<uint64_t>(val.getIntNumeral()),
                          /*isSigned=*/false);
@@ -3691,6 +3752,7 @@ bool AbstractInterpretation::isBranchFeasible(const llvm::BranchInst *branch,
 
   // For non-cmp conditions (e.g., phi, select), do simple check
   uint32_t condId = getValueId(cond);
+  materializeConstantValue(as, cond, condId);
 
   if (!as.inVarToValTable(condId)) {
     // Unknown condition - assume feasible
@@ -3808,27 +3870,26 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
   const llvm::LoadInst *loadOp0 = nullptr;
   const llvm::LoadInst *loadOp1 = nullptr;
 
-  // Try to find if op0 comes from a load instruction
-  if (const llvm::LoadInst *load = llvm::dyn_cast<llvm::LoadInst>(op0Val)) {
-    loadOp0 = load;
-  } else if (const llvm::BitCastInst *bc =
-                 llvm::dyn_cast<llvm::BitCastInst>(op0Val)) {
-    if (const llvm::LoadInst *load =
-            llvm::dyn_cast<llvm::LoadInst>(bc->getOperand(0))) {
-      loadOp0 = load;
+  auto getUnderlyingLoad = [](const llvm::Value *value)
+      -> const llvm::LoadInst * {
+    while (value) {
+      if (const auto *cast = llvm::dyn_cast<llvm::CastInst>(value)) {
+        value = cast->getOperand(0);
+        continue;
+      }
+      if (const auto *freeze = llvm::dyn_cast<llvm::FreezeInst>(value)) {
+        value = freeze->getOperand(0);
+        continue;
+      }
+      break;
     }
-  }
+    return llvm::dyn_cast_or_null<llvm::LoadInst>(value);
+  };
 
-  // Try to find if op1 comes from a load instruction
-  if (const llvm::LoadInst *load = llvm::dyn_cast<llvm::LoadInst>(op1Val)) {
-    loadOp1 = load;
-  } else if (const llvm::BitCastInst *bc =
-                 llvm::dyn_cast<llvm::BitCastInst>(op1Val)) {
-    if (const llvm::LoadInst *load =
-            llvm::dyn_cast<llvm::LoadInst>(bc->getOperand(0))) {
-      loadOp1 = load;
-    }
-  }
+  // Integer comparisons often operate on a casted reload of the same memory
+  // cell. Strip the casts so branch facts can be propagated back to that cell.
+  loadOp0 = getUnderlyingLoad(op0Val);
+  loadOp1 = getUnderlyingLoad(op1Val);
 
   // Get addresses from loaded pointers for memory refinement
   AddressValue addrOp0, addrOp1;
@@ -3903,6 +3964,32 @@ bool AbstractInterpretation::isCmpBranchFeasible(const llvm::CmpInst *cmpInst,
     std::swap(lhsAddrs, rhsAddrs);
     predicate = getSwitchLhsRhsPredicate()[predicate];
   } else if (!b0 && !b1) {
+    if ((predicate == llvm::CmpInst::ICMP_SLT ||
+         predicate == llvm::CmpInst::ICMP_SLE) &&
+        !val1.ub().is_infinity()) {
+      int64_t upper = val1.ub().getIntNumeral();
+      if (predicate == llvm::CmpInst::ICMP_SLT) {
+        if (upper == std::numeric_limits<int64_t>::min())
+          return true;
+        --upper;
+      }
+      IntervalValue refined = val0;
+      refined.meet_with(IntervalValue(BoundedInt::minus_infinity(),
+                                      BoundedInt(upper)));
+      if (refined.isBottom())
+        return false;
+      as[lhsId] = AbstractValue(refined);
+      if (lhsLoadOp && !lhsAddrs.getVals().empty()) {
+        for (uint32_t addr : lhsAddrs.getVals()) {
+          uint32_t objId = as.getIDFromAddr(addr);
+          if (!as.inAddrToValTable(objId))
+            continue;
+          AbstractValue memValue = as.load(addr);
+          memValue.getInterval().meet_with(refined);
+          as.store(addr, memValue);
+        }
+      }
+    }
     return true;
   } else if (b0 && b1) {
     if (!cmpInst->getOperand(0)->getType()->isIntegerTy())
