@@ -22,7 +22,14 @@
 
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/Support/raw_ostream.h>
 #include <gtest/gtest.h>
+
+#include <initializer_list>
+#include <set>
+#include <vector>
 
 using namespace llvm;
 using namespace aser;
@@ -758,6 +765,231 @@ TEST(AserPTA_Comparison, FIvsFS_SameResult) {
   passesFI.run(*module);
   passesFS.run(*module);
 }
+
+// ============================================================================
+// Global Initializer Tests
+// ============================================================================
+
+namespace {
+
+using InitializerSolvers = ::testing::Types<
+    FI_NoCtx_Solver, aser::WavePropagation<FI_NoCtx_Model>,
+    aser::DeepPropagation<FI_NoCtx_Model>, FS_NoCtx_Solver,
+    aser::WavePropagation<FS_NoCtx_Model>, aser::DeepPropagation<FS_NoCtx_Model>>;
+
+struct ExpectedPointsTo {
+  const char *value;
+  std::vector<const char *> targets;
+};
+
+template <typename Solver>
+void checkInitializers(const char *ir,
+                       std::initializer_list<ExpectedPointsTo> expectations) {
+  llvm::LLVMContext context;
+  auto module = lotus::unittest::parseModule(context, ir, "global-initializers");
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+
+  llvm::legacy::PassManager passes;
+  passes.add(new aser::CanonicalizeGEPPass());
+  passes.run(*module);
+  ASSERT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+
+  Solver solver;
+  solver.analyze(module.get());
+  for (const auto &expected : expectations) {
+    SCOPED_TRACE(expected.value);
+    const llvm::Value *value = module->getNamedValue(expected.value);
+    if (!value)
+      value = lotus::unittest::findInstructionByName(
+          module->getFunction("main"), expected.value);
+    ASSERT_NE(value, nullptr);
+    std::vector<const typename Solver::ObjTy *> points;
+    solver.getPointsTo(nullptr, value, points);
+    std::set<const llvm::Value *> actualTargets, expectedTargets;
+    for (const auto *object : points)
+      actualTargets.insert(object->getValue());
+    for (const char *target : expected.targets) {
+      auto *global = module->getNamedValue(target);
+      ASSERT_NE(global, nullptr);
+      expectedTargets.insert(global);
+    }
+    EXPECT_EQ(points.size(), expected.targets.size());
+    EXPECT_EQ(actualTargets, expectedTargets);
+  }
+}
+
+template <typename Solver>
+class AserPTAGlobalInitializers : public ::testing::Test {};
+
+TYPED_TEST_SUITE(AserPTAGlobalInitializers, InitializerSolvers);
+
+TYPED_TEST(AserPTAGlobalInitializers, DirectBlockAddress) {
+  checkInitializers<TypeParam>(R"(
+    @jump = global i8* blockaddress(@main, %target)
+    define i32 @main() {
+    entry:
+      %label = load i8*, i8** @jump
+      br label %target
+    target:
+      ret i32 0
+    }
+  )", {{"jump", {"jump"}}, {"label", {}}});
+}
+
+TYPED_TEST(AserPTAGlobalInitializers, BitcastBlockAddress) {
+  checkInitializers<TypeParam>(R"(
+    @jump = global i32* bitcast (i8* blockaddress(@main, %target) to i32*)
+    define i32 @main() {
+    entry:
+      %label = load i32*, i32** @jump
+      br label %target
+    target:
+      ret i32 0
+    }
+  )", {{"jump", {"jump"}}, {"label", {}}});
+}
+
+TYPED_TEST(AserPTAGlobalInitializers, AddressSpaceCastBlockAddress) {
+  checkInitializers<TypeParam>(R"(
+    target datalayout = "e-p:64:64-p1:32:32"
+    @jump = global i8 addrspace(1)* addrspacecast (
+        i8* blockaddress(@main, %target) to i8 addrspace(1)*)
+    define i32 @main() {
+    entry:
+      %label = load i8 addrspace(1)*, i8 addrspace(1)** @jump
+      br label %target
+    target:
+      ret i32 0
+    }
+  )", {{"jump", {"jump"}}, {"label", {}}});
+}
+
+TYPED_TEST(AserPTAGlobalInitializers, GepBlockAddress) {
+  checkInitializers<TypeParam>(R"(
+    @jump = global i8* getelementptr (
+        i8, i8* blockaddress(@main, %target), i64 1)
+    define i32 @main() {
+    entry:
+      %label = load i8*, i8** @jump
+      br label %target
+    target:
+      ret i32 0
+    }
+  )", {{"jump", {"jump"}}, {"label", {}}});
+}
+
+TYPED_TEST(AserPTAGlobalInitializers, MixedArrayKeepsDataAddress) {
+  // Both native models merge elements of this pointer array.
+  checkInitializers<TypeParam>(R"(
+    @payload = global i8 0
+    @table = global [2 x i8*] [
+        i8* blockaddress(@main, %target), i8* @payload]
+    define i32 @main() {
+    entry:
+      %data = load i8*, i8** getelementptr (
+          [2 x i8*], [2 x i8*]* @table, i64 0, i64 1)
+      br label %target
+    target:
+      ret i32 0
+    }
+  )", {{"table", {"table"}}, {"data", {"payload"}}});
+}
+
+TYPED_TEST(AserPTAGlobalInitializers, MixedStructKeepsDataAndFunctionAddresses) {
+  const char *ir = R"(
+    %Dispatch = type { i32*, i8*, void ()* }
+    @payload = global i8 0
+    @dispatch = global %Dispatch {
+        i32* bitcast (i8* blockaddress(@main, %target) to i32*),
+        i8* @payload, void ()* @callback }
+    define void @callback() { ret void }
+    define i32 @main() {
+    entry:
+      %label = load i32*, i32** getelementptr (
+          %Dispatch, %Dispatch* @dispatch, i64 0, i32 0)
+      %data = load i8*, i8** getelementptr (
+          %Dispatch, %Dispatch* @dispatch, i64 0, i32 1)
+      %function = load void ()*, void ()** getelementptr (
+          %Dispatch, %Dispatch* @dispatch, i64 0, i32 2)
+      br label %target
+    target:
+      ret i32 0
+    }
+  )";
+  if (TypeParam::MMT::COLLAPSE_GEP) {
+    checkInitializers<TypeParam>(
+        ir, {{"dispatch", {"dispatch"}},
+             {"label", {"payload", "callback"}},
+             {"data", {"payload", "callback"}},
+             {"function", {"payload", "callback"}}});
+  } else {
+    checkInitializers<TypeParam>(ir, {{"dispatch", {"dispatch"}},
+                                     {"label", {}},
+                                     {"data", {"payload"}},
+                                     {"function", {"callback"}}});
+  }
+}
+
+TYPED_TEST(AserPTAGlobalInitializers, NestedAggregateKeepsDataAddress) {
+  checkInitializers<TypeParam>(R"(
+    @payload = global i8 0
+    @table = global { [2 x i8*] } { [2 x i8*] [
+        i8* blockaddress(@main, %target), i8* @payload] }
+    define i32 @main() {
+    entry:
+      %data = load i8*, i8** getelementptr (
+          { [2 x i8*] }, { [2 x i8*] }* @table,
+          i64 0, i32 0, i64 1)
+      br label %target
+    target:
+      ret i32 0
+    }
+  )", {{"table", {"table"}}, {"data", {"payload"}}});
+}
+
+TYPED_TEST(AserPTAGlobalInitializers, CastArrayUsesInitializerPointerSize) {
+  // Stripping the cast changes the pointer size from four to eight bytes.
+  // Skipping the label must still advance by one original array element.
+  checkInitializers<TypeParam>(R"(
+    target datalayout = "e-p:64:64-p1:32:32"
+    @payload = global i8 0
+    @table = global [2 x i8 addrspace(1)*] [
+        i8 addrspace(1)* addrspacecast (
+            i8* blockaddress(@main, %target) to i8 addrspace(1)*),
+        i8 addrspace(1)* addrspacecast (i8* @payload to i8 addrspace(1)*)]
+    define i32 @main() {
+    entry:
+      %data = load i8 addrspace(1)*, i8 addrspace(1)** getelementptr (
+          [2 x i8 addrspace(1)*], [2 x i8 addrspace(1)*]* @table,
+          i64 0, i64 1)
+      br label %target
+    target:
+      ret i32 0
+    }
+  )", {{"data", {"payload"}}});
+}
+
+TYPED_TEST(AserPTAGlobalInitializers, OrdinaryPointersKeepTheirTargets) {
+  checkInitializers<TypeParam>(R"(
+    @payload = global i8 0
+    @data = global i32* bitcast (i8* @payload to i32*)
+    @function = global void ()* @callback
+    @null = global i8* null
+    @undef = global i8* undef
+    define void @callback() { ret void }
+    define i32 @main() {
+      %data.value = load i32*, i32** @data
+      %function.value = load void ()*, void ()** @function
+      %null.value = load i8*, i8** @null
+      %undef.value = load i8*, i8** @undef
+      ret i32 0
+    }
+  )", {{"data.value", {"payload"}}, {"function.value", {"callback"}},
+       {"null.value", {}}, {"undef.value", {}}});
+}
+
+} // namespace
 
 #ifndef LOTUS_GTEST_NO_MAIN
 int main(int argc, char **argv) {

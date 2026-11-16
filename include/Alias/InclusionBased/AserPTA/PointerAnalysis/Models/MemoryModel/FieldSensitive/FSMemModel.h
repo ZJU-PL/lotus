@@ -365,12 +365,15 @@ private:
   inline void processScalarGlobals(MemBlock<ctx> *memBlock,
                                    const llvm::Constant *C, size_t &offset,
                                    const llvm::DataLayout &DL) {
-    if (C->getType()->isPointerTy() && !llvm::isa<llvm::BlockAddress>(C)) {
+    // Keep C for layout: stripping an addrspacecast can change pointer size.
+    // Check the canonical value so casts cannot hide a basic-block address.
+    const auto *value =
+        llvm::cast<llvm::Constant>(Canonicalizer::canonicalize(C));
+    if (C->getType()->isPointerTy() && !llvm::isa<llvm::BlockAddress>(value)) {
       /* FIXME: what if the constexpr is a complicated expression or global
          alias? need to evaluate it statically. */
       // now assume it point is a global variable
       // llvm::APInt constOffset(64, 0);
-      C = llvm::dyn_cast<llvm::Constant>(Canonicalizer::canonicalize(C));
       // auto V = C->stripAndAccumulateConstantOffsets(DL, constOffset, true);
 
       auto *ptr = memBlock->getObjectAt(offset);
@@ -389,7 +392,7 @@ private:
 
       auto *ptrNode = ptr->getObjNode();
       ObjNode *objNode = nullptr;
-      if (const auto *GEP = llvm::dyn_cast<llvm::GEPOperator>(C)) {
+      if (const auto *GEP = llvm::dyn_cast<llvm::GEPOperator>(value)) {
         auto off = llvm::APInt(DL.getIndexTypeSizeInBits(GEP->getType()), 0);
         const auto *baseValue = GEP->stripAndAccumulateConstantOffsets(DL, off, true);
         // objNode can be none, when it is a external symbol, which does not
@@ -410,7 +413,7 @@ private:
           }
         }
       } else {
-        if (auto *baseBlock = getMemBlock(CT::getGlobalCtx(), C)) {
+        if (auto *baseBlock = getMemBlock(CT::getGlobalCtx(), value)) {
           if (auto *baseObj = baseBlock->getObjectAt(0)) {
             objNode = baseObj->getObjNodeOrNull();
           }
