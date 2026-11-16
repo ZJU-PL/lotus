@@ -110,6 +110,10 @@ public:
     if (llvm::isa<llvm::PointerType>(C->getType())) {
       // strip the offset+alias
       const auto *value = Canonicalizer::canonicalize(C);
+      // Basic-block addresses have no data object. Check after stripping
+      // casts and offsets so wrapped block addresses are skipped as well.
+      if (llvm::isa<llvm::BlockAddress>(value))
+        return;
       auto obj = this->get(CT::getGlobalCtx(), value, AllocType::Globals);
       auto ptr = this->get(CT::getGlobalCtx(), gVar, AllocType::Globals);
 
