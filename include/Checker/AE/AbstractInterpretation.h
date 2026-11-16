@@ -400,6 +400,7 @@ private:
   void updateStateOnCmp(const llvm::CmpInst *cmp);
   void updateStateOnLoad(const llvm::LoadInst *load);
   void updateStateOnStore(const llvm::StoreInst *store);
+  void updateStateOnAtomic(const llvm::Instruction *inst);
   void updateStateOnCast(const llvm::CastInst *cast);
   void updateStateOnCall(const llvm::CallBase *call);
   void updateStateOnRet(const llvm::ReturnInst *ret);

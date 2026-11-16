@@ -292,6 +292,26 @@ void materializeConstantValue(AbstractState &as, const llvm::Value *val,
   }
 
   const auto *constant = llvm::dyn_cast<llvm::Constant>(val);
+  if (constant) {
+    if (const auto *vector =
+            llvm::dyn_cast<llvm::FixedVectorType>(val->getType())) {
+      AbstractValue lanes;
+      for (unsigned i = 0; i < vector->getNumElements(); ++i) {
+        const llvm::Constant *element = constant->getAggregateElement(i);
+        if (!element) {
+          lanes.join_with(unknownValueForType(vector->getElementType()));
+          continue;
+        }
+        const uint32_t id = AbstractInterpretation::getValueIdStatic(element);
+        materializeConstantValue(as, element, id);
+        lanes.join_with(as.inVarToValTable(id) || as.inVarToAddrsTable(id)
+                            ? as[id]
+                            : unknownValueForType(vector->getElementType()));
+      }
+      as[valueId] = lanes;
+      return;
+    }
+  }
   if (constant && val->getType()->isPointerTy()) {
     llvm::Module *module = AbstractInterpretation::getAEInstance().getModule();
     if (!module)
@@ -333,9 +353,17 @@ const llvm::Value *resolveAggregateElement(const llvm::Value *aggregate,
   if (const auto *insert = llvm::dyn_cast<llvm::InsertElementInst>(aggregate)) {
     if (indices.size() == 1) {
       if (const auto *lane =
-              llvm::dyn_cast<llvm::ConstantInt>(insert->getOperand(1))) {
-        if (lane->getZExtValue() == indices.front())
-          return insert->getOperand(2);
+              llvm::dyn_cast<llvm::ConstantInt>(insert->getOperand(2))) {
+        const auto *type =
+            llvm::dyn_cast<llvm::FixedVectorType>(insert->getType());
+        if (!type ||
+            lane->getValue().getLimitedValue() >= type->getNumElements())
+          return nullptr;
+        if (lane->getValue().getLimitedValue() == indices.front())
+          return insert->getOperand(1);
+      } else {
+        // A dynamic insertion may overwrite the requested lane.
+        return nullptr;
       }
     }
     return resolveAggregateElement(insert->getOperand(0), indices);
@@ -443,6 +471,49 @@ bool unsignedPredicatePossible(int predicate, const IntervalValue &lhs,
   }
 }
 
+bool isSignedPredicate(int predicate) {
+  return predicate == llvm::CmpInst::ICMP_SGT ||
+         predicate == llvm::CmpInst::ICMP_SGE ||
+         predicate == llvm::CmpInst::ICMP_SLT ||
+         predicate == llvm::CmpInst::ICMP_SLE;
+}
+
+IntervalValue signedIntegerInterval(const IntervalValue &value, unsigned bits) {
+  if (bits > 1 && !value.is_infinite()) {
+    const int64_t min = bits == 64 ? std::numeric_limits<int64_t>::min()
+                                   : -(int64_t{1} << (bits - 1));
+    const int64_t max = bits == 64 ? std::numeric_limits<int64_t>::max()
+                                   : (int64_t{1} << (bits - 1)) - 1;
+    if (value.lb().getIntNumeral() >= min && value.ub().getIntNumeral() <= max)
+      return value;
+  }
+  const auto bounds = unsignedIntervalBounds(value, bits);
+  if (bits == 1) {
+    // Signed i1 interprets the true bit as -1, while SSA flags use 0/1.
+    return IntervalValue(-static_cast<int64_t>(bounds.second),
+                         -static_cast<int64_t>(bounds.first));
+  }
+  return signedIntervalFromUnsigned(bounds.first, bounds.second, bits);
+}
+
+bool signedPredicatePossible(int predicate, const IntervalValue &lhs,
+                             const IntervalValue &rhs, unsigned bits) {
+  const IntervalValue a = signedIntegerInterval(lhs, bits);
+  const IntervalValue b = signedIntegerInterval(rhs, bits);
+  switch (predicate) {
+  case llvm::CmpInst::ICMP_SGT:
+    return a.ub().geq(b.lb()) && !a.ub().equal(b.lb());
+  case llvm::CmpInst::ICMP_SGE:
+    return a.ub().geq(b.lb());
+  case llvm::CmpInst::ICMP_SLT:
+    return a.lb().leq(b.ub()) && !a.lb().equal(b.ub());
+  case llvm::CmpInst::ICMP_SLE:
+    return a.lb().leq(b.ub());
+  default:
+    return true;
+  }
+}
+
 void clearAEBugReports() {
   static constexpr const char *AEBugTypeNames[] = {
       "AE Buffer Overflow",  "AE Null Dereference", "AE Divide By Zero",
@@ -458,6 +529,35 @@ void clearAEBugReports() {
     }
   }
   mgr.clear_reports_for_types(ids);
+}
+
+IntervalValue atomicEquality(AbstractValue lhs, AbstractValue rhs,
+                             llvm::Type *type) {
+  if (type->isPointerTy()) {
+    if (!lhs.isAddr() || !rhs.isAddr() ||
+        lhs.getAddrs().contains(InvalidMemAddr) ||
+        rhs.getAddrs().contains(InvalidMemAddr))
+      return IntervalValue(0, 1);
+    if (!lhs.getAddrs().hasIntersect(rhs.getAddrs()))
+      return IntervalValue(0);
+    return lhs.getAddrs().size() == 1 && rhs.getAddrs().size() == 1
+               ? IntervalValue(1)
+               : IntervalValue(0, 1);
+  }
+  if (!lhs.isInterval() || !rhs.isInterval())
+    return IntervalValue(0, 1);
+  if (type->isIntegerTy() && type->getIntegerBitWidth() <= 64) {
+    const unsigned bits = type->getIntegerBitWidth();
+    const auto a = unsignedIntervalBounds(lhs.getInterval(), bits);
+    const auto b = unsignedIntervalBounds(rhs.getInterval(), bits);
+    lhs = signedIntervalFromUnsigned(a.first, a.second, bits);
+    rhs = signedIntervalFromUnsigned(b.first, b.second, bits);
+  }
+  if (!lhs.getInterval().hasIntersect(rhs.getInterval()))
+    return IntervalValue(0);
+  return lhs.getInterval().is_numeral() && rhs.getInterval().is_numeral()
+             ? IntervalValue(1)
+             : IntervalValue(0, 1);
 }
 
 bool isAEQuietMode() {
@@ -1630,7 +1730,7 @@ bool AbstractInterpretation::handleInstruction(const llvm::Instruction *inst) {
     break;
   case llvm::Instruction::AtomicRMW:
   case llvm::Instruction::AtomicCmpXchg:
-    as[getValueId(inst)] = unknownValueForType(inst->getType());
+    updateStateOnAtomic(inst);
     break;
   case llvm::Instruction::ICmp:
   case llvm::Instruction::FCmp:
@@ -1936,11 +2036,14 @@ void AbstractInterpretation::updateStateOnCmp(const llvm::CmpInst *cmp) {
                              predicate == llvm::CmpInst::ICMP_UGE ||
                              predicate == llvm::CmpInst::ICMP_ULT ||
                              predicate == llvm::CmpInst::ICMP_ULE;
-  if (isUnsignedCmp && cmp->getOperand(0)->getType()->isIntegerTy()) {
+  if ((isUnsignedCmp || isSignedPredicate(predicate)) &&
+      cmp->getOperand(0)->getType()->isIntegerTy() &&
+      cmp->getOperand(0)->getType()->getIntegerBitWidth() <= 64) {
     const unsigned bits = cmp->getOperand(0)->getType()->getIntegerBitWidth();
-    const bool mayBeTrue =
-        unsignedPredicatePossible(predicate, val0, val1, bits);
-    const bool mayBeFalse = unsignedPredicatePossible(
+    const auto possible =
+        isUnsignedCmp ? unsignedPredicatePossible : signedPredicatePossible;
+    const bool mayBeTrue = possible(predicate, val0, val1, bits);
+    const bool mayBeFalse = possible(
         llvm::CmpInst::getInversePredicate(predicate), val0, val1, bits);
     if (!mayBeTrue)
       resVal = IntervalValue(0, 0);
@@ -2091,6 +2194,101 @@ void AbstractInterpretation::updateStateOnStore(const llvm::StoreInst *store) {
     kind = AbstractState::StoreKind::Strong;
 
   as.storeValue(ptrId, valId, kind);
+}
+
+void AbstractInterpretation::updateStateOnAtomic(
+    const llvm::Instruction *inst) {
+  const auto *rmw = llvm::dyn_cast<llvm::AtomicRMWInst>(inst);
+  const auto *cmp = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(inst);
+  const llvm::Value *pointer =
+      rmw ? rmw->getPointerOperand() : cmp->getPointerOperand();
+  const llvm::Value *operand =
+      rmw ? rmw->getValOperand() : cmp->getNewValOperand();
+  llvm::Type *type = operand->getType();
+  AbstractState &as = stateStore_.getOrCreate(inst);
+  const uint32_t ptrId = getValueId(pointer), valueId = getValueId(operand);
+  materializeConstantValue(as, pointer, ptrId);
+  materializeConstantValue(as, operand, valueId);
+  AbstractValue old = as.loadValue(ptrId);
+  if (!old.isInterval() && !old.isAddr())
+    old = unknownValueForType(type);
+  const AbstractValue value =
+      as.inVarToValTable(valueId) || as.inVarToAddrsTable(valueId)
+          ? as[valueId]
+          : unknownValueForType(type);
+  AbstractValue updated = unknownValueForType(type);
+  bool writes = true;
+  if (cmp) {
+    const uint32_t expectedId = getValueId(cmp->getCompareOperand());
+    materializeConstantValue(as, cmp->getCompareOperand(), expectedId);
+    IntervalValue success = atomicEquality(old, as[expectedId], type);
+    if (success.is_zero()) {
+      writes = false;
+    } else if (success.equals(IntervalValue(1)) && !cmp->isWeak()) {
+      updated = value;
+    } else {
+      updated = old;
+      updated.join_with(value);
+    }
+  } else if (rmw->getOperation() == llvm::AtomicRMWInst::Xchg) {
+    updated = value;
+  } else if (type->isIntegerTy() && type->getIntegerBitWidth() <= 64 &&
+             old.isInterval() && value.isInterval() &&
+             old.getInterval().is_numeral() &&
+             value.getInterval().is_numeral()) {
+    const unsigned bits = type->getIntegerBitWidth();
+    llvm::APInt a(bits, old.getInterval().getIntNumeral());
+    llvm::APInt b(bits, value.getInterval().getIntNumeral());
+    llvm::APInt result(bits, 0);
+    switch (rmw->getOperation()) {
+    case llvm::AtomicRMWInst::Add:
+      result = a + b;
+      break;
+    case llvm::AtomicRMWInst::Sub:
+      result = a - b;
+      break;
+    case llvm::AtomicRMWInst::And:
+      result = a & b;
+      break;
+    case llvm::AtomicRMWInst::Nand:
+      result = ~(a & b);
+      break;
+    case llvm::AtomicRMWInst::Or:
+      result = a | b;
+      break;
+    case llvm::AtomicRMWInst::Xor:
+      result = a ^ b;
+      break;
+    case llvm::AtomicRMWInst::Max:
+      result = a.sgt(b) ? a : b;
+      break;
+    case llvm::AtomicRMWInst::Min:
+      result = a.slt(b) ? a : b;
+      break;
+    case llvm::AtomicRMWInst::UMax:
+      result = a.ugt(b) ? a : b;
+      break;
+    case llvm::AtomicRMWInst::UMin:
+      result = a.ult(b) ? a : b;
+      break;
+    default:
+      llvm_unreachable("unexpected integer atomic RMW operation");
+    }
+    updated = AbstractValue(IntervalValue(result.getSExtValue()));
+  }
+  // An atomic RMW returns the old value. A cmpxchg's old-value field is kept
+  // under the aggregate's SSA id; extractvalue handles its success field.
+  as[getValueId(inst)] = old;
+  if (writes && as.inVarToAddrsTable(ptrId)) {
+    const AddressValue targets = as[ptrId].getAddrs();
+    const bool strong = isStrongUpdateForStore(targets, as);
+    for (uint32_t address : targets) {
+      if (strong)
+        as.store(address, updated);
+      else
+        as.weakStore(address, updated);
+    }
+  }
 }
 
 void AbstractInterpretation::updateStateOnCast(const llvm::CastInst *cast) {
@@ -2595,6 +2793,22 @@ void AbstractInterpretation::updateStateOnExtractValue(
 
   llvm::SmallVector<unsigned, 4> indices(extract->idx_begin(),
                                          extract->idx_end());
+  if (const auto *cmp = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(aggregate)) {
+    if (indices.size() == 1 && indices[0] == 0) {
+      as[lhsId] = as[aggId];
+      return;
+    }
+    if (indices.size() == 1 && indices[0] == 1) {
+      const uint32_t expectedId = getValueId(cmp->getCompareOperand());
+      materializeConstantValue(as, cmp->getCompareOperand(), expectedId);
+      IntervalValue success = atomicEquality(
+          as[aggId], as[expectedId], cmp->getCompareOperand()->getType());
+      if (cmp->isWeak() && !success.is_zero())
+        success = IntervalValue(0, 1);
+      as[lhsId] = AbstractValue(success);
+      return;
+    }
+  }
   if (const llvm::Value *selected =
           resolveAggregateElement(aggregate, indices)) {
     uint32_t selectedId = getValueId(selected);
@@ -2605,16 +2819,8 @@ void AbstractInterpretation::updateStateOnExtractValue(
     }
   }
 
-  // ExtractValue extracts a field from an aggregate value
-  // For abstract interpretation, we conservatively propagate the value
-  // In SVF, this would be a CopyStmt from aggregate field to result
-  if (as.inVarToValTable(aggId)) {
-    updateStateOnCopy(extract, aggregate);
-  } else if (as.inVarToAddrsTable(aggId)) {
-    updateStateOnCopy(extract, aggregate);
-  } else {
-    as[lhsId] = unknownValueForType(extract->getType());
-  }
+  // A flattened aggregate summary cannot identify an arbitrary field.
+  as[lhsId] = unknownValueForType(extract->getType());
 }
 
 void AbstractInterpretation::updateStateOnInsertValue(
@@ -2665,7 +2871,13 @@ void AbstractInterpretation::updateStateOnExtractElement(
 
   if (const auto *index =
           llvm::dyn_cast<llvm::ConstantInt>(extract->getIndexOperand())) {
-    unsigned lane = static_cast<unsigned>(index->getZExtValue());
+    const auto *type = llvm::dyn_cast<llvm::FixedVectorType>(vector->getType());
+    if (!type ||
+        index->getValue().getLimitedValue() >= type->getNumElements()) {
+      as[lhsId] = unknownValueForType(extract->getType());
+      return;
+    }
+    unsigned lane = static_cast<unsigned>(index->getValue().getLimitedValue());
     if (const llvm::Value *selected = resolveAggregateElement(vector, {lane})) {
       uint32_t selectedId = getValueId(selected);
       materializeConstantValue(as, selected, selectedId);
@@ -2679,7 +2891,7 @@ void AbstractInterpretation::updateStateOnExtractElement(
   // ExtractElement extracts an element from a vector
   // For abstract interpretation, we propagate the vector's abstract value
   // In SVF, this would be a CopyStmt from vector element to result
-  if (as.inVarToValTable(vecId)) {
+  if (as.inVarToValTable(vecId) && !extract->getType()->isPointerTy()) {
     updateStateOnCopy(extract, vector);
   } else if (as.inVarToAddrsTable(vecId)) {
     updateStateOnCopy(extract, vector);
@@ -2692,11 +2904,20 @@ void AbstractInterpretation::updateStateOnInsertElement(
     const llvm::InsertElementInst *insert) {
   uint32_t lhsId = getValueId(insert);
   uint32_t vecId = getValueId(insert->getOperand(0));
-  uint32_t valId = getValueId(insert->getOperand(2));
+  uint32_t valId = getValueId(insert->getOperand(1));
 
   AbstractState &as = stateStore_.getOrCreate(insert);
+  if (const auto *index =
+          llvm::dyn_cast<llvm::ConstantInt>(insert->getOperand(2))) {
+    const auto *type = llvm::dyn_cast<llvm::FixedVectorType>(insert->getType());
+    if (!type ||
+        index->getValue().getLimitedValue() >= type->getNumElements()) {
+      as[lhsId] = unknownValueForType(insert->getType()->getElementType());
+      return;
+    }
+  }
   materializeConstantValue(as, insert->getOperand(0), vecId);
-  materializeConstantValue(as, insert->getOperand(2), valId);
+  materializeConstantValue(as, insert->getOperand(1), valId);
 
   // InsertElement inserts a value into a vector and returns the new vector
   // For abstract interpretation, we join the vector and inserted value
@@ -2722,7 +2943,7 @@ void AbstractInterpretation::updateStateOnInsertElement(
   if (hasValue) {
     as[lhsId] = result;
   } else {
-    as[lhsId] = unknownValueForType(insert->getType());
+    as[lhsId] = unknownValueForType(insert->getType()->getElementType());
   }
 }
 
@@ -4131,6 +4352,29 @@ bool AbstractInterpretation::isCmpBranchFeasible(
                              predicate == llvm::CmpInst::ICMP_UGE ||
                              predicate == llvm::CmpInst::ICMP_ULT ||
                              predicate == llvm::CmpInst::ICMP_ULE;
+  if ((isUnsignedCmp || isSignedPredicate(predicate)) &&
+      cmpInst->getOperand(0)->getType()->isIntegerTy() &&
+      cmpInst->getOperand(0)->getType()->getIntegerBitWidth() <= 64) {
+    const unsigned bits =
+        cmpInst->getOperand(0)->getType()->getIntegerBitWidth();
+    const auto possible =
+        isUnsignedCmp ? unsignedPredicatePossible : signedPredicatePossible;
+    if (!possible(predicate, val0, val1, bits))
+      return false;
+    if (!possible(llvm::CmpInst::getInversePredicate(
+                      static_cast<llvm::CmpInst::Predicate>(predicate)),
+                  val0, val1, bits))
+      return true;
+    if (!isUnsignedCmp) {
+      // Keep raw out-of-range arithmetic approximations out of inverse
+      // refinement. The predicate still observes the operand's bit pattern.
+      if ((!val0.is_infinite() &&
+           !signedIntegerInterval(val0, bits).equals(val0)) ||
+          (!val1.is_infinite() &&
+           !signedIntegerInterval(val1, bits).equals(val1)))
+        return true;
+    }
+  }
   if (isUnsignedCmp && !(b0 && b1) &&
       cmpInst->getOperand(0)->getType()->isIntegerTy()) {
     const unsigned bits =
