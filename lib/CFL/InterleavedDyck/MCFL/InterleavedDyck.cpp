@@ -313,21 +313,103 @@ struct Condensation {
   std::unordered_map<Vertex, std::vector<Vertex>> originals;
 };
 
-Condensation condense(const Graph &graph, const PairSet &under, bool enabled) {
-  DisjointSet sets(graph.vertices());
-  if (enabled) {
-    std::unordered_map<Vertex, std::size_t> incoming;
-    std::unordered_map<Vertex, std::size_t> outgoing;
-    for (const Edge &edge : graph.edges()) {
-      ++outgoing[edge.source];
-      ++incoming[edge.target];
+void contractNormalSCCs(const Graph &graph, DisjointSet &sets) {
+  std::unordered_map<Vertex, std::vector<Vertex>> normal_adj;
+  for (Vertex v : graph.vertices()) {
+    normal_adj.try_emplace(v);
+  }
+  for (const Edge &edge : graph.edges()) {
+    if (edge.label == "normal" && edge.source != edge.target) {
+      normal_adj[edge.source].push_back(edge.target);
     }
-    for (const Edge &edge : graph.edges()) {
-      // The artifact graph has one implicit epsilon self-loop at every node.
-      if (edge.label == "normal" && outgoing[edge.source] + 1 <= 2 &&
-          incoming[edge.target] + 1 <= 2) {
-        sets.join(edge.source, edge.target);
+  }
+
+  std::size_t next_index = 0;
+  std::unordered_map<Vertex, std::size_t> index;
+  std::unordered_map<Vertex, std::size_t> lowlink;
+  std::unordered_set<Vertex> on_stack;
+  std::vector<Vertex> scc_stack;
+
+  struct Frame {
+    Vertex v;
+    std::size_t neighbor_idx;
+  };
+  std::vector<Frame> call_stack;
+
+  for (Vertex start : graph.vertices()) {
+    if (index.count(start) != 0U) {
+      continue;
+    }
+    index[start] = next_index;
+    lowlink[start] = next_index;
+    ++next_index;
+    scc_stack.push_back(start);
+    on_stack.insert(start);
+    call_stack.push_back({start, 0});
+
+    while (!call_stack.empty()) {
+      Frame &frame = call_stack.back();
+      const auto &neighbors = normal_adj[frame.v];
+      if (frame.neighbor_idx < neighbors.size()) {
+        const Vertex w = neighbors[frame.neighbor_idx++];
+        if (index.count(w) == 0U) {
+          index[w] = next_index;
+          lowlink[w] = next_index;
+          ++next_index;
+          scc_stack.push_back(w);
+          on_stack.insert(w);
+          call_stack.push_back({w, 0});
+        } else if (on_stack.count(w) != 0U) {
+          lowlink[frame.v] = std::min(lowlink[frame.v], index[w]);
+        }
+      } else {
+        const Vertex finished = frame.v;
+        call_stack.pop_back();
+        if (!call_stack.empty()) {
+          const Vertex parent = call_stack.back().v;
+          lowlink[parent] = std::min(lowlink[parent], lowlink[finished]);
+        }
+        if (lowlink[finished] == index[finished]) {
+          while (true) {
+            const Vertex member = scc_stack.back();
+            scc_stack.pop_back();
+            on_stack.erase(member);
+            sets.join(finished, member);
+            if (member == finished) {
+              break;
+            }
+          }
+        }
       }
+    }
+  }
+}
+
+Condensation condense(const Graph &graph, const PairSet &under, bool enabled,
+                      CondensationExpansionPolicy expansion_policy) {
+  DisjointSet sets(graph.vertices());
+  const bool artifact_compatible =
+      expansion_policy == CondensationExpansionPolicy::ArtifactCompatible;
+  if (enabled) {
+    if (artifact_compatible) {
+      std::unordered_map<Vertex, std::size_t> incoming;
+      std::unordered_map<Vertex, std::size_t> outgoing;
+      for (const Edge &edge : graph.edges()) {
+        ++outgoing[edge.source];
+        ++incoming[edge.target];
+      }
+      for (const Edge &edge : graph.edges()) {
+        // Reproduce the reference artifact's degree-based directed contraction.
+        if (edge.label == "normal" && outgoing[edge.source] + 1 <= 2 &&
+            incoming[edge.target] + 1 <= 2) {
+          sets.join(edge.source, edge.target);
+        }
+      }
+    } else {
+      // Sound condensation: only merge vertices that are mutually reachable via
+      // neutral ("normal") edges, avoiding false reverse pairs when an
+      // unbalanced edge provides plain reachability in the reverse direction.
+      contractNormalSCCs(graph, sets);
     }
     for (const Pair &pair : under) {
       if (graph.containsVertex(pair.source) &&
@@ -345,8 +427,12 @@ Condensation condense(const Graph &graph, const PairSet &under, bool enabled) {
     result.originals[representative].push_back(vertex);
   }
   for (const Edge &edge : graph.edges()) {
-    result.graph.addEdge(sets.find(edge.source), sets.find(edge.target),
-                         edge.label);
+    const Vertex rep_src = sets.find(edge.source);
+    const Vertex rep_dst = sets.find(edge.target);
+    if (!artifact_compatible && rep_src == rep_dst && edge.label == "normal") {
+      continue;
+    }
+    result.graph.addEdge(rep_src, rep_dst, edge.label);
   }
   return result;
 }
@@ -695,7 +781,8 @@ InterleavedDyckSolver::solve(const Graph &input,
 
   for (unsigned dimension = 1; dimension <= options.max_dimension;
        ++dimension) {
-    Condensation condensed = condense(graph, previous, options.condense);
+    Condensation condensed =
+        condense(graph, previous, options.condense, options.expansion_policy);
     PairSet compressed_pairs;
     SolverStats aggregate_stats;
 
