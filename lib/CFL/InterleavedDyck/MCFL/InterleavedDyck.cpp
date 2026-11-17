@@ -467,6 +467,169 @@ buildInterleavedDyckGrammar(unsigned dimension,
   grammar.addBasic(start, std::string(kEpsilonLabel));
   grammar.addBasic(start, "normal");
 
+  if (variant == InterleavedGrammarVariant::Full) {
+    if (dimension == 1) {
+      for (unsigned id : alphabet.parentheses) {
+        addWrappingRule(builder, start, openParenthesis(id),
+                        closeParenthesis(id), 0);
+      }
+      for (unsigned id : alphabet.brackets) {
+        addWrappingRule(builder, start, openBracket(id), closeBracket(id), 0);
+      }
+      grammar.addConcatenate(start, {start, start}, {{{0, 0}, {1, 0}}});
+      grammar.validate();
+      return std::move(builder.model);
+    }
+
+    // Compact G_d^+ formulation: S directly carries closed 1-ary words while
+    // P_k / Q_k (k >= 2) represent k-tuples seeded directly by matched
+    // delimiter pairs, avoiding redundant P_1 / Q_1 and epsilon-tuple states.
+    grammar.addConcatenate(start, {start, start}, {{{0, 0}, {1, 0}}});
+
+    std::vector<Grammar::Nonterminal> p(dimension + 1);
+    std::vector<Grammar::Nonterminal> q(dimension + 1);
+    for (unsigned arity = 2; arity <= dimension; ++arity) {
+      p[arity] = builder.add("P" + std::to_string(arity), arity, 'P');
+      q[arity] = builder.add("Q" + std::to_string(arity), arity, 'Q');
+      builder.model.collapse_adjacent_gap.emplace(
+          p[arity], arity == 2 ? start : p[arity - 1]);
+      builder.model.collapse_adjacent_gap.emplace(
+          q[arity], arity == 2 ? start : q[arity - 1]);
+    }
+
+    for (unsigned id : alphabet.parentheses) {
+      const Grammar::Nonterminal po =
+          builder.fresh("po_" + std::to_string(id), 1);
+      grammar.addBasic(po, openParenthesis(id));
+      grammar.addInsert(p[2], po, closeParenthesis(id), 1);
+      grammar.addAppend(start, po, closeParenthesis(id), 0);
+    }
+    for (unsigned id : alphabet.brackets) {
+      const Grammar::Nonterminal bo =
+          builder.fresh("bo_" + std::to_string(id), 1);
+      grammar.addBasic(bo, openBracket(id));
+      grammar.addInsert(q[2], bo, closeBracket(id), 1);
+      grammar.addAppend(start, bo, closeBracket(id), 0);
+    }
+
+    // Collapse adjacent tuple components into S or (k-1)-tuples.
+    grammar.addConcatenate(start, {p[2]}, {{{0, 0}, {0, 1}}});
+    grammar.addConcatenate(start, {q[2]}, {{{0, 0}, {0, 1}}});
+    for (unsigned arity = 3; arity <= dimension; ++arity) {
+      for (unsigned merge = 0; merge + 1 < arity; ++merge) {
+        std::vector<std::vector<Grammar::VariableRef>> collapsed(arity - 1);
+        for (unsigned c = 0; c < arity; ++c) {
+          const unsigned dst = c <= merge ? c : c - 1;
+          collapsed[dst].push_back({0, c});
+        }
+        grammar.addConcatenate(p[arity - 1], {p[arity]}, collapsed);
+        grammar.addConcatenate(q[arity - 1], {q[arity]}, std::move(collapsed));
+      }
+    }
+
+    // Outer wrapping, S-insertion, and cross-family nesting across arities >= 2.
+    for (unsigned arity = 2; arity <= dimension; ++arity) {
+      grammar.addConcatenate(p[arity], {p[arity], p[2]},
+                             outerNestingOutputs(arity));
+      grammar.addConcatenate(q[arity], {q[arity], q[2]},
+                             outerNestingOutputs(arity));
+
+      for (unsigned component = 0; component < arity; ++component) {
+        grammar.addConcatenate(p[arity], {p[arity], start},
+                               insertionOutputs(arity, component, true));
+        grammar.addConcatenate(p[arity], {p[arity], start},
+                               insertionOutputs(arity, component, false));
+        grammar.addConcatenate(q[arity], {q[arity], start},
+                               insertionOutputs(arity, component, true));
+        grammar.addConcatenate(q[arity], {q[arity], start},
+                               insertionOutputs(arity, component, false));
+
+        grammar.addConcatenate(p[arity], {p[arity], q[2]},
+                               nestingOutputs(arity, component));
+        grammar.addConcatenate(q[arity], {q[arity], p[2]},
+                               nestingOutputs(arity, component));
+      }
+    }
+
+    for (unsigned left = 2; left <= dimension; ++left) {
+      for (unsigned right = 2; right <= dimension; ++right) {
+        const unsigned output = left + right - 1;
+        if (output <= dimension) {
+          grammar.addConcatenate(p[output], {p[left], p[right]},
+                                 familyConcatenation(left, right));
+          grammar.addConcatenate(q[output], {q[left], q[right]},
+                                 familyConcatenation(left, right));
+        }
+      }
+    }
+
+    // Non-touching tuple splits for higher dimensions (d >= 3).
+    if (dimension >= 3) {
+      grammar.addConcatenate(p[3], {p[2], p[2]},
+                             {{{0, 0}, {1, 0}}, {{1, 1}}, {{0, 1}}});
+      grammar.addConcatenate(q[3], {q[2], q[2]},
+                             {{{0, 0}, {1, 0}}, {{1, 1}}, {{0, 1}}});
+      grammar.addConcatenate(p[3], {p[2], p[2]},
+                             {{{0, 0}}, {{1, 0}}, {{1, 1}, {0, 1}}});
+      grammar.addConcatenate(q[3], {q[2], q[2]},
+                             {{{0, 0}}, {{1, 0}}, {{1, 1}, {0, 1}}});
+      for (unsigned k = 3; k < dimension; ++k) {
+        for (unsigned pos = 0; pos <= k; ++pos) {
+          std::vector<std::vector<Grammar::VariableRef>> split_out(k + 1);
+          for (unsigned c = 0; c < pos; ++c) {
+            split_out[c].push_back({0, c});
+          }
+          split_out[pos].push_back({1, 0});
+          for (unsigned c = pos; c < k; ++c) {
+            if (c == pos) {
+              split_out[pos + 1].push_back({1, 1});
+            }
+            split_out[c + 1].push_back({0, c});
+          }
+          grammar.addConcatenate(p[k + 1], {p[k], p[2]}, split_out);
+          grammar.addConcatenate(q[k + 1], {q[k], q[2]}, std::move(split_out));
+        }
+      }
+    }
+
+    // Interleaved alternation into S across compatible tuple arities.
+    for (unsigned pa = 2; pa <= dimension; ++pa) {
+      for (unsigned qa = 2; qa <= dimension; ++qa) {
+        if (pa == qa) {
+          std::vector<Grammar::VariableRef> p_first;
+          std::vector<Grammar::VariableRef> q_first;
+          for (unsigned i = 0; i < pa; ++i) {
+            p_first.push_back({0, i});
+            p_first.push_back({1, i});
+            q_first.push_back({1, i});
+            q_first.push_back({0, i});
+          }
+          grammar.addConcatenate(start, {p[pa], q[qa]}, {p_first});
+          grammar.addConcatenate(start, {p[pa], q[qa]}, {q_first});
+        } else if (pa + 1 == qa) {
+          std::vector<Grammar::VariableRef> q_outer;
+          for (unsigned i = 0; i < pa; ++i) {
+            q_outer.push_back({1, i});
+            q_outer.push_back({0, i});
+          }
+          q_outer.push_back({1, pa});
+          grammar.addConcatenate(start, {p[pa], q[qa]}, {q_outer});
+        } else if (qa + 1 == pa) {
+          std::vector<Grammar::VariableRef> p_outer;
+          for (unsigned i = 0; i < qa; ++i) {
+            p_outer.push_back({0, i});
+            p_outer.push_back({1, i});
+          }
+          p_outer.push_back({0, qa});
+          grammar.addConcatenate(start, {p[pa], q[qa]}, {p_outer});
+        }
+      }
+    }
+
+    grammar.validate();
+    return std::move(builder.model);
+  }
+
   std::vector<Grammar::Nonterminal> p(dimension + 1);
   std::vector<Grammar::Nonterminal> q(dimension + 1);
   for (unsigned arity = 1; arity <= dimension; ++arity) {
@@ -508,36 +671,6 @@ buildInterleavedDyckGrammar(unsigned dimension,
   grammar.addConcatenate(start, {p[dimension], q[dimension]}, {p_first});
   grammar.addConcatenate(start, {p[dimension], q[dimension]}, {q_first});
 
-  if (variant == InterleavedGrammarVariant::Full) {
-    for (unsigned arity = 1; arity <= dimension; ++arity) {
-      for (unsigned component = 0; component < arity; ++component) {
-        grammar.addConcatenate(p[arity], {p[arity], start},
-                               insertionOutputs(arity, component, true));
-        grammar.addConcatenate(p[arity], {p[arity], start},
-                               insertionOutputs(arity, component, false));
-        grammar.addConcatenate(q[arity], {q[arity], start},
-                               insertionOutputs(arity, component, true));
-        grammar.addConcatenate(q[arity], {q[arity], start},
-                               insertionOutputs(arity, component, false));
-      }
-    }
-
-    if (dimension >= 2) {
-      for (unsigned arity = 1; arity <= dimension; ++arity) {
-        for (unsigned component = 0; component < arity; ++component) {
-          grammar.addConcatenate(p[arity], {p[arity], q[2]},
-                                 nestingOutputs(arity, component));
-          grammar.addConcatenate(q[arity], {q[arity], p[2]},
-                                 nestingOutputs(arity, component));
-        }
-        grammar.addConcatenate(p[arity], {p[arity], p[2]},
-                               outerNestingOutputs(arity));
-        grammar.addConcatenate(q[arity], {q[arity], q[2]},
-                               outerNestingOutputs(arity));
-      }
-    }
-  }
-
   grammar.validate();
   return std::move(builder.model);
 }
@@ -575,18 +708,24 @@ InterleavedDyckSolver::solve(const Graph &input,
         const bool balance_parentheses = !alphabet.parentheses.empty();
         InterleavedGrammar projected =
             buildProjectedGrammar(alphabet, balance_parentheses);
-        component_result = Solver{}.solve(component, projected.grammar);
+        SolverOptions proj_options;
+        proj_options.record_proofs = false;
+        component_result =
+            Solver{}.solve(component, projected.grammar, proj_options);
       } else {
         InterleavedGrammar model =
             buildInterleavedDyckGrammar(dimension, alphabet, options.variant);
         SolverOptions solver_options;
+        solver_options.record_proofs = false;
         if (dimension >= 2) {
           InterleavedGrammar alpha = buildProjectedGrammar(alphabet, true);
           InterleavedGrammar beta = buildProjectedGrammar(alphabet, false);
+          SolverOptions proj_options;
+          proj_options.record_proofs = false;
           const ReachabilityResult alpha_result =
-              Solver{}.solve(component, alpha.grammar);
+              Solver{}.solve(component, alpha.grammar, proj_options);
           const ReachabilityResult beta_result =
-              Solver{}.solve(component, beta.grammar);
+              Solver{}.solve(component, beta.grammar, proj_options);
           const auto alpha_pairs =
               std::make_shared<PairSet>(alpha_result.reachablePairs());
           const auto beta_pairs =
@@ -602,6 +741,17 @@ InterleavedDyckSolver::solve(const Graph &input,
             }
             return true;
           };
+          if (!model.collapse_adjacent_gap.empty()) {
+            solver_options.collapse_adjacent_gap =
+                [&model](Grammar::Nonterminal nonterminal)
+                -> std::optional<Grammar::Nonterminal> {
+              const auto it = model.collapse_adjacent_gap.find(nonterminal);
+              if (it == model.collapse_adjacent_gap.end()) {
+                return std::nullopt;
+              }
+              return it->second;
+            };
+          }
         }
         component_result =
             Solver{}.solve(component, model.grammar, solver_options);

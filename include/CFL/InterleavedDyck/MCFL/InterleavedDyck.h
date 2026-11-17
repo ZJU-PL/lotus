@@ -6,6 +6,7 @@
 #include "CFL/InterleavedDyck/MCFL/Solver.h"
 
 #include <cstddef>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -34,6 +35,8 @@ struct InterleavedGrammar {
   Grammar grammar;
   std::unordered_set<Grammar::Nonterminal> parenthesis_family;
   std::unordered_set<Grammar::Nonterminal> bracket_family;
+  std::unordered_map<Grammar::Nonterminal, Grammar::Nonterminal>
+      collapse_adjacent_gap;
 };
 
 InterleavedAlphabet discoverInterleavedAlphabet(const Graph &graph);

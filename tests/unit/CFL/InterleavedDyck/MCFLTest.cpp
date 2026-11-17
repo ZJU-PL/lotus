@@ -324,13 +324,46 @@ TEST(MCFLInterleavedSolverTest,
   EXPECT_EQ(result.reachablePairs().count({1, 0}), 1U);
 }
 
-TEST(MCFLArtifactRegressionTest, ReproducesFaketaobaoPairCounts) {
-  const interleaved_dyck::Graph graph = interleaved_dyck::Graph::parseDotFile(
-      std::string(MCFL_DATASET_DIR) + "/faketaobao.dot");
-  const InterleavedAnalysisResult result = InterleavedDyckSolver{}.solve(graph);
+TEST(MCFLInterleavedSolverTest, DimensionTwoCollapsesAdjacentUnreachableGap) {
+  Graph graph;
+  graph.addEdge(0, 1, "op--0");
+  graph.addEdge(1, 2, "cp--0");
+  graph.addEdge(10, 11, "ob--0");
+  graph.addEdge(11, 12, "cb--0");
+  InterleavedOptions options;
+  options.max_dimension = 2;
+  options.condense = false;
+  const InterleavedAnalysisResult result =
+      InterleavedDyckSolver{}.solve(graph, options);
   ASSERT_EQ(result.dimensions.size(), 2U);
-  EXPECT_EQ(result.dimensions[0].reachable_pairs.size(), 57U);
-  EXPECT_EQ(result.dimensions[1].reachable_pairs.size(), 59U);
+  EXPECT_EQ(result.dimensions[1].reachable_pairs.count({0, 2}), 1U);
+  EXPECT_EQ(result.dimensions[1].reachable_pairs.count({10, 12}), 1U);
+}
+
+TEST(MCFLArtifactRegressionTest, ReproducesSmallPublicTaintPairCounts) {
+  struct ExpectedCounts {
+    const char *filename;
+    std::size_t d1;
+    std::size_t d2;
+  };
+  constexpr std::array<ExpectedCounts, 5> kCases{{
+      {"fakebanker.dot", 249U, 251U},
+      {"faketaobao.dot", 57U, 59U},
+      {"jollyserv.dot", 155U, 164U},
+      {"loozfon.dot", 76U, 93U},
+      {"uranai.dot", 143U, 143U},
+  }};
+  for (const ExpectedCounts &test_case : kCases) {
+    const interleaved_dyck::Graph graph = interleaved_dyck::Graph::parseDotFile(
+        std::string(MCFL_DATASET_DIR) + "/" + test_case.filename);
+    const InterleavedAnalysisResult result =
+        InterleavedDyckSolver{}.solve(graph);
+    ASSERT_EQ(result.dimensions.size(), 2U) << test_case.filename;
+    EXPECT_EQ(result.dimensions[0].reachable_pairs.size(), test_case.d1)
+        << test_case.filename;
+    EXPECT_EQ(result.dimensions[1].reachable_pairs.size(), test_case.d2)
+        << test_case.filename;
+  }
 }
 
 } // namespace

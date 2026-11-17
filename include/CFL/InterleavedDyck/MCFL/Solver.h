@@ -64,6 +64,17 @@ struct SolverOptions {
   /// Optional stronger feasibility relation. If present, this replaces plain
   /// graph reachability for adjacent tuple components.
   std::function<bool(Grammar::Nonterminal, Vertex, Vertex)> gap_reachable;
+
+  /// Optional dimension-reduction shortcut: when an adjacent gap (v -> u)
+  /// fails `gap_reachable` with `v == u`, collapse those two adjacent spans
+  /// into one span on the returned lower-arity nonterminal.
+  std::function<std::optional<Grammar::Nonterminal>(Grammar::Nonterminal)>
+      collapse_adjacent_gap;
+
+  /// Retain the saturated fact/proof DAG for `facts()` and `witness(u, v)`.
+  /// Staged approximations that only read `reachablePairs()` and `stats()` can
+  /// disable this to avoid allocating per-fact proof records.
+  bool record_proofs = true;
 };
 
 /// Exact reachability for the supplied non-deleting, non-permuting MCFG.
