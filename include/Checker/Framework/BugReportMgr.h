@@ -6,6 +6,7 @@
 #include "Checker/Framework/BugTypes.h"
 #include "Checker/Framework/SuppressionManager.h"
 
+#include <cstddef>
 #include <map>
 #include <set>
 #include <string>

@@ -3,6 +3,7 @@
 #include "Checker/TPA/FrontEnd/ModRefFunctionSummary.h"
 
 #include <cassert>
+#include <unordered_map>
 
 namespace llvm {
 class Function;

@@ -1,6 +1,9 @@
 #include "Checker/TPA/Annotation/ExternalTaintTable.h"
 
 #include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/MemoryBuffer.h>

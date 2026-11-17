@@ -4,6 +4,8 @@
 #include "Checker/TPA/Annotation/TaintDescriptor.h"
 #include "Checker/TPA/Engine/EvalResult.h"
 
+#include <cstddef>
+
 namespace annotation {
 class PipeTaintEntry;
 class SourceTaintEntry;

@@ -4,6 +4,7 @@
 #include "Alias/InclusionBased/TPA/Util/DataStructure/VectorSet.h"
 #include "Alias/InclusionBased/TPA/Util/Iterator/UniquePtrIterator.h"
 
+#include <cstddef>
 #include <memory>
 #include <vector>
 

@@ -13,9 +13,11 @@
 #include "Checker/Tooling/CheckerReport.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <map>
 #include <set>
+#include <utility>
 
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/Verifier.h>

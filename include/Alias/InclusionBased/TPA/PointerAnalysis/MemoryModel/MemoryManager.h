@@ -4,6 +4,7 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/MemoryBlock.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/MemoryObject.h"
 
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <set>

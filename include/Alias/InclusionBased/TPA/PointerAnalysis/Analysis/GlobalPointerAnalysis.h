@@ -4,6 +4,8 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/Env.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/Store.h"
 
+#include <cstddef>
+
 namespace context {
 class Context;
 } // namespace context

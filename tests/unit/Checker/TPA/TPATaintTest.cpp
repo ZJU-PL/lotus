@@ -10,6 +10,7 @@
 #include "Checker/TPA/Analysis/TaintAnalysis.h"
 #include "Checker/TPA/FrontEnd/DefUseModuleBuilder.h"
 
+#include <cstddef>
 #include <map>
 
 #include <gtest/gtest.h>

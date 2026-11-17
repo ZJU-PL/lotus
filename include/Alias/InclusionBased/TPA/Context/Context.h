@@ -2,6 +2,7 @@
 
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 
+#include <cstddef>
 #include <unordered_set>
 
 #include <llvm/IR/Instruction.h>

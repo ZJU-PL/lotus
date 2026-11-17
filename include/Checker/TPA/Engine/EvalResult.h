@@ -3,6 +3,8 @@
 #include "Checker/TPA/Engine/EvalSuccessor.h"
 #include "Checker/TPA/Support/TaintStore.h"
 
+#include <cstddef>
+#include <utility>
 #include <vector>
 
 namespace tpa::taint {

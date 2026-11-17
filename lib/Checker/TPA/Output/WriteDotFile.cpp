@@ -5,6 +5,7 @@
 
 #include <map>
 #include <set>
+#include <string>
 
 #include <llvm/IR/Function.h>
 #include <llvm/Support/FileSystem.h>

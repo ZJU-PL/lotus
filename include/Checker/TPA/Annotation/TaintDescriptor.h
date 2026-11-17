@@ -2,6 +2,8 @@
 
 #include "Annotation/ArgPosition.h"
 
+#include <cstdint>
+
 namespace annotation {
 
 // TClass specify whether the taintness is on the value, on the memory location

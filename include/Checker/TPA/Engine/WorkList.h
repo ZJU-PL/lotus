@@ -7,6 +7,8 @@
 #include "Utils/ADT/TwoLevelWorkList.h"
 #include "Utils/LLVM/FIFOWorkList.h"
 
+#include <utility>
+
 namespace tpa::taint {
 
 class WorkList {

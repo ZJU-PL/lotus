@@ -9,8 +9,13 @@
 #include "Checker/TPA/Precision/PrecisionLossTracker.h"
 #include "Checker/TPA/Program/DefUseModule.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <iterator>
 #include <set>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/Instructions.h>

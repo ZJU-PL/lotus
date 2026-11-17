@@ -7,6 +7,9 @@
 #include "Checker/TPA/Support/TaintEnv.h"
 #include "Checker/TPA/Support/TaintMemo.h"
 
+#include <cstddef>
+#include <utility>
+
 namespace llvm {
 class Module;
 } // namespace llvm

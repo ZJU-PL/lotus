@@ -2,6 +2,7 @@
 
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/ProgramPoint.h"
 
+#include <cstddef>
 #include <unordered_set>
 
 namespace tpa {

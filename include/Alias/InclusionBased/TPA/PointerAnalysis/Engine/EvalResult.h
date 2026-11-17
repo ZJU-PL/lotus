@@ -3,6 +3,7 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Engine/EvalSuccessor.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/Store.h"
 
+#include <cstddef>
 #include <memory>
 #include <vector>
 

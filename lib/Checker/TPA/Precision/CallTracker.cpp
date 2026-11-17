@@ -7,6 +7,9 @@
 #include "Checker/TPA/Support/TaintEnv.h"
 #include "Checker/TPA/Support/TaintMemo.h"
 
+#include <cstddef>
+#include <unordered_map>
+
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/Support/raw_ostream.h>

@@ -2,7 +2,9 @@
 
 #include "Alias/InclusionBased/TPA/Util/DataStructure/VectorSet.h"
 
+#include <cstddef>
 #include <unordered_map>
+#include <utility>
 
 namespace tpa {
 class MemoryObject;

@@ -5,6 +5,7 @@
 
 #include <stdexcept>
 #include <unordered_set>
+#include <vector>
 
 #include <llvm/ADT/DepthFirstIterator.h>
 #include <llvm/IR/Instructions.h>

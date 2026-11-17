@@ -5,6 +5,7 @@
 #include "Checker/Framework/BugTypes.h"
 #include "Utils/Formats/cJSON.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>

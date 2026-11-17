@@ -3,6 +3,7 @@
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 
 #include <cassert>
+#include <cstddef>
 
 namespace context {
 class Context;

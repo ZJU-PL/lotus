@@ -2,6 +2,7 @@
 
 #include "Checker/TPA/Support/ProgramPoint.h"
 
+#include <cstddef>
 #include <unordered_set>
 
 namespace tpa::taint {

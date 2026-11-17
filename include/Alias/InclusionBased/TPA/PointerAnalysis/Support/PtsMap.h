@@ -2,6 +2,7 @@
 
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/PtsSet.h"
 
+#include <cstddef>
 #include <type_traits>
 #include <unordered_map>
 

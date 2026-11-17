@@ -2,6 +2,8 @@
 
 #include "Checker/TPA/Lattice/Lattice.h"
 
+#include <cstdint>
+
 namespace tpa::taint {
 
 enum class TaintLattice : uint8_t { Unknown, Untainted, Tainted, Either };

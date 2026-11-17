@@ -3,6 +3,8 @@
 #include "Checker/TPA/Support/TaintMap.h"
 #include "Checker/TPA/Support/TaintValue.h"
 
+#include <cstddef>
+
 #include <llvm/IR/Constant.h>
 
 namespace tpa::taint {

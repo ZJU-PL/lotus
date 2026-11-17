@@ -3,6 +3,7 @@
 #include "Checker/TPA/Precision/IndexVector.h"
 #include "Checker/TPA/Support/ProgramPoint.h"
 
+#include <cstddef>
 #include <vector>
 
 namespace tpa {

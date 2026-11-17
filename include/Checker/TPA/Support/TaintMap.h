@@ -2,7 +2,9 @@
 
 #include "Checker/TPA/Lattice/TaintLattice.h"
 
+#include <cstddef>
 #include <unordered_map>
+#include <utility>
 
 namespace tpa::taint {
 

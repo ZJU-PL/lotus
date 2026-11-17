@@ -6,6 +6,8 @@
 #include "Checker/TPA/Support/TaintEnv.h"
 #include "Checker/TPA/Support/TaintValue.h"
 
+#include <cstddef>
+
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/Support/raw_ostream.h>

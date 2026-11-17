@@ -3,6 +3,8 @@
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 #include "Checker/TPA/Support/ProgramPoint.h"
 
+#include <cstddef>
+
 namespace llvm {
 class Function;
 } // namespace llvm

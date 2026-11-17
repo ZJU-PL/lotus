@@ -1,6 +1,7 @@
 /** @file SuppressionManager.h @brief Bug report suppression manager for filtering known false positives. */
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <set>
 #include <string>

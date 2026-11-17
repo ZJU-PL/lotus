@@ -3,6 +3,7 @@
 #include "Alias/InclusionBased/TPA/Util/Iterator/MapValueIterator.h"
 #include "Checker/TPA/Program/DefUseFunction.h"
 
+#include <unordered_map>
 #include <unordered_set>
 
 namespace llvm {

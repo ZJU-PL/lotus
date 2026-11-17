@@ -2,6 +2,7 @@
 
 #include "Checker/TPA/Support/ExternalModels.h"
 
+#include <cstddef>
 #include <limits>
 
 #include <llvm/ADT/DepthFirstIterator.h>

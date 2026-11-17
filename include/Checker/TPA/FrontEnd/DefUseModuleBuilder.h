@@ -4,6 +4,8 @@
 #include "Checker/TPA/Program/DefUseModule.h"
 #include "Checker/TPA/Support/ExternalModels.h"
 
+#include <utility>
+
 namespace llvm {
 class Module;
 class Value;

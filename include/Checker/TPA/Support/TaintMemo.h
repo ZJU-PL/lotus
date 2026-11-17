@@ -3,6 +3,9 @@
 #include "Checker/TPA/Support/ProgramPoint.h"
 #include "Checker/TPA/Support/TaintStore.h"
 
+#include <unordered_map>
+#include <utility>
+
 namespace tpa::taint {
 
 class TaintMemo {

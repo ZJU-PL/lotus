@@ -7,6 +7,8 @@
 #include "Checker/TPA/FrontEnd/ReachingDefModuleAnalysis.h"
 #include "Checker/TPA/Program/Reachability.h"
 
+#include <cstddef>
+
 #include <llvm/ADT/DepthFirstIterator.h>
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/IR/CFG.h>

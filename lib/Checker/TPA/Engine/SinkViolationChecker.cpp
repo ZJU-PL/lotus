@@ -8,6 +8,8 @@
 #include "Checker/TPA/Support/TaintMemo.h"
 #include "Checker/TPA/Support/TaintValue.h"
 
+#include <cstddef>
+
 #include <llvm/IR/Instructions.h>
 #include <llvm/Support/raw_ostream.h>
 

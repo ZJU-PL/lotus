@@ -11,6 +11,8 @@
 #include "Checker/TPA/Support/TaintEnv.h"
 #include "Checker/TPA/Support/TaintMemo.h"
 
+#include <cstddef>
+
 #include <llvm/IR/Instructions.h>
 #include <llvm/Support/raw_ostream.h>
 

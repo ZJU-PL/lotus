@@ -3,6 +3,8 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Engine/EvalResult.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Program/CFG/CFGNode.h"
 
+#include <cstddef>
+
 namespace context {
 class Context;
 } // namespace context

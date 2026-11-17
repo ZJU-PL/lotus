@@ -10,6 +10,9 @@
 #include "Checker/TPA/Support/ProgramPoint.h"
 #include "Checker/TPA/Support/TaintEnv.h"
 
+#include <cstddef>
+#include <vector>
+
 #include <llvm/IR/Instructions.h>
 #include <llvm/Support/raw_ostream.h>
 

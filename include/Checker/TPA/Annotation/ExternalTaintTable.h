@@ -2,6 +2,8 @@
 
 #include "Checker/TPA/Annotation/TaintSummary.h"
 
+#include <cstddef>
+#include <string>
 #include <unordered_map>
 
 #include <llvm/ADT/StringRef.h>

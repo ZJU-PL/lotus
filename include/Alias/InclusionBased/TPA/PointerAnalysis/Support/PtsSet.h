@@ -4,6 +4,7 @@
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 
 #include <array>
+#include <cstddef>
 #include <mutex>
 #include <unordered_set>
 

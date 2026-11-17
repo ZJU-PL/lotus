@@ -4,6 +4,7 @@
 #include "Alias/InclusionBased/TPA/Util/Iterator/IteratorRange.h"
 
 #include <cassert>
+#include <cstddef>
 #include <unordered_map>
 
 namespace llvm {

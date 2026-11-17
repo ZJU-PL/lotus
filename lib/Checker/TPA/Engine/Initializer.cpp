@@ -7,6 +7,8 @@
 #include "Checker/TPA/Support/TaintEnv.h"
 #include "Checker/TPA/Support/TaintMemo.h"
 
+#include <utility>
+
 #include <llvm/IR/Function.h>
 
 using namespace context;
