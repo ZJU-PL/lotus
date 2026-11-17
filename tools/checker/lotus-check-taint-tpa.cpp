@@ -17,6 +17,7 @@
 #include <map>
 #include <set>
 
+#include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Support/CommandLine.h>
@@ -57,6 +58,12 @@ static cl::opt<std::string>
     DotDir("taint-tpa.def-use-dot-dir", cl::init(""),
            cl::desc("Write sparse def-use graphs to this directory"),
            cl::sub(lotus::checker::tooling::taintTPASubCommand()));
+
+static cl::opt<bool>
+    StripDebug("taint-tpa.strip-debug", cl::init(false),
+               cl::desc("Strip debug info before verification (report source "
+                        "locations are lost)"),
+               cl::sub(lotus::checker::tooling::taintTPASubCommand()));
 
 static cl::opt<tpa::taint::UnmodeledPolicy> Unmodeled(
     "taint-tpa.unmodeled",
@@ -239,9 +246,18 @@ int runTPATaintCheckerTool(const char *argv0) try {
     diagnostic.print(argv0, errs());
     return 2;
   }
-  if (verifyModule(*module, &errs()) ||
+  bool debugStripped = StripDebug;
+  if (StripDebug)
+    StripDebugInfo(*module);
+  bool recoveredDebug = false;
+  if (!tpa::taint::verifyInputModule(*module, errs(), recoveredDebug) ||
       !tpa::taint::validateModule(*module, errs()))
     return 2;
+  debugStripped |= recoveredDebug;
+  if (recoveredDebug && lotus::checker::tooling::logAtLeast(
+                            lotus::checker::tooling::LogLevel::Warning))
+    errs() << "TPA taint: discarded invalid input debug info; source locations "
+              "are unavailable\n";
   std::string ptrFile =
       PointerSpec.empty() ? defaultSpec("ptr.spec") : PointerSpec.getValue();
   std::string mrFile =
@@ -258,8 +274,10 @@ int runTPATaintCheckerTool(const char *argv0) try {
   context::KLimitContext::setLimit(K);
   context::setContextStrategy(context::ContextStrategy::KLimit);
   tpa::taint::prepareModule(*module, !NoPrepass);
-  if (verifyModule(*module, &errs()))
+  if (verifyModule(*module, &errs())) {
+    errs() << "TPA preprocessing produced invalid LLVM IR\n";
     return 2;
+  }
   tpa::SemiSparseProgramBuilder pointerBuilder;
   auto program = pointerBuilder.runOnModule(*module);
   tpa::SemiSparsePointerAnalysis pointer;
@@ -346,6 +364,12 @@ int runTPATaintCheckerTool(const char *argv0) try {
              << " call_sites=" << entry.second.calls
              << " missing_modref=" << entry.second.missingModRef
              << " missing_taint=" << entry.second.missingTaint << "\n";
+    const auto &pointerStats = pointer.getStatistics();
+    outs() << "pointer_evaluations=" << pointerStats.evaluations
+           << " pointer_initialization_seconds="
+           << pointerStats.initializationSeconds
+           << " pointer_solve_seconds=" << pointerStats.solveSeconds
+           << " debug_stripped=" << (debugStripped ? 1 : 0) << "\n";
     const auto &s = analysis.getStatistics();
     auto seconds = [](auto a, auto b) {
       return std::chrono::duration<double>(b - a).count();
@@ -382,6 +406,7 @@ int runTPATaintCheckerTool(const char *argv0) try {
                           0, {NodeTag::CALL_SITE}, "sink");
       report->set_conf_score(80);
       report->add_metadata("engine", "taint-tpa");
+      report->add_metadata("debug_stripped", debugStripped ? "true" : "false");
       report->add_metadata("unmodeled_policy", policyName);
       report->add_metadata("ignored_external_symbols",
                            std::to_string(coverage.ignored.size()));

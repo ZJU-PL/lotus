@@ -35,7 +35,7 @@ bool DefUseInstruction::isEntryInstruction() const {
 }
 
 bool DefUseInstruction::isCallInstruction() const {
-  return isa<CallInst>(inst) || isa<InvokeInst>(inst);
+  return isa<CallBase>(inst);
 }
 
 bool DefUseInstruction::isReturnInstruction() const {
@@ -77,6 +77,8 @@ DefUseFunction::DefUseFunction(const Function &f) : function(f), entryInst(&f) {
       if (isa<ReturnInst>(&inst)) {
         exitInsts.push_back(&itr->second);
       }
+      if (isa<ReturnInst>(inst) || isa<ResumeInst>(inst))
+        memoryExitInsts.push_back(&itr->second);
     }
   }
 }

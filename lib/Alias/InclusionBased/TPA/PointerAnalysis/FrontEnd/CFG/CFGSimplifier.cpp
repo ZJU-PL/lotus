@@ -123,11 +123,13 @@ std::vector<CFGNode *> CFGSimplifier::findRedundantNodes(CFG &cfg) {
     if (node->isCopyNode()) {
       auto *copyNode = static_cast<CopyCFGNode *>(node);
       // Copy with 1 source is an identity: Dest == Src
-      // Keep freeze results materialized for clients querying the original IR.
+      // Keep value-recovering results materialized for original-IR clients.
       // Removing the node loses its binding: unlike bitcasts, pointer queries
       // do not strip freeze instructions when looking up a points-to set.
       if (copyNode->getNumSrc() == 1u &&
-          !isa<FreezeInst>(copyNode->getDest())) {
+          !isa<FreezeInst>(copyNode->getDest()) &&
+          !isa<ExtractValueInst>(copyNode->getDest()) &&
+          !isa<ExtractElementInst>(copyNode->getDest())) {
         ret.push_back(copyNode);
         eqMap[copyNode->getDest()] = copyNode->getSrc(0);
       }

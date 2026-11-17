@@ -253,7 +253,7 @@ atol REF Arg0 D
 btowc IGNORE
 # Miscellaneous
 mktime REF Arg0 R
-mktime MOD Arg1 R
+mktime MOD Arg0 R
 setlocale REF Arg1 D
 setlocale MOD Ret D
 localeconv MOD Ret R

@@ -14,12 +14,13 @@ using namespace llvm;
 namespace tpa::taint {
 
 ReturnTracker::ReturnVector
-ReturnTracker::getReturnVector(const CalleeVector &callees) {
+ReturnTracker::getReturnVector(const CalleeVector &callees, bool memory) {
   ReturnVector returns;
   for (const auto &fc : callees) {
     const auto &function =
         trackerState.getDefUseModule().getDefUseFunction(fc.getFunction());
-    for (const auto *exit : function.getExitInsts())
+    for (const auto *exit :
+         (memory ? function.getMemoryExitInsts() : function.getExitInsts()))
       returns.emplace_back(fc.getContext(), exit);
   }
   return returns;
@@ -88,10 +89,11 @@ void ReturnTracker::trackMemory(const ProgramPoint &pp,
 void ReturnTracker::trackReturn(const ProgramPoint &pp,
                                 const CalleeVector &callees) {
   auto retVec = getReturnVector(callees);
-  if (retVec.empty())
-    return;
-  trackValue(pp, retVec);
-  trackMemory(pp, retVec);
+  if (!retVec.empty())
+    trackValue(pp, retVec);
+  auto memoryExits = getReturnVector(callees, true);
+  if (!memoryExits.empty())
+    trackMemory(pp, memoryExits);
 }
 
 } // namespace tpa::taint

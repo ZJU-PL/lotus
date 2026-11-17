@@ -22,7 +22,7 @@ private:
   using CalleeVector = std::vector<tpa::FunctionContext>;
   using ReturnVector = std::vector<ProgramPoint>;
 
-  ReturnVector getReturnVector(const CalleeVector &);
+  ReturnVector getReturnVector(const CalleeVector &, bool memory = false);
   TaintVector getReturnTaintValues(const ReturnVector &);
   TaintVector getReturnTaintValues(const tpa::MemoryObject *,
                                    const ReturnVector &);

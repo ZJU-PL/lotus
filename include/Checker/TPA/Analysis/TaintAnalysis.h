@@ -72,6 +72,11 @@ public:
 /// Unsupported instructions are errors, never silently treated as clean.
 bool validateModule(const llvm::Module &, llvm::raw_ostream &errors);
 
+/// Reject broken executable IR; recover debug-only errors by stripping debug
+/// metadata. Returns success, and reports whether recovery stripped metadata.
+bool verifyInputModule(llvm::Module &, llvm::raw_ostream &errors,
+                       bool &debugStripped);
+
 /// Run TPA normalization and unify exits before constructing the pointer
 /// program. Exit unification is mandatory even when optional prepasses are off.
 void prepareModule(llvm::Module &, bool runTPAPrepasses = true);

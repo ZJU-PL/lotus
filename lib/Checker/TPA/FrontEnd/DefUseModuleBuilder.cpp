@@ -53,6 +53,8 @@ void addExternalDefs(DefUseFunction &duFunc) {
       if (const auto *call = dyn_cast<CallBase>(&inst))
         if (call->isInlineAsm())
           entryInst->insertTopLevelEdge(duFunc.getDefUseInstruction(call));
+      if (isa<LandingPadInst>(inst))
+        entryInst->insertTopLevelEdge(duFunc.getDefUseInstruction(&inst));
       if (const auto *allocInst = dyn_cast<AllocaInst>(&inst)) {
         entryInst->insertTopLevelEdge(duFunc.getDefUseInstruction(allocInst));
         continue;
@@ -77,7 +79,7 @@ void addExternalDefs(DefUseFunction &duFunc) {
 void addExternalUses(DefUseFunction &duFunc,
                      const ReachingDefMap<Instruction> &rdMap,
                      const ModRefFunctionSummary &summary) {
-  for (auto *exitInst : duFunc.getExitInsts()) {
+  for (auto *exitInst : duFunc.getMemoryExitInsts()) {
     auto &rdStore = rdMap.getReachingDefStore(exitInst->getInstruction());
     for (auto const &mapping : rdStore) {
       const auto *loc = mapping.first;

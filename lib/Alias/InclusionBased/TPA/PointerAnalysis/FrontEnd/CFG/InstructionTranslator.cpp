@@ -82,7 +82,7 @@ tpa::CFGNode *InstructionTranslator::visitReturnInst(ReturnInst &retInst) {
   return retNode;
 }
 
-tpa::CFGNode *InstructionTranslator::visitCallInst(CallInst &callInst) {
+tpa::CFGNode *InstructionTranslator::translateCall(CallBase &callInst) {
   auto *funPtr = callInst.getCalledOperand()->stripPointerCasts();
 
   auto *callNode = cfg.create<tpa::CallCFGNode>(funPtr, &callInst);
@@ -104,23 +104,19 @@ tpa::CFGNode *InstructionTranslator::visitCallInst(CallInst &callInst) {
   return callNode;
 }
 
-tpa::CFGNode *InstructionTranslator::visitInvokeInst(InvokeInst &invokeInst) {
-  auto *funPtr = invokeInst.getCalledOperand()->stripPointerCasts();
-
-  auto *callNode = cfg.create<tpa::CallCFGNode>(funPtr, &invokeInst);
-
-  for (unsigned i = 0; i < invokeInst.arg_size(); ++i) {
-    auto *argOp = invokeInst.getArgOperand(i);
-    if (!argOp->getType()->isPointerTy())
-      continue;
-
-    auto *arg = argOp->stripPointerCasts();
-    if (!arg->getType()->isPointerTy())
-      arg = argOp;
-
-    callNode->addArgument(arg);
-  }
-  return callNode;
+tpa::CFGNode *InstructionTranslator::visitCallInst(CallInst &inst) {
+  return translateCall(inst);
+}
+tpa::CFGNode *InstructionTranslator::visitInvokeInst(InvokeInst &inst) {
+  return translateCall(inst);
+}
+tpa::CFGNode *InstructionTranslator::visitCallBrInst(CallBrInst &inst) {
+  return translateCall(inst);
+}
+tpa::CFGNode *InstructionTranslator::visitResumeInst(ResumeInst &) {
+  auto *exit = cfg.create<tpa::ReturnCFGNode>(nullptr);
+  cfg.addUnwindExitNode(exit);
+  return exit;
 }
 
 tpa::CFGNode *InstructionTranslator::visitPHINode(PHINode &phiInst) {

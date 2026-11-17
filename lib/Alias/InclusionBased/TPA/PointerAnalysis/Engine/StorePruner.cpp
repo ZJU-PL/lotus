@@ -75,40 +75,56 @@ StorePruner::ObjectSet StorePruner::getRootSet(const Store &store,
 // store.
 void StorePruner::findAllReachableObjects(const Store &store,
                                           ObjectSet &reachableSet) {
-  // Worklist initialized with the roots
-  std::vector<const MemoryObject *> currWorkList(reachableSet.begin(),
-                                                 reachableSet.end());
-  std::vector<const MemoryObject *> nextWorkList;
-  nextWorkList.reserve(reachableSet.size());
-  ObjectSet exploredSet;
-
-  while (!currWorkList.empty()) {
-    for (const auto *obj : currWorkList) {
-      // Avoid cycles and redundant processing
-      if (!exploredSet.insert(obj).second)
-        continue;
-
-      // Add to reachable set (redundant if coming from roots, but needed for
-      // transitive)
-      reachableSet.insert(obj);
-
-      // 1. Trace structural reachability
-      auto offsetObjs = memManager.getReachablePointerObjects(obj, false);
-      for (const auto *oObj : offsetObjs)
-        if (!exploredSet.count(oObj))
-          nextWorkList.push_back(oObj);
-      // else: already explored, skip but continue to next field
-
-      // 2. Trace pointer reachability:
-      //    Objects pointed to by pointers stored inside 'obj'
-      auto pSet = store.lookup(obj);
-      for (const auto *pObj : pSet)
-        if (!exploredSet.count(pObj))
-          nextWorkList.push_back(pObj);
+  // Every object's stored pointers must be followed, but expanding the same
+  // allocation's structural suffix at every field costs O(fields^2) per call.
+  // A lower-offset expansion includes every higher-offset structural suffix.
+  using Block = const MemoryBlock *;
+  std::unordered_map<Block, size_t> scheduledMin, expandedMin;
+  auto note = [&](const MemoryObject *object) {
+    if (object->isSpecialObject() ||
+        (!store.isOverlay() && isAccessible(object)))
+      return;
+    auto result =
+        scheduledMin.emplace(object->getMemoryBlock(), object->getOffset());
+    if (!result.second)
+      result.first->second =
+          std::min(result.first->second, object->getOffset());
+  };
+  std::vector<const MemoryObject *> work(reachableSet.begin(),
+                                         reachableSet.end());
+  for (const auto *object : work)
+    note(object);
+  auto enqueue = [&](const MemoryObject *object) {
+    // For an owning store, every globally accessible binding is already a
+    // root. An unbound global/function object adds neither bindings nor edges.
+    if (!store.isOverlay() && isAccessible(object) && !store.hasBinding(object))
+      return;
+    if (reachableSet.insert(object).second) {
+      note(object);
+      work.push_back(object);
     }
-
-    currWorkList.clear();
-    currWorkList.swap(nextWorkList);
+  };
+  for (size_t next = 0; next < work.size(); ++next) {
+    const auto *object = work[next];
+    // Global structural fields with bindings were all seeded as roots;
+    // fields without bindings cannot lead to another object in an owning map.
+    // Overlays can hide base bindings from iteration, so retain full expansion.
+    if (!object->isSpecialObject() &&
+        (store.isOverlay() || !isAccessible(object))) {
+      auto *block = object->getMemoryBlock();
+      const auto offset = object->getOffset();
+      auto expanded = expandedMin.find(block);
+      if (offset == scheduledMin.at(block) &&
+          (expanded == expandedMin.end() || offset < expanded->second)) {
+        expandedMin[block] = offset;
+        for (const auto *field :
+             memManager.getReachablePointerObjects(object, false))
+          enqueue(field);
+      }
+    }
+    // This remains per-object, even when its structural suffix is covered.
+    for (const auto *pointee : store.lookup(object))
+      enqueue(pointee);
   }
 }
 
@@ -129,6 +145,14 @@ Store StorePruner::filterStore(const Store &store,
 Store StorePruner::pruneStore(const Store &store, const ProgramPoint &pp) {
   assert(pp.getCFGNode()->isCallNode() &&
          "Pruning can only happen on call node!");
+
+  // Every owning-store binding is already a root in this common case.
+  // There is nothing to remove, independently of argument reachability.
+  if (!store.isOverlay() &&
+      std::all_of(store.begin(), store.end(), [](const auto &binding) {
+        return isAccessible(binding.first);
+      }))
+    return store;
 
   auto reachableSet = getRootSet(store, pp);
   findAllReachableObjects(store, reachableSet);

@@ -1,14 +1,22 @@
 #include "Alias/InclusionBased/TPA/Context/ContextPolicy.h"
 #include "Alias/InclusionBased/TPA/Context/KLimitContext.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Analysis/SemiSparsePointerAnalysis.h"
+#include "Alias/InclusionBased/TPA/PointerAnalysis/Engine/StorePruner.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/FrontEnd/SemiSparseProgramBuilder.h"
+#include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/Type/TypeLayout.h"
+#include "Alias/InclusionBased/TPA/PointerAnalysis/Program/CFG/CFG.h"
+#include "Alias/InclusionBased/TPA/Transforms/LowerGlobalCtor.h"
 #include "Alias/InclusionBased/TPA/Transforms/RunPrepass.h"
 #include "Checker/TPA/Analysis/TaintAnalysis.h"
 #include "Checker/TPA/FrontEnd/DefUseModuleBuilder.h"
 
+#include <map>
+
 #include <gtest/gtest.h>
 #include <llvm/ADT/ScopeExit.h>
 #include <llvm/AsmParser/Parser.h>
+#include <llvm/BinaryFormat/Dwarf.h>
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -763,6 +771,306 @@ TEST(TPATaint,
   for (const auto *name :
        {"wrong_return", "wrong_argument", "wrong_arity", "wrong_convention"})
     EXPECT_FALSE(tpa::compatibleCallTarget(*one, *module->getFunction(name)));
+}
+
+TEST(TPATaint, ValidationDiagnosticsAreCappedWithoutPrintingValues) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic diagnostic;
+  std::string ir = "define i32 @main() { %p = alloca i8\n";
+  for (unsigned i = 0; i < 50; ++i)
+    ir += "%v" + std::to_string(i) + " = va_arg i8* %p, i32\n";
+  ir += "ret i32 0 }";
+  auto module = llvm::parseAssemblyString(ir, diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  std::string text;
+  llvm::raw_string_ostream errors(text);
+  EXPECT_FALSE(tpa::taint::validateModule(*module, errors));
+  errors.flush();
+  size_t count = 0;
+  for (size_t pos = 0; (pos = text.find("Unsupported TPA taint instruction",
+                                        pos)) != std::string::npos;
+       ++pos)
+    ++count;
+  EXPECT_EQ(count, 20u);
+  EXPECT_NE(
+      text.find("30 additional unsupported instructions omitted (50 total)"),
+      std::string::npos);
+  EXPECT_EQ(text.find("%v"), std::string::npos);
+}
+
+TEST(TPATaint, InvokeAndLandingPadCarryExplicitTaint) {
+  auto result = run(R"(
+    declare i32 @source()
+    declare void @sink(i32)
+    declare i32 @__gxx_personality_v0(...)
+    define i32 @main() personality i32 (...)* @__gxx_personality_v0 {
+      %value = invoke i32 @source() to label %normal unwind label %unwind
+    normal:
+      invoke void @sink(i32 %value) to label %done unwind label %unwind
+    done:
+      ret i32 0
+    unwind:
+      %exception = landingpad { i8*, i32 } cleanup
+      resume { i8*, i32 } %exception
+    }
+  )",
+                    1, true);
+  EXPECT_EQ(result.violations, 1u);
+}
+
+TEST(TPATaint, ResumePropagatesPointerAndTaintMemoryToCaller) {
+  auto result = run(R"(
+    declare void @may_throw()
+    declare void @sink(i32)
+    declare i32 @__gxx_personality_v0(...)
+    define void @throw_after_store(i32** %slot, i32* %value)
+        personality i32 (...)* @__gxx_personality_v0 {
+      store i32* %value, i32** %slot
+      invoke void @may_throw() to label %never unwind label %cleanup
+    never:
+      unreachable
+    cleanup:
+      %exception = landingpad { i8*, i32 } cleanup
+      resume { i8*, i32 } %exception
+    }
+    define i32 @main(i32 %argc) personality i32 (...)* @__gxx_personality_v0 {
+      %value = alloca i32
+      %slot = alloca i32*
+      store i32 %argc, i32* %value
+      store i32* null, i32** %slot
+      invoke void @throw_after_store(i32** %slot, i32* %value)
+          to label %normal unwind label %handler
+    normal:
+      ret i32 0
+    handler:
+      %exception = landingpad { i8*, i32 } catch i8* null
+      %pointer = load i32*, i32** %slot
+      %loaded = load i32, i32* %pointer
+      call void @sink(i32 %loaded)
+      ret i32 0
+    }
+  )",
+                    1, true);
+  EXPECT_EQ(result.violations, 1u);
+}
+
+TEST(TPATaint, CallBrInlineAssemblyUsesUnresolvedPolicyAndKeepsSuccessors) {
+  const char *ir = R"(
+    declare void @sink(i32)
+    define i32 @main(i32 %argc) {
+      callbr void asm sideeffect "", "i"(i8* blockaddress(@main, %indirect))
+          to label %normal [label %indirect]
+    normal:
+      ret i32 0
+    indirect:
+      call void @sink(i32 %argc)
+      ret i32 0
+    }
+  )";
+  auto result = run(ir, 0, true);
+  EXPECT_EQ(result.violations, 1u);
+  EXPECT_EQ(result.unresolved, 1u);
+  EXPECT_THROW(run(ir, 0, false, false, tpa::taint::UnmodeledPolicy::Error),
+               std::invalid_argument);
+}
+
+TEST(TPATaint, StorePruningMatchesReferenceClosureWithBackwardFieldEdges) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(R"(
+    %S = type { i8*, i8*, i8*, i8* }
+    @global = global i8* null
+    declare void @callee(i8*)
+    define i32 @main() {
+      %block = alloca %S
+      %a = alloca i8*
+      %b = alloca i8*
+      %dead = alloca i8*
+      %root = bitcast %S* %block to i8*
+      call void @callee(i8* %root)
+      ret i32 0
+    }
+  )",
+                                          error, context);
+  ASSERT_NE(module, nullptr);
+  std::map<std::string, const llvm::Instruction *> values;
+  const llvm::CallBase *call = nullptr;
+  for (const auto &inst : module->getFunction("main")->front()) {
+    if (inst.hasName())
+      values[inst.getName().str()] = &inst;
+    if (auto *candidate = llvm::dyn_cast<llvm::CallBase>(&inst))
+      call = candidate;
+  }
+  ASSERT_NE(call, nullptr);
+  const auto *ctx = context::Context::getGlobalContext();
+  tpa::MemoryManager memory;
+  const auto *layout = tpa::TypeLayout::getTypeLayout(32, {}, {0, 8, 16, 24});
+  const auto *pointerLayout = tpa::TypeLayout::getPointerTypeLayoutWithSize(8);
+  const auto *base =
+      memory.allocateStackMemory(ctx, values.at("block"), layout);
+  const auto *f8 = memory.offsetMemory(base, 8);
+  const auto *f16 = memory.offsetMemory(base, 16);
+  const auto *f24 = memory.offsetMemory(base, 24);
+  const auto *a =
+      memory.allocateStackMemory(ctx, values.at("a"), pointerLayout);
+  const auto *b =
+      memory.allocateStackMemory(ctx, values.at("b"), pointerLayout);
+  const auto *dead =
+      memory.allocateStackMemory(ctx, values.at("dead"), pointerLayout);
+  const auto *global = memory.allocateGlobalMemory(
+      module->getGlobalVariable("global"), pointerLayout);
+  tpa::Store store;
+  auto bind = [&](const tpa::MemoryObject *from, const tpa::MemoryObject *to) {
+    store.strongUpdate(from, tpa::PtsSet::getSingletonSet(to));
+  };
+  bind(base, a);
+  bind(f8, b);
+  bind(f16, base);
+  bind(f24, tpa::MemoryManager::getNullObject());
+  bind(a, tpa::MemoryManager::getNullObject());
+  bind(b, f16);
+  bind(dead, tpa::MemoryManager::getUniversalObject());
+  bind(global, a);
+  tpa::PointerManager pointers;
+  const auto *root = pointers.getOrCreatePointer(ctx, values.at("root"));
+  tpa::CFG cfg(*module->getFunction("main"));
+  auto *node =
+      cfg.create<tpa::CallCFGNode>(module->getFunction("callee"), call);
+  node->addArgument(values.at("root"));
+  for (const auto *start : {base, f8, f16, f24, a}) {
+    tpa::Env env;
+    env.weakUpdate(root, tpa::PtsSet::getSingletonSet(start));
+    auto actual = tpa::StorePruner(env, pointers, memory)
+                      .pruneStore(store, tpa::ProgramPoint(ctx, node));
+    // Reference: ordinary graph reachability, with every structural edge
+    // expanded independently. This deliberately has no block-frontier shortcut.
+    std::unordered_set<const tpa::MemoryObject *> reachable;
+    std::vector<const tpa::MemoryObject *> work{start, global};
+    for (size_t next = 0; next < work.size(); ++next) {
+      const auto *object = work[next];
+      if (!reachable.insert(object).second)
+        continue;
+      for (const auto *field : memory.getReachablePointerObjects(object, false))
+        work.push_back(field);
+      for (const auto *target : store.lookup(object))
+        work.push_back(target);
+    }
+    size_t expected = 0;
+    for (const auto &entry : store) {
+      if (reachable.count(entry.first)) {
+        ++expected;
+        EXPECT_EQ(actual.lookup(entry.first), entry.second);
+      } else
+        EXPECT_TRUE(actual.lookup(entry.first).empty());
+    }
+    EXPECT_EQ(actual.size(), expected);
+    EXPECT_TRUE(actual.lookup(dead).empty());
+  }
+}
+
+TEST(TPATaint, PointerValuedAssemblyOutputHasUnknownPointsToBinding) {
+  llvm::LLVMContext llvmContext;
+  llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"(
+    define i32 @main() {
+      %pointer = call i8* asm sideeffect "", "=r"()
+      ret i32 0
+    }
+  )",
+                                          diagnostic, llvmContext);
+  ASSERT_NE(module, nullptr);
+  EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+  const auto *value = &module->getFunction("main")->front().front();
+  tpa::taint::prepareModule(*module);
+  tpa::SemiSparseProgramBuilder builder;
+  auto program = builder.runOnModule(*module);
+  tpa::SemiSparsePointerAnalysis pointer;
+  pointer.runOnProgram(program);
+  auto pointsTo =
+      pointer.getPtsSet(context::Context::getGlobalContext(), value);
+  EXPECT_TRUE(pointsTo.has(tpa::MemoryManager::getUniversalObject()));
+}
+
+TEST(TPATaint,
+     ConstructorLoweringRetainsEqualPrioritiesAndValidDebugLocations) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(R"(
+    @llvm.global_ctors = appending global [3 x { i32, void ()*, i8* }] [
+      { i32, void ()*, i8* } { i32 200, void ()* @a, i8* null },
+      { i32, void ()*, i8* } { i32 100, void ()* @b, i8* null },
+      { i32, void ()*, i8* } { i32 200, void ()* @c, i8* null }]
+    define void @a() { ret void }
+    define void @b() { ret void }
+    define void @c() { ret void }
+    define i32 @main() { ret i32 0 }
+  )",
+                                          error, context);
+  ASSERT_NE(module, nullptr);
+  llvm::DIBuilder debug(*module);
+  auto *file = debug.createFile("constructors.cpp", ".");
+  debug.createCompileUnit(llvm::dwarf::DW_LANG_C_plus_plus, file, "test", false,
+                          "", 0);
+  auto *type = debug.createSubroutineType(debug.getOrCreateTypeArray({}));
+  for (const auto *name : {"main", "a", "b", "c"}) {
+    auto *scope = debug.createFunction(file, name, name, file, 1, type, 1,
+                                       llvm::DINode::FlagZero,
+                                       llvm::DISubprogram::SPFlagDefinition);
+    module->getFunction(name)->setSubprogram(scope);
+  }
+  debug.finalize();
+  module->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                        llvm::DEBUG_METADATA_VERSION);
+  ASSERT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+  llvm::ModuleAnalysisManager manager;
+  transform::LowerGlobalCtorPass().run(*module, manager);
+  EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+  std::vector<std::string> calls;
+  for (const auto &inst : module->getFunction("main")->front())
+    if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+      calls.push_back(call->getCalledFunction()->getName().str());
+      EXPECT_TRUE(static_cast<bool>(call->getDebugLoc()));
+    }
+  EXPECT_EQ(calls, (std::vector<std::string>{"b", "a", "c"}));
+}
+
+TEST(TPATaint, InputVerifierRecoversDebugOnlyButRejectsBrokenExecutableIR) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic diagnostic;
+  auto makeModule = [&]() {
+    auto module = llvm::parseAssemblyString(R"(
+      define i32 @callee() { ret i32 0 }
+      define i32 @main() { %result = call i32 @callee() ret i32 %result }
+    )",
+                                            diagnostic, context);
+    llvm::DIBuilder debug(*module);
+    auto *file = debug.createFile("debug.c", ".");
+    debug.createCompileUnit(llvm::dwarf::DW_LANG_C99, file, "test", false, "",
+                            0);
+    auto *type = debug.createSubroutineType(debug.getOrCreateTypeArray({}));
+    for (const auto *name : {"main", "callee"})
+      module->getFunction(name)->setSubprogram(debug.createFunction(
+          file, name, name, file, 1, type, 1, llvm::DINode::FlagZero,
+          llvm::DISubprogram::SPFlagDefinition));
+    debug.finalize();
+    module->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                          llvm::DEBUG_METADATA_VERSION);
+    return module;
+  };
+  auto debugOnly = makeModule();
+  bool recovered = false;
+  std::string text;
+  llvm::raw_string_ostream errors(text);
+  EXPECT_TRUE(tpa::taint::verifyInputModule(*debugOnly, errors, recovered));
+  EXPECT_TRUE(recovered);
+  EXPECT_EQ(debugOnly->getFunction("main")->getSubprogram(), nullptr);
+  EXPECT_FALSE(llvm::verifyModule(*debugOnly, &llvm::errs()));
+  auto broken = makeModule();
+  broken->getFunction("main")->front().getTerminator()->eraseFromParent();
+  recovered = true;
+  EXPECT_FALSE(tpa::taint::verifyInputModule(*broken, errors, recovered));
+  EXPECT_FALSE(recovered);
+  EXPECT_NE(broken->getFunction("main")->getSubprogram(), nullptr);
 }
 
 } // namespace

@@ -37,6 +37,12 @@ engine metadata, argument index and calling context.
 Options
 -------
 
+* ``--taint-tpa.strip-debug`` explicitly strips all debug metadata before input
+  verification; reports lose source locations. By default valid debug info is
+  retained. Debug-only input verifier errors are recovered by stripping invalid
+  metadata with a warning. Structural IR errors remain fatal, and verification
+  after TPA preprocessing stays strict to expose transformation bugs.
+
 * ``--taint-tpa.unmodeled=ignore|error`` selects the missing external model
   and unresolved-call policy. The default is ``ignore``, an optimistic research
   setting. ``error`` requires all models and call targets.
@@ -199,10 +205,35 @@ thread scheduling, interference and memory-order guarantees are not analyzed.
 Pointer-valued RMW/compare-exchange remain unsupported because their pointer
 store effects also need implementation in the TPA backend.
 
-Exception-handling instructions, ``invoke``, ``callbr``, ``va_arg`` and other
-instructions outside the validated subset are rejected. This baseline does not
-claim coverage of arbitrary C++ programs, concurrency or whole-program soundness
-for incomplete external models.
+``invoke`` uses the ordinary interprocedural data transfers while normal and
+unwind CFG paths are conservatively joined. ``landingpad`` introduces an opaque
+runtime handle/selector; precise exception payload provenance and handler type
+matching are not modeled. ``resume`` propagates incoming memory to callers
+without manufacturing a scalar return. Both pointer and taint graphs retain
+exceptional memory exits, including functions that have no normal return.
+Windows funclet instructions and ``va_arg`` remain unsupported.
+
+``callbr`` inline assembly follows the unresolved-call policy and retains all
+CFG successors. Ignored assembly adds no taint effects. The pointer backend
+keeps pointer-valued assembly results queryable as unknown objects.
+
+Instruction-capability diagnostics print at most 20 opcode/function entries
+plus an omitted count, avoiding repeated full-module metadata printing.
+Constructor lowering retains all equal-priority entries in stable, ascending
+priority order and gives generated calls valid caller debug locations. The
+``mktime`` mod/ref summary reads and writes its sole ``Arg0`` ``struct tm*``.
+
+Store pruning expands a structural pointer-field suffix only when a smaller
+reachable offset requires it, while still following every reachable object's
+stored pointers. For owning stores, global bindings are already roots and need
+no redundant structural expansion; overlays retain full base-aware traversal.
+This preserves the pruned mapping and reduces repeated layout enumeration.
+The optimization is checked against an independent reachability implementation.
+Large programs can still require substantial pointer-analysis time;
+``--analysis-stats`` includes pointer evaluation counts and solve timings.
+
+This baseline does not claim full C++ exception semantics, concurrency support
+or whole-program soundness with optimistic external models.
 
 Library use
 -----------

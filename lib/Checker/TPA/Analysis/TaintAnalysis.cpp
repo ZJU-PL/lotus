@@ -12,11 +12,32 @@
 #include <set>
 #include <stdexcept>
 
+#include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
 
 namespace tpa::taint {
+bool verifyInputModule(llvm::Module &module, llvm::raw_ostream &errors,
+                       bool &debugStripped) {
+  debugStripped = false;
+  bool brokenDebug = false;
+  // First inspect without printing Values: debug diagnostics can otherwise
+  // rebuild large module slot tables for every affected call site.
+  if (llvm::verifyModule(module, nullptr, &brokenDebug)) {
+    llvm::verifyModule(module, &errors, &brokenDebug);
+    errors << "Input LLVM IR verification failed\n";
+    return false;
+  }
+  if (brokenDebug) {
+    llvm::StripDebugInfo(module);
+    debugStripped = true;
+    return !llvm::verifyModule(module, &errors);
+  }
+  return true;
+}
+
 bool validateModule(const llvm::Module &module, llvm::raw_ostream &errors) {
   auto *main = module.getFunction("main");
   if (!main || main->isDeclaration()) {
@@ -24,11 +45,13 @@ bool validateModule(const llvm::Module &module, llvm::raw_ostream &errors) {
     return false;
   }
   bool valid = true;
+  size_t unsupported = 0;
+  constexpr size_t maxDiagnostics = 20;
   for (const auto &function : module)
     for (const auto &block : function)
       for (const auto &inst : block) {
-        // Keep explicit-flow semantics. No exception, concurrent scheduling,
-        // variadic-body or callbr semantics are claimed by this baseline.
+        // Explicit-flow, path-insensitive semantics. Exception type matching,
+        // concurrent scheduling and variadic function bodies remain partial.
         bool supported = inst.isBinaryOp() || inst.isCast() ||
                          llvm::isa<llvm::CmpInst>(inst);
         switch (inst.getOpcode()) {
@@ -49,6 +72,10 @@ bool validateModule(const llvm::Module &module, llvm::raw_ostream &errors) {
         case llvm::Instruction::InsertElement:
         case llvm::Instruction::InsertValue:
         case llvm::Instruction::ShuffleVector:
+        case llvm::Instruction::Invoke:
+        case llvm::Instruction::CallBr:
+        case llvm::Instruction::LandingPad:
+        case llvm::Instruction::Resume:
         case llvm::Instruction::Call:
         case llvm::Instruction::Ret:
         case llvm::Instruction::Br:
@@ -67,11 +94,19 @@ bool validateModule(const llvm::Module &module, llvm::raw_ostream &errors) {
         if (auto *cx = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&inst))
           pointerAtomic = cx->getCompareOperand()->getType()->isPointerTy();
         if (!supported || pointerAtomic) {
-          errors << "Unsupported TPA taint instruction in "
-                 << function.getName() << ": " << inst << "\n";
+          if (++unsupported <= maxDiagnostics)
+            // Printing the Value constructs a ModuleSlotTracker and can rescan
+            // all debug metadata for every error. Opcode/name reads are linear.
+            errors << "Unsupported TPA taint instruction in "
+                   << function.getName() << ": " << inst.getOpcodeName()
+                   << "\n";
           valid = false;
         }
       }
+  if (unsupported > maxDiagnostics)
+    errors << (unsupported - maxDiagnostics)
+           << " additional unsupported instructions omitted (" << unsupported
+           << " total)\n";
   return valid;
 }
 

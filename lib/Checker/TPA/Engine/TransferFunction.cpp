@@ -309,7 +309,7 @@ void TransferFunction::evalCall(const ProgramPoint &pp,
       if (callGraphUpdated)
         for (auto *exit : globalState.getDefUseModule()
                               .getDefUseFunction(callTgt)
-                              .getExitInsts())
+                              .getMemoryExitInsts())
           evalResult.addTopLevelSuccessor(ProgramPoint(newCtx, exit));
     }
   }
@@ -352,6 +352,15 @@ void TransferFunction::evalReturn(const ProgramPoint &pp,
       globalState.getCallGraph().getCallers(FunctionContext(ctx, fromFunc));
   for (auto const &retSite : returnTgts)
     applyReturn(retSite, tVal, evalResult);
+}
+
+void TransferFunction::evalResume(const ProgramPoint &pp, EvalResult &result) {
+  if (localState)
+    result.setStore(*localState);
+  const auto *function = pp.getDefUseInstruction()->getFunction();
+  for (const auto &caller : globalState.getCallGraph().getCallers(
+           FunctionContext(pp.getContext(), function)))
+    applyReturn(caller, TaintLattice::Unknown, result);
 }
 
 EvalResult TransferFunction::eval(const ProgramPoint &pp) {
@@ -436,6 +445,7 @@ EvalResult TransferFunction::eval(const ProgramPoint &pp) {
     case Instruction::Unreachable:
     case Instruction::Br:
       break;
+    case Instruction::CallBr:
     case Instruction::Invoke:
     case Instruction::Call:
       evalCall(pp, evalResult);
@@ -443,9 +453,15 @@ EvalResult TransferFunction::eval(const ProgramPoint &pp) {
     case Instruction::Ret:
       evalReturn(pp, evalResult);
       break;
-    case Instruction::VAArg:
     case Instruction::LandingPad:
-    case Instruction::Resume: {
+      // Runtime handle/selector values are clean; accesses through extracted
+      // exception pointers use the pointer backend's unknown-object model.
+      evalAlloca(pp, evalResult);
+      break;
+    case Instruction::Resume:
+      evalResume(pp, evalResult);
+      break;
+    case Instruction::VAArg: {
       errs() << "Insruction not handled :" << *inst << "\n";
       llvm_unreachable("Taint analysis failed");
     }

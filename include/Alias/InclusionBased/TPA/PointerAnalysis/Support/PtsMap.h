@@ -62,6 +62,8 @@ private:
   }
 
 public:
+  bool isOverlay() const { return base != nullptr; }
+
   PtsMap makeOverlay() const {
     PtsMap result;
     result.base = this;

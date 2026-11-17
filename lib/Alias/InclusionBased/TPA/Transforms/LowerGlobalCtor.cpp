@@ -15,6 +15,7 @@
 #include <map>
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
@@ -26,8 +27,8 @@ namespace transform {
  * @brief Lower a global constructors array into function calls in main().
  *
  * Extracts function pointers and priorities from the @llvm.global_ctors array,
- * sorts them by priority (higher priority first), and inserts calls to them
- * at the beginning of main(). Then removes the global variable.
+ * sorts them by priority (lower numeric priority first), and inserts calls to
+ * them at the beginning of main(). Then removes the global variable.
  *
  * @param ctor The @llvm.global_ctors global variable
  * @param module The module containing the variable
@@ -47,7 +48,9 @@ static bool lowerGlobalCtor(GlobalVariable &ctor, Module &module) {
     return false;
   auto *initArray = cast<ConstantArray>(init);
 
-  std::map<unsigned, Function *, std::greater<unsigned>> funMap;
+  // Equal priorities are common after linking many translation units. Keep
+  // all entries, in their original order within each priority.
+  std::multimap<unsigned, Function *> funMap;
   for (auto &elem : initArray->operands()) {
     auto *elemVal = elem.get();
     if (isa<ConstantAggregateZero>(elemVal))
@@ -55,17 +58,24 @@ static bool lowerGlobalCtor(GlobalVariable &ctor, Module &module) {
     auto *cs = cast<ConstantStruct>(elemVal);
     if (isa<ConstantPointerNull>(cs->getOperand(1)))
       continue;
-    if (!isa<Function>(cs->getOperand(1)))
+    auto *function = dyn_cast<Function>(cs->getOperand(1)->stripPointerCasts());
+    if (!function)
       continue;
 
     auto *prio = cast<ConstantInt>(cs->getOperand(0));
-    funMap[prio->getZExtValue()] = cast<Function>(cs->getOperand(1));
+    funMap.emplace(prio->getZExtValue(), function);
   }
 
   auto insertPos = mainFunc->begin()->getFirstInsertionPt();
   for (auto const &mapping : funMap) {
     FunctionCallee callee(mapping.second->getFunctionType(), mapping.second);
-    CallInst::Create(callee, "", &*insertPos);
+    auto *call = CallInst::Create(callee, "", &*insertPos);
+    auto location = insertPos->getDebugLoc();
+    if (!location)
+      if (auto *scope = mainFunc->getSubprogram())
+        location = DILocation::get(module.getContext(), scope->getScopeLine(),
+                                   0, scope);
+    call->setDebugLoc(location);
   }
 
   ctor.eraseFromParent();

@@ -262,6 +262,7 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
     LocalTracker(workList).trackMemory(pp, memSet);
     break;
   }
+  case Instruction::CallBr:
   case Instruction::Invoke:
   case Instruction::Call: {
     evalCallInst(pp);
@@ -275,9 +276,18 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
     }
     break;
   }
-  case Instruction::VAArg:
   case Instruction::LandingPad:
+    break; // Runtime-produced handle: no modeled value provenance.
   case Instruction::Resume: {
+    MemorySet objects;
+    if (store)
+      for (const auto &entry : pp.getDefUseInstruction()->mem_preds())
+        if (store->lookup(entry.first) == TaintLattice::Either)
+          objects.insert(entry.first);
+    LocalTracker(workList).trackMemory(pp, objects);
+    break;
+  }
+  case Instruction::VAArg: {
     errs() << *inst << "\n";
     llvm_unreachable("instruction not handled");
   }

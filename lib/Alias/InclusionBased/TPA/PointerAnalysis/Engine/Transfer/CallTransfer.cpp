@@ -225,6 +225,18 @@ void TransferFunction::evalCallNode(const ProgramPoint &pp,
 
   const auto callees = resolveCallTarget(ctx, callNode);
   if (callees.empty()) {
+    // Inline assembly has no resolvable function body. Pointer-valued outputs
+    // must still be queryable, using the same unknown object as externals.
+    const auto *call = llvm::cast<llvm::CallBase>(callNode.getCallSite());
+    if (call->isInlineAsm())
+      if (const auto *destination = callNode.getDest()) {
+        const auto *pointer =
+            globalState.getPointerManager().getOrCreatePointer(ctx,
+                                                               destination);
+        globalState.getEnv().weakUpdate(
+            pointer,
+            PtsSet::getSingletonSet(MemoryManager::getUniversalObject()));
+      }
     // To avoid a premature fixpoint we need two things:
     // 1. Propagate the current store to mem-level successors so that when the
     //    function pointer is resolved (triggering a top-level re-evaluation of

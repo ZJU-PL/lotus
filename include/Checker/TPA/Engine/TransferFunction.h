@@ -85,6 +85,7 @@ private:
   void evalAtomic(const ProgramPoint &, EvalResult &);
   void evalCall(const ProgramPoint &, EvalResult &);
   void evalReturn(const ProgramPoint &, EvalResult &);
+  void evalResume(const ProgramPoint &, EvalResult &);
 
 public:
   TransferFunction(TaintGlobalState &g, const TaintStore *l)

@@ -126,3 +126,27 @@ execute_process(COMMAND "${PROGRAM}" --engine=taint-tpa ${WORK_DIR}/bad-model.ll
 if(NOT result EQUAL 2 OR NOT errors MATCHES "selects non-pointer argument 0 of type i32")
   message(FATAL_ERROR "An invalid fixed memory argument was accepted: ${result}\n${output}\n${errors}")
 endif()
+
+file(WRITE "${WORK_DIR}/mktime.ll" [=[
+%tm = type { i32, i32 }
+declare i64 @mktime(%tm*)
+declare i8* @malloc(i64)
+define i32 @main(i32 %argc) {
+  %time = alloca %tm
+  %field = getelementptr %tm, %tm* %time, i64 0, i32 0
+  store i32 %argc, i32* %field
+  %seconds = call i64 @mktime(%tm* %time)
+  %allocation = call i8* @malloc(i64 %seconds)
+  ret i32 0
+}
+]=])
+check_run(1 "raw_sink_violations=1" ${WORK_DIR}/mktime.ll --taint-tpa.unmodeled=error)
+
+# LLVM's text parser may discard malformed metadata itself. Use valid debug
+# info to verify that the explicit option removes report source locations.
+check_run(1 "JSON report written to" ${INPUTS}/debug.ll ${specs}
+  --taint-tpa.strip-debug --report-json=${WORK_DIR}/stripped-debug.json)
+file(READ "${WORK_DIR}/stripped-debug.json" stripped)
+if(stripped MATCHES "tpa-debug-fixture.c")
+  message(FATAL_ERROR "Explicit debug stripping retained source locations")
+endif()

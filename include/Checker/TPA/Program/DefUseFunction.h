@@ -13,6 +13,7 @@ private:
 
   DefUseInstruction entryInst;
   std::vector<DefUseInstruction *> exitInsts;
+  std::vector<DefUseInstruction *> memoryExitInsts;
 
 public:
   using NodeType = DefUseInstruction;
@@ -28,6 +29,7 @@ public:
 
   DefUseInstruction *getEntryInst() { return &entryInst; }
   const DefUseInstruction *getEntryInst() const { return &entryInst; }
+  const auto &getMemoryExitInsts() const { return memoryExitInsts; }
   const std::vector<DefUseInstruction *> &getExitInsts() const {
     return exitInsts;
   }
