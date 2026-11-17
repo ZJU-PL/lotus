@@ -48,6 +48,11 @@ void addExternalDefs(DefUseFunction &duFunc) {
     for (auto const &inst : bb) {
       if (!duFunc.getDefUseInstruction(&inst))
         continue;
+      // InlineAsm is neither an LLVM Constant nor a parameter. Calls without
+      // SSA inputs still need an initial evaluation under the ignore policy.
+      if (const auto *call = dyn_cast<CallBase>(&inst))
+        if (call->isInlineAsm())
+          entryInst->insertTopLevelEdge(duFunc.getDefUseInstruction(call));
       if (const auto *allocInst = dyn_cast<AllocaInst>(&inst)) {
         entryInst->insertTopLevelEdge(duFunc.getDefUseInstruction(allocInst));
         continue;
@@ -106,6 +111,7 @@ void computeNodePriority(DefUseFunction &duFunc) {
 class MemReadVisitor : public llvm::InstVisitor<MemReadVisitor> {
 private:
   const SemiSparsePointerAnalysis &ptrAnalysis;
+  UnmodeledPolicy unmodeledPolicy;
   const ModRefModuleSummary &summaryMap;
   const ExternalModRefTable &modRefTable;
 
@@ -148,14 +154,10 @@ private:
   }
 
   void processExternalCall(CallBase *cs, const Function *f) {
-    const auto *summary = modRefTable.lookup(f->getName());
-    if (summary == nullptr) {
-      errs() << "Missing entry in ModRefTable: " << f->getName() << "\n";
-      llvm_unreachable("Consider adding the function to modref annotations");
-    }
+    const auto &summary = lookupModRefSummary(modRefTable, *f, unmodeledPolicy);
     auto &inst = *cs;
 
-    for (auto const &effect : *summary) {
+    for (auto const &effect : summary) {
       if (effect.isRefEffect()) {
         auto const &pos = effect.getPosition();
         assert(!pos.isReturnPosition() &&
@@ -169,8 +171,9 @@ private:
                          effect.onReachableMemory());
         else {
           for (auto i = idx, e = cs->arg_size(); i < e; ++i)
-            processMemRead(inst, cs->getArgOperand(i),
-                           effect.onReachableMemory());
+            if (cs->getArgOperand(i)->getType()->isPointerTy())
+              processMemRead(inst, cs->getArgOperand(i),
+                             effect.onReachableMemory());
         }
       }
     }
@@ -179,8 +182,10 @@ private:
 public:
   MemReadVisitor(const RDMapType &m, DefUseFunction &f,
                  const SemiSparsePointerAnalysis &p,
-                 const ModRefModuleSummary &sm, const ExternalModRefTable &e)
-      : ptrAnalysis(p), summaryMap(sm), modRefTable(e), rdMap(m), duFunc(f) {}
+                 const ModRefModuleSummary &sm, const ExternalModRefTable &e,
+                 UnmodeledPolicy policy)
+      : ptrAnalysis(p), unmodeledPolicy(policy), summaryMap(sm), modRefTable(e),
+        rdMap(m), duFunc(f) {}
 
   // Default case
   void visitInstruction(Instruction &) {}
@@ -189,11 +194,20 @@ public:
     processMemRead(loadInst, loadInst.getPointerOperand(), false);
   }
 
+  void visitAtomicRMWInst(AtomicRMWInst &inst) {
+    processMemRead(inst, inst.getPointerOperand(), false);
+  }
+  void visitAtomicCmpXchgInst(AtomicCmpXchgInst &inst) {
+    processMemRead(inst, inst.getPointerOperand(), false);
+  }
+
   void visitCallBase(CallBase &call) { visitTaintCall(&call); }
 
   void visitTaintCall(CallBase *cs) {
+    if (isDebugIntrinsic(*cs))
+      return;
     auto *inst = cs;
-    auto callTgts = ptrAnalysis.getCallees(cs);
+    auto callTgts = resolveCallTargets(ptrAnalysis, *cs, unmodeledPolicy);
     auto &rdStore = rdMap.getReachingDefStore(inst);
     auto *dstDuInst = duFunc.getDefUseInstruction(inst);
     for (const auto *callee : callTgts) {
@@ -215,11 +229,12 @@ public:
 void DefUseModuleBuilder::buildMemLevelEdges(
     DefUseFunction &duFunc, const ModRefModuleSummary &summaryMap) {
   // Run the reaching def analysis
-  ReachingDefModuleAnalysis rdAnalysis(ptrAnalysis, summaryMap, modRefTable);
+  ReachingDefModuleAnalysis rdAnalysis(ptrAnalysis, summaryMap, modRefTable,
+                                       unmodeledPolicy);
   auto rdMap = rdAnalysis.runOnFunction(duFunc.getFunction());
 
-  MemReadVisitor memVisitor(rdMap, duFunc, ptrAnalysis, summaryMap,
-                            modRefTable);
+  MemReadVisitor memVisitor(rdMap, duFunc, ptrAnalysis, summaryMap, modRefTable,
+                            unmodeledPolicy);
   for (const auto *bb :
        llvm::depth_first(&duFunc.getFunction().getEntryBlock()))
     memVisitor.visit(*const_cast<BasicBlock *>(bb));
@@ -247,11 +262,13 @@ void DefUseModuleBuilder::buildDefUseFunction(
 DefUseModule DefUseModuleBuilder::buildDefUseModule(const Module &module) {
   if (!validateModule(module, llvm::errs()))
     throw std::invalid_argument("Unsupported module for TPA taint");
-  DefUseModule duModule(module, reachableFunctions(module, ptrAnalysis));
+  DefUseModule duModule(
+      module, reachableFunctions(module, ptrAnalysis, unmodeledPolicy));
 
   // Obtain mod ref summary first
   auto moduleSummary =
-      ModRefModuleAnalysis(ptrAnalysis, modRefTable).runOnModule(module);
+      ModRefModuleAnalysis(ptrAnalysis, modRefTable, unmodeledPolicy)
+          .runOnModule(module);
 
   for (auto &duFunc : duModule)
     buildDefUseFunction(duFunc, moduleSummary);

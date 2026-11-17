@@ -37,6 +37,10 @@ engine metadata, argument index and calling context.
 Options
 -------
 
+* ``--taint-tpa.unmodeled=ignore|error`` selects the missing external model
+  and unresolved-call policy. The default is ``ignore``, an optimistic research
+  setting. ``error`` requires all models and call targets.
+
 * ``--taint-tpa.k-limit=N`` uses the same k-limited call-string policy for pointer and
   taint propagation. The default is 0, merging calling contexts.
 * ``--taint-tpa.ptr-config=FILE``, ``--taint-tpa.modref-config=FILE`` and ``--taint-tpa.taint-config=FILE``
@@ -115,21 +119,90 @@ Sinks support ``V`` and ``D``. Reachable-memory pipes copy offsets for individua
 destination. Memory effects at external calls are weak updates. Legacy scalar-return
 effects on void calls are ignored, matching the pointer client.
 
-External calls need compatible pointer, mod/ref and taint models. In particular,
-a memory taint source or pipe needs a corresponding mod/ref effect so the
-sparse graph carries its result. Missing mod/ref or taint models, invalid
-positions/types and unresolved indirect calls are diagnosed by the CLI.
-``IGNORE`` is an explicit model choice. The shipped models provide a starting
-point; pin and review the model files used for benchmark comparisons.
+For mixed variadic inputs, paired value and memory rules are used:
+
+.. code-block:: text
+
+   PIPE snprintf Arg0 D AfterArg2 V
+   PIPE snprintf Arg0 D AfterArg2 D
+
+The value rule carries scalar argument taint (and pointer-value taint). The
+memory-input range selects only pointer arguments, so numeric arguments are
+never passed to points-to queries. Mod/ref argument ranges likewise select
+pointers; the shipped formatted-output summaries include matching reads, such
+as ``snprintf REF AfterArg2 D``, to construct sparse memory dependencies for
+string arguments. Fixed memory positions, taint source/sink positions and
+memory pipe destinations still require pointer operands. These are type-directed
+summaries; they do not parse format strings or unpack ``va_list`` contents.
+
+Indirect call candidates are filtered by calling convention, argument count,
+return type and fixed argument types in both the pointer solver and call-target
+queries. Compatible typed-pointer casts are retained when address spaces match;
+variadic targets accept additional arguments after their fixed prefix. This is
+a candidate filter, not a proof of full ABI compatibility. Explicit named
+callees, including casts of known function symbols, retain their identity.
+``filtered_indirect_targets`` counts eliminated merged-context candidates per
+static call site. If none remain, the unresolved-call policy applies.
+
+Available external models are applied independently. When a taint model is
+missing in ``ignore`` mode, the call generates no taint and performs no taint
+kills; its new SSA return value is assumed untainted so dependent internal
+calls can still be analyzed. Existing argument and memory taint survives.
+Missing mod/ref models add no memory effects. This policy can miss real flows
+through unmodeled functions. Explicit ``IGNORE`` taint entries use the same
+no-effect/untainted-return behavior and are accepted in strict mode.
+
+LLVM debug declaration, value and label intrinsics are known no-ops in both
+modes. They are excluded from model validation, call reachability and the
+sparse def-use graph, and do not count as ignored externals. Debug locations
+remain available for reports.
+
+``--analysis-stats`` records the policy, unique ignored symbols, distinct static
+call sites, and per-symbol missing taint/mod-ref counts. An indirect call with
+multiple missing targets counts once in the total call-site count and once
+under each affected symbol. Worklist revisits do not inflate counts. A warning
+summarizes missing-model coverage unless logging is disabled; finding metadata
+also records the policy and aggregate counts.
+
+Unresolved calls, including inline assembly, follow the same policy. In
+``ignore`` mode they preserve incoming taint and memory facts and assume an
+untainted new SSA return value; known callees continue to use their bodies or
+models. Statistics distinguish ignored unresolved call sites and inline-assembly
+sites, with per-caller counts. The counts include context-specific resolution
+failures encountered by the solver and do not count worklist revisits.
+``TaintAnalysis::getIgnoredUnresolvedCalls`` exposes the executed call sites.
+Strict mode diagnoses a missing target, including the caller and call IR.
+
+The pointer analysis continues using its existing external-pointer models and
+fallback behavior; this option controls the taint and mod/ref layers. A memory
+taint source or pipe still needs a corresponding mod/ref effect so the sparse
+graph carries its result. Invalid available models remain errors. Pin and
+review the model files and policy used for benchmark comparisons.
 
 The tracker primarily diagnoses call/return context merging. External-model,
 alias, path and weak-update imprecision need not yield a loss site. Its output
 is a research diagnostic, not a complete explanation of every finding.
 
-Unsupported atomic accesses, exception-handling instructions, ``invoke``,
-``callbr``, ``va_arg`` and other instructions outside the validated subset
-are rejected. This baseline does not claim coverage of arbitrary C++ programs,
-concurrency or whole-program soundness for incomplete external models.
+Supported LLVM data operations include arithmetic and casts, ``fneg``, scalar
+and pointer ``freeze``, aggregates/vectors, loads/stores and scalar atomics.
+Indirect branches carry existing explicit data flows without introducing
+implicit control taint. ``freeze`` preserves operand taint; poison/undef
+nondeterminism is not modeled separately.
+
+Atomic loads/stores use the corresponding ordinary taint memory effects.
+``atomicrmw`` returns the old contents and writes a value derived from its
+operation; exchange can strongly overwrite a concrete singleton object.
+``cmpxchg`` joins retained and replacement memory because success is not proved,
+and conservatively combines old-value and comparison taint in its aggregate
+result. ``fence`` changes no taint facts. These are sequential data effects:
+thread scheduling, interference and memory-order guarantees are not analyzed.
+Pointer-valued RMW/compare-exchange remain unsupported because their pointer
+store effects also need implementation in the TPA backend.
+
+Exception-handling instructions, ``invoke``, ``callbr``, ``va_arg`` and other
+instructions outside the validated subset are rejected. This baseline does not
+claim coverage of arbitrary C++ programs, concurrency or whole-program soundness
+for incomplete external models.
 
 Library use
 -----------
@@ -137,7 +210,8 @@ Library use
 Call ``validateModule`` and ``prepareModule`` before building the TPA pointer
 program. Keep that program, the LLVM module, the pointer analysis and the sparse
 graph alive while using taint results. Do not change the context policy between
-analyses. Build the graph with ``DefUseModuleBuilder``, then run
+analyses. Pass the same ``UnmodeledPolicy`` to ``DefUseModuleBuilder`` and
+``TaintAnalysis`` (both default to ``Ignore``), then run
 ``TaintAnalysis::runOnDefUseModule(graph, trackPrecisionLoss)``.
 
 The analysis exposes its environment, incoming memory stores, violations,

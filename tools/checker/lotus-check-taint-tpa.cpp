@@ -14,6 +14,8 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <map>
+#include <set>
 
 #include <llvm/IR/Verifier.h>
 #include <llvm/IRReader/IRReader.h>
@@ -56,6 +58,30 @@ static cl::opt<std::string>
            cl::desc("Write sparse def-use graphs to this directory"),
            cl::sub(lotus::checker::tooling::taintTPASubCommand()));
 
+static cl::opt<tpa::taint::UnmodeledPolicy> Unmodeled(
+    "taint-tpa.unmodeled",
+    cl::desc("Policy for missing external models and unresolved calls"),
+    cl::values(clEnumValN(tpa::taint::UnmodeledPolicy::Ignore, "ignore",
+                          "Assume no additional effects (optimistic)"),
+               clEnumValN(tpa::taint::UnmodeledPolicy::Error, "error",
+                          "Require all models and call targets")),
+    cl::init(tpa::taint::UnmodeledPolicy::Ignore),
+    cl::sub(lotus::checker::tooling::taintTPASubCommand()));
+
+struct ExternalModelCoverage {
+  struct Symbol {
+    size_t calls = 0;
+    size_t missingModRef = 0;
+    size_t missingTaint = 0;
+  };
+  std::map<std::string, Symbol> ignored;
+  std::set<const CallBase *> ignoredCalls;
+  std::set<const CallBase *> unresolvedCalls;
+  std::map<std::string, size_t> unresolvedByFunction;
+  size_t inlineAsmCalls = 0;
+  size_t filteredIndirectTargets = 0;
+};
+
 static std::string defaultSpec(StringRef file) {
   SmallString<256> path;
   if (const char *dir = std::getenv("LOTUS_CONFIG_DIR")) {
@@ -73,77 +99,128 @@ static std::string defaultSpec(StringRef file) {
 }
 
 // Validate all resolved external targets before running the sparse builder.
-// This is a closed-world research baseline: incomplete models are errors.
+// Validate available models independently and account for missing ones.
 static bool validateModels(const Module &module,
                            const tpa::SemiSparsePointerAnalysis &pointer,
                            const annotation::ExternalModRefTable &modref,
-                           const annotation::ExternalTaintTable &taint) {
+                           const annotation::ExternalTaintTable &taint,
+                           ExternalModelCoverage &coverage) {
   bool valid = true;
-  for (const auto *function : tpa::taint::reachableFunctions(module, pointer))
+  for (const auto *function :
+       tpa::taint::reachableFunctions(module, pointer, Unmodeled))
     for (const auto *block : llvm::depth_first(&function->getEntryBlock()))
       for (const auto &inst : *block) {
         auto *call = dyn_cast<CallBase>(&inst);
-        if (!call)
+        if (!call || tpa::taint::isDebugIntrinsic(*call))
           continue;
-        for (auto *target : pointer.getCallees(call)) {
-          if (!target->isDeclaration())
+        size_t filtered = 0;
+        auto targets = tpa::taint::resolveCallTargets(pointer, *call, Unmodeled,
+                                                      nullptr, &filtered);
+        coverage.filteredIndirectTargets += filtered;
+        if (targets.empty()) {
+          coverage.unresolvedCalls.insert(call);
+          ++coverage.unresolvedByFunction[function->getName().str()];
+          coverage.inlineAsmCalls += call->isInlineAsm();
+        }
+        for (auto *target : targets) {
+          if (!target->isDeclaration() || tpa::taint::isDebugIntrinsic(*target))
             continue;
           auto *mr = modref.lookup(target->getName());
           auto *ts = taint.lookup(target->getName());
           if (!mr || !ts) {
-            errs() << "Missing " << (!mr ? "mod/ref" : "taint") << " model for "
-                   << target->getName() << "\n";
-            valid = false;
-            continue;
+            if (Unmodeled == tpa::taint::UnmodeledPolicy::Error) {
+              if (!mr)
+                errs() << "Missing mod/ref model for " << target->getName()
+                       << "\n";
+              if (!ts)
+                errs() << "Missing taint model for " << target->getName()
+                       << "\n";
+              valid = false;
+            } else {
+              auto &symbol = coverage.ignored[target->getName().str()];
+              ++symbol.calls;
+              symbol.missingModRef += !mr;
+              symbol.missingTaint += !ts;
+              coverage.ignoredCalls.insert(call);
+            }
           }
-          auto checkPosition = [&](annotation::APosition pos, bool memory) {
+          auto checkPosition = [&](annotation::APosition pos, bool memory,
+                                   StringRef modelKind,
+                                   bool pointerRange = false) {
+            auto reject = [&](const Twine &reason) {
+              errs() << "Invalid " << modelKind << " model for "
+                     << target->getName() << " in " << function->getName()
+                     << ": " << reason << "\n  " << *call << "\n";
+              valid = false;
+            };
             if (pos.isReturnPosition()) {
               // Legacy specifications contain value-return effects for void
               // LLVM memory intrinsics. Match the pointer client's no-op.
               if (call->getType()->isVoidTy() && !memory)
                 return;
-              if (call->getType()->isVoidTy() ||
-                  (memory && !call->getType()->isPointerTy()))
-                valid = false;
+              if (call->getType()->isVoidTy())
+                reject("memory effect selects a void return");
+              else if (memory && !call->getType()->isPointerTy()) {
+                std::string type;
+                raw_string_ostream out(type);
+                out << *call->getType();
+                reject(Twine("memory effect selects non-pointer return type ") +
+                       out.str());
+              }
               return;
             }
             auto arg = pos.getAsArgPosition();
             unsigned index = arg.getArgIndex();
-            if (!arg.isAfterArgPosition()) {
-              if (index >= call->arg_size() ||
-                  (memory &&
-                   !call->getArgOperand(index)->getType()->isPointerTy()))
-                valid = false;
-            } else {
-              for (unsigned i = index; i < call->arg_size(); ++i)
-                if (memory && !call->getArgOperand(i)->getType()->isPointerTy())
-                  valid = false;
+            if (!arg.isAfterArgPosition() && index >= call->arg_size()) {
+              reject(Twine("Arg") + Twine(index) + " is outside the " +
+                     Twine(call->arg_size()) + " call arguments");
+              return;
+            }
+            const auto end =
+                arg.isAfterArgPosition() ? call->arg_size() : index + 1u;
+            for (unsigned i = index; i < end; ++i) {
+              if ((pointerRange && arg.isAfterArgPosition()) || !memory ||
+                  call->getArgOperand(i)->getType()->isPointerTy())
+                continue;
+              std::string type;
+              raw_string_ostream out(type);
+              out << *call->getArgOperand(i)->getType();
+              reject(Twine("memory effect ") +
+                     (arg.isAfterArgPosition() ? "AfterArg" : "Arg") +
+                     Twine(index) + " selects non-pointer argument " +
+                     Twine(i) + " of type " + out.str());
             }
           };
-          for (const auto &effect : *mr)
-            checkPosition(effect.getPosition(), true);
-          for (const auto &entry : *ts) {
-            using namespace annotation;
-            if (entry.getEntryEnd() == TEnd::Source) {
-              const auto &source = entry.getAsSourceEntry();
-              checkPosition(source.getTaintPosition(),
-                            source.getTaintClass() != TClass::ValueOnly);
-            } else if (entry.getEntryEnd() == TEnd::Sink) {
-              const auto &sink = entry.getAsSinkEntry();
-              checkPosition(sink.getArgPosition(),
-                            sink.getTaintClass() != TClass::ValueOnly);
-            } else {
-              const auto &pipe = entry.getAsPipeEntry();
-              checkPosition(pipe.getSrcPosition(),
-                            pipe.getSrcClass() != TClass::ValueOnly);
-              checkPosition(pipe.getDstPosition(),
-                            pipe.getDstClass() != TClass::ValueOnly);
+          if (mr)
+            for (const auto &effect : *mr)
+              checkPosition(effect.getPosition(), true, "mod/ref", true);
+          if (ts)
+            for (const auto &entry : *ts) {
+              using namespace annotation;
+              if (entry.getEntryEnd() == TEnd::Source) {
+                const auto &source = entry.getAsSourceEntry();
+                checkPosition(source.getTaintPosition(),
+                              source.getTaintClass() != TClass::ValueOnly,
+                              "taint source");
+              } else if (entry.getEntryEnd() == TEnd::Sink) {
+                const auto &sink = entry.getAsSinkEntry();
+                checkPosition(sink.getArgPosition(),
+                              sink.getTaintClass() != TClass::ValueOnly,
+                              "taint sink");
+              } else {
+                const auto &pipe = entry.getAsPipeEntry();
+                checkPosition(pipe.getSrcPosition(),
+                              pipe.getSrcClass() != TClass::ValueOnly,
+                              "taint pipe source", true);
+                checkPosition(pipe.getDstPosition(),
+                              pipe.getDstClass() != TClass::ValueOnly,
+                              "taint pipe destination");
+              }
             }
-          }
         }
       }
   if (!valid)
-    errs() << "TPA taint requires complete models with valid call argument "
+    errs() << "TPA taint external model validation failed; check call argument "
               "positions and types\n";
   return valid;
 }
@@ -201,10 +278,18 @@ int runTPATaintCheckerTool(const char *argv0) try {
   if (!annotation::ExternalTaintTable::parse((*taintBuffer)->getBuffer(), taint,
                                              errs()))
     return 2;
-  if (!validateModels(*module, pointer, modref, taint))
+  ExternalModelCoverage coverage;
+  if (!validateModels(*module, pointer, modref, taint, coverage))
     return 2;
-  tpa::taint::DefUseModuleBuilder builder(pointer);
-  builder.loadExternalModRefTable(mrFile.c_str());
+  if (!coverage.ignored.empty() &&
+      lotus::checker::tooling::logAtLeast(
+          lotus::checker::tooling::LogLevel::Warning))
+    errs() << "TPA taint: ignoring missing external models for "
+           << coverage.ignored.size() << " symbols at "
+           << coverage.ignoredCalls.size()
+           << " call sites; --analysis-stats lists symbol counts\n";
+  tpa::taint::DefUseModuleBuilder builder(pointer, Unmodeled);
+  builder.setExternalModRefTable(std::move(modref));
   auto graph = builder.buildDefUseModule(*module);
   auto graphDone = Clock::now();
   if (!DotDir.empty()) {
@@ -221,16 +306,46 @@ int runTPATaintCheckerTool(const char *argv0) try {
         return 2;
     }
   }
-  tpa::taint::TaintAnalysis analysis(pointer);
+  tpa::taint::TaintAnalysis analysis(pointer, Unmodeled);
   analysis.setExternalTaintTable(std::move(taint));
   analysis.runOnDefUseModule(graph, Track);
   auto done = Clock::now();
+  // Include context-specific resolution failures as well as merged-target
+  // failures found during graph construction, without counting revisits.
+  for (const auto *call : analysis.getIgnoredUnresolvedCalls())
+    if (coverage.unresolvedCalls.insert(call).second) {
+      ++coverage.unresolvedByFunction[call->getFunction()->getName().str()];
+      coverage.inlineAsmCalls += call->isInlineAsm();
+    }
+  if (!coverage.unresolvedCalls.empty() &&
+      lotus::checker::tooling::logAtLeast(
+          lotus::checker::tooling::LogLevel::Warning))
+    errs() << "TPA taint: ignoring " << coverage.unresolvedCalls.size()
+           << " unresolved call sites; --analysis-stats lists caller counts\n";
+
   if (Track) {
     using namespace util::io;
     for (const auto &site : analysis.getLossSites())
       outs() << "Precision loss at " << site << "\n";
   }
+  const char *policyName =
+      Unmodeled == tpa::taint::UnmodeledPolicy::Ignore ? "ignore" : "error";
   if (lotus::checker::tooling::statsEnabled()) {
+    outs() << "unmodeled_policy=" << policyName
+           << " ignored_external_symbols=" << coverage.ignored.size()
+           << " ignored_external_calls=" << coverage.ignoredCalls.size()
+           << " ignored_unresolved_calls=" << coverage.unresolvedCalls.size()
+           << " ignored_inline_asm_calls=" << coverage.inlineAsmCalls
+           << " filtered_indirect_targets=" << coverage.filteredIndirectTargets
+           << "\n";
+    for (const auto &entry : coverage.unresolvedByFunction)
+      outs() << "ignored_unresolved caller=" << entry.first
+             << " call_sites=" << entry.second << "\n";
+    for (const auto &entry : coverage.ignored)
+      outs() << "ignored_external symbol=" << entry.first
+             << " call_sites=" << entry.second.calls
+             << " missing_modref=" << entry.second.missingModRef
+             << " missing_taint=" << entry.second.missingTaint << "\n";
     const auto &s = analysis.getStatistics();
     auto seconds = [](auto a, auto b) {
       return std::chrono::duration<double>(b - a).count();
@@ -267,6 +382,17 @@ int runTPATaintCheckerTool(const char *argv0) try {
                           0, {NodeTag::CALL_SITE}, "sink");
       report->set_conf_score(80);
       report->add_metadata("engine", "taint-tpa");
+      report->add_metadata("unmodeled_policy", policyName);
+      report->add_metadata("ignored_external_symbols",
+                           std::to_string(coverage.ignored.size()));
+      report->add_metadata("ignored_external_calls",
+                           std::to_string(coverage.ignoredCalls.size()));
+      report->add_metadata("ignored_unresolved_calls",
+                           std::to_string(coverage.unresolvedCalls.size()));
+      report->add_metadata("ignored_inline_asm_calls",
+                           std::to_string(coverage.inlineAsmCalls));
+      report->add_metadata("filtered_indirect_targets",
+                           std::to_string(coverage.filteredIndirectTargets));
       report->add_metadata("context", contextText);
       report->add_metadata("argument", std::to_string(violation.argPos));
       manager.insert_report(bugType, report, true);

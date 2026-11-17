@@ -233,7 +233,11 @@ void TransferFunction::evalTaintPipe(const ProgramPoint &pp,
                          ? cs->arg_size()
                          : position.getArgIndex() + 1u;
     for (unsigned i = position.getArgIndex(); i < end; ++i) {
-      auto srcVal = TaintValue(pp.getContext(), cs->getArgOperand(i));
+      const auto *argument = cs->getArgOperand(i);
+      if (position.isAfterArgPosition() && srcClass != TClass::ValueOnly &&
+          !argument->getType()->isPointerTy())
+        continue;
+      auto srcVal = TaintValue(pp.getContext(), argument);
       srcTaint = Lattice<TaintLattice>::merge(
           srcTaint, getTaintValueByTClass(srcVal, entry.getSrcClass()));
     }
@@ -272,14 +276,30 @@ void TransferFunction::evalCallBySummary(const ProgramPoint &pp,
 void TransferFunction::evalExternalCall(const ProgramPoint &pp,
                                         const Function *func,
                                         EvalResult &evalResult) {
+  if (isDebugIntrinsic(*func))
+    return;
   auto funName = func->getName();
-  if (const auto *summary = globalState.getExternalTaintTable().lookup(funName))
+  const auto *summary = globalState.getExternalTaintTable().lookup(funName);
+  if (summary && !summary->empty())
     return evalCallBySummary(pp, func, *summary, evalResult);
-  else {
-    errs() << "Missing annotation for external function " << funName << "\n";
-    llvm_unreachable("Please add annotation to the aforementioned function and "
-                     "in the config file and try again.\n");
-  }
+  if (!summary && globalState.getUnmodeledPolicy() == UnmodeledPolicy::Error)
+    throw std::invalid_argument("Missing taint model for " + funName.str());
+
+  evalIgnoredCall(pp, evalResult);
+}
+
+void TransferFunction::evalIgnoredCall(const ProgramPoint &pp,
+                                       EvalResult &evalResult) {
+  // Optimistic missing-model policy (also used for explicit IGNORE entries).
+  // Existing memory/argument facts survive;
+  // only this call's new SSA result is assumed untainted. Leaving it at bottom
+  // would prevent downstream internal calls from being analyzed at all.
+  const auto *inst = pp.getDefUseInstruction()->getInstruction();
+  if (!inst->getType()->isVoidTy() &&
+      globalState.getEnv().weakUpdate(TaintValue(pp.getContext(), inst),
+                                      TaintLattice::Untainted))
+    addTopLevelSuccessors(pp, evalResult);
+  addMemLevelSuccessors(pp, evalResult);
 }
 
 } // namespace tpa::taint

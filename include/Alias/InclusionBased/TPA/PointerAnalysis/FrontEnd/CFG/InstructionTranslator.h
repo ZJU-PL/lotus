@@ -32,6 +32,7 @@ public:
       : cfg(c), typeMap(t), dataLayout(d) {}
 
   // Default case
+  CFGNode *visitFreezeInst(llvm::FreezeInst &);
   CFGNode *visitInstruction(llvm::Instruction &) { return nullptr; }
 
   // Supported cases

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Checker/TPA/Annotation/ExternalTaintTable.h"
+#include "Checker/TPA/Support/ExternalModels.h"
 #include "Checker/TPA/Support/ProgramPointSet.h"
 #include "Checker/TPA/Support/SinkViolationRecord.h"
 #include "Checker/TPA/Support/TaintEnv.h"
@@ -33,17 +34,20 @@ public:
   };
 
 private:
+  UnmodeledPolicy unmodeledPolicy;
   TaintEnv env;
   TaintMemo memo;
   annotation::ExternalTaintTable extTable;
   const tpa::SemiSparsePointerAnalysis &ptrAnalysis;
   SinkViolationRecord violations;
   ProgramPointSet lossSites;
+  std::unordered_set<const llvm::CallBase *> ignoredUnresolvedCalls;
   Statistics stats;
 
 public:
-  explicit TaintAnalysis(const tpa::SemiSparsePointerAnalysis &p)
-      : ptrAnalysis(p) {}
+  explicit TaintAnalysis(const tpa::SemiSparsePointerAnalysis &p,
+                         UnmodeledPolicy policy = UnmodeledPolicy::Ignore)
+      : unmodeledPolicy(policy), ptrAnalysis(p) {}
   void loadExternalTaintTable(const char *fileName) {
     extTable = annotation::ExternalTaintTable::loadFromFile(fileName);
   }
@@ -53,6 +57,9 @@ public:
   /// Clears earlier results. Returns true if no configured sink policy is
   /// violated.
   bool runOnDefUseModule(const DefUseModule &, bool trackPrecisionLoss = false);
+  const auto &getIgnoredUnresolvedCalls() const {
+    return ignoredUnresolvedCalls;
+  }
   const TaintEnv &getEnv() const { return env; }
   const TaintMemo &getMemo() const { return memo; }
   const SinkViolationRecord &getViolations() const { return violations; }

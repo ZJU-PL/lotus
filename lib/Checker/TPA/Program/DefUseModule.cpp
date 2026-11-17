@@ -1,5 +1,7 @@
 #include "Checker/TPA/Program/DefUseModule.h"
 
+#include "Checker/TPA/Support/ExternalModels.h"
+
 #include <limits>
 
 #include <llvm/ADT/DepthFirstIterator.h>
@@ -60,6 +62,8 @@ DefUseFunction::getDefUseInstruction(const Instruction *inst) const {
 DefUseFunction::DefUseFunction(const Function &f) : function(f), entryInst(&f) {
   for (const auto *bb : llvm::depth_first(&f.getEntryBlock())) {
     for (auto const &inst : *bb) {
+      if (isDebugIntrinsic(inst))
+        continue;
       if (const auto *brInst = dyn_cast<BranchInst>(&inst))
         if (brInst->isUnconditional())
           continue;

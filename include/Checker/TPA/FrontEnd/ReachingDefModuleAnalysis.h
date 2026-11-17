@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Checker/TPA/FrontEnd/ReachingDefMap.h"
+#include "Checker/TPA/Support/ExternalModels.h"
 
 namespace llvm {
 class Instruction;
@@ -25,14 +26,17 @@ using ReachingDefModuleMap = ReachingDefMap<llvm::Instruction>;
 class ReachingDefModuleAnalysis {
 private:
   const tpa::SemiSparsePointerAnalysis &ptrAnalysis;
+  UnmodeledPolicy unmodeledPolicy;
   const ModRefModuleSummary &summaryMap;
   const annotation::ExternalModRefTable &modRefTable;
 
 public:
   ReachingDefModuleAnalysis(const tpa::SemiSparsePointerAnalysis &p,
                             const ModRefModuleSummary &s,
-                            const annotation::ExternalModRefTable &t)
-      : ptrAnalysis(p), summaryMap(s), modRefTable(t) {}
+                            const annotation::ExternalModRefTable &t,
+                            UnmodeledPolicy policy = UnmodeledPolicy::Ignore)
+      : ptrAnalysis(p), unmodeledPolicy(policy), summaryMap(s), modRefTable(t) {
+  }
 
   ReachingDefModuleMap runOnFunction(const llvm::Function &func);
 };

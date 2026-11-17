@@ -3,6 +3,7 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Analysis/SemiSparsePointerAnalysis.h"
 #include "Annotation/ModRef/ExternalModRefTable.h"
 #include "Checker/TPA/FrontEnd/ModRefModuleSummary.h"
+#include "Checker/TPA/Program/Reachability.h"
 #include "Utils/LLVM/FIFOWorkList.h"
 
 #include <llvm/IR/BasicBlock.h>
@@ -29,6 +30,7 @@ const Instruction *getNextInstruction(const Instruction *inst) {
 class EvalVisitor : public InstVisitor<EvalVisitor> {
 private:
   const SemiSparsePointerAnalysis &ptrAnalysis;
+  UnmodeledPolicy unmodeledPolicy;
   const ModRefModuleSummary &summaryMap;
   const ExternalModRefTable &modRefTable;
 
@@ -66,13 +68,9 @@ private:
   }
 
   void evalExternalCall(CallBase *cs, const Function *f) {
-    const auto *summary = modRefTable.lookup(f->getName());
-    if (summary == nullptr) {
-      errs() << "Missing entry in ModRefTable: " << f->getName() << "\n";
-      llvm_unreachable("Consider adding the function to modref annotations");
-    }
+    const auto &summary = lookupModRefSummary(modRefTable, *f, unmodeledPolicy);
 
-    for (auto const &effect : *summary) {
+    for (auto const &effect : summary) {
       if (effect.isModEffect()) {
         auto const &pos = effect.getPosition();
         if (pos.isReturnPosition()) {
@@ -86,8 +84,9 @@ private:
                      effect.onReachableMemory());
           else {
             for (auto i = idx, e = cs->arg_size(); i < e; ++i)
-              modValue(cs->getArgOperand(i)->stripPointerCasts(), cs,
-                       effect.onReachableMemory());
+              if (cs->getArgOperand(i)->getType()->isPointerTy())
+                modValue(cs->getArgOperand(i)->stripPointerCasts(), cs,
+                         effect.onReachableMemory());
           }
         }
       }
@@ -96,8 +95,10 @@ private:
 
 public:
   EvalVisitor(const SemiSparsePointerAnalysis &p, const ModRefModuleSummary &sm,
-              const ExternalModRefTable &e, const StoreType &s)
-      : ptrAnalysis(p), summaryMap(sm), modRefTable(e), store(s) {}
+              const ExternalModRefTable &e, const StoreType &s,
+              UnmodeledPolicy policy)
+      : ptrAnalysis(p), unmodeledPolicy(policy), summaryMap(sm), modRefTable(e),
+        store(s) {}
   const StoreType &getStore() const { return store; }
 
   // Default case
@@ -114,10 +115,19 @@ public:
     evalStore(storeInst, ptr);
   }
 
+  void visitAtomicRMWInst(AtomicRMWInst &inst) {
+    evalStore(inst, inst.getPointerOperand());
+  }
+  void visitAtomicCmpXchgInst(AtomicCmpXchgInst &inst) {
+    evalStore(inst, inst.getPointerOperand());
+  }
+
   void visitCallBase(CallBase &call) { visitTaintCall(&call); }
 
   void visitTaintCall(CallBase *cs) {
-    auto callTgts = ptrAnalysis.getCallees(cs);
+    if (isDebugIntrinsic(*cs))
+      return;
+    auto callTgts = resolveCallTargets(ptrAnalysis, *cs, unmodeledPolicy);
     for (const auto *callee : callTgts) {
       if (callee->isDeclaration()) {
         evalExternalCall(cs, callee);
@@ -153,7 +163,7 @@ ReachingDefModuleAnalysis::runOnFunction(const Function &func) {
     const auto *inst = workList.dequeue();
 
     EvalVisitor evalVisitor(ptrAnalysis, summaryMap, modRefTable,
-                            rdMap.getReachingDefStore(inst));
+                            rdMap.getReachingDefStore(inst), unmodeledPolicy);
     evalVisitor.visit(const_cast<Instruction &>(*inst));
 
     if (inst->isTerminator()) {

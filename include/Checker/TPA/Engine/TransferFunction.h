@@ -73,6 +73,7 @@ private:
                      EvalResult &);
   void evalCallBySummary(const ProgramPoint &, const llvm::Function *,
                          const annotation::TaintSummary &, EvalResult &);
+  void evalIgnoredCall(const ProgramPoint &, EvalResult &);
   void evalExternalCall(const ProgramPoint &, const llvm::Function *,
                         EvalResult &);
 
@@ -81,6 +82,7 @@ private:
   void evalAllOperands(const ProgramPoint &, EvalResult &);
   void evalLoad(const ProgramPoint &, EvalResult &);
   void evalStore(const ProgramPoint &, EvalResult &);
+  void evalAtomic(const ProgramPoint &, EvalResult &);
   void evalCall(const ProgramPoint &, EvalResult &);
   void evalReturn(const ProgramPoint &, EvalResult &);
 

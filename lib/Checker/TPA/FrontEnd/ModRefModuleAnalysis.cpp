@@ -64,14 +64,15 @@ bool updateSummary(ModRefFunctionSummary &callerSummary,
 }
 
 void updateRevCallGraph(RevCallMapType &revCallGraph, const Function &f,
-                        const SemiSparsePointerAnalysis &ptrAnalysis) {
+                        const SemiSparsePointerAnalysis &ptrAnalysis,
+                        UnmodeledPolicy policy) {
   for (const auto *bb : llvm::depth_first(&f.getEntryBlock())) {
     for (auto const &inst : *bb) {
       auto *cs = llvm::dyn_cast<llvm::CallBase>(&inst);
-      if (!cs)
+      if (!cs || isDebugIntrinsic(*cs))
         continue;
 
-      auto callTgts = ptrAnalysis.getCallees(cs);
+      auto callTgts = resolveCallTargets(ptrAnalysis, *cs, policy);
       for (const auto *callee : callTgts)
         revCallGraph[callee].insert(cs);
     }
@@ -114,6 +115,22 @@ public:
       if (!isLocalStackLocation(obj, storeInst.getParent()->getParent()))
         summary.addMemoryWrite(obj);
     }
+  }
+
+  void summarizeAtomic(Instruction &inst, Value *ptr) {
+    if (isa<GlobalValue>(ptr))
+      summary.addValueRead(ptr->stripPointerCasts());
+    for (const auto *object : ptrAnalysis.getPtsSet(ptr))
+      if (!isLocalStackLocation(object, inst.getFunction())) {
+        summary.addMemoryRead(object);
+        summary.addMemoryWrite(object);
+      }
+  }
+  void visitAtomicRMWInst(AtomicRMWInst &inst) {
+    summarizeAtomic(inst, inst.getPointerOperand());
+  }
+  void visitAtomicCmpXchgInst(AtomicCmpXchgInst &inst) {
+    summarizeAtomic(inst, inst.getPointerOperand());
   }
 
   void visitInstruction(Instruction &inst) {
@@ -170,9 +187,10 @@ bool updateSummaryForModEffect(const Instruction *inst,
     else {
       bool changed = false;
       for (auto i = idx, e = cs->arg_size(); i < e; ++i)
-        changed |= addExternalMemoryWrite(
-            cs->getArgOperand(i)->stripPointerCasts(), summary, caller,
-            ptrAnalysis, modEffect.onReachableMemory());
+        if (cs->getArgOperand(i)->getType()->isPointerTy())
+          changed |= addExternalMemoryWrite(
+              cs->getArgOperand(i)->stripPointerCasts(), summary, caller,
+              ptrAnalysis, modEffect.onReachableMemory());
       return changed;
     }
   }
@@ -222,6 +240,8 @@ bool updateSummaryForRefEffect(const Instruction *inst,
   else {
     bool changed = false;
     for (auto i = idx, e = cs->arg_size(); i < e; ++i) {
+      if (!cs->getArgOperand(i)->getType()->isPointerTy())
+        continue;
       changed |= addExternalMemoryRead(
           cs->getArgOperand(i)->stripPointerCasts(), summary, caller,
           ptrAnalysis, refEffect.onReachableMemory());
@@ -233,16 +253,12 @@ bool updateSummaryForRefEffect(const Instruction *inst,
 bool updateSummaryForExternalCall(const Instruction *inst, const Function *f,
                                   ModRefFunctionSummary &summary,
                                   const SemiSparsePointerAnalysis &ptrAnalysis,
-                                  const ExternalModRefTable &modRefTable) {
-  const auto *modRefSummary = modRefTable.lookup(f->getName());
-  if (modRefSummary == nullptr) {
-    errs() << modRefTable.size() << "\n";
-    errs() << "Missing entry in ModRefTable: " << f->getName() << "\n";
-    llvm_unreachable("Consider adding the function to modref annotations");
-  }
+                                  const ExternalModRefTable &modRefTable,
+                                  UnmodeledPolicy policy) {
+  const auto &modRefSummary = lookupModRefSummary(modRefTable, *f, policy);
 
   bool changed = false;
-  for (auto const &effect : *modRefSummary) {
+  for (auto const &effect : modRefSummary) {
     if (effect.isModEffect())
       changed |= updateSummaryForModEffect(inst, summary, ptrAnalysis, effect);
     else
@@ -254,7 +270,8 @@ bool updateSummaryForExternalCall(const Instruction *inst, const Function *f,
 void propagateSummary(ModRefModuleSummary &moduleSummary,
                       const RevCallMapType &revCallGraph,
                       const SemiSparsePointerAnalysis &ptrAnalysis,
-                      const ExternalModRefTable &modRefTable) {
+                      const ExternalModRefTable &modRefTable,
+                      UnmodeledPolicy policy) {
   auto workList = util::FIFOWorkList<const Function *>();
 
   // Enqueue all callees at the beginning
@@ -275,7 +292,7 @@ void propagateSummary(ModRefModuleSummary &moduleSummary,
         const auto *caller = callSite->getParent()->getParent();
         auto &callerSummary = moduleSummary.getSummary(caller);
         if (updateSummaryForExternalCall(callSite, f, callerSummary,
-                                         ptrAnalysis, modRefTable))
+                                         ptrAnalysis, modRefTable, policy))
           workList.enqueue(caller);
       }
     } else {
@@ -303,13 +320,15 @@ ModRefModuleSummary ModRefModuleAnalysis::runOnModule(const Module &module) {
   ModRefModuleSummary moduleSummary;
   RevCallMapType revCallGraph;
 
-  for (const auto *function : reachableFunctions(module, ptrAnalysis)) {
+  for (const auto *function :
+       reachableFunctions(module, ptrAnalysis, unmodeledPolicy)) {
     const auto &f = *function;
     collectProcedureSummary(f, moduleSummary.getSummary(&f));
-    updateRevCallGraph(revCallGraph, f, ptrAnalysis);
+    updateRevCallGraph(revCallGraph, f, ptrAnalysis, unmodeledPolicy);
   }
 
-  propagateSummary(moduleSummary, revCallGraph, ptrAnalysis, modRefTable);
+  propagateSummary(moduleSummary, revCallGraph, ptrAnalysis, modRefTable,
+                   unmodeledPolicy);
 
   return moduleSummary;
 }

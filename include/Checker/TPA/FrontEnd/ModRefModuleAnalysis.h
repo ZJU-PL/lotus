@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Checker/TPA/FrontEnd/ModRefModuleSummary.h"
+#include "Checker/TPA/Support/ExternalModels.h"
 
 namespace llvm {
 class Function;
@@ -20,14 +21,16 @@ namespace tpa::taint {
 class ModRefModuleAnalysis {
 private:
   const tpa::SemiSparsePointerAnalysis &ptrAnalysis;
+  UnmodeledPolicy unmodeledPolicy;
   const annotation::ExternalModRefTable &modRefTable;
 
   void collectProcedureSummary(const llvm::Function &, ModRefFunctionSummary &);
 
 public:
   ModRefModuleAnalysis(const tpa::SemiSparsePointerAnalysis &p,
-                       const annotation::ExternalModRefTable &t)
-      : ptrAnalysis(p), modRefTable(t) {}
+                       const annotation::ExternalModRefTable &t,
+                       UnmodeledPolicy policy = UnmodeledPolicy::Ignore)
+      : ptrAnalysis(p), unmodeledPolicy(policy), modRefTable(t) {}
 
   ModRefModuleSummary runOnModule(const llvm::Module &module);
 };

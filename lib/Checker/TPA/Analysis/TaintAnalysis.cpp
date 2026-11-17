@@ -27,11 +27,17 @@ bool validateModule(const llvm::Module &module, llvm::raw_ostream &errors) {
   for (const auto &function : module)
     for (const auto &block : function)
       for (const auto &inst : block) {
-        // Keep the original explicit-flow semantics. No exception, atomic,
+        // Keep explicit-flow semantics. No exception, concurrent scheduling,
         // variadic-body or callbr semantics are claimed by this baseline.
         bool supported = inst.isBinaryOp() || inst.isCast() ||
                          llvm::isa<llvm::CmpInst>(inst);
         switch (inst.getOpcode()) {
+        case llvm::Instruction::FNeg:
+        case llvm::Instruction::Freeze:
+        case llvm::Instruction::IndirectBr:
+        case llvm::Instruction::AtomicRMW:
+        case llvm::Instruction::AtomicCmpXchg:
+        case llvm::Instruction::Fence:
         case llvm::Instruction::Alloca:
         case llvm::Instruction::Load:
         case llvm::Instruction::Store:
@@ -53,7 +59,14 @@ bool validateModule(const llvm::Module &module, llvm::raw_ostream &errors) {
         default:
           break;
         }
-        if (!supported || inst.isAtomic()) {
+        // Pointer-valued RMW/cmpxchg also need pointer-store semantics in
+        // the TPA backend. Until those exist, reject them explicitly.
+        bool pointerAtomic = false;
+        if (auto *rmw = llvm::dyn_cast<llvm::AtomicRMWInst>(&inst))
+          pointerAtomic = rmw->getValOperand()->getType()->isPointerTy();
+        if (auto *cx = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&inst))
+          pointerAtomic = cx->getCompareOperand()->getType()->isPointerTy();
+        if (!supported || pointerAtomic) {
           errors << "Unsupported TPA taint instruction in "
                  << function.getName() << ": " << inst << "\n";
           valid = false;
@@ -71,7 +84,9 @@ bool TaintAnalysis::runOnDefUseModule(const DefUseModule &module,
   violations.clear();
   lossSites = ProgramPointSet();
   stats = Statistics();
-  TaintGlobalState state(module, ptrAnalysis, extTable, env, memo);
+  ignoredUnresolvedCalls.clear();
+  TaintGlobalState state(module, ptrAnalysis, extTable, env, memo,
+                         unmodeledPolicy);
   auto work = Initializer(state, memo).runOnInitState(TaintStore());
   std::set<const context::Context *> contexts;
   while (!work.empty()) {
@@ -81,6 +96,7 @@ bool TaintAnalysis::runOnDefUseModule(const DefUseModule &module,
     ++stats.evaluations;
     TaintPropagator(memo, work).propagate(result);
   }
+  ignoredUnresolvedCalls = state.getIgnoredUnresolvedCalls();
   violations = SinkViolationChecker(env, memo, extTable, ptrAnalysis)
                    .checkSinkViolation(state.getSinks());
   if (trackPrecisionLoss)

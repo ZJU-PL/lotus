@@ -200,6 +200,14 @@ tpa::CFGNode *InstructionTranslator::visitIntToPtrInst(IntToPtrInst &inst) {
   return cfg.create<tpa::CopyCFGNode>(&inst, std::move(srcs));
 }
 
+tpa::CFGNode *InstructionTranslator::visitFreezeInst(FreezeInst &inst) {
+  if (!inst.getType()->isPointerTy())
+    return nullptr;
+  auto sources = SmallPtrSet<const Value *, 1>();
+  sources.insert(inst.getOperand(0)->stripPointerCasts());
+  return createCopyNode(&inst, sources);
+}
+
 tpa::CFGNode *InstructionTranslator::visitBitCastInst(BitCastInst &bcInst) {
   // Bitcasts are ignored in the CFG translation because the analysis
   // strips pointer casts when looking up values.

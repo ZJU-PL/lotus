@@ -2,6 +2,7 @@
 
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/CallGraph.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/FunctionContext.h"
+#include "Checker/TPA/Support/ExternalModels.h"
 #include "Checker/TPA/Support/SinkSignature.h"
 
 #include <unordered_set>
@@ -24,6 +25,7 @@ class TaintGlobalState {
 private:
   // The program
   const DefUseModule &duModule;
+  UnmodeledPolicy unmodeledPolicy;
 
   // Pointer Analysis
   const tpa::SemiSparsePointerAnalysis &ptrAnalysis;
@@ -44,13 +46,17 @@ private:
   // Taint sinks
   using SinkSet = std::unordered_set<SinkSignature>;
   SinkSet sinkSet;
+  std::unordered_set<const llvm::CallBase *> ignoredUnresolvedCalls;
 
 public:
   TaintGlobalState(const DefUseModule &m,
                    const tpa::SemiSparsePointerAnalysis &p,
                    const annotation::ExternalTaintTable &t, TaintEnv &e,
-                   TaintMemo &mm)
-      : duModule(m), ptrAnalysis(p), extTaintTable(t), env(e), memo(mm) {}
+                   TaintMemo &mm, UnmodeledPolicy policy)
+      : duModule(m), unmodeledPolicy(policy), ptrAnalysis(p), extTaintTable(t),
+        env(e), memo(mm) {}
+
+  UnmodeledPolicy getUnmodeledPolicy() const { return unmodeledPolicy; }
 
   const DefUseModule &getDefUseModule() const { return duModule; }
 
@@ -69,6 +75,13 @@ public:
 
   CallGraphType &getCallGraph() { return callGraph; }
   const CallGraphType &getCallGraph() const { return callGraph; }
+
+  void recordIgnoredUnresolvedCall(const llvm::CallBase *call) {
+    ignoredUnresolvedCalls.insert(call);
+  }
+  const auto &getIgnoredUnresolvedCalls() const {
+    return ignoredUnresolvedCalls;
+  }
 
   SinkSet &getSinks() { return sinkSet; }
   const SinkSet &getSinks() const { return sinkSet; }

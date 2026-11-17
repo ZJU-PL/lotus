@@ -3,7 +3,11 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/MemoryManager.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/PointerManager.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/PtsSet.h"
+#include "Alias/InclusionBased/TPA/Util/CallCompatibility.h"
 #include "Annotation/Pointer/ExternalPointerTable.h"
+
+#include <algorithm>
+#include <cstddef>
 
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
@@ -129,17 +133,22 @@ public:
 
   // Get possible callee functions for an indirect call
   // Parameters: inst - the call instruction, ctx - optional context
-  // Returns: list of functions that may be called at this site
+  // Returns: compatible indirect targets; explicit named callees are retained.
+  // filteredTargets optionally receives this query's rejected candidate count.
   std::vector<const llvm::Function *>
   getCallees(const llvm::Instruction *inst,
-             const context::Context *ctx = nullptr) const {
+             const context::Context *ctx = nullptr,
+             std::size_t *filteredTargets = nullptr) const {
     std::vector<const llvm::Function *> ret;
+    if (filteredTargets)
+      *filteredTargets = 0;
 
     const auto *callBase = llvm::dyn_cast<llvm::CallBase>(inst);
     if (!callBase)
       return ret;
 
-    if (auto *f = callBase->getCalledFunction()) {
+    if (auto *f = llvm::dyn_cast<llvm::Function>(
+            callBase->getCalledOperand()->stripPointerCasts())) {
       ret.push_back(f);
     } else {
       auto *funPtrVal = callBase->getCalledOperand();
@@ -148,6 +157,15 @@ public:
       auto pSet =
           ctx == nullptr ? getPtsSet(funPtrVal) : getPtsSet(ctx, funPtrVal);
       getCallees(inst, pSet, ret);
+      const auto before = ret.size();
+      ret.erase(std::remove_if(ret.begin(), ret.end(),
+                               [&](const llvm::Function *candidate) {
+                                 return !compatibleCallTarget(*callBase,
+                                                              *candidate);
+                               }),
+                ret.end());
+      if (filteredTargets)
+        *filteredTargets = before - ret.size();
     }
 
     return ret;

@@ -6,6 +6,7 @@
 #include "Checker/TPA/Engine/TaintGlobalState.h"
 #include "Checker/TPA/Output/Printer.h"
 #include "Checker/TPA/Program/DefUseModule.h"
+#include "Checker/TPA/Program/Reachability.h"
 #include "Checker/TPA/Support/ProgramPoint.h"
 #include "Checker/TPA/Support/TaintEnv.h"
 
@@ -228,6 +229,55 @@ void TransferFunction::evalInternalCall(const ProgramPoint &pp,
   evalEntry(ProgramPoint(fc.getContext(), entryInst), evalResult, envChanged);
 }
 
+void TransferFunction::evalAtomic(const ProgramPoint &pp, EvalResult &result) {
+  if (!localState)
+    return;
+  const auto *inst = pp.getDefUseInstruction()->getInstruction();
+  const auto *rmw = dyn_cast<AtomicRMWInst>(inst);
+  const auto *cx = dyn_cast<AtomicCmpXchgInst>(inst);
+  const auto *ptr = rmw ? rmw->getPointerOperand() : cx->getPointerOperand();
+  auto pointsTo =
+      globalState.getPointerAnalysis().getPtsSet(pp.getContext(), ptr);
+  if (pointsTo.empty())
+    return;
+  const auto oldValue = loadTaintFromPtsSet(pointsTo, *localState);
+  auto &env = globalState.getEnv();
+  const auto *replacement = rmw ? rmw->getValOperand() : cx->getNewValOperand();
+  const auto replacementValue =
+      env.lookup(TaintValue(pp.getContext(), replacement));
+  auto returnedValue = oldValue;
+  if (cx)
+    // The aggregate represents both the old value and the comparison result.
+    returnedValue = Lattice<TaintLattice>::merge(
+        oldValue,
+        env.lookup(TaintValue(pp.getContext(), cx->getCompareOperand())));
+  if (returnedValue != TaintLattice::Unknown &&
+      env.weakUpdate(TaintValue(pp.getContext(), inst), returnedValue))
+    addTopLevelSuccessors(pp, result);
+
+  result.setStore(*localState);
+  if (replacementValue != TaintLattice::Unknown) {
+    if (cx) {
+      // The exchange may fail. Retain incoming contents as well as the new
+      // value.
+      weakUpdateStore(pointsTo, replacementValue, result.getStore());
+    } else {
+      const auto writtenValue =
+          rmw->getOperation() == AtomicRMWInst::Xchg
+              ? replacementValue
+              : Lattice<TaintLattice>::merge(oldValue, replacementValue);
+      const auto *object = *pointsTo.begin();
+      if (pointsTo.size() == 1 && !object->isSummaryObject() &&
+          !object->isSpecialObject())
+        strongUpdateStore(object, writtenValue, result.getStore());
+      else
+        weakUpdateStore(pointsTo, writtenValue, result.getStore());
+    }
+  }
+  for (const auto *object : pointsTo)
+    addMemLevelSuccessors(pp, object, result);
+}
+
 void TransferFunction::evalCall(const ProgramPoint &pp,
                                 EvalResult &evalResult) {
   const auto *inst = pp.getDefUseInstruction()->getInstruction();
@@ -238,7 +288,13 @@ void TransferFunction::evalCall(const ProgramPoint &pp,
     evalResult.setStore(*localState);
 
   const auto *ctx = pp.getContext();
-  auto callees = globalState.getPointerAnalysis().getCallees(cs, ctx);
+  auto callees = resolveCallTargets(globalState.getPointerAnalysis(), *cs,
+                                    globalState.getUnmodeledPolicy(), ctx);
+  if (callees.empty()) {
+    globalState.recordIgnoredUnresolvedCall(cs);
+    evalIgnoredCall(pp, evalResult);
+    return;
+  }
   for (const auto *callTgt : callees) {
     if (callTgt->isDeclaration())
       evalExternalCall(pp, callTgt, evalResult);
@@ -315,6 +371,8 @@ EvalResult TransferFunction::eval(const ProgramPoint &pp) {
     case Instruction::Alloca:
       evalAlloca(pp, evalResult);
       break;
+    case Instruction::FNeg:
+    case Instruction::Freeze:
     case Instruction::Trunc:
     case Instruction::ZExt:
     case Instruction::SExt:
@@ -364,10 +422,16 @@ EvalResult TransferFunction::eval(const ProgramPoint &pp) {
     case Instruction::Store:
       evalStore(pp, evalResult);
       break;
+    case Instruction::AtomicRMW:
+    case Instruction::AtomicCmpXchg:
+      evalAtomic(pp, evalResult);
+      break;
     case Instruction::Load:
       evalLoad(pp, evalResult);
       break;
     // TODO: Add implicit flow detection for Br
+    case Instruction::IndirectBr:
+    case Instruction::Fence:
     case Instruction::Switch:
     case Instruction::Unreachable:
     case Instruction::Br:
@@ -379,10 +443,6 @@ EvalResult TransferFunction::eval(const ProgramPoint &pp) {
     case Instruction::Ret:
       evalReturn(pp, evalResult);
       break;
-    case Instruction::IndirectBr:
-    case Instruction::AtomicCmpXchg:
-    case Instruction::AtomicRMW:
-    case Instruction::Fence:
     case Instruction::VAArg:
     case Instruction::LandingPad:
     case Instruction::Resume: {

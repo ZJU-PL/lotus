@@ -180,11 +180,15 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
 
   switch (inst->getOpcode()) {
   case Instruction::Alloca:
+  case Instruction::IndirectBr:
+  case Instruction::Fence:
   case Instruction::Switch:
   case Instruction::Unreachable:
   case Instruction::Br:
     // These instructions never produce imprecise result
     break;
+  case Instruction::FNeg:
+  case Instruction::Freeze:
   case Instruction::Trunc:
   case Instruction::ZExt:
   case Instruction::SExt:
@@ -238,6 +242,20 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
     LocalTracker(workList).trackValue(pp, valueSet);
     break;
   }
+  case Instruction::AtomicRMW:
+  case Instruction::AtomicCmpXchg: {
+    LocalTracker(workList).trackValue(pp, evalAllOperands(pp));
+    if (store) {
+      const auto *rmw = dyn_cast<AtomicRMWInst>(inst);
+      const auto *cx = dyn_cast<AtomicCmpXchgInst>(inst);
+      const auto *ptr =
+          rmw ? rmw->getPointerOperand() : cx->getPointerOperand();
+      auto pts =
+          trackerState.getPointerAnalysis().getPtsSet(pp.getContext(), ptr);
+      LocalTracker(workList).trackMemory(pp, evalPtsSet(pp, pts, *store));
+    }
+    break;
+  }
   case Instruction::Load: {
     assert(store != nullptr);
     auto memSet = evalLoad(pp, *store);
@@ -257,10 +275,6 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
     }
     break;
   }
-  case Instruction::IndirectBr:
-  case Instruction::AtomicCmpXchg:
-  case Instruction::AtomicRMW:
-  case Instruction::Fence:
   case Instruction::VAArg:
   case Instruction::LandingPad:
   case Instruction::Resume: {
