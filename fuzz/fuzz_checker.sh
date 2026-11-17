@@ -63,8 +63,8 @@ while true; do
 
     # lotus-taint (with default and a couple of aa types)
     for aa in dyck andersen; do
-        echo "=== Running lotus-check --engine=taint --taint.alias-analysis=$aa ==="
-        if ! "$BUILD_DIR/bin/lotus-check" --engine=taint --taint.alias-analysis="$aa" "$BC_FILE" 2>&1; then
+        echo "=== Running lotus-check --engine=taint-ifds --taint.alias-analysis=$aa ==="
+        if ! "$BUILD_DIR/bin/lotus-check" --engine=taint-ifds --taint.alias-analysis="$aa" "$BC_FILE" 2>&1; then
             echo "CRASH: lotus-check taint (--taint.alias-analysis=$aa) crashed on $C_FILE"
             echo "Test files preserved: $C_FILE, $BC_FILE"
             exit 1

@@ -1,12 +1,12 @@
 IFDS Taint Checker
 ==================
 
-The ``--engine=taint`` mode runs Lotus's interprocedural IFDS taint analysis.
+The ``--engine=taint-ifds`` mode runs Lotus's interprocedural IFDS taint analysis.
 It follows user-configured data from source functions to sink functions.
 
-**Frontend**: ``lotus-check --engine=taint``
+**Frontend**: ``lotus-check --engine=taint-ifds``
 
-**Implementation**: ``tools/checker/lotus-check-taint.cpp`` and
+**Implementation**: ``tools/checker/lotus-check-taint-ifds.cpp`` and
 ``include/Dataflow/IFDS/Analyses/IFDSTaintAnalysis.h``
 
 Scope
@@ -27,14 +27,14 @@ Usage
 .. code-block:: bash
 
    # Run with the default source and sink configuration.
-   ./build/bin/lotus-check --engine=taint input.bc
+   ./build/bin/lotus-check --engine=taint-ifds input.bc
 
    # Add project-specific source and sink functions.
-   ./build/bin/lotus-check --engine=taint input.bc \
+   ./build/bin/lotus-check --engine=taint-ifds input.bc \
      --taint.sources=recv,getenv --taint.sinks=system,execve
 
    # Select an alias-analysis backend and show source/sink tagging details.
-   ./build/bin/lotus-check --engine=taint input.bc --taint.alias-analysis=dyck --log-level=debug
+   ./build/bin/lotus-check --engine=taint-ifds input.bc --taint.alias-analysis=dyck --log-level=debug
 
 Important options
 -----------------
@@ -60,3 +60,6 @@ See also
 * :ref:`Choosing a Checker <choosing-a-checker>` – bug-class to engine guide
 * :doc:`../dataflow/ifds_ide` – IFDS/IDE framework
 * :doc:`../annotation/taint_config` – reusable taint configuration
+
+For experiments using native TPA memory objects and sparse def-use propagation,
+see :doc:`taint_tpa`.

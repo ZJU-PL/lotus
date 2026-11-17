@@ -12,7 +12,7 @@ Lotus provides a single checker binary:
 * **Binary**: ``lotus-check``
 * **Directory**: ``tools/checker/``
 * **Dispatch model**: one binary with explicit engine values such as ``generic``,
-  ``kint``, ``ae``, ``taint``, ``concur``, ``pulse``, ``fitx``, ``saber``,
+  ``kint``, ``ae``, ``taint-ifds``, ``taint-tpa``, ``concur``, ``pulse``, ``fitx``, ``saber``,
   ``gsaf``, and ``symex``
 
 The engine runners live in:
@@ -20,7 +20,8 @@ The engine runners live in:
 * ``tools/checker/lotus-check-generic.cpp``
 * ``tools/checker/lotus-check-kint.cpp``
 * ``tools/checker/lotus-check-ae.cpp``
-* ``tools/checker/lotus-check-taint.cpp``
+* ``tools/checker/lotus-check-taint-ifds.cpp``
+* ``tools/checker/lotus-check-taint-tpa.cpp``
 * ``tools/checker/lotus-check-concur.cpp``
 * ``tools/checker/lotus-check-pulse.cpp``
 * ``tools/checker/lotus-check-fitx.cpp``
@@ -67,7 +68,7 @@ Taint:
 
 .. code-block:: bash
 
-   ./build/bin/lotus-check --engine=taint input.bc \
+   ./build/bin/lotus-check --engine=taint-ifds input.bc \
      --taint.alias-analysis=dyck \
      --taint.sources=recv,getenv \
      --taint.sinks=system,execve

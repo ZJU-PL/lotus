@@ -312,14 +312,14 @@ Compile and Analyze
 .. code-block:: bash
 
    clang -emit-llvm -c -g taint.c -o taint.bc
-   ./build/bin/lotus-check --engine=taint taint.bc --verbose
+   ./build/bin/lotus-check --engine=taint-ifds taint.bc --verbose
 
 Custom Sources and Sinks
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   ./build/bin/lotus-check --engine=taint taint.bc \
+   ./build/bin/lotus-check --engine=taint-ifds taint.bc \
        --taint.sources=scanf,gets,read \
        --taint.sinks=system,exec,popen
 

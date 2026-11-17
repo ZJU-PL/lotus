@@ -4,11 +4,10 @@
 #include "Checker/Framework/CheckerSpecLoader.h"
 #include "Checker/Framework/ReportOptions.h"
 #include "Checker/Framework/Subcommands.h"
+#include "Checker/GSAF/API/VulnerabilityRegistry.h"
 #include "Checker/Tooling/CheckerOptions.h"
 #include "Checker/Tooling/CheckerReport.h"
 #include "Checker/Tooling/CheckerToolEntrypoints.h"
-
-#include "Checker/GSAF/API/VulnerabilityRegistry.h"
 
 #include <array>
 #include <string>
@@ -40,8 +39,8 @@ struct EngineDescriptor {
   int (*run)(const char *);
 };
 
-const std::array<EngineDescriptor, 10> &engineDescriptors() {
-  static const std::array<EngineDescriptor, 10> descriptors = {{
+const std::array<EngineDescriptor, 11> &engineDescriptors() {
+  static const std::array<EngineDescriptor, 11> descriptors = {{
       {"generic", "Registry-backed declarative checkers",
        lotus::checker::EngineKind::Declarative,
        lotus::checker::tooling::genericSubCommand, runGenericCheckerTool},
@@ -49,8 +48,12 @@ const std::array<EngineDescriptor, 10> &engineDescriptors() {
        lotus::checker::tooling::aeSubCommand, runAECheckerTool},
       {"kint", "Integer bug detection", lotus::checker::EngineKind::KINT,
        lotus::checker::tooling::kintSubCommand, runKintCheckerTool},
-      {"taint", "IFDS taint analysis", lotus::checker::EngineKind::Taint,
-       lotus::checker::tooling::taintSubCommand, runTaintCheckerTool},
+      {"taint-ifds", "IFDS taint analysis",
+       lotus::checker::EngineKind::TaintIFDS,
+       lotus::checker::tooling::taintIFDSSubCommand, runIFDSTaintCheckerTool},
+      {"taint-tpa", "TPA-native sparse taint analysis",
+       lotus::checker::EngineKind::TaintTPA,
+       lotus::checker::tooling::taintTPASubCommand, runTPATaintCheckerTool},
       {"concur", "Concurrency checking",
        lotus::checker::EngineKind::Concurrency,
        lotus::checker::tooling::concurrencySubCommand,
@@ -60,8 +63,7 @@ const std::array<EngineDescriptor, 10> &engineDescriptors() {
        lotus::checker::tooling::pulseSubCommand, runPulseCheckerTool},
       {"fitx", "FiTx typestate analysis", lotus::checker::EngineKind::FiTx,
        lotus::checker::tooling::fitxSubCommand, runFiTxCheckerTool},
-      {"saber", "Sparse value-flow checking",
-       lotus::checker::EngineKind::Saber,
+      {"saber", "Sparse value-flow checking", lotus::checker::EngineKind::Saber,
        lotus::checker::tooling::saberSubCommand, runSaberCheckerTool},
       {"gsaf", "Guarded value-flow analysis", lotus::checker::EngineKind::GSAF,
        lotus::checker::tooling::gsafSubCommand, runGSAFCheckerTool},
@@ -87,8 +89,8 @@ Error validateOptions(ArrayRef<std::string> args) {
   if (args.size() > 1 && isKnownEngine(args[1]))
     sub = &findEngine(args[1])->subcommand();
 
-  static const StringRef helpFlags[] = {"help", "help-hidden", "help-list",
-                                        "help-list-hidden", "version", "h"};
+  static const StringRef helpFlags[] = {
+      "help", "help-hidden", "help-list", "help-list-hidden", "version", "h"};
   bool afterSentinel = false;
   unsigned positionalCount = 0;
   for (size_t i = 1; i < args.size(); ++i) {
@@ -117,8 +119,7 @@ Error validateOptions(ArrayRef<std::string> args) {
     StringRef prefix = a.startswith("--") ? "--" : "-";
     return createStringError(inconvertibleErrorCode(),
                              "Unknown command line argument '%s%s'.",
-                             prefix.str().c_str(),
-                             spelling.str().c_str());
+                             prefix.str().c_str(), spelling.str().c_str());
   }
   if (positionalCount > 1) {
     return createStringError(inconvertibleErrorCode(),
@@ -178,10 +179,10 @@ void printEngineHelp(const EngineDescriptor &desc, bool showHidden) {
 // Generic-engine CLI options
 // ---------------------------------------------------------------------------
 
-static cl::OptionCategory GenericSelectionCategory(
-    "Generic Checker Selection Options");
-static cl::OptionCategory GenericExecutionCategory(
-    "Generic Checker Execution Options");
+static cl::OptionCategory
+    GenericSelectionCategory("Generic Checker Selection Options");
+static cl::OptionCategory
+    GenericExecutionCategory("Generic Checker Execution Options");
 static cl::opt<std::string>
     InputFilename(cl::Positional, cl::desc("<input bitcode file>"),
                   cl::value_desc("bitcode"), cl::init(""),
@@ -319,8 +320,8 @@ int runGenericCheckerTool(const char *argv0) {
       selection.push_back(descriptor);
     }
   } else {
-    selection =
-        registry.select(CategoryFilter, lotus::checker::EngineKind::Declarative);
+    selection = registry.select(CategoryFilter,
+                                lotus::checker::EngineKind::Declarative);
     if (!lotus::checker::tooling::hasExplicitCheckSelection() &&
         CategoryFilter.empty()) {
       std::vector<const lotus::checker::CheckerDescriptor *> defaults;

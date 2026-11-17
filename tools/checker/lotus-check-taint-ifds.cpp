@@ -1,8 +1,10 @@
 /**
- * @file llvm-ai.cpp
- * @brief LLVM IFDS/IDE Analysis Tool
+ * @file lotus-check-taint-ifds.cpp
+ * @brief IFDS-based taint analysis engine for the lotus-check frontend
  *
- * A command-line tool for running IFDS/IDE interprocedural dataflow analysis
+ * Runs the IFDS/IDE interprocedural taint analysis as the `taint-ifds` engine.
+ * The TPA-based taint baseline lives in
+ * tools/checker/lotus-check-taint-tpa.cpp.
  */
 
 #include "Checker/Framework/BugReportMgr.h"
@@ -17,6 +19,10 @@
 #include <sstream>
 #include <string>
 
+#include <Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h>
+#include <Dataflow/IFDS/Analyses/IFDSTaintAnalysis.h>
+#include <Dataflow/IFDS/Core/IFDSFramework.h>
+#include <Dataflow/IFDS/Solver/IFDSSolver.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/LLVMContext.h>
@@ -30,10 +36,6 @@
 #include <llvm/Support/Path.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
-#include <Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h>
-#include <Dataflow/IFDS/Analyses/IFDSTaintAnalysis.h>
-#include <Dataflow/IFDS/Core/IFDSFramework.h>
-#include <Dataflow/IFDS/Solver/IFDSSolver.h>
 
 // #include <iostream>
 // #include <thread>
@@ -55,7 +57,7 @@ enum class TaintAASelection {
 static cl::opt<std::string>
     InputFilename(cl::Positional, cl::desc("<input bitcode file>"),
                   cl::Required,
-                  cl::sub(lotus::checker::tooling::taintSubCommand()));
+                  cl::sub(lotus::checker::tooling::taintIFDSSubCommand()));
 
 static cl::opt<TaintAASelection> AliasAnalysisType(
     "taint.alias-analysis", cl::desc("Alias analysis type"),
@@ -70,31 +72,31 @@ static cl::opt<TaintAASelection> AliasAnalysisType(
         clEnumValN(TaintAASelection::Combined, "combined",
                    "Andersen (context-insensitive) and DyckAA")),
     cl::init(TaintAASelection::Dyck),
-    cl::sub(lotus::checker::tooling::taintSubCommand()));
+    cl::sub(lotus::checker::tooling::taintIFDSSubCommand()));
 
 static cl::opt<std::string> SourceFunctions(
     "taint.sources", cl::desc("Comma-separated list of source functions"),
-    cl::init(""), cl::sub(lotus::checker::tooling::taintSubCommand()));
+    cl::init(""), cl::sub(lotus::checker::tooling::taintIFDSSubCommand()));
 
 static cl::opt<std::string> SinkFunctions(
     "taint.sinks", cl::desc("Comma-separated list of sink functions"),
-    cl::init(""), cl::sub(lotus::checker::tooling::taintSubCommand()));
+    cl::init(""), cl::sub(lotus::checker::tooling::taintIFDSSubCommand()));
 
 static cl::opt<bool> SparseTaint(
     "taint.sparse", cl::desc("Skip certified identity taint transfers"),
-    cl::init(false), cl::sub(lotus::checker::tooling::taintSubCommand()));
+    cl::init(false), cl::sub(lotus::checker::tooling::taintIFDSSubCommand()));
 
 static cl::opt<bool>
     MicroBench("taint.micro-bench",
                cl::desc("Enable micro benchmark mode (use source/sink and "
                         "evaluate precision/recall)"),
                cl::init(false),
-               cl::sub(lotus::checker::tooling::taintSubCommand()));
+               cl::sub(lotus::checker::tooling::taintIFDSSubCommand()));
 
 static cl::opt<std::string> ExpectedFile(
     "taint.expected-flows",
     cl::desc("Path to .expected file for micro benchmark evaluation"),
-    cl::init(""), cl::sub(lotus::checker::tooling::taintSubCommand()));
+    cl::init(""), cl::sub(lotus::checker::tooling::taintIFDSSubCommand()));
 
 // Helper function to parse comma-separated function names
 std::vector<std::string> parseFunctionList(const std::string &input) {
@@ -310,14 +312,14 @@ static void evaluateMicroBenchmark(const std::set<TaintFlow> &expected,
   }
   const size_t falsePositives = detected.size() - truePositives;
   const size_t falseNegatives = expected.size() - truePositives;
-  const double precision =
-      detected.empty() ? (expected.empty() ? 1.0 : 0.0)
-                       : static_cast<double>(truePositives) /
-                             static_cast<double>(detected.size());
-  const double recall =
-      expected.empty() ? 1.0
-                       : static_cast<double>(truePositives) /
-                             static_cast<double>(expected.size());
+  const double precision = detected.empty()
+                               ? (expected.empty() ? 1.0 : 0.0)
+                               : static_cast<double>(truePositives) /
+                                     static_cast<double>(detected.size());
+  const double recall = expected.empty()
+                            ? 1.0
+                            : static_cast<double>(truePositives) /
+                                  static_cast<double>(expected.size());
   const double f1 = precision + recall == 0.0
                         ? 0.0
                         : 2.0 * precision * recall / (precision + recall);
@@ -429,10 +431,10 @@ static lotus::AAConfig getAliasAnalysisConfig(TaintAASelection selection) {
   llvm_unreachable("invalid taint alias analysis selection");
 }
 
-int runTaintCheckerTool(const char *argv0) {
+int runIFDSTaintCheckerTool(const char *argv0) {
   (void)lotus::checker::tooling::statsEnabled();
-  auto selectedOr =
-      lotus::checker::tooling::resolveChecks(lotus::checker::EngineKind::Taint);
+  auto selectedOr = lotus::checker::tooling::resolveChecks(
+      lotus::checker::EngineKind::TaintIFDS);
   if (!selectedOr) {
     logAllUnhandledErrors(selectedOr.takeError(), errs(), "error: ");
     return lotus::checker::tooling::EXIT_ERROR;
@@ -449,7 +451,7 @@ int runTaintCheckerTool(const char *argv0) {
     return lotus::checker::tooling::EXIT_ERROR;
   }
   BugReportMgr &mgr = BugReportMgr::get_instance();
-  lotus::checker::tooling::AnalysisStatsRecorder stats("taint", *M, mgr);
+  lotus::checker::tooling::AnalysisStatsRecorder stats("taint-ifds", *M, mgr);
 
   if (lotus::checker::tooling::logAtLeast(
           lotus::checker::tooling::LogLevel::Debug)) {

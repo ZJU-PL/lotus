@@ -178,15 +178,15 @@ fixture and check facts and values at every instruction while preserving
 summaries and ESG edges. Timing, job-count, and RSS measurements require an
 external benchmark harness; no such script ships with the repository.
 
-Command-Line Tool: lotus-check --engine=taint
-=============================================
+Command-Line Tool: lotus-check --engine=taint-ifds
+==================================================
 
-The ``lotus-check --engine=taint`` frontend provides an interprocedural taint analysis using the
+The ``lotus-check --engine=taint-ifds`` frontend provides an interprocedural taint analysis using the
 IFDS framework.
 
 .. code-block:: bash
 
-   ./build/bin/lotus-check --engine=taint <input bitcode file> [options]
+   ./build/bin/lotus-check --engine=taint-ifds <input bitcode file> [options]
 
 Key Options
 -----------
@@ -213,10 +213,10 @@ Examples
 .. code-block:: bash
 
    # Basic taint analysis
-   ./build/bin/lotus-check --engine=taint input.bc
+   ./build/bin/lotus-check --engine=taint-ifds input.bc
 
    # Custom sources and sinks
-   ./build/bin/lotus-check --engine=taint input.bc --taint.sources=read,scanf --taint.sinks=system,exec
+   ./build/bin/lotus-check --engine=taint-ifds input.bc --taint.sources=read,scanf --taint.sinks=system,exec
 
 For other command-line tools that build on IFDS/IDE, see
 :doc:`../tools/checker/index`.

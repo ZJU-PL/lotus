@@ -38,7 +38,7 @@ Declares accessor functions for each subcommand (defined in
 
    auto &sub = lotus::checker::tooling::genericSubCommand();
    auto &sub = lotus::checker::tooling::kintSubCommand();
-   auto &sub = lotus::checker::tooling::taintSubCommand();
+   auto &sub = lotus::checker::tooling::taintIFDSSubCommand();
    auto &sub = lotus::checker::tooling::concurrencySubCommand();
    auto &sub = lotus::checker::tooling::pulseSubCommand();
    auto &sub = lotus::checker::tooling::fitxSubCommand();

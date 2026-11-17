@@ -83,8 +83,11 @@ Expected<EngineKind> parseEngineKind(StringRef value) {
   if (value == "kint") {
     return EngineKind::KINT;
   }
-  if (value == "taint") {
-    return EngineKind::Taint;
+  if (value == "taint-ifds") {
+    return EngineKind::TaintIFDS;
+  }
+  if (value == "taint-tpa") {
+    return EngineKind::TaintTPA;
   }
   if (value == "fitx") {
     return EngineKind::FiTx;

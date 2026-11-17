@@ -118,9 +118,9 @@ Lotus exposes its internal libraries through standalone executable drivers in ``
    * - ``lotus-check --engine=concur``
      - ``tools/checker/``
      - ``lotus-check --engine=concur target.bc``
-   * - ``lotus-check --engine=taint``
+   * - ``lotus-check --engine=taint-ifds``
      - ``tools/checker/``
-     - ``lotus-check --engine=taint target.bc``
+     - ``lotus-check --engine=taint-ifds target.bc``
    * - ``lotus-dfa-ifds``
      - ``tools/dataflow/``
      - ``lotus-dfa-ifds target.bc``

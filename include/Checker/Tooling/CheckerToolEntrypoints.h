@@ -2,7 +2,8 @@
 
 int runGenericCheckerTool(const char *argv0);
 int runKintCheckerTool(const char *argv0);
-int runTaintCheckerTool(const char *argv0);
+int runIFDSTaintCheckerTool(const char *argv0);
+int runTPATaintCheckerTool(const char *argv0);
 int runConcurrencyCheckerTool(const char *argv0);
 int runPulseCheckerTool(const char *argv0);
 int runFiTxCheckerTool(const char *argv0);

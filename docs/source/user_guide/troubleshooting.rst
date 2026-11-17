@@ -291,7 +291,7 @@ Missing Bugs (False Negatives)
    ./build/bin/clam --crab-inter --crab-check --crab-null-check --crab-uaf-check --crab-bounds-check input.bc
    
    # Context-sensitive taint
-   ./build/bin/lotus-check --engine=taint input.bc --verbose
+   ./build/bin/lotus-check --engine=taint-ifds input.bc --verbose
 
 3. Check if bug type is supported:
 
@@ -436,16 +436,16 @@ Taint Analysis Issues
 
 .. code-block:: bash
 
-   ./build/bin/lotus-check --engine=taint input.bc --taint.sources=my_input_func \
+   ./build/bin/lotus-check --engine=taint-ifds input.bc --taint.sources=my_input_func \
                       --taint.sinks=my_output_func
 
 2. Check that source and sink functions are actually called
 
-3. Use ``lotus-check --engine=taint`` for interprocedural flow:
+3. Use ``lotus-check --engine=taint-ifds`` for interprocedural flow:
 
 .. code-block:: bash
 
-   ./build/bin/lotus-check --engine=taint input.bc
+   ./build/bin/lotus-check --engine=taint-ifds input.bc
 
 Performance Tuning
 ------------------
@@ -599,7 +599,7 @@ A: Yes:
 
 .. code-block:: bash
 
-   ./build/bin/lotus-check --engine=taint input.bc --taint.sources=my_source1,my_source2 \
+   ./build/bin/lotus-check --engine=taint-ifds input.bc --taint.sources=my_source1,my_source2 \
                       --taint.sinks=my_sink1,my_sink2
 
 Or create custom analysis (see :doc:`../developer/developer_guide`).

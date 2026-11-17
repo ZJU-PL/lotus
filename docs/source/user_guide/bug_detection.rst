@@ -324,14 +324,14 @@ Basic Usage
 .. code-block:: bash
 
    # Basic taint analysis
-   ./build/bin/lotus-check --engine=taint program.bc
+   ./build/bin/lotus-check --engine=taint-ifds program.bc
    
    # Custom sources and sinks
-   ./build/bin/lotus-check --engine=taint program.bc --taint.sources=read,scanf,recv \
+   ./build/bin/lotus-check --engine=taint-ifds program.bc --taint.sources=read,scanf,recv \
                             --taint.sinks=system,exec,printf
    
    # Verbose output
-   ./build/bin/lotus-check --engine=taint program.bc --verbose
+   ./build/bin/lotus-check --engine=taint-ifds program.bc --verbose
 
 Example 1: Command Injection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -382,7 +382,7 @@ Example 1: Command Injection
 .. code-block:: bash
 
    clang -emit-llvm -c -g cmd_injection.c -o cmd_injection.bc
-   ./build/bin/lotus-check --engine=taint cmd_injection.bc --verbose
+   ./build/bin/lotus-check --engine=taint-ifds cmd_injection.bc --verbose
 
 **Expected Output**:
 
@@ -440,7 +440,7 @@ Example 2: SQL Injection
 
 .. code-block:: bash
 
-   ./build/bin/lotus-check --engine=taint sql_injection.bc --taint.sources=scanf --taint.sinks=sqlite3_exec
+   ./build/bin/lotus-check --engine=taint-ifds sql_injection.bc --taint.sources=scanf --taint.sinks=sqlite3_exec
 
 **Fix**: Use parameterized queries:
 
@@ -663,7 +663,7 @@ CI/CD Pipeline
    
    # Run checkers via the unified lotus-check frontend
    ./build/bin/lotus-check --engine=kint source.bc --checks=all > kint_results.txt
-   ./build/bin/lotus-check --engine=taint source.bc > taint_results.txt
+   ./build/bin/lotus-check --engine=taint-ifds source.bc > taint_results.txt
    
    # Check for bugs
    if grep -q "Bug" *.txt; then
