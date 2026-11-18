@@ -534,7 +534,7 @@ AliasClient::AliasClient(AliasClient &&other) noexcept
       address_objects_(std::move(other.address_objects_)),
       address_object_sources_(std::move(other.address_object_sources_)),
       address_objects_valid_(other.address_objects_valid_),
-      session_(std::move(other.session_)), backend_(std::move(other.backend_)) {
+      session_(std::move(other.session_)), backend_(other.backend_) {
 }
 
 AliasClient &AliasClient::operator=(AliasClient &&other) noexcept {
@@ -559,7 +559,7 @@ AliasClient &AliasClient::operator=(AliasClient &&other) noexcept {
   address_object_sources_ = std::move(other.address_object_sources_);
   address_objects_valid_ = other.address_objects_valid_;
   session_ = std::move(other.session_);
-  backend_ = std::move(other.backend_);
+  backend_ = other.backend_;
   return *this;
 }
 

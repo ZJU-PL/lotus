@@ -371,7 +371,7 @@ AdaptiveResult AdaptiveSolver::solve(
                        : solveAdaptive<false>(graph, options);
   AdaptiveResult result;
   result.components_ = std::move(partition.components);
-  result.stats_ = std::move(partition.stats);
+  result.stats_ = partition.stats;
   return result;
 }
 
@@ -383,7 +383,7 @@ AdaptiveResult AdaptiveSolver::solveShallow(
                        : solveShallowAdaptive<false>(graph, threshold, options);
   AdaptiveResult result;
   result.components_ = std::move(partition.components);
-  result.stats_ = std::move(partition.stats);
+  result.stats_ = partition.stats;
   return result;
 }
 

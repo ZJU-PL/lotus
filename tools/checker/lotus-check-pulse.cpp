@@ -142,7 +142,8 @@ int runPulseCheckerTool(const char *argv0) {
   }
   std::vector<int> disabledTypeIds;
   for (size_t id = 0; id < mgr.get_num_bug_types(); ++id) {
-    if (disabledBugTypes.count(mgr.get_bug_type_info(id).bug_name)) {
+    if (disabledBugTypes.count(
+            mgr.get_bug_type_info(static_cast<int>(id)).bug_name)) {
       disabledTypeIds.push_back(static_cast<int>(id));
     }
   }

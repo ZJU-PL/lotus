@@ -1,7 +1,7 @@
 #pragma once
 
+#include "CFL/InterleavedDyck/ILP/LinearProgram.h"
 #include "CFL/InterleavedDyck/ILP/Solver.h"
-#include "LinearProgram.h"
 
 #include <memory>
 

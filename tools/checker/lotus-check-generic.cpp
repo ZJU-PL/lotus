@@ -440,6 +440,7 @@ int main(int argc, char **argv) {
     normalizedArgs.push_back(filteredArgs[i]);
 
   std::vector<char *> argvPtrs;
+  argvPtrs.reserve(normalizedArgs.size() + 1);
   for (auto &s : normalizedArgs)
     argvPtrs.push_back(s.data());
   argvPtrs.push_back(nullptr);

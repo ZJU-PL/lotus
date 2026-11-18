@@ -1,5 +1,7 @@
 #include "CFL/InterleavedDyck/GraphReduction/Legacy/CFLGraph.h"
 
+#include <cstddef>
+
 int CFLMatrix::DeleteAllEdgesAndJ(unsigned i, unsigned j) {
 
   int intronewAedge = 0; // is set to 1 if there are new A edges installed.
@@ -55,7 +57,7 @@ int CFLMatrix::DeleteAllEdgesAndJ(unsigned i, unsigned j) {
     }
   }
 
-  Matrix *q = p + i * Size + j;
+  Matrix *q = p + static_cast<std::size_t>(i) * Size + j;
   q->colors.reset(); // deledge from i to j;
 
   if (hasDedge) {
@@ -71,7 +73,7 @@ int CFLMatrix::DeleteAllEdgesAndJ(unsigned i, unsigned j) {
 unsigned CFLMatrix::FindOutDegree(unsigned i) {
   unsigned OutDegree = 0;
   for (unsigned j = 0; j < Size; j++) {
-    Matrix *q = p + i * Size + j;
+    Matrix *q = p + static_cast<std::size_t>(i) * Size + j;
     OutDegree += q->colors.count();
   }
   return OutDegree;
@@ -80,7 +82,7 @@ unsigned CFLMatrix::FindOutDegree(unsigned i) {
 unsigned CFLMatrix::FindInDegree(unsigned j) {
   unsigned InDegree = 0;
   for (unsigned i = 0; i < Size; i++) {
-    Matrix *q = p + i * Size + j;
+    Matrix *q = p + static_cast<std::size_t>(i) * Size + j;
     InDegree += q->colors.count();
   }
   return InDegree;
@@ -89,12 +91,12 @@ unsigned CFLMatrix::FindInDegree(unsigned j) {
 void CFLMatrix::DeleteNode(unsigned i) {
 
   for (unsigned j = 0; j < Size; j++) {
-    Matrix *q = p + i * Size + j;
+    Matrix *q = p + static_cast<std::size_t>(i) * Size + j;
     q->colors.reset();
   }
 
   for (unsigned j = 0; j < Size; j++) {
-    Matrix *q = p + j * Size + i;
+    Matrix *q = p + static_cast<std::size_t>(j) * Size + i;
     q->colors.reset();
   }
 }
