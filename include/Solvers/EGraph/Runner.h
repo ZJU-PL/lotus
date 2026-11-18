@@ -291,18 +291,18 @@ public:
   }
 
   BackoffScheduler &doNotBan(Symbol name) {
-    auto &stats = ruleStats(std::move(name));
+    auto &stats = ruleStats(name);
     stats.match_limit = std::numeric_limits<size_t>::max();
     return *this;
   }
 
   BackoffScheduler &ruleMatchLimit(Symbol name, size_t limit) {
-    ruleStats(std::move(name)).match_limit = limit;
+    ruleStats(name).match_limit = limit;
     return *this;
   }
 
   BackoffScheduler &ruleBanLength(Symbol name, size_t length) {
-    ruleStats(std::move(name)).ban_length = length;
+    ruleStats(name).ban_length = length;
     return *this;
   }
 
@@ -369,7 +369,7 @@ private:
   };
 
   RuleStats &ruleStats(Symbol name) {
-    auto [it, inserted] = stats_.try_emplace(std::move(name));
+    auto [it, inserted] = stats_.try_emplace(name);
     if (inserted) {
       it->second.match_limit = default_match_limit_;
       it->second.ban_length = default_ban_length_;

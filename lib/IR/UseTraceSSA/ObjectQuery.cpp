@@ -474,7 +474,7 @@ ObjectBatchResult QueryEngine::runObjects(const ObjectBatchQuery &request) const
           throw std::length_error("UseTraceSSA: context state identifier overflow");
         id = states.size();
         known.emplace(state, id);
-        states.push_back(std::move(state));
+        states.push_back(state);
         visited.push_back(emptyMask);
         queued.push_back(emptyMask);
         queuedProof.push_back(InvalidID);
@@ -547,7 +547,7 @@ ObjectBatchResult QueryEngine::runObjects(const ObjectBatchQuery &request) const
           }
           ID edgeID = materialize(current.product, index);
           next.product = pe[edgeID].to;
-          push(std::move(next), permitted, delta.proof, original);
+          push(next, permitted, delta.proof, original);
         }
       }
     } catch (const Budget &budget) {

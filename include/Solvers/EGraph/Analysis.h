@@ -27,7 +27,7 @@ struct Justification {
   static Justification ruleJustification(Symbol reason) {
     Justification justification;
     justification.kind = Kind::Rule;
-    justification.rule = std::move(reason);
+    justification.rule = reason;
     return justification;
   }
 

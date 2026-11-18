@@ -10,7 +10,7 @@ namespace lotus::egraph {
 class Var {
 public:
   Var() = default;
-  explicit Var(Symbol name) : name_(std::move(name)) {}
+  explicit Var(Symbol name) : name_(name) {}
 
   static Var fromU32(uint32_t num) {
     Var var;

@@ -183,31 +183,12 @@ dda.addQuery(ptr3);
 dda.runOnModule(module);
 ```
 
-### Context-Sensitive Analysis
+### Context-sensitive mode and budget
 
-```cpp
-#include "Alias/DemandDriven/DDA/ContextDDA.h"
-
-DDAPass dda;
-dda.setDDAKind(DDAKind::Cxt_DDA);
-dda.runOnModule(module);
-
-auto pts = dda.getFlowDDA()->getPointsTo(ptr);
-```
-
-### Budget Control
-
-```cpp
-#include "Alias/DemandDriven/DDA/FlowDDA.h"
-
-FlowDDA::setDefaultMaxBudget(10000);  // Default: 100000
-
-FlowDDA dda;
-dda.run(module);
-
-// Queries exceeding budget fall back to conservative PTA
-auto pts = dda.getPointsTo(ptr);
-```
+Switch modes with `dda.setDDAKind(DDAKind::Cxt_DDA)` (FlowDDA is the default); reach the
+underlying solver with `dda.getFlowDDA()`. Cap work with
+`FlowDDA::setDefaultMaxBudget(10000)` (default 100000) — queries exceeding the budget fall back
+to conservative PTA (see "Out-Of-Budget Fallback").
 
 ### Custom Client
 
@@ -266,17 +247,10 @@ while still preferring PTA-derived object IDs when available.
 
 ## Context Sensitivity
 
-`ContextDDA` extends the same transfer logic with call-string constraints:
-
-- Call/return edges update or match context IDs
-- Recursive callsites are treated context-insensitively where needed
-- Context-insensitive edge set is initialized from recursion/value-flow cycles
-- Out-of-budget in `ContextDDA` downgrades to conservative object-level fallback
-
-Use `ContextDDA` when recursion, callbacks, or precision dominate. Use
-`FlowDDA` for general-purpose analysis where speed matters more.
-
-### Comparison
+`ContextDDA` extends the same transfer logic with call-string constraints: call/return edges
+update or match context IDs; recursive callsites are treated context-insensitively where needed;
+the context-insensitive edge set is initialized from recursion/value-flow cycles; out-of-budget
+downgrades to conservative object-level fallback.
 
 | Aspect | FlowDDA | ContextDDA |
 |--------|---------|------------|
@@ -296,27 +270,10 @@ Use `ContextDDA` when recursion, callbacks, or precision dominate. Use
 
 ### Optimization Tips
 
-1. **Set an appropriate budget**:
-   ```cpp
-   FlowDDA::setDefaultMaxBudget(10000);  // Lower for faster queries
-   ```
-
-2. **Use targeted clients**:
-   ```cpp
-   dda.selectClient(DDAClientKind::Funptr);  // Faster than All
-   ```
-
-3. **Batch queries to reuse caches**:
-   ```cpp
-   for (auto *ptr : pointers) {
-       auto pts = dda.getPointsTo(ptr);  // Later queries benefit from cache
-   }
-   ```
-
-4. **Pick the right mode**:
-   ```cpp
-   dda.setDDAKind(DDAKind::FlowS_DDA);  // Faster
-   ```
+1. Set an appropriate budget with `FlowDDA::setDefaultMaxBudget()` (lower for faster queries).
+2. Use targeted clients — `selectClient(DDAClientKind::Funptr)` is faster than `All`.
+3. Batch queries — calling `getPointsTo` on several pointers lets later queries reuse caches.
+4. Pick the right mode — `setDDAKind(DDAKind::FlowS_DDA)` is faster.
 
 ## SVFG Assumptions And Invariants
 
