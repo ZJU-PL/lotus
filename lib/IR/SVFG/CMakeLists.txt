@@ -12,6 +12,7 @@ set(SVFG_SOURCES
     SVFGSerializer.cpp
     SVFGOPT.cpp
     SVFGStats.cpp
+    MemorySSADump.cpp
 )
 
 # Create library

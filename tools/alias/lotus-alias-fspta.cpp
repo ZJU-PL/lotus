@@ -9,6 +9,7 @@
 #include "Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/CLIUtils.h"
 #include "IR/ICFG/ICFGBuilder.h"
+#include "IR/SVFG/MemorySSADump.h"
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/SVFG/SVFGStats.h"
 #include "Utils/Graph/DotWriter.h"
@@ -185,6 +186,13 @@ cl::opt<std::string> DumpSVFGFunction(
     "dump-svfg-function",
     cl::desc("Restrict --dump-svfg to one function (e.g. main)"),
     cl::init(""), cl::cat(FsptaCategory));
+cl::opt<bool> DumpMSSA(
+    "dump-mssa", cl::desc("Dump sparse MemorySSA MU/CHI/PHI text"),
+    cl::init(false), cl::cat(FsptaCategory));
+cl::opt<std::string> DumpMSSAFunction(
+    "dump-mssa-function",
+    cl::desc("Restrict --dump-mssa to one function (e.g. main)"),
+    cl::init(""), cl::cat(FsptaCategory));
 cl::opt<bool> ValidateAnnotations(
     "validate-annotations",
     cl::desc("Validate __aser_alias__/__aser_no_alias__ calls"),
@@ -290,6 +298,11 @@ int runValueFlowAnalysis(const Module &module) {
   if (!DumpSVFG.empty()) {
     errs() << "lotus-alias-fspta: --dump-svfg is unavailable for vfpta, "
               "which builds its own value-flow graph\n";
+    return 1;
+  }
+  if (DumpMSSA) {
+    errs() << "lotus-alias-fspta: --dump-mssa is unavailable for vfpta, "
+              "which does not use the shared SVFG MemorySSA\n";
     return 1;
   }
 
@@ -499,6 +512,15 @@ int main(int argc, char **argv) {
   graphConfig.objectIdLinkage = objectLinkageStrategy();
   auto graphBuilder = std::make_unique<SVFGBuilder>(graphConfig);
   std::unique_ptr<SVFG> graph(graphBuilder->build(&icfg));
+  if (DumpMSSA) {
+    std::string dumpError;
+    if (!dumpMemorySSA(*graph, *module, outs(), DumpMSSAFunction,
+                       &dumpError)) {
+      errs() << "lotus-alias-fspta: cannot dump MemorySSA: " << dumpError
+             << "\n";
+      return 1;
+    }
+  }
   if (DumpStats &&
       graphConfig.objectIdClustering ==
           SVFGBuilderConfig::ObjectIdClustering::Hierarchical) {

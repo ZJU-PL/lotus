@@ -1,4 +1,49 @@
 #include "SVFGMemorySSATestSupport.h"
+#include "IR/SVFG/MemorySSADump.h"
+
+#include <llvm/Support/raw_ostream.h>
+
+TEST_F(SVFGMemorySSATest, TextDumpGroupsMuChiAndPhiByFunctionAndBlock) {
+  const char *source = R"(
+    @g = global i8* null
+
+    define i32 @main(i1 %cond) {
+    entry:
+      %x = alloca i8
+      br i1 %cond, label %then, label %else
+    then:
+      store i8* %x, i8** @g
+      br label %join
+    else:
+      store i8* null, i8** @g
+      br label %join
+    join:
+      %value = load i8*, i8** @g
+      ret i32 0
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+  ICFG icfg;
+  std::unique_ptr<SVFG> svfg = buildSVFG(module.get(), icfg);
+  ASSERT_NE(svfg, nullptr);
+
+  std::string text;
+  llvm::raw_string_ostream output(text);
+  std::string error;
+  ASSERT_TRUE(dumpMemorySSA(*svfg, *module, output, "main", &error)) << error;
+  output.flush();
+
+  EXPECT_NE(text.find("==========FUNCTION: main=========="), std::string::npos);
+  EXPECT_NE(text.find("entry\n"), std::string::npos);
+  EXPECT_NE(text.find(" PHI "), std::string::npos);
+  EXPECT_NE(text.find(" MU "), std::string::npos);
+  EXPECT_NE(text.find(" CHI "), std::string::npos);
+  EXPECT_NE(text.find("memReg="), std::string::npos);
+  EXPECT_NE(text.find("version="), std::string::npos);
+  EXPECT_NE(text.find("points-to={"), std::string::npos);
+}
 
 TEST_F(SVFGMemorySSATest, ReadOnlyCalleeDoesNotCreateCallerSideDefs) {
   const char *source = R"(

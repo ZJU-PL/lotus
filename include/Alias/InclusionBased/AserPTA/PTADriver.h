@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "Alias/InclusionBased/AserPTA/AnalysisOptions.h"
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/PointerAnalysisPass.h"
 #include "Alias/InclusionBased/AserPTA/PreProcessing/Passes/CanonicalizeGEPPass.h"
 #include "Alias/InclusionBased/AserPTA/PreProcessing/Passes/LoweringMemCpyPass.h"
@@ -26,10 +27,13 @@ namespace aser {
 template <typename PTASolver> class PTADriverPass : public llvm::ModulePass {
 private:
   bool dumpStats;
+  AnalysisOptions options;
 
 public:
   static char ID;
-  PTADriverPass(bool dumpStats = true) : ModulePass(ID), dumpStats(dumpStats) {}
+  PTADriverPass(bool dumpStats = true,
+                const AnalysisOptions &options = AnalysisOptions())
+      : ModulePass(ID), dumpStats(dumpStats), options(options) {}
 
   void getAnalysisUsage(llvm::AnalysisUsage &AU) const override {
     AU.addRequired<PointerAnalysisPass<PTASolver>>();
@@ -40,7 +44,8 @@ public:
       llvm::ResetStatistics();
     }
 
-    getAnalysis<PointerAnalysisPass<PTASolver>>().analyze(&M);
+    getAnalysis<PointerAnalysisPass<PTASolver>>().analyze(&M, "main",
+                                                          options);
 
     if (dumpStats) {
       llvm::PrintStatistics(llvm::outs());
@@ -59,7 +64,8 @@ template <typename PTASolver> char PTADriverPass<PTASolver>::ID = 0;
 /// @param M The LLVM module to analyze.
 /// @param dumpStats Whether to dump analysis statistics.
 template <typename Solver>
-void runAnalysis(llvm::Module &M, bool dumpStats = true) {
+void runAnalysis(llvm::Module &M, bool dumpStats,
+                 const AnalysisOptions &options) {
   llvm::legacy::PassManager passes;
 
   // Preprocessing passes
@@ -71,13 +77,26 @@ void runAnalysis(llvm::Module &M, bool dumpStats = true) {
   passes.add(new StandardHeapAPIRewritePass());
 
   // Analysis passes
-  auto *ptaPass = new PointerAnalysisPass<Solver>();
+  auto *ptaPass = new PointerAnalysisPass<Solver>(options);
   passes.add(ptaPass);
-  passes.add(new PTADriverPass<Solver>(dumpStats));
+  passes.add(new PTADriverPass<Solver>(dumpStats, options));
 
   llvm::errs() << "Running pointer analysis...\n";
   passes.run(M);
   llvm::errs() << "Analysis completed.\n";
+}
+
+/// Backward-compatible solve-only entry point.
+template <typename Solver>
+void runAnalysis(llvm::Module &M, bool dumpStats = true) {
+  runAnalysis<Solver>(M, dumpStats, AnalysisOptions());
+}
+
+/// Performs pointer analysis with optional points-to cache I/O.
+template <typename Solver>
+void runAnalysis(llvm::Module &M, const AnalysisOptions &options,
+                 bool dumpStats = true) {
+  runAnalysis<Solver>(M, dumpStats, options);
 }
 
 } // namespace aser

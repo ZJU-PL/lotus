@@ -1,4 +1,5 @@
 #include "IR/ICFG/ICFGBuilder.h"
+#include "IR/SVFG/MemorySSADump.h"
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/UseTraceSSA/DefectDetector.h"
 #include "IR/UseTraceSSA/Query.h"
@@ -39,6 +40,12 @@ llvm::cl::opt<std::string> DumpSVFG("dump-svfg",
 llvm::cl::opt<std::string> DumpSVFGFunction(
     "dump-svfg-function",
     llvm::cl::desc("Restrict --dump-svfg to one function (e.g. main)"),
+    llvm::cl::init(""));
+llvm::cl::opt<bool> DumpMSSA(
+    "dump-mssa", llvm::cl::desc("Dump sparse MemorySSA MU/CHI/PHI text"));
+llvm::cl::opt<std::string> DumpMSSAFunction(
+    "dump-mssa-function",
+    llvm::cl::desc("Restrict --dump-mssa to one function (e.g. main)"),
     llvm::cl::init(""));
 llvm::cl::opt<std::string> Check("check",
                                  llvm::cl::desc(
@@ -99,6 +106,11 @@ int main(int argc, char **argv) {
     llvm::errs() << "lotus-ir-usetracessa: --format must be text, json, or dot\n";
     return 1;
   }
+  if (DumpMSSA && Format != "text") {
+    llvm::errs()
+        << "lotus-ir-usetracessa: --dump-mssa requires --format=text\n";
+    return 1;
+  }
   if (query && Format != "text") {
     llvm::errs() << "lotus-ir-usetracessa: queries require --format=text\n";
     return 1;
@@ -139,11 +151,20 @@ int main(int argc, char **argv) {
     icfgBuilder.build(module.get());
     SVFGBuilderConfig config;
     config.usePointerAnalysis = true;
-    config.buildMSSA = Check.empty();
+    config.buildMSSA = Check.empty() || DumpMSSA;
     config.resolveIndirectCalls = true;
     SVFGBuilder builder(config);
     std::unique_ptr<SVFG> svfg(builder.build(&icfg));
     const auto builtSVFG = Clock::now();
+    if (DumpMSSA) {
+      std::string dumpError;
+      if (!dumpMemorySSA(*svfg, *module, llvm::outs(), DumpMSSAFunction,
+                         &dumpError)) {
+        llvm::errs() << "lotus-ir-usetracessa: cannot dump MemorySSA: "
+                     << dumpError << "\n";
+        return 1;
+      }
+    }
     if (Timing) std::cerr << "timing_ms svfg=" << millis(parsed, builtSVFG) << '\n';
     if (!DumpSVFG.empty()) {
       std::string dumpError;

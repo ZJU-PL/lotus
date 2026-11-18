@@ -41,11 +41,15 @@ build/bin/lotus-ir-usetracessa test.bc --check=use-after-free
 build/bin/lotus-ir-usetracessa test.bc --check=use-after-free --context-limit=3
 build/bin/lotus-ir-usetracessa test.bc --check=memory-leak
 build/bin/lotus-ir-usetracessa test.bc --check=file-leak
+build/bin/lotus-ir-usetracessa test.bc --dump-mssa --dump-mssa-function=main
 ```
 
 The tool builds ICFG and an AserPTA-backed SVFG, then derives UseTraceSSA with
 shared temporal histories and guarded object effects. Full graph mode also
-builds MemorySSA. `--dump-svfg=path.dot` saves the source SVFG. Resource checks
+builds MemorySSA. `--dump-svfg=path.dot` saves the source SVFG. `--dump-mssa`
+prints MU/CHI/PHI text with memReg, version, and points-to facts, grouped by
+function and basic block;
+`--dump-mssa-function=<name>` restricts the dump to one function. Resource checks
 model `malloc`/`calloc` with `free`, `fopen` with `fclose`, and load/store uses.
 `Found` is a potential witness in the abstraction; incomplete external models
 or cross-function resource effects prevent a negative safety conclusion.
@@ -59,6 +63,7 @@ build/bin/lotus-ir-ufg test.bc --check=use-after-free --context-limit=3
 build/bin/lotus-ir-ufg test.bc --check=memory-leak
 build/bin/lotus-ir-ufg test.bc --check=file-leak
 build/bin/lotus-ir-ufg test.bc --format=json
+build/bin/lotus-ir-ufg test.bc --dump-mssa --dump-mssa-function=main
 ```
 
 The UFG tool uses the same SVFG importer, pointer facts, and defect rules as

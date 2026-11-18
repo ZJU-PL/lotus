@@ -32,6 +32,14 @@ https://peimingliu.github.io/asset/pic/PUS.pdf
   - `store`: Dereference stores (`*p = q`)
   - `offset`: Field access via GEP (`p = &obj->field`)
 
+- **Optional Points-to Cache**: `lotus-alias-aser-aa` can persist the solved
+  AserPTA graph through `--write-ander=<file>` and load it with
+  `--read-ander=<file>`. The cache records the exact node count, a semantic
+  node-layout digest, and every points-to set. A load either installs a fully
+  matching cache, explicitly falls back to constraint solving to reconstruct a
+  changed graph, or fails when the final node layout still differs. Loading
+  rebuilds indirect-call edges from the restored function-pointer facts.
+
 ## Architecture
 
 ### Core Components

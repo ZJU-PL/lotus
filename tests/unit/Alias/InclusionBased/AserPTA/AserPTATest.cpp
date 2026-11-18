@@ -24,11 +24,14 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/raw_ostream.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <initializer_list>
 #include <set>
+#include <stdexcept>
 #include <vector>
 
 using namespace llvm;
@@ -325,6 +328,138 @@ TEST(AserPTAIndirectCalls, ResolvingTargetCanRegisterMoreSitesOnSamePointer) {
         ++sites;
       }
   EXPECT_EQ(sites, 13u);
+}
+
+TEST(AserPTACache, RoundTripsPointsToAcrossSolverDestruction) {
+  const char *ir = R"(
+    @global = global i32 0
+    define i32 @main() {
+      %local = alloca i32
+      %slot = alloca i32*
+      store i32* %local, i32** %slot
+      %alias = load i32*, i32** %slot
+      store i32* @global, i32** %slot
+      ret i32 0
+    }
+  )";
+
+  llvm::SmallString<128> cachePath;
+  int fd = -1;
+  ASSERT_FALSE(llvm::sys::fs::createTemporaryFile(
+      "lotus-aser-pts", "cache", fd, cachePath));
+  llvm::sys::fs::closeFile(fd);
+
+  {
+    LLVMContext context;
+    auto module = parseModule(context, ir, "AserPTACacheWrite");
+    ASSERT_NE(module, nullptr);
+    FI_NoCtx_Solver solver;
+    AnalysisOptions options;
+    options.writePointsToPath = cachePath.str().str();
+    solver.analyze(module.get(), "main", options);
+  }
+  ASSERT_TRUE(llvm::sys::fs::exists(cachePath));
+
+  LLVMContext context;
+  auto module = parseModule(context, ir, "AserPTACacheRead");
+  ASSERT_NE(module, nullptr);
+  FI_NoCtx_Solver solver;
+  AnalysisOptions options;
+  options.readPointsToPath = cachePath.str().str();
+  solver.analyze(module.get(), "main", options);
+
+  const auto *alias = findInstructionByName(module->getFunction("main"), "alias");
+  ASSERT_NE(alias, nullptr);
+  std::vector<const FI_NoCtx_Solver::ObjTy *> points;
+  solver.getPointsTo(nullptr, alias, points);
+  ASSERT_FALSE(points.empty());
+  EXPECT_NE(std::find_if(points.begin(), points.end(), [&](const auto *object) {
+              return object->getValue() == module->getGlobalVariable("global");
+            }),
+            points.end());
+
+  EXPECT_FALSE(llvm::sys::fs::remove(cachePath));
+}
+
+TEST(AserPTACache, LoadRejectsChangedNodeLayout) {
+  const char *originalIR = R"(
+    define i32 @main() {
+      %x = alloca i32
+      ret i32 0
+    }
+  )";
+  const char *changedIR = R"(
+    @extra = global i32 0
+    define i32 @main() {
+      %x = alloca i32
+      %y = alloca i32
+      ret i32 0
+    }
+  )";
+
+  llvm::SmallString<128> cachePath;
+  int fd = -1;
+  ASSERT_FALSE(llvm::sys::fs::createTemporaryFile(
+      "lotus-aser-layout", "cache", fd, cachePath));
+  llvm::sys::fs::closeFile(fd);
+
+  {
+    LLVMContext context;
+    auto module = parseModule(context, originalIR, "AserPTACacheLayoutWrite");
+    ASSERT_NE(module, nullptr);
+    FI_NoCtx_Solver solver;
+    AnalysisOptions options;
+    options.writePointsToPath = cachePath.str().str();
+    solver.analyze(module.get(), "main", options);
+  }
+
+  LLVMContext context;
+  auto module = parseModule(context, changedIR, "AserPTACacheLayoutRead");
+  ASSERT_NE(module, nullptr);
+  FI_NoCtx_Solver solver;
+  AnalysisOptions options;
+  options.readPointsToPath = cachePath.str().str();
+  EXPECT_THROW(solver.analyze(module.get(), "main", options),
+               std::runtime_error);
+
+  EXPECT_FALSE(llvm::sys::fs::remove(cachePath));
+}
+
+TEST(AserPTACache, LoadRebuildsIndirectCallEdges) {
+  llvm::SmallString<128> cachePath;
+  int fd = -1;
+  ASSERT_FALSE(llvm::sys::fs::createTemporaryFile(
+      "lotus-aser-indirect", "cache", fd, cachePath));
+  llvm::sys::fs::closeFile(fd);
+
+  {
+    LLVMContext context;
+    auto module = parseModule(context, lateCallIR, "AserPTACacheIndirectWrite");
+    ASSERT_NE(module, nullptr);
+    FI_NoCtx_Solver solver;
+    AnalysisOptions options;
+    options.writePointsToPath = cachePath.str().str();
+    solver.analyze(module.get(), "main", options);
+  }
+
+  LLVMContext context;
+  auto module = parseModule(context, lateCallIR, "AserPTACacheIndirectRead");
+  ASSERT_NE(module, nullptr);
+  FI_NoCtx_Solver solver;
+  AnalysisOptions options;
+  options.readPointsToPath = cachePath.str().str();
+  solver.analyze(module.get(), "main", options);
+
+  const CallBase *call = nullptr;
+  for (const Instruction &instruction : instructions(module->getFunction("main")))
+    if (const auto *candidate = dyn_cast<CallBase>(&instruction))
+      call = candidate;
+  ASSERT_NE(call, nullptr);
+  const auto *site = solver.getInDirectCallSite(nullptr, call);
+  ASSERT_NE(site, nullptr);
+  EXPECT_EQ(site->getResolvedTarget().count(module->getFunction("late")), 1u);
+
+  EXPECT_FALSE(llvm::sys::fs::remove(cachePath));
 }
 
 // ============================================================================
