@@ -171,7 +171,7 @@ Supported groups:
   ``multiplicity``, ``nullpointer``, ``parametersummary``, ``profile``,
   ``purity``, ``sccp``, ``typehierarchy``, ``loop``.
 * ``checker``: ``ae``, ``concurrency``, ``framework``, ``gsaf``, ``kint``,
-  ``pulse``, ``saber``, ``reports``, ``typequalifier``.
+  ``pulse``, ``saber``, ``tpa``, ``reports``, ``typequalifier``.
 * ``concurrency``: ``mhp``, ``lockset``, ``valueflow``, ``thread``, ``clocks``,
   ``threadapi``, ``threadlocal``, ``openmp``, ``mpi``, ``cuda``, ``linuxkernel``.
 * ``dataflow``: ``ifdside``, ``mono``, ``wpds``, ``apa``, ``demandapa``, ``npa``,

@@ -13,15 +13,16 @@ categories rather than mutually exclusive bug categories: several memory-safety
 and taint-related classes are intentionally supported by more than one engine.
 
 1. **kint**: Integer-related bugs (overflow, division by zero, bad shift, array bounds)
-2. **taint**: Information flow and injection vulnerabilities
-3. **concur**: Race conditions, deadlocks, OpenMP misuse, and MPI protocol bugs
-4. **pulse**: Pulse analysis for memory safety
-5. **fitx**: Fast typestate-based development feedback
-6. **saber**: Sparse value-flow resource checks (leaks and double frees)
-7. **ae**: Broad abstract-execution memory-safety checking
-8. **generic**: Custom checkers via declarative rules
-9. **symex**: Symbolic execution engine
-10. **gsaf**: Guarded value-flow analysis for taint and use-after-free style checks
+2. **taint-ifds**: IFDS-based information flow and injection vulnerabilities
+3. **taint-tpa**: TPA-native sparse taint analysis
+4. **concur**: Race conditions, deadlocks, OpenMP misuse, and MPI protocol bugs
+5. **pulse**: Pulse analysis for memory safety
+6. **fitx**: Fast typestate-based development feedback
+7. **saber**: Sparse value-flow resource checks (leaks and double frees)
+8. **ae**: Broad abstract-execution memory-safety checking
+9. **generic**: Custom checkers via declarative rules
+10. **symex**: Symbolic execution engine
+11. **gsaf**: Guarded value-flow analysis for taint and use-after-free style checks
 
 See :ref:`Choosing a Checker <choosing-a-checker>` for the bug-class-to-engine
 guide.  ``./build/bin/lotus-check --list-checkers`` lists checker ids for both
@@ -120,7 +121,7 @@ Tool 1: Kint - Integer and Array Analysis
 
 Kint detects numerical bugs using SMT solving and interprocedural function
 summaries.  Its auxiliary taint tracking is not a replacement for the
-configurable ``taint`` source-to-sink checker.
+configurable ``taint-ifds`` source-to-sink checker.
 
 Capabilities
 ~~~~~~~~~~~~

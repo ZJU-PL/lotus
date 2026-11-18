@@ -285,7 +285,8 @@ Build Targets
 * ``tools/checker/lotus-check-pulse.cpp`` – Pulse engine runner
 * ``tools/checker/lotus-check-saber.cpp`` – Saber engine runner
 * ``tools/checker/lotus-check-symex.cpp`` – Symbolic-execution engine runner
-* ``tools/checker/lotus-check-taint-ifds.cpp`` – Taint-analysis engine runner
+* ``tools/checker/lotus-check-taint-ifds.cpp`` – IFDS taint engine runner
+* ``tools/checker/lotus-check-taint-tpa.cpp`` – TPA-native sparse taint engine runner
 
 Usage
 -----

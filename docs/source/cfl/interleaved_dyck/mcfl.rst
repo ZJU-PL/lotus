@@ -158,8 +158,8 @@ elimination, ``--artifact-compatible`` selects the artifact's condensed
 cross-product expansion, ``--stats`` prints saturation counters, and
 ``--print-pairs`` emits the final endpoint relation.
 
-The exact unary algorithms share the separate
-``lotus-cfl-interleaved-dyck unary`` executable documented in
+The exact unary algorithms are exposed through the ``unary`` subcommand of
+``lotus-cfl-interleaved-dyck``, documented in
 :doc:`/cfl/interleaved_dyck/unary`.
 
 Validation and Complexity

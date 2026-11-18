@@ -110,7 +110,7 @@ Each subdirectory under ``tools/`` contains the ``main()`` entry points that lin
    * - ``tools/alias/``
      - ``lotus-alias-sparrow-aa``, ``lotus-alias-aser-aa``, ``lotus-alias-dyck-aa``, ``lotus-alias-lotus-aa``, ``lotus-alias-tpa``, ``lotus-alias-bootstrap``, ``lotus-alias-fspta``, ``lotus-alias-sea-dsa-dg``, ``lotus-alias-seadsa-tool``, ``lotus-alias-call-graph``, ``lotus-alias-cclyzer-aa``
    * - ``tools/checker/``
-     - ``lotus-check`` (unified binary with ``--engine=generic|kint|ae|taint|pulse|concur|saber|fitx|gsaf|symex``)
+     - ``lotus-check`` (unified binary with ``--engine=generic|ae|kint|taint-ifds|taint-tpa|concur|pulse|fitx|saber|gsaf|symex``)
    * - ``tools/dataflow/``
      - ``lotus-dfa``, ``lotus-dfa-apa``, ``lotus-dfa-mono``, ``lotus-dfa-ifds``, ``lotus-dfa-npa``, ``lotus-dfa-wpds``
    * - ``tools/optimization/``
