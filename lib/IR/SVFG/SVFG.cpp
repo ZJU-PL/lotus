@@ -543,6 +543,193 @@ bool SVFG::remapObjectIds(
   return true;
 }
 
+bool SVFG::objectsOverlap(uint32_t lhs, uint32_t rhs) const {
+  if (lhs == rhs)
+    return true;
+  // Field-insensitive representatives and their base denote the same memory.
+  if (canonicalObjectId(lhs) == canonicalObjectId(rhs))
+    return true;
+  // Unknown objects act as wildcards in either direction.
+  if (isUnknownObject(lhs) || isUnknownObject(rhs))
+    return true;
+
+  auto baseObject = [&](uint32_t object) {
+    const ObjectInfo *info = getObjectInfo(object);
+    return info && info->baseObjId != 0 ? info->baseObjId : object;
+  };
+  if (baseObject(lhs) != baseObject(rhs))
+    return false;
+
+  const ObjectInfo *lhsInfo = getObjectInfo(lhs);
+  const ObjectInfo *rhsInfo = getObjectInfo(rhs);
+  const bool lhsField = lhsInfo && lhsInfo->hasFieldOffset;
+  const bool rhsField = rhsInfo && rhsInfo->hasFieldOffset;
+  // A query for the aggregate covers all of its fields; two distinct fields
+  // only overlap at the same offset.
+  if (!lhsField || !rhsField)
+    return true;
+  return lhsInfo->fieldOffset == rhsInfo->fieldOffset;
+}
+
+bool SVFG::objectSetsOverlap(const SVFGNodeBS &lhs,
+                             const SVFGNodeBS &rhs) const {
+  for (uint32_t lhsObject : lhs)
+    for (uint32_t rhsObject : rhs)
+      if (objectsOverlap(lhsObject, rhsObject))
+        return true;
+  return false;
+}
+
+std::optional<std::pair<SVFGNodeBS, SVFGNodeBS>>
+SVFG::getCallReadWriteObjects(const llvm::CallBase *call) const {
+  if (!call)
+    return std::nullopt;
+
+  const SVFGNodeBS *readOnly = getCallReadOnlyObjects(call);
+  const SVFGNodeBS *writeOnly = getCallWriteObjects(call);
+  if (readOnly || writeOnly)
+    return std::make_pair(readOnly ? *readOnly : SVFGNodeBS{},
+                          writeOnly ? *writeOnly : SVFGNodeBS{});
+
+  const SVFGNodeSet &ins = getActualIns(call);
+  const SVFGNodeSet &outs = getActualOuts(call);
+  if (ins.empty() && outs.empty())
+    return std::nullopt;
+
+  auto unionPointsTo = [](const SVFGNodeSet &nodes) {
+    SVFGNodeBS result;
+    for (SVFGNode *node : nodes) {
+      if (!node)
+        continue;
+      if (const SVFGNodeBS *pts = node->getPointsTo())
+        result.insert(pts->begin(), pts->end());
+    }
+    return result;
+  };
+  return std::make_pair(unionPointsTo(ins), unionPointsTo(outs));
+}
+
+std::optional<SVFG::ModRefInfo>
+SVFG::getModRefInfo(const llvm::CallBase *call,
+                    const SVFGNodeBS &objects) const {
+  if (!call)
+    return std::nullopt;
+  if (objects.empty())
+    return ModRefInfo{};
+
+  auto touchesSet = [&](const SVFGNodeBS &region) {
+    return objectSetsOverlap(objects, region);
+  };
+  auto touchesNodes = [&](const SVFGNodeSet &nodes) {
+    for (SVFGNode *node : nodes) {
+      const SVFGNodeBS *pts = node ? node->getPointsTo() : nullptr;
+      if (pts && touchesSet(*pts))
+        return true;
+    }
+    return false;
+  };
+
+  const SVFGNodeBS *readOnly = getCallReadOnlyObjects(call);
+  const SVFGNodeBS *writeOnly = getCallWriteObjects(call);
+  if (readOnly || writeOnly) {
+    ModRefInfo info;
+    info.reads = readOnly && touchesSet(*readOnly);
+    info.writes = writeOnly && touchesSet(*writeOnly);
+    return info;
+  }
+
+  const SVFGNodeSet &ins = getActualIns(call);
+  const SVFGNodeSet &outs = getActualOuts(call);
+  if (!ins.empty() || !outs.empty()) {
+    // No refined read-only summary (for example after deserialization):
+    // ActualIn also carries may-write regions, so this is conservative.
+    ModRefInfo info;
+    info.reads = touchesNodes(ins);
+    info.writes = touchesNodes(outs);
+    return info;
+  }
+
+  // No MemorySSA summary: fall back to LLVM memory attributes. A call with no
+  // attributes remains unknown rather than being reported as side-effect free.
+  if (call->doesNotAccessMemory())
+    return ModRefInfo{};
+  if (call->onlyReadsMemory())
+    return ModRefInfo{true, false};
+  return std::nullopt;
+}
+
+std::optional<SVFG::ModRefInfo> SVFG::getModRefInfo(const llvm::CallBase *call,
+                                                    uint32_t object) const {
+  if (object == 0)
+    return std::nullopt;
+  return getModRefInfo(call, SVFGNodeBS{object});
+}
+
+std::optional<SVFG::ModRefInfo>
+SVFG::getModRefInfo(const llvm::CallBase *call,
+                    const llvm::Value *pointer) const {
+  if (!call || !pointer || !pointer->getType()->isPointerTy())
+    return std::nullopt;
+
+  SVFGNodeBS objects = getObjectIds(pointer);
+  if (objects.empty()) {
+    if (const uint32_t single = getObjectId(pointer))
+      objects.insert(single);
+  }
+  if (objects.empty())
+    return std::nullopt;
+  return getModRefInfo(call, objects);
+}
+
+std::optional<SVFG::ModRefInfo>
+SVFG::getModRefInfo(const llvm::CallBase *call) const {
+  if (!call)
+    return std::nullopt;
+
+  const SVFGNodeBS *readOnly = getCallReadOnlyObjects(call);
+  const SVFGNodeBS *writeOnly = getCallWriteObjects(call);
+  if (readOnly || writeOnly)
+    return ModRefInfo{readOnly && !readOnly->empty(),
+                      writeOnly && !writeOnly->empty()};
+
+  const SVFGNodeSet &ins = getActualIns(call);
+  const SVFGNodeSet &outs = getActualOuts(call);
+  if (!ins.empty() || !outs.empty())
+    return ModRefInfo{!ins.empty(), !outs.empty()};
+
+  if (call->doesNotAccessMemory())
+    return ModRefInfo{};
+  if (call->onlyReadsMemory())
+    return ModRefInfo{true, false};
+  return std::nullopt;
+}
+
+std::optional<SVFG::ModRefInfo> SVFG::getModRefInfo(
+    const llvm::CallBase *cs1, const llvm::CallBase *cs2) const {
+  if (!cs1 || !cs2)
+    return std::nullopt;
+  if (cs1->doesNotAccessMemory() || cs2->doesNotAccessMemory())
+    return ModRefInfo{};
+
+  const auto first = getCallReadWriteObjects(cs1);
+  const auto second = getCallReadWriteObjects(cs2);
+  if (!first || !second)
+    return std::nullopt;
+
+  const SVFGNodeBS &cs1Reads = first->first;
+  const SVFGNodeBS &cs1Writes = first->second;
+  const SVFGNodeBS &cs2Reads = second->first;
+  const SVFGNodeBS &cs2Writes = second->second;
+
+  ModRefInfo info;
+  // Ref: cs1 reads memory modified by cs2.
+  info.reads = objectSetsOverlap(cs1Reads, cs2Writes);
+  // Mod: cs1 writes memory read or modified by cs2.
+  info.writes = objectSetsOverlap(cs1Writes, cs2Reads) ||
+                objectSetsOverlap(cs1Writes, cs2Writes);
+  return info;
+}
+
 uint32_t SVFG::getCallSiteId(const llvm::CallBase *cs,
                              const llvm::Function *callee) const {
   if (!cs || !callee)
@@ -1034,6 +1221,8 @@ void SVFG::swapWith(SVFG &other) {
   swap(mssaVerToNodeMap, other.mssaVerToNodeMap);
   swap(callSiteToActualInMap, other.callSiteToActualInMap);
   swap(callSiteToActualOutMap, other.callSiteToActualOutMap);
+  swap(callReadOnlyObjects, other.callReadOnlyObjects);
+  swap(callWriteObjects, other.callWriteObjects);
   swap(callSiteToActualParmMap, other.callSiteToActualParmMap);
   swap(callSiteToActualRetMap, other.callSiteToActualRetMap);
   swap(funcToFormalInMap, other.funcToFormalInMap);

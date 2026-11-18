@@ -4,4 +4,5 @@ lotus_collect_test_sources(ir_tests
   SVFGMemorySSAInterproceduralTest.cpp
   SVFGSerializerTest.cpp
   SVFGBuilderObjectClusteringTest.cpp
-  SVFGBuilderDefaultsTest.cpp)
+  SVFGBuilderDefaultsTest.cpp
+  SVFGModRefTest.cpp)

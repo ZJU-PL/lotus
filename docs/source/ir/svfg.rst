@@ -436,6 +436,41 @@ Because object IDs change, ``--read-pts`` result files must be loaded by a
 build that uses the same clustering setting (the same contract as
 ``--cluster-objects``).
 
+Mod/Ref Queries
+===============
+
+``SVFG::getModRefInfo`` answers whether a call may read or write an abstract
+object, a points-to set, or the objects pointed to by an LLVM value:
+
+.. code-block:: cpp
+
+   std::optional<SVFG::ModRefInfo> info =
+       svfg.getModRefInfo(call, objectId);
+   if (info) {
+     bool reads = info->reads;
+     bool writes = info->writes;
+     auto kind = info->kind();   // NoModRef / Ref / Mod / ModRef
+   }
+
+   // Whole-call effect.
+   auto whole = svfg.getModRefInfo(call);
+
+   // Directed conflict between two calls (SVF's getModRefInfo(cs1, cs2)):
+   // reads  = cs1 references an object modified by cs2
+   // writes = cs1 modifies an object referenced or modified by cs2
+   auto conflict = svfg.getModRefInfo(call1, call2);
+
+* Both ``reads`` and ``writes`` use the builder-time per-call read/write sets.
+  The read set excludes regions that are only written; ``ActualIn`` also
+  carries those for weak-update ordering.
+* The sets survive ``SVFGOPT`` rewiring, which may remove ActualIn/ActualOut
+  nodes.
+* After deserialization the sets are unavailable and the query falls back to
+  ``ActualIn``/``ActualOut`` (conservative for write-only calls).
+* Calls without MemorySSA nodes fall back to LLVM memory attributes
+  (``readnone``/``readonly``). Otherwise the result is ``std::nullopt`` rather
+  than an unjustified "no effect".
+
 DOT Export
 ==========
 

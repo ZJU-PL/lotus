@@ -243,6 +243,8 @@ private:
   /// @brief Callsite mappings
   CallSiteToActualMap callSiteToActualInMap;  // ActualIn (memory)
   CallSiteToActualMap callSiteToActualOutMap; // ActualOut (memory)
+  std::unordered_map<const llvm::CallBase *, SVFGNodeBS> callReadOnlyObjects;
+  std::unordered_map<const llvm::CallBase *, SVFGNodeBS> callWriteObjects;
   CallSiteToActualParmMap callSiteToActualParmMap;
   CallSiteToActualRetMap callSiteToActualRetMap;
 
@@ -303,6 +305,15 @@ private:
     }
     baseToFieldObjects[newBase].insert(object);
   }
+  /// Object overlap used by ModRef: exact IDs, FI representatives, unknown
+  /// wildcards, aggregate/field containment, and same-offset fields.
+  bool objectsOverlap(uint32_t lhs, uint32_t rhs) const;
+  bool objectSetsOverlap(const SVFGNodeBS &lhs, const SVFGNodeBS &rhs) const;
+  /// Per-call read/write sets from the builder maps (preferred) or from
+  /// ActualIn/ActualOut. nullopt when neither is available.
+  std::optional<std::pair<SVFGNodeBS, SVFGNodeBS>>
+  getCallReadWriteObjects(const llvm::CallBase *call) const;
+
   std::unordered_map<uint32_t, std::string> nodeFunctionDebug;
   std::unordered_map<uint32_t, std::string> nodeCallSiteDebug;
 
@@ -497,6 +508,37 @@ public:
     callSiteToActualOutMap[cs].insert(node);
   }
 
+  /// Builder-time read-only object set for @p call. Unlike ActualIn, this set
+  /// excludes may-write-only regions that SVF-style weak updates also read for
+  /// MemorySSA ordering. Absent for calls without a mod/ref summary.
+  ///
+  /// Not serialized: after deserialization, getModRefInfo() falls back to
+  /// ActualIn/ActualOut, which is conservative for write-only calls.
+  inline void setCallReadOnlyObjects(const llvm::CallBase *call,
+                                     const SVFGNodeBS &objects) {
+    if (call)
+      callReadOnlyObjects[call] = objects;
+  }
+  inline const SVFGNodeBS *
+  getCallReadOnlyObjects(const llvm::CallBase *call) const {
+    auto it = callReadOnlyObjects.find(call);
+    return it == callReadOnlyObjects.end() ? nullptr : &it->second;
+  }
+
+  /// Builder-time may-write object set for @p call. Kept separately from
+  /// ActualOut so ModRef queries still work after SVFGOPT removes ActualOut
+  /// nodes.
+  inline void setCallWriteObjects(const llvm::CallBase *call,
+                                  const SVFGNodeBS &objects) {
+    if (call)
+      callWriteObjects[call] = objects;
+  }
+  inline const SVFGNodeBS *
+  getCallWriteObjects(const llvm::CallBase *call) const {
+    auto it = callWriteObjects.find(call);
+    return it == callWriteObjects.end() ? nullptr : &it->second;
+  }
+
   inline const SVFGNodeSet &getActualParms(const llvm::CallBase *cs) const {
     static SVFGNodeSet empty;
     auto it = callSiteToActualParmMap.find(cs);
@@ -637,6 +679,62 @@ public:
     return it == gepAccessInfo.end() ? GepAccessInfo{} : it->second;
   }
   inline const auto &getGepAccessMap() const { return gepAccessInfo; }
+
+  //===------------------------------------------------------------------===
+  // Mod/ref queries
+  //===------------------------------------------------------------------===
+
+  /// @brief Read/write effects of a call on one or more abstract objects.
+  ///
+  /// Derived from the builder's per-call read/write object sets. Those sets
+  /// are kept separately from ActualIn/ActualOut so queries survive SVFGOPT
+  /// rewiring. An empty query yields {false,false}; std::nullopt means the
+  /// graph has no summary and LLVM attributes cannot answer.
+  struct ModRefInfo {
+    enum class Kind { NoModRef, Ref, Mod, ModRef };
+
+    bool reads = false;
+    bool writes = false;
+
+    bool references() const { return reads; }
+    bool modifies() const { return writes; }
+    bool isModRef() const { return reads || writes; }
+    Kind kind() const {
+      if (reads && writes)
+        return Kind::ModRef;
+      if (reads)
+        return Kind::Ref;
+      if (writes)
+        return Kind::Mod;
+      return Kind::NoModRef;
+    }
+  };
+
+  /// Mod/ref of @p objects by @p call. Returns nullopt when the graph has no
+  /// per-call summary and LLVM attributes cannot answer. Unknown objects act
+  /// as wildcards, and a query for an aggregate covers writes to its fields.
+  std::optional<ModRefInfo> getModRefInfo(const llvm::CallBase *call,
+                                          const SVFGNodeBS &objects) const;
+
+  /// Mod/ref of one abstract object by @p call.
+  std::optional<ModRefInfo> getModRefInfo(const llvm::CallBase *call,
+                                          uint32_t object) const;
+
+  /// Mod/ref of the objects pointed to by @p pointer at @p call.
+  std::optional<ModRefInfo>
+  getModRefInfo(const llvm::CallBase *call,
+                const llvm::Value *pointer) const;
+
+  /// Whole-call effect: does @p call read or write any memory?
+  std::optional<ModRefInfo> getModRefInfo(const llvm::CallBase *call) const;
+
+  /// Directed mod/ref conflict between two calls, matching SVF's
+  /// MRGenerator::getModRefInfo(cs1, cs2):
+  ///  - reads  = cs1 references an object that cs2 modifies
+  ///  - writes = cs1 modifies an object that cs2 references or modifies
+  /// Returns nullopt when either call has no object-level memory summary.
+  std::optional<ModRefInfo> getModRefInfo(const llvm::CallBase *cs1,
+                                          const llvm::CallBase *cs2) const;
 
   //===------------------------------------------------------------------===
   // Indirect callsite index (DDA)

@@ -1199,6 +1199,19 @@ void SVFGBuilder::buildMemorySSA() {
           }
         }
 
+        // Preserve the true read-only set for ModRef queries before adding
+        // may-write regions to ActualIn for weak-update ordering.
+        if (svfg) {
+          SVFGNodeBS readOnly;
+          for (const auto &entry : readRegs)
+            readOnly.insert(entry.second.begin(), entry.second.end());
+          SVFGNodeBS writeOnly;
+          for (const auto &entry : writeRegs)
+            writeOnly.insert(entry.second.begin(), entry.second.end());
+          svfg->setCallReadOnlyObjects(call, readOnly);
+          svfg->setCallWriteObjects(call, writeOnly);
+        }
+
         // A may-write region is also an input to the callee: weak updates and
         // untouched objects must see the reaching memory version. Model the
         // SVF ActualIn/FormalIn side for MOD regions even when the callee does

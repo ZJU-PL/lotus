@@ -315,3 +315,15 @@ The drivers accept `--dump-svfg-function=main` to write only one function:
 ```bash
 lotus-ir-ufg --dump-svfg=main.dot --dump-svfg-function=main program.bc
 ```
+
+## Mod/ref queries
+
+`SVFG::getModRefInfo` has overloads for a whole call, a call vs. an object /
+points-to set / `Value*`, and a directed call-vs-call conflict. All return
+`std::optional<ModRefInfo>` with a `kind()` helper
+(`NoModRef`/`Ref`/`Mod`/`ModRef`). Both directions use the builder's per-call
+read/write sets, which survive `SVFGOPT` rewiring; the read set excludes
+may-write-only regions that `ActualIn` also carries for weak-update ordering.
+After deserialization the query falls back to `ActualIn`/`ActualOut`. Without a
+MemorySSA summary it falls back to LLVM `readnone`/`readonly` attributes, and
+otherwise returns `nullopt` rather than guessing.
