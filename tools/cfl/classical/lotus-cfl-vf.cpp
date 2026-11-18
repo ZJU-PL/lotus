@@ -3,6 +3,7 @@
 #include "IR/SVFG/SVFG.h"
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/SVFG/SVFGNode.h"
+#include "Utils/Graph/DotWriter.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -28,6 +29,7 @@ struct Options {
   bool prepare_svfg = true;
   bool json_stats = false;
   std::string dump_svfg;
+  std::string dump_svfg_function;
   std::string dump_cfl_graph;
   std::string dump_cfl_grammar;
   std::string query_source;
@@ -44,6 +46,7 @@ void usage(std::ostream &stream) {
             "  --query SOURCE,TARGET       Query named LLVM values\n"
             "                              (use FUNCTION::VALUE for locals)\n"
             "  --dump-svfg FILE            Write the prepared SVFG as DOT\n"
+            "  --dump-svfg-function NAME   Restrict --dump-svfg to one function\n"
             "  --dump-cfl-graph FILE       Write the encoded labeled graph\n"
             "  --dump-cfl-grammar FILE     Write the normalized grammar\n"
             "  --no-prepare                Keep dereference and strong-update "
@@ -84,6 +87,8 @@ Options parseOptions(int argc, char **argv) {
       options.query_target = query.substr(comma + 1);
     } else if (argument == "--dump-svfg") {
       options.dump_svfg = value();
+    } else if (argument == "--dump-svfg-function") {
+      options.dump_svfg_function = value();
     } else if (argument == "--dump-cfl-graph") {
       options.dump_cfl_graph = value();
     } else if (argument == "--dump-cfl-grammar") {
@@ -206,7 +211,12 @@ int main(int argc, char **argv) {
       preparation = prepareSVFGForCFL(*svfg);
     }
     if (!options.dump_svfg.empty()) {
-      svfg->dump(options.dump_svfg);
+      std::string dump_error;
+      if (!lotus::utils::graphviz::writeSVFGDot(
+              *svfg, *module, options.dump_svfg_function, options.dump_svfg, {},
+              &dump_error)) {
+        std::cerr << "cannot write SVFG DOT: " << dump_error << '\n';
+      }
     }
 
     ValueFlowClient client = ValueFlowClient::fromSVFG(*svfg, options.encoding);

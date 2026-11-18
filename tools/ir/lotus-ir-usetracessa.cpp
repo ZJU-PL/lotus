@@ -4,6 +4,7 @@
 #include "IR/UseTraceSSA/Query.h"
 #include "IR/UseTraceSSA/SVFGBridge.h"
 #include "IR/UseTraceSSA/TraceQueryOptions.h"
+#include "Utils/Graph/DotWriter.h"
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -35,6 +36,10 @@ llvm::cl::opt<std::string> Format("format", llvm::cl::desc("text, json, or dot")
 llvm::cl::opt<std::string> DumpSVFG("dump-svfg",
                                     llvm::cl::desc("Write the source SVFG DOT to a file"),
                                     llvm::cl::init(""));
+llvm::cl::opt<std::string> DumpSVFGFunction(
+    "dump-svfg-function",
+    llvm::cl::desc("Restrict --dump-svfg to one function (e.g. main)"),
+    llvm::cl::init(""));
 llvm::cl::opt<std::string> Check("check",
                                  llvm::cl::desc(
                                      "double-free, use-after-free, memory-leak, or file-leak"),
@@ -140,7 +145,13 @@ int main(int argc, char **argv) {
     std::unique_ptr<SVFG> svfg(builder.build(&icfg));
     const auto builtSVFG = Clock::now();
     if (Timing) std::cerr << "timing_ms svfg=" << millis(parsed, builtSVFG) << '\n';
-    if (!DumpSVFG.empty()) svfg->dump(DumpSVFG);
+    if (!DumpSVFG.empty()) {
+      std::string dumpError;
+      if (!lotus::utils::graphviz::writeSVFGDot(*svfg, *module,
+                                                DumpSVFGFunction, DumpSVFG, {},
+                                                &dumpError))
+        llvm::errs() << "cannot write SVFG DOT: " << dumpError << "\n";
+    }
     NativeHistoryMode mode = Check == "double-free" ? NativeHistoryMode::DoubleFree :
                              Check == "use-after-free" ? NativeHistoryMode::UseAfterFree :
                              Check == "memory-leak" ? NativeHistoryMode::MemoryLeak :

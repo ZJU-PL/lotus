@@ -1,6 +1,8 @@
 add_subdirectory(Platform)
 add_subdirectory(Random)
+add_subdirectory(FastCluster)
 add_subdirectory(ADT)
+add_subdirectory(Graph)
 add_subdirectory(Formats)
 add_subdirectory(LLVM)
 add_subdirectory(Parallel)

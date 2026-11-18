@@ -110,6 +110,8 @@ Relevant options:
 - ``--source-node=<ID>`` and ``--sink-node=<ID>`` – Query flow reachability
 - ``--format=text|json|dot`` – Select output format (default: ``text``)
 - ``--dump-svfg=<file>`` – Write the source SVFG to a DOT file
+- ``--dump-svfg-function=<name>`` – Restrict ``--dump-svfg`` to one function
+  definition (for example ``main``); useful for large programs
 - ``--timing`` – Print analysis phase timings to standard error
 - ``--quiet`` – Suppress issue and witness details
 
@@ -142,6 +144,8 @@ Relevant options:
 - ``--source-node=<ID>`` and ``--sink-node=<ID>`` – Query flow reachability
 - ``--format=text|json|dot`` – Select output format (default: ``text``)
 - ``--dump-svfg=<file>`` – Write the source SVFG to a DOT file
+- ``--dump-svfg-function=<name>`` – Restrict ``--dump-svfg`` to one function
+  definition (for example ``main``); useful for large programs
 - ``--timing`` – Print analysis phase timings to standard error
 - ``--quiet`` – Suppress issue and witness details
 

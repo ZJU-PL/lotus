@@ -103,6 +103,7 @@
 #include "IR/SVFG/SVFGNodeBS.h"
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <set>
 #include <vector>
@@ -203,6 +204,14 @@ public:
   /// @brief Get points-to set (for memory nodes)
   virtual const SVFGNodeBS *getPointsTo() const { return nullptr; }
 
+  /// @brief Rewrite abstract-object identifiers carried by this node.
+  ///
+  /// Only nodes that store object IDs (Addr object, load/store memory guards,
+  /// memory SSA guards) need to override this. The mapping is a bijection
+  /// produced by HierarchicalClusterer.
+  using ObjectIdRemap = std::function<std::uint32_t(std::uint32_t)>;
+  virtual void remapObjectIds(const ObjectIdRemap &) {}
+
   /// @brief Get LLVM value for debugging
   virtual const llvm::Value *getValue() const { return nullptr; }
 
@@ -292,6 +301,11 @@ public:
   inline uint32_t getObjectId() const { return objectId_; }
   inline void setObjectId(uint32_t id) { objectId_ = id; }
 
+  void remapObjectIds(const ObjectIdRemap &map) override {
+    if (objectId_ != 0)
+      objectId_ = map(objectId_);
+  }
+
   SVFG_NODE_KIND(Addr)
 };
 
@@ -332,6 +346,10 @@ public:
   inline uint32_t getMemoryUseVersion() const { return ssaVersion; }
   inline const SVFGNodeBS &getMemoryPointsTo() const { return memPointsTo; }
 
+  void remapObjectIds(const ObjectIdRemap &map) override {
+    memPointsTo.remapIds(map);
+  }
+
   SVFG_NODE_KIND(Load)
 };
 
@@ -362,6 +380,10 @@ public:
   inline uint32_t getMemoryDefReg() const { return memReg; }
   inline uint32_t getMemoryDefVersion() const { return ssaVersion; }
   inline const SVFGNodeBS &getMemoryPointsTo() const { return memPointsTo; }
+
+  void remapObjectIds(const ObjectIdRemap &map) override {
+    memPointsTo.remapIds(map);
+  }
   SVFGNodeBS getDefSVFVars() const override {
     if (!memPointsTo.empty()) {
       return memPointsTo;
@@ -593,6 +615,10 @@ public:
   uint32_t getSSAVersion() const override { return ssaVersion; }
   void setSSAVersion(uint32_t ver) { ssaVersion = ver; }
   SVFGNodeBS getDefSVFVars() const override { return pointsTo; }
+
+  void remapObjectIds(const ObjectIdRemap &map) override {
+    pointsTo.remapIds(map);
+  }
 
   static inline bool classof(const SVFGNode *n) {
     return n && isMemSVFGNode(n->getNodeKind());

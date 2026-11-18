@@ -296,7 +296,6 @@ public:
 
   /// Hint overload required by std::insert_iterator (std::inserter).
   iterator insert(iterator, std::uint32_t id) { return insert(id).first; }
-
   template <typename InputIt> void insert(InputIt first, InputIt last) {
     for (; first != last; ++first)
       insert(static_cast<std::uint32_t>(*first));
@@ -305,6 +304,22 @@ public:
   void insert(std::initializer_list<std::uint32_t> values) {
     for (std::uint32_t value : values)
       insert(value);
+  }
+
+  /// Rewrite every element through @p map and re-canonicalise the word layout.
+  /// Used by object-ID renumbering; @p map must be a bijection when the set is
+  /// compared against another remapped set.
+  template <typename MapFn> void remapIds(MapFn &&map) {
+    if (chunks_.empty())
+      return;
+    std::vector<std::uint32_t> ids;
+    ids.reserve(size_);
+    for (std::uint32_t id : *this)
+      ids.push_back(static_cast<std::uint32_t>(map(id)));
+    chunks_.clear();
+    size_ = 0;
+    for (std::uint32_t id : ids)
+      insert(id);
   }
 
   size_type erase(std::uint32_t id) {

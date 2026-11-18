@@ -43,6 +43,12 @@ public:
   void observe(const llvm::Function *scope, const SVFGNodeBS &pointsTo);
   void freeze();
 
+  /// Rewrite every object ID in the observations and frozen partitions.
+  /// Called after the builder renumbers object IDs but before MemorySSA nodes
+  /// are materialised.
+  void remapObjectIds(
+      const std::unordered_map<uint32_t, uint32_t> &oldToNew);
+
   SVFGNodeBS canonicalize(const llvm::Function *scope,
                           const SVFGNodeBS &pointsTo) const;
 

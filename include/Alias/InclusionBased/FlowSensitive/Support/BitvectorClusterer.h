@@ -15,6 +15,7 @@
 #pragma once
 
 #include "IR/SVFG/SVFGNodeBS.h"
+#include "Utils/ADT/HierarchicalClusterer.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -36,6 +37,39 @@ public:
   explicit BitvectorClusterer(const PtsSetContainer &sets,
                               ObjectID maxObjectId = 0) {
     build(sets, maxObjectId);
+  }
+
+  /// Build the permutation with the hierarchical fastcluster pass used by
+  /// SVF's NodeIDAllocator::Clusterer (and by SVFGBuilder's
+  /// objectIdClustering). Unlike build(), this evaluates several linkages and
+  /// keeps the mapping with the fewest words. New IDs are `idBase + rank`.
+  template <typename PtsSetContainer>
+  static BitvectorClusterer hierarchical(
+      const PtsSetContainer &sets, ObjectID idBase = 1,
+      lotus::utils::ClusterLinkage linkage =
+          lotus::utils::ClusterLinkage::Best) {
+    std::vector<lotus::utils::ClusterSet> input;
+    std::vector<ObjectID> universe;
+    for (const auto &pointsTo : sets) {
+      lotus::utils::ClusterSet set;
+      set.objects.assign(pointsTo.begin(), pointsTo.end());
+      universe.insert(universe.end(), set.objects.begin(), set.objects.end());
+      if (!set.objects.empty())
+        input.push_back(std::move(set));
+    }
+
+    lotus::utils::ClusterOptions options;
+    options.idBase = idBase;
+    options.linkage = linkage;
+    const auto result =
+        lotus::utils::HierarchicalClusterer::cluster(input, universe, options);
+
+    BitvectorClusterer clusterer;
+    for (const auto &entry : result.oldToNew) {
+      clusterer.originalToClustered_[entry.first] = entry.second;
+      clusterer.clusteredToOriginal_[entry.second] = entry.first;
+    }
+    return clusterer;
   }
 
   template <typename PtsSetContainer>

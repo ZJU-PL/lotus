@@ -136,6 +136,8 @@ Key options:
   points-to set sizes, and strong updates.
 * ``--dump-svfg=<file>`` – Write the initialized SVFG as a DOT file (``fspta``
   and ``vfspta`` only).
+* ``--dump-svfg-function=<name>`` – Restrict ``--dump-svfg`` to one function
+  definition (for example ``main``).
 * ``--write-pts=<file>`` and ``--read-pts=<file>`` – Save or restore solved
   points-to results to/from a binary file.
 * ``--validate-annotations`` – Validate ``__aser_alias__``/``__aser_no_alias__``

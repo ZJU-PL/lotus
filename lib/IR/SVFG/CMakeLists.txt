@@ -23,6 +23,8 @@ target_link_libraries(SVFG PUBLIC
     CanaryICFG
     AserPTA
     AliasSpecManager
+    CanaryADT
+    CanaryGraphWriter
     LLVMAnalysis
     LLVMCore
     LLVMSupport

@@ -1,5 +1,7 @@
 #include "IR/SVFG/SVFGSerializer.h"
 
+#include "Utils/Graph/DotWriter.h"
+
 #include "IR/ICFG/ICFG.h"
 #include "IR/SVFG/SVFG.h"
 #include "IR/SVFG/SVFGEdge.h"
@@ -754,73 +756,12 @@ static void applyMSSAOperands(SVFGNode *node, const ParsedNodeMeta &meta) {
 
 bool SVFGSerializer::writeDot(const SVFG &graph, const std::string &filename,
                               bool simple) {
-  std::ofstream file(filename);
-  if (!file.is_open())
-    return false;
-
-  file << "digraph SVFG {\n";
-  file << "  rankdir=TB;\n";
-  file << "  node [shape=box, fontsize=10];\n";
-
-  for (const auto &pair : graph) {
-    const SVFGNode *node = pair.second;
-    file << "  N" << node->getId() << " [label=\"";
-    if (simple) {
-      file << node->getId() << ":" << static_cast<uint32_t>(node->getNodeKind());
-    } else {
-      file << "ID: " << node->getId() << "\\n";
-      file << "Kind: " << static_cast<uint32_t>(node->getNodeKind());
-    }
-    if (!simple) {
-      if (const auto *val = node->getValue()) {
-        file << "\\nVal: " << val->getName().str();
-      }
-      if (const auto fnDebug = graph.getNodeFunctionDebug(node->getId());
-          !fnDebug.empty()) {
-        file << "\\nFn: " << fnDebug;
-      }
-      if (const auto callDebug = graph.getNodeCallSiteDebug(node->getId());
-          !callDebug.empty()) {
-        file << "\\nCS: " << callDebug;
-      }
-    } else if (const auto *val = node->getValue()) {
-      file << "\\nVal: " << val->getName().str();
-    }
-    file << "\"];\n";
-  }
-
-  for (const auto &pair : graph) {
-    const SVFGNode *node = pair.second;
-    for (const SVFGEdge *edge : node->getOutEdges()) {
-      file << "  N" << edge->getSrcNode()->getId() << " -> N"
-           << edge->getDstNode()->getId();
-      file << " [label=\"";
-      if (simple) {
-        file << static_cast<uint32_t>(edge->getEdgeKind());
-      } else {
-        file << edge->toString();
-        if (edge->hasCallSiteDebug()) {
-          file << "\\n" << edge->getCallSiteDebug();
-        }
-      }
-      file << "\"";
-      if (!simple) {
-        if (edge->hasCallSite() || edge->hasCallSiteDebug()) {
-          file << ", color=darkgreen";
-        }
-        if (!edge->getPointsTo().empty()) {
-          file << ", tooltip=\"pts=" << edge->getPointsTo().size() << "\"";
-        }
-        if (edge->getWeight() == SVFGEdge::EdgeWeight::Many) {
-          file << ", style=dashed";
-        }
-      }
-      file << "];\n";
-    }
-  }
-
-  file << "}\n";
-  return true;
+  // Delegate to the shared DOT layer so SVFG, ICFG, CFG and call-graph dumps
+  // share escaping and attribute handling.
+  lotus::utils::graphviz::DotOptions options;
+  options.simple = simple;
+  options.clusterByFunction = !simple;
+  return lotus::utils::graphviz::writeSVFGDot(graph, filename, options);
 }
 
 bool SVFGSerializer::writeText(const SVFG &graph, const std::string &filename) {

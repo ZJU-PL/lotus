@@ -74,8 +74,13 @@ replaces each object with its class representative and every memory/version
 fact is keyed by that representative. Strong updates are disabled on any class
 with more than one member. SVF's `cluster()` instead permutes IDs for bitvector
 locality and preserves object identity and strong updates. The standalone
-`BitvectorClusterer` helper supplies a sparse permutation, but is not wired into
-the solvers' set storage.
+`BitvectorClusterer` supplies a sparse permutation but is not wired into the
+solvers' set storage. The production path for locality is identity-preserving
+object-ID renumbering at SVFG build time:
+`SVFGBuilderConfig::objectIdClustering = Hierarchical` runs fastcluster over
+the builder's points-to sets before MemorySSA is created (see
+`lib/IR/SVFG/README.md`). It permutes IDs, not objects, so strong updates and
+precision are unchanged.
 `Statistics::clusteredObjects` / `mergedObjectClusters` report the size of the
 partition. A written result file stores post-clustering object IDs, so reload
 it with the same `clusterObjects` setting that produced it.

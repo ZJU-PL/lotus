@@ -11,6 +11,7 @@
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/SVFG/SVFGStats.h"
+#include "Utils/Graph/DotWriter.h"
 
 #include <algorithm>
 #include <exception>
@@ -36,6 +37,8 @@ enum class AnalysisOption { FlowSensitive, Versioned, ValueFlow };
 enum class ParallelOrderOption { Reference, Unordered };
 enum class ClusterOption { None, Type, Footprint };
 enum class PrelabelOption { Builder, PreAnalysis };
+enum class ObjectClusteringOption { None, Hierarchical };
+enum class ObjectLinkageOption { Best, Single, Complete, Average, Median };
 
 cl::OptionCategory FsptaCategory("Lotus flow-sensitive pointer analyses");
 cl::opt<bool>
@@ -107,6 +110,29 @@ cl::opt<PartitionOption> MemoryPartition(
                clEnumValN(PartitionOption::InterDisjoint, "inter-disjoint",
                           "Disjoint whole-program regions")),
     cl::init(PartitionOption::InterDisjoint), cl::cat(FsptaCategory));
+cl::opt<ObjectClusteringOption> ObjectClustering(
+    "object-clustering",
+    cl::desc("Renumber abstract-object IDs before solving"),
+    cl::values(clEnumValN(ObjectClusteringOption::None, "none",
+                          "Keep builder allocation order (default)"),
+               clEnumValN(ObjectClusteringOption::Hierarchical,
+                          "hierarchical",
+                          "fastcluster renumbering for bitvector locality")),
+    cl::init(ObjectClusteringOption::None), cl::cat(FsptaCategory));
+cl::opt<ObjectLinkageOption> ObjectLinkage(
+    "object-clustering-linkage",
+    cl::desc("Linkage used by --object-clustering=hierarchical"),
+    cl::values(clEnumValN(ObjectLinkageOption::Best, "best",
+                          "Run single/complete/average and keep the best"),
+               clEnumValN(ObjectLinkageOption::Single, "single",
+                          "Single linkage"),
+               clEnumValN(ObjectLinkageOption::Complete, "complete",
+                          "Complete linkage"),
+               clEnumValN(ObjectLinkageOption::Average, "average",
+                          "Average linkage"),
+               clEnumValN(ObjectLinkageOption::Median, "median",
+                          "Median linkage")),
+    cl::init(ObjectLinkageOption::Best), cl::cat(FsptaCategory));
 cl::opt<bool> PrintPointsTo("print-pts",
                             cl::desc("Print top-level points-to results"),
                             cl::init(false), cl::cat(FsptaCategory));
@@ -155,6 +181,10 @@ cl::opt<std::string> WritePtsFile(
 cl::opt<std::string>
     DumpSVFG("dump-svfg", cl::desc("Write the initialized SVFG as a DOT file"),
              cl::init(""), cl::cat(FsptaCategory));
+cl::opt<std::string> DumpSVFGFunction(
+    "dump-svfg-function",
+    cl::desc("Restrict --dump-svfg to one function (e.g. main)"),
+    cl::init(""), cl::cat(FsptaCategory));
 cl::opt<bool> ValidateAnnotations(
     "validate-annotations",
     cl::desc("Validate __aser_alias__/__aser_no_alias__ calls"),
@@ -202,6 +232,32 @@ MemoryRegionPartitionStrategy partitionStrategy() {
     return MemoryRegionPartitionStrategy::InterDisjoint;
   }
   llvm_unreachable("invalid memory partition");
+}
+
+SVFGBuilderConfig::ObjectIdClustering objectClusteringStrategy() {
+  switch (ObjectClustering) {
+  case ObjectClusteringOption::None:
+    return SVFGBuilderConfig::ObjectIdClustering::None;
+  case ObjectClusteringOption::Hierarchical:
+    return SVFGBuilderConfig::ObjectIdClustering::Hierarchical;
+  }
+  llvm_unreachable("invalid object clustering");
+}
+
+lotus::utils::ClusterLinkage objectLinkageStrategy() {
+  switch (ObjectLinkage) {
+  case ObjectLinkageOption::Best:
+    return lotus::utils::ClusterLinkage::Best;
+  case ObjectLinkageOption::Single:
+    return lotus::utils::ClusterLinkage::Single;
+  case ObjectLinkageOption::Complete:
+    return lotus::utils::ClusterLinkage::Complete;
+  case ObjectLinkageOption::Average:
+    return lotus::utils::ClusterLinkage::Average;
+  case ObjectLinkageOption::Median:
+    return lotus::utils::ClusterLinkage::Median;
+  }
+  llvm_unreachable("invalid object clustering linkage");
 }
 
 void printValue(const Value *value, raw_ostream &os) {
@@ -392,6 +448,12 @@ int main(int argc, char **argv) {
               "only\n";
     return 1;
   }
+  if (!ReadPtsFile.empty() &&
+      ObjectClustering != ObjectClusteringOption::None) {
+    errs() << "--read-pts stores object IDs from the build that produced the "
+              "file; load it with --object-clustering=none\n";
+    return 1;
+  }
   if (ClusterObjects == ClusterOption::Footprint &&
       Analysis != AnalysisOption::Versioned) {
     errs() << "--cluster-objects=footprint is supported only for "
@@ -433,15 +495,35 @@ int main(int argc, char **argv) {
   graphConfig.pointerOnly = PointerOnly;
   graphConfig.resolveIndirectCalls = false;
   graphConfig.memoryPartition = partitionStrategy();
+  graphConfig.objectIdClustering = objectClusteringStrategy();
+  graphConfig.objectIdLinkage = objectLinkageStrategy();
   auto graphBuilder = std::make_unique<SVFGBuilder>(graphConfig);
   std::unique_ptr<SVFG> graph(graphBuilder->build(&icfg));
+  if (DumpStats &&
+      graphConfig.objectIdClustering ==
+          SVFGBuilderConfig::ObjectIdClustering::Hierarchical) {
+    const auto &clusterStats =
+        graphBuilder->getObjectIdClusteringStatistics();
+    errs() << "Object-ID clustering: " << clusterStats.objects
+           << " objects, " << clusterStats.clusteredRegions << "/"
+           << clusterStats.regions << " regions clustered, words "
+           << clusterStats.originalWordSpan << " -> "
+           << clusterStats.clusteredWordSpan;
+    if (clusterStats.fellBackToIdentity)
+      errs() << " (identity fallback)";
+    errs() << "\n";
+  }
   if (StatsReport) {
     SVFGStats svfgStats(graph.get());
     svfgStats.performStat();
     svfgStats.printStat("SVFG");
   }
-  if (!DumpSVFG.empty())
-    graph->dump(DumpSVFG);
+  if (!DumpSVFG.empty()) {
+    std::string dumpError;
+    if (!lotus::utils::graphviz::writeSVFGDot(*graph, *module, DumpSVFGFunction,
+                                              DumpSVFG, {}, &dumpError))
+      errs() << "cannot write SVFG DOT: " << dumpError << "\n";
+  }
 
   auto isAllowedIndirectCall = [&](const CallBase *callSite,
                                    const Function *target) {

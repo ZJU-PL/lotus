@@ -21,7 +21,9 @@
 #include "IR/SVFG/SVFGNode.h"
 #include "IR/SVFG/SVFGSerializer.h"
 
+#include <limits>
 #include <queue>
+#include <unordered_set>
 
 #include <llvm/Support/Casting.h>
 
@@ -338,6 +340,207 @@ SVFGNode *SVFG::getCanonicalDefNodeForDDAId(uint32_t ddaId) const {
     return getDef(inst);
 
   return nullptr;
+}
+
+std::vector<uint32_t> SVFG::collectReferencedObjectIds() const {
+  std::unordered_set<uint32_t> ids;
+  auto add = [&](uint32_t id) {
+    if (id != 0)
+      ids.insert(id);
+  };
+  for (const auto &entry : objIdToInfo) {
+    add(entry.first);
+    add(entry.second.baseObjId);
+  }
+  for (const auto &entry : objectDebug)
+    add(entry.first);
+  for (const auto &entry : objIdToValue)
+    add(entry.first);
+  for (const auto &entry : valueToObjId)
+    add(entry.second);
+  for (const auto &entry : valueToObjIds)
+    for (uint32_t id : entry.second)
+      add(id);
+  for (const auto &entry : baseToFieldObjects) {
+    add(entry.first);
+    for (uint32_t id : entry.second)
+      add(id);
+  }
+  for (const auto &entry : baseOffsetToFieldObject) {
+    add(entry.first.first);
+    add(entry.second);
+  }
+  for (const auto &entry : gepBaseToFieldObject)
+    for (const auto &inner : entry.second) {
+      add(inner.first);
+      add(inner.second);
+    }
+
+  for (const auto &entry : nodeMap) {
+    SVFGNode *node = entry.second;
+    if (!node)
+      continue;
+    if (const SVFGNodeBS *pts = node->getPointsTo())
+      for (uint32_t id : *pts)
+        add(id);
+    if (auto *addr = llvm::dyn_cast<AddrSVFGNode>(node))
+      add(addr->getObjectId());
+    for (const SVFGEdge *edge : node->getOutEdges())
+      for (uint32_t id : edge->getPointsTo())
+        add(id);
+  }
+
+  std::vector<uint32_t> result(ids.begin(), ids.end());
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
+std::vector<SVFGNodeBS> SVFG::collectPointsToSets() const {
+  std::vector<SVFGNodeBS> sets;
+  auto collect = [&](const SVFGNodeBS &set) {
+    if (!set.empty())
+      sets.push_back(set);
+  };
+  for (const auto &entry : valueToObjIds)
+    collect(entry.second);
+  for (const auto &entry : baseToFieldObjects)
+    collect(entry.second);
+  for (const auto &entry : nodeMap) {
+    SVFGNode *node = entry.second;
+    if (!node)
+      continue;
+    if (const SVFGNodeBS *pts = node->getPointsTo())
+      collect(*pts);
+    for (const SVFGEdge *edge : node->getOutEdges())
+      collect(edge->getPointsTo());
+  }
+  return sets;
+}
+
+bool SVFG::remapObjectIds(
+    const std::unordered_map<uint32_t, uint32_t> &oldToNew,
+    std::string *error) {
+  auto fail = [&](std::string message) {
+    if (error)
+      *error = std::move(message);
+    return false;
+  };
+
+  const std::vector<uint32_t> referenced = collectReferencedObjectIds();
+  std::unordered_set<uint32_t> newIds;
+  newIds.reserve(referenced.size() * 2);
+  for (uint32_t id : referenced) {
+    const auto it = oldToNew.find(id);
+    if (it == oldToNew.end())
+      return fail("missing object ID " + std::to_string(id));
+    if (!newIds.insert(it->second).second)
+      return fail("object-ID mapping is not injective at " + std::to_string(id));
+  }
+
+  auto mapId = [&](uint32_t id) -> uint32_t {
+    if (id == 0)
+      return 0;
+    const auto it = oldToNew.find(id);
+    return it == oldToNew.end() ? id : it->second;
+  };
+
+  std::unordered_map<uint32_t, ObjectInfo> newInfo;
+  newInfo.reserve(objIdToInfo.size());
+  for (const auto &entry : objIdToInfo) {
+    ObjectInfo info = entry.second;
+    if (info.baseObjId != 0)
+      info.baseObjId = mapId(info.baseObjId);
+    newInfo.emplace(mapId(entry.first), info);
+  }
+
+  std::unordered_map<uint32_t, std::string> newDebug;
+  newDebug.reserve(objectDebug.size());
+  for (const auto &entry : objectDebug)
+    newDebug.emplace(mapId(entry.first), entry.second);
+
+  std::unordered_map<uint32_t, const llvm::Value *> newObjToValue;
+  newObjToValue.reserve(objIdToValue.size());
+  for (const auto &entry : objIdToValue)
+    newObjToValue.emplace(mapId(entry.first), entry.second);
+
+  std::unordered_map<const llvm::Value *, uint32_t> newValueToObj;
+  newValueToObj.reserve(valueToObjId.size());
+  for (const auto &entry : valueToObjId)
+    newValueToObj.emplace(entry.first, mapId(entry.second));
+
+  std::unordered_map<const llvm::Value *, SVFGNodeBS> newValueToObjs;
+  newValueToObjs.reserve(valueToObjIds.size());
+  for (const auto &entry : valueToObjIds) {
+    SVFGNodeBS set = entry.second;
+    set.remapIds(mapId);
+    newValueToObjs.emplace(entry.first, std::move(set));
+  }
+
+  std::unordered_map<uint32_t, SVFGNodeBS> newBaseToFields;
+  newBaseToFields.reserve(baseToFieldObjects.size());
+  for (const auto &entry : baseToFieldObjects) {
+    SVFGNodeBS set = entry.second;
+    set.remapIds(mapId);
+    newBaseToFields.emplace(mapId(entry.first), std::move(set));
+  }
+
+  std::map<std::pair<uint32_t, uint64_t>, uint32_t> newBaseOffset;
+  for (const auto &entry : baseOffsetToFieldObject)
+    newBaseOffset.emplace(std::make_pair(mapId(entry.first.first),
+                                         entry.first.second),
+                          mapId(entry.second));
+
+  std::unordered_map<const llvm::GetElementPtrInst *,
+                     std::unordered_map<uint32_t, uint32_t>>
+      newGepBaseToField;
+  newGepBaseToField.reserve(gepBaseToFieldObject.size());
+  for (const auto &entry : gepBaseToFieldObject) {
+    std::unordered_map<uint32_t, uint32_t> inner;
+    inner.reserve(entry.second.size());
+    for (const auto &field : entry.second)
+      inner.emplace(mapId(field.first), mapId(field.second));
+    newGepBaseToField.emplace(entry.first, std::move(inner));
+  }
+
+  SVFGNode::ObjectIdRemap remap = [&](uint32_t id) { return mapId(id); };
+  for (const auto &entry : nodeMap)
+    if (entry.second)
+      entry.second->remapObjectIds(remap);
+
+  std::unordered_set<const SVFGEdge *> visitedEdges;
+  for (const auto &entry : nodeMap) {
+    if (!entry.second)
+      continue;
+    for (SVFGEdge *edge : entry.second->getOutEdges()) {
+      if (visitedEdges.insert(edge).second)
+        edge->remapObjectIds(remap);
+    }
+  }
+
+  objIdToInfo = std::move(newInfo);
+  objectDebug = std::move(newDebug);
+  objIdToValue = std::move(newObjToValue);
+  valueToObjId = std::move(newValueToObj);
+  valueToObjIds = std::move(newValueToObjs);
+  baseToFieldObjects = std::move(newBaseToFields);
+  baseOffsetToFieldObject = std::move(newBaseOffset);
+  gepBaseToFieldObject = std::move(newGepBaseToField);
+
+  uint32_t maxNew = 0;
+  for (uint32_t id : newIds)
+    maxNew = std::max(maxNew, id);
+  nextObjectId =
+      std::max<uint32_t>(maxNew == std::numeric_limits<uint32_t>::max()
+                             ? maxNew
+                             : maxNew + 1,
+                         kObjectIdBase);
+
+  objectIdMapping = oldToNew;
+  reverseObjectIdMapping.clear();
+  reverseObjectIdMapping.reserve(oldToNew.size());
+  for (const auto &entry : oldToNew)
+    reverseObjectIdMapping[entry.second] = entry.first;
+  return true;
 }
 
 uint32_t SVFG::getCallSiteId(const llvm::CallBase *cs,
@@ -852,6 +1055,8 @@ void SVFG::swapWith(SVFG &other) {
   swap(gepAccessInfo, other.gepAccessInfo);
   swap(objIdToInfo, other.objIdToInfo);
   swap(baseToFieldObjects, other.baseToFieldObjects);
+  swap(objectIdMapping, other.objectIdMapping);
+  swap(reverseObjectIdMapping, other.reverseObjectIdMapping);
   swap(nodeFunctionDebug, other.nodeFunctionDebug);
   swap(nodeCallSiteDebug, other.nodeCallSiteDebug);
   swap(nodesForUpdate, other.nodesForUpdate);

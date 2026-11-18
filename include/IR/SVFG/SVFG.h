@@ -286,6 +286,9 @@ private:
       gepAccessInfo;
   std::unordered_map<uint32_t, ObjectInfo> objIdToInfo;
   std::unordered_map<uint32_t, SVFGNodeBS> baseToFieldObjects;
+  /// Object-ID permutation applied by the builder (empty = identity).
+  std::unordered_map<uint32_t, uint32_t> objectIdMapping;
+  std::unordered_map<uint32_t, uint32_t> reverseObjectIdMapping;
 
   void indexObjectBase(uint32_t object, uint32_t oldBase, uint32_t newBase) {
     oldBase = oldBase ? oldBase : object;
@@ -868,6 +871,37 @@ public:
       ids.push_back(entry.first);
     return ids;
   }
+
+  /// @brief Every object ID referenced anywhere in the graph.
+  ///
+  /// Unlike getAllObjectIds(), this also includes IDs that only occur in
+  /// field/base maps or in stored points-to guards.
+  std::vector<uint32_t> collectReferencedObjectIds() const;
+
+  /// @brief Distinct points-to sets stored in the graph.
+  ///
+  /// Node and edge guards plus value/field object maps. Input for hierarchical
+  /// object-ID renumbering.
+  std::vector<SVFGNodeBS> collectPointsToSets() const;
+
+  /// @brief Object-ID permutation applied by the builder.
+  /// Empty means the identity mapping.
+  const std::unordered_map<uint32_t, uint32_t> &
+  getObjectIdMapping() const {
+    return objectIdMapping;
+  }
+  const std::unordered_map<uint32_t, uint32_t> &
+  getReverseObjectIdMapping() const {
+    return reverseObjectIdMapping;
+  }
+
+  /// @brief Rewrite every abstract-object ID through @p oldToNew.
+  ///
+  /// @p oldToNew must be a bijection over collectReferencedObjectIds().
+  /// Node guards, edge guards, field/base maps and value maps are updated
+  /// together; on failure nothing is modified.
+  bool remapObjectIds(const std::unordered_map<uint32_t, uint32_t> &oldToNew,
+                      std::string *error = nullptr);
 
   /// @brief Distinct base objects split by field sensitivity.
   /// Mirrors SVF's FIObjNum / FSObjNum: only base objects are counted, and a
