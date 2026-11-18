@@ -1,0 +1,16 @@
+# ---------------------------------------------------------------------------
+# GitHub Linguist configuration
+#
+# Keeps the repository's language statistics representative of the actual
+# source code. Files listed here still exist in the tree and are still
+# checked out normally; they are only excluded from Linguist's byte counts.
+# ---------------------------------------------------------------------------
+
+# CFG / grammar benchmark inputs are plain edge-list data. Linguist treats the
+# ".g" extension as GAP (and, depending on content sniffing, G-code), which
+# otherwise reports this repository as ~76% GAP and ~3% G-code.
+*.g                     linguist-vendored
+
+# Vendored third-party sources (cclyzer++, fpsolve, WALi/OpenNWA, ...).
+# Kept in-tree for reproducibility, excluded from language statistics.
+third-party/**          linguist-vendored

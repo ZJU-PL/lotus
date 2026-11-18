@@ -150,7 +150,7 @@ int runAECheckerTool(const char *argv0) {
     // `--ae.sparsity` mirrors SVF's flag name; `--ae.state-store` is the
     // Lotus-native spelling. Whichever was passed explicitly wins; with
     // neither, fall back to the documented default (`dense`).
-    std::string requested = StateLayoutOpt;
+    std::string requested = StateLayoutOpt.getValue();
     if (StateLayoutOpt.getNumOccurrences() == 0 &&
         SparsityOpt.getNumOccurrences() != 0)
       requested = SparsityOpt.getValue();

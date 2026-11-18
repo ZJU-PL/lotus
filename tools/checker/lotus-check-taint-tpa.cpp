@@ -153,7 +153,7 @@ static bool validateModels(const Module &module,
               coverage.ignoredCalls.insert(call);
             }
           }
-          auto checkPosition = [&](annotation::APosition pos, bool memory,
+          auto checkPosition = [&](const annotation::APosition &pos, bool memory,
                                    StringRef modelKind,
                                    bool pointerRange = false) {
             auto reject = [&](const Twine &reason) {

@@ -183,29 +183,43 @@ static cl::OptionCategory
     GenericSelectionCategory("Generic Checker Selection Options");
 static cl::OptionCategory
     GenericExecutionCategory("Generic Checker Execution Options");
-static cl::opt<std::string>
-    InputFilename(cl::Positional, cl::desc("<input bitcode file>"),
-                  cl::value_desc("bitcode"), cl::init(""),
-                  cl::cat(GenericExecutionCategory),
-                  cl::sub(*cl::TopLevelSubCommand),
-                  cl::sub(lotus::checker::tooling::genericSubCommand()));
-static cl::opt<bool>
+struct GenericCLIOptions {
+  cl::opt<std::string> InputFilename;
+  cl::opt<bool> ListCheckers;
+  cl::opt<std::string> CategoryFilter;
+  cl::opt<std::string> BuiltinSpecDir;
+
+  GenericCLIOptions()
+    : InputFilename(cl::Positional, cl::desc("<input bitcode file>"),
+            cl::value_desc("bitcode"), cl::init(""),
+            cl::cat(GenericExecutionCategory),
+            cl::sub(*cl::TopLevelSubCommand),
+            cl::sub(lotus::checker::tooling::genericSubCommand())),
     ListCheckers("list-checkers",
-                 cl::desc("List available checker ids and exit"),
-                 cl::cat(GenericSelectionCategory), cl::init(false),
-                 cl::sub(*cl::TopLevelSubCommand),
-                 cl::sub(lotus::checker::tooling::genericSubCommand()));
-static cl::opt<std::string> CategoryFilter(
-    "generic.category", cl::desc("Run only checkers in the given category"),
-    cl::value_desc("category"), cl::init(""), cl::cat(GenericSelectionCategory),
-    cl::sub(*cl::TopLevelSubCommand),
-    cl::sub(lotus::checker::tooling::genericSubCommand()));
-static cl::opt<std::string> BuiltinSpecDir(
-    "generic.spec-dir",
-    cl::desc("Load declarative checker specs from this directory"),
-    cl::value_desc("dir"), cl::init(""), cl::cat(GenericExecutionCategory),
-    cl::sub(*cl::TopLevelSubCommand),
-    cl::sub(lotus::checker::tooling::genericSubCommand()));
+           cl::desc("List available checker ids and exit"),
+           cl::cat(GenericSelectionCategory), cl::init(false),
+           cl::sub(*cl::TopLevelSubCommand),
+           cl::sub(lotus::checker::tooling::genericSubCommand())),
+    CategoryFilter(
+      "generic.category",
+      cl::desc("Run only checkers in the given category"),
+      cl::value_desc("category"), cl::init(""),
+      cl::cat(GenericSelectionCategory),
+      cl::sub(*cl::TopLevelSubCommand),
+      cl::sub(lotus::checker::tooling::genericSubCommand())),
+    BuiltinSpecDir(
+      "generic.spec-dir",
+      cl::desc("Load declarative checker specs from this directory"),
+      cl::value_desc("dir"), cl::init(""),
+      cl::cat(GenericExecutionCategory),
+      cl::sub(*cl::TopLevelSubCommand),
+      cl::sub(lotus::checker::tooling::genericSubCommand())) {}
+};
+
+static GenericCLIOptions &genericCLIOptions() {
+  static GenericCLIOptions options;
+  return options;
+}
 
 // ---------------------------------------------------------------------------
 // Registry construction (shared by generic engine and --list-checkers)
@@ -219,8 +233,8 @@ Expected<lotus::checker::CheckerRegistry> buildRegistry() {
     return std::move(error);
 
   std::string specDir;
-  if (BuiltinSpecDir.getNumOccurrences() != 0)
-    specDir = BuiltinSpecDir;
+  if (genericCLIOptions().BuiltinSpecDir.getNumOccurrences() != 0)
+    specDir = genericCLIOptions().BuiltinSpecDir;
   else if (auto env = sys::Process::GetEnv("LOTUS_CHECKER_SPEC_DIR"))
     specDir = *env;
   else if (sys::fs::is_directory(LOTUS_INSTALL_CHECKER_SPEC_DIR))
@@ -246,6 +260,7 @@ Expected<lotus::checker::CheckerRegistry> buildRegistry() {
 // ---------------------------------------------------------------------------
 
 int runGenericCheckerTool(const char *argv0) {
+  auto &options = genericCLIOptions();
   (void)lotus::checker::tooling::statsEnabled();
   auto registry_or = buildRegistry();
   if (!registry_or) {
@@ -254,7 +269,7 @@ int runGenericCheckerTool(const char *argv0) {
   }
   auto registry = std::move(*registry_or);
 
-  if (ListCheckers) {
+  if (options.ListCheckers) {
     outs() << "ID\tENGINE\tMODE\tDEFAULT\tCATEGORY\tTITLE\n";
     for (const auto *desc : registry.list()) {
       if (desc->isDeclarative()) {
@@ -274,7 +289,7 @@ int runGenericCheckerTool(const char *argv0) {
     return lotus::checker::tooling::EXIT_SUCCESS_CODE;
   }
 
-  if (InputFilename.empty()) {
+  if (options.InputFilename.empty()) {
     errs() << "error: input bitcode file is required unless --list-checkers is "
               "used\n";
     return lotus::checker::tooling::EXIT_ERROR;
@@ -282,7 +297,7 @@ int runGenericCheckerTool(const char *argv0) {
 
   LLVMContext context;
   SMDiagnostic error;
-  auto module = parseIRFile(InputFilename, error, context);
+  auto module = parseIRFile(options.InputFilename, error, context);
   if (!module) {
     error.print(argv0, errs());
     return lotus::checker::tooling::EXIT_ERROR;
@@ -314,16 +329,16 @@ int runGenericCheckerTool(const char *argv0) {
                << " --checks=<id>\n";
         return lotus::checker::tooling::EXIT_ERROR;
       }
-      if (!CategoryFilter.empty() &&
-          descriptor->metadata.category != CategoryFilter)
+        if (!options.CategoryFilter.empty() &&
+          descriptor->metadata.category != options.CategoryFilter)
         continue;
       selection.push_back(descriptor);
     }
   } else {
-    selection = registry.select(CategoryFilter,
+    selection = registry.select(options.CategoryFilter,
                                 lotus::checker::EngineKind::Declarative);
     if (!lotus::checker::tooling::hasExplicitCheckSelection() &&
-        CategoryFilter.empty()) {
+      options.CategoryFilter.empty()) {
       std::vector<const lotus::checker::CheckerDescriptor *> defaults;
       for (const auto *d : selection)
         if (d->metadata.default_enabled)
@@ -366,6 +381,7 @@ int main(int argc, char **argv) {
   llvm_shutdown_obj shutdown;
   report_options::initializeReportOptions();
   lotus::gsaf::initializeBuiltinVulnerabilities();
+  genericCLIOptions();
 
   // Extract --engine=<name> from argv before cl::Parse sees it.
   std::string selectedEngine;
@@ -473,7 +489,7 @@ int main(int argc, char **argv) {
   }
 
   // No engine: check for top-level actions (--list-checkers).
-  if (ListCheckers)
+  if (genericCLIOptions().ListCheckers)
     return runGenericCheckerTool(argvPtrs[0]);
 
   errs() << "error: no engine selected\n"
