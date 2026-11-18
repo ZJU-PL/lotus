@@ -70,8 +70,8 @@ Access Dyck graph:
    
    DyckGraph *graph = DAA.getDyckGraph();
    
-   // Retrieve vertex for a value
-   DyckGraphNode *node = graph->retrieveDyckVertex(val1);
+   // Retrieve vertex for a value (returns the node and whether it was already initialized)
+   auto [node, existed] = graph->retrieveDyckVertex(val1);
    if (node) {
        std::set<void *> *equivSet = node->getEquivalentSet();
        if (equivSet) {

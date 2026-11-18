@@ -262,17 +262,17 @@ Create ``verify.c``:
 .. code-block:: bash
 
    ./build/bin/clam --crab-dom=int --crab-check \
-       --crab-print-invariants=true verify.prep.bc
+       --crab-print-invariants=blocks verify.prep.bc
 
 .. code-block:: bash
 
    ./build/bin/clam --crab-dom=zones --crab-check \
-       --crab-print-invariants=true verify.prep.bc
+       --crab-print-invariants=blocks verify.prep.bc
 
 .. code-block:: bash
 
    ./build/bin/clam --crab-dom=pk --crab-check \
-       --crab-print-invariants=true verify.prep.bc
+       --crab-print-invariants=blocks verify.prep.bc
 
 .. code-block:: bash
 
