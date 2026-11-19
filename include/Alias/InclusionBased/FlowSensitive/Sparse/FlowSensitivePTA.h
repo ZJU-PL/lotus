@@ -251,6 +251,7 @@ private:
   PointsToSet expandIndirectObjects(const PointsToSet &objects) const;
   void initializeRecursiveFunctions();
   void initializeGlobalMemory();
+  void resetAfterAbstractionChange();
   StoredSet constantPointsTo(const llvm::Constant *constant);
   SCCInfo computeSCCs() const;
   /// Fill the SVF-named population / points-to statistics from the solved

@@ -318,6 +318,9 @@ VersionedFlowSensitivePTA::storeTargetObjects(
     targets = store.getDefSVFVars();
   if (targets.empty() && pointer)
     targets = graph_->getObjectIds(pointer);
+  if (auto found = discoveredStoreTargets_.find(store.getId());
+      found != discoveredStoreTargets_.end())
+    targets.insert(found->second.begin(), found->second.end());
   return expandIndirectObjects(targets);
 }
 
@@ -1832,8 +1835,25 @@ VersionedFlowSensitivePTA::gepTransfer(const GepSVFGNode &gep) {
         }
       }
     }
-    if (ObjectID mapped = graph_->getGepObject(instruction, base))
+    if (ObjectID mapped = graph_->getGepObject(instruction, base)) {
       result.insert(mapped);
+      continue;
+    }
+    // Resolve every base independently. One mapped base must not suppress
+    // the conservative field targets of another base in the same input set.
+    const PointsToSet &candidates = graph_->getObjectIds(gep.getValue());
+    bool matchedBase = false;
+    for (ObjectID candidate : candidates) {
+      const auto *info = graph_->getObjectInfo(candidate);
+      const ObjectID candidateBase =
+          info && info->baseObjId != 0 ? info->baseObjId : candidate;
+      if (candidate != base && candidateBase != base)
+        continue;
+      result.insert(candidate);
+      matchedBase = true;
+    }
+    if (!matchedBase)
+      result.insert(candidates.begin(), candidates.end());
   }
   if (result.empty() && !bases.empty()) {
     const PointsToSet &known = graph_->getObjectIds(gep.getValue());
@@ -2220,6 +2240,21 @@ bool VersionedFlowSensitivePTA::processNode(const SVFGNode &node) {
     // before the LHS was refined.
     if (targets.empty())
       return false;
+    bool missingDefinition = false;
+    for (ObjectID object : targets)
+      if (!graph_->isConstantObject(object) &&
+          (!storeMayTarget(*store, object) ||
+           getYield(node.getId(), object) == InvalidVersion)) {
+        discoveredStoreTargets_[node.getId()].insert(object);
+        missingDefinition = true;
+      }
+    if (missingDefinition) {
+      // Writing a target not covered by prelabelling can otherwise update a
+      // pass-through consume version, leaking the write to earlier loads.
+      // Refine the footprint and restart before publishing any such fact.
+      topologyChanged_ = true;
+      return false;
+    }
     const bool strong = isStrongUpdate(targets);
     const ObjectID strongObject = strong ? *targets.begin() : 0;
     const PointsToSet stored =
@@ -2416,6 +2451,7 @@ const VersionedFlowSensitivePTA::Statistics &
 VersionedFlowSensitivePTA::solve() {
   const auto started = std::chrono::steady_clock::now();
   stats_ = {};
+  discoveredStoreTargets_.clear();
   hasDeadline_ = config_.timeLimitSeconds != 0;
   if (hasDeadline_)
     deadline_ = started +
@@ -2427,6 +2463,7 @@ VersionedFlowSensitivePTA::solve() {
       break;
     }
     topologyChanged_ = false;
+    const auto fiObjects = graph_->countBaseObjects().first;
     initializeRecursiveFunctions();
     topLevelPointsTo_.clear();
     versionedPointsTo_.clear();
@@ -2451,6 +2488,10 @@ VersionedFlowSensitivePTA::solve() {
         propagateVersion(object, version->second);
     }
     solveCurrentTopology();
+    // FI collapse also changes which objects an edge carries and which
+    // stores define versions. Rebuild the labels and facts on that graph.
+    if (graph_->countBaseObjects().first != fiObjects)
+      topologyChanged_ = true;
   } while (topologyChanged_ && !stats_.timedOut);
 
   for (const auto &[nodeID, node] : *graph_)
@@ -2564,8 +2605,8 @@ VersionedFlowSensitivePTA::mayAlias(const Value *lhs, const Value *rhs) const {
     for (ObjectID object : *set)
       if (graph_->isUnknownObject(object))
         return true;
-  *left = mapObjects(graph_->expandObjectsForAlias(*left));
-  *right = mapObjects(graph_->expandObjectsForAlias(*right));
+  *left = mapObjects(graph_->expandObjectsForAlias(*left, lhs));
+  *right = mapObjects(graph_->expandObjectsForAlias(*right, rhs));
   const PointsToSet *small = &*left;
   const PointsToSet *large = &*right;
   if (large->size() < small->size())

@@ -17,6 +17,20 @@ using namespace lotus::alias;
 using namespace lotus::unittest;
 
 namespace {
+TEST_F(LlvmModuleTest, OutputAllocationContractSeparatesSizeAndDestination) {
+  AliasSpecManager specs(std::vector<std::string>{});
+  lotus::FunctionSpec contract;
+  contract.functionName = "custom_output_allocator";
+  contract.isAllocator = true;
+  contract.allocs.push_back(lotus::AllocEffect{2, 0});
+  specs.addCustomSpec(contract.functionName, contract);
+  const auto info = specs.getAllocatorInfo(contract.functionName);
+  ASSERT_TRUE(info.has_value());
+  EXPECT_EQ(info->sizeArgIndex, 2);
+  EXPECT_EQ(info->ptrOutArgIndex, 0);
+  EXPECT_FALSE(info->returnsPointer);
+}
+
 class FlowSensitiveMigrationTest : public LlvmModuleTest,
                                    public testing::WithParamInterface<bool> {
 protected:
@@ -120,9 +134,102 @@ TEST_P(FlowSensitiveMigrationTest, BaseAliasExpansionKeepsPreciseMemory) {
   solve();
   EXPECT_EQ(mayAlias(value("record"), value("second")), true);
   EXPECT_EQ(mayAlias(value("second"), value("record")), true);
+  EXPECT_EQ(mayAlias(value("first"), value("second")), false);
   expectOnly("p", module->getGlobalVariable("x"));
   expectOnly("q", module->getGlobalVariable("y"));
   EXPECT_EQ(mayAlias(value("p"), value("q")), false);
+}
+
+TEST_P(FlowSensitiveMigrationTest, LateFieldCollapseInvalidatesEarlierFacts) {
+  module = parseModule(R"(
+    @x = global i8 0
+    @y = global i8 0
+    define void @main(i64 %n) {
+      %record = alloca {i8*, i8*}
+      %first = getelementptr {i8*, i8*}, {i8*, i8*}* %record, i32 0, i32 0
+      %second = getelementptr {i8*, i8*}, {i8*, i8*}* %record, i32 0, i32 1
+      store i8* @x, i8** %first
+      store i8* @y, i8** %second
+      %r = load i8*, i8** %first
+      %late = getelementptr {i8*, i8*}, {i8*, i8*}* %record, i64 %n
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  graph = std::make_unique<SVFG>();
+  auto add = [&](SVFGNode *node, const Value *value) {
+    graph->addNode(node);
+    if (value)
+      graph->setValueNode(value, node->getId());
+  };
+  constexpr uint32_t base = 500, member = 501, x = 600, y = 601;
+  SVFG::ObjectInfo info;
+  info.isStack = true;
+  info.baseObjId = base;
+  graph->setObjectInfo(base, info);
+  info.baseObjId = base;
+  info.hasFieldOffset = true;
+  info.fieldOffset = 8;
+  graph->setObjectInfo(member, info);
+  graph->setOffsetObject(base, 8, member);
+  graph->setObjectBase(member, base);
+  graph->setObjectValue(base, value("record"));
+  for (auto entry : {std::make_pair(x, "x"), std::make_pair(y, "y")}) {
+    SVFG::ObjectInfo global;
+    global.isGlobal = true;
+    global.baseObjId = entry.first;
+    graph->setObjectInfo(entry.first, global);
+    graph->setObjectValue(entry.first, module->getGlobalVariable(entry.second));
+  }
+  auto *address = new AddrSVFGNode(1, nullptr, value("record"), base);
+  auto *xAddress = new AddrSVFGNode(2, nullptr, module->getGlobalVariable("x"), x);
+  auto *yAddress = new AddrSVFGNode(3, nullptr, module->getGlobalVariable("y"), y);
+  auto *first = new GepSVFGNode(4, nullptr, value("first"));
+  auto *second = new GepSVFGNode(5, nullptr, value("second"));
+  const auto *firstInst = cast<Instruction>(value("first"));
+  const auto *storeX = cast<StoreInst>(firstInst->getNextNode()->getNextNode());
+  auto *writeX = new StoreSVFGNode(6, nullptr, storeX, first->getId());
+  auto *writeY = new StoreSVFGNode(7, nullptr, storeX->getNextNode(), second->getId());
+  auto *read = new LoadSVFGNode(8, nullptr, value("r"), first->getId());
+  auto *late = new GepSVFGNode(9, nullptr, value("late"));
+  add(address, value("record"));
+  add(xAddress, module->getGlobalVariable("x"));
+  add(yAddress, module->getGlobalVariable("y"));
+  add(first, value("first"));
+  add(second, value("second"));
+  add(writeX, nullptr);
+  add(writeY, nullptr);
+  add(read, value("r"));
+  add(late, value("late"));
+  graph->setGepAccess(cast<GetElementPtrInst>(value("first")), 0, false);
+  graph->setGepAccess(cast<GetElementPtrInst>(value("second")), 8, false);
+  const SVFGNodeBS region{base, member};
+  writeX->setMemoryDef(1, 1, region);
+  writeY->setMemoryDef(1, 2, region);
+  read->setMemoryUse(1, 2, region);
+  graph->addEdge(address, first, SVFGEdgeK::IntraGep);
+  graph->addEdge(address, second, SVFGEdgeK::IntraGep);
+  graph->addEdge(address, late, SVFGEdgeK::IntraGep);
+  graph->addEdge(first, writeX, SVFGEdgeK::IntraDirect);
+  graph->addEdge(second, writeY, SVFGEdgeK::IntraDirect);
+  graph->addEdge(xAddress, writeX, SVFGEdgeK::IntraCopy);
+  graph->addEdge(yAddress, writeY, SVFGEdgeK::IntraCopy);
+  graph->addEdge(writeX, writeY, SVFGEdgeK::IntraIndirect, nullptr, region);
+  graph->addEdge(writeY, read, SVFGEdgeK::IntraIndirect, nullptr, region);
+  graph->addEdge(first, read, SVFGEdgeK::IntraDirect);
+  // Force discovery of the unannotated GEP after the earlier memory read.
+  graph->addEdge(read, late, SVFGEdgeK::IntraIndirect, nullptr, region);
+  if (GetParam()) {
+    versioned = std::make_unique<VersionedFlowSensitivePTA>(*graph);
+    versioned->solve();
+  } else {
+    sparse = std::make_unique<FlowSensitivePTA>(*graph);
+    sparse->solve();
+    std::string difference;
+    EXPECT_TRUE(sparse->isFixedPoint(&difference)) << difference;
+  }
+  EXPECT_EQ(pointsTo(value("r")), (SVFGNodeBS{x, y}))
+      << (versioned ? versioned->statisticsReport() : sparse->statisticsReport());
 }
 
 TEST_P(FlowSensitiveMigrationTest, EmptyAuxiliaryTargetsRemainBounded) {
@@ -146,6 +253,83 @@ TEST_P(FlowSensitiveMigrationTest, EmptyAuxiliaryTargetsRemainBounded) {
   EXPECT_EQ(other.isIndirectCallTargetAllowed(
                 call, module->getFunction("target")),
             std::nullopt);
+}
+
+TEST_P(FlowSensitiveMigrationTest, GepFallbackPreservesEveryInputBase) {
+  module = parseModule(R"(
+    define void @main(i1 %c) {
+      %a = alloca {i8*, i8*}
+      %b = alloca {i8*, i8*}
+      %s = select i1 %c, {i8*, i8*}* %a, {i8*, i8*}* %b
+      %p = getelementptr {i8*, i8*}, {i8*, i8*}* %s, i32 0, i32 1
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  graph = std::make_unique<SVFG>();
+  auto *a = new AddrSVFGNode(1, nullptr, value("a"), 500);
+  auto *b = new AddrSVFGNode(2, nullptr, value("b"), 600);
+  auto *selected = new IntraPhiSVFGNode(3, nullptr, value("s"));
+  auto *gep = new GepSVFGNode(4, nullptr, value("p"));
+  for (SVFGNode *node : std::vector<SVFGNode *>{a, b, selected, gep}) {
+    graph->addNode(node);
+    graph->setValueNode(node->getValue(), node->getId());
+  }
+  for (uint32_t base : {500u, 600u}) {
+    SVFG::ObjectInfo info;
+    info.isStack = true;
+    info.baseObjId = base;
+    graph->setObjectInfo(base, info);
+    info.fieldOffset = 8;
+    info.hasFieldOffset = true;
+    graph->setObjectInfo(base + 1, info);
+  }
+  graph->setOffsetObject(500, 8, 501);
+  graph->setObjectsForValue(value("p"), SVFGNodeBS{501, 601});
+  graph->setGepAccess(cast<GetElementPtrInst>(value("p")), 8, false);
+  graph->addEdge(a, selected, SVFGEdgeK::IntraPhi);
+  graph->addEdge(b, selected, SVFGEdgeK::IntraPhi);
+  graph->addEdge(selected, gep, SVFGEdgeK::IntraGep);
+  if (GetParam()) {
+    versioned = std::make_unique<VersionedFlowSensitivePTA>(*graph);
+    versioned->solve();
+  } else {
+    sparse = std::make_unique<FlowSensitivePTA>(*graph);
+    sparse->solve();
+  }
+  EXPECT_EQ(pointsTo(value("p")), (SVFGNodeBS{501, 601}));
+}
+
+TEST_P(FlowSensitiveMigrationTest, MissingStorePrelabelDoesNotWriteIntoThePast) {
+  build(R"(
+    @old = global i8 0
+    @new = global i8 0
+    @slot = global i8* @old
+    @other = global i8* null
+    define void @main() {
+      %before = load i8*, i8** @slot
+      %lhs = bitcast i8** @slot to i8**
+      store i8* @new, i8** %lhs
+      %after = load i8*, i8** @slot
+      %unused = load i8*, i8** @other
+      ret void
+    }
+  )");
+  if (GetParam()) {
+    VersionedFlowSensitivePTA::Config config;
+    config.preAnalysisTargets = [&](const Value *pointer) {
+      if (pointer == value("lhs"))
+        return SVFGNodeBS{graph->getObjectId(module->getGlobalVariable("other"))};
+      return builder->getPreAnalysisPointsTo(pointer);
+    };
+    versioned = std::make_unique<VersionedFlowSensitivePTA>(*graph, config);
+    versioned->solve();
+  } else {
+    sparse = std::make_unique<FlowSensitivePTA>(*graph);
+    sparse->solve();
+  }
+  expectOnly("before", module->getGlobalVariable("old"));
+  expectOnly("after", module->getGlobalVariable("new"));
 }
 
 TEST_P(FlowSensitiveMigrationTest, RegisterAggregateSelectPreservesPointers) {

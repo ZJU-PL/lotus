@@ -29,7 +29,6 @@ using namespace lotus::analysis;
 using namespace llvm;
 
 void SVFGBuilder::buildEdges() {
-  buildAggregateEdges();
   buildDirectEdges();
   buildCopyEdges();
   buildGepEdges();
@@ -152,16 +151,58 @@ void SVFGBuilder::buildAggregateEdges() {
   };
   // Resolving constant fields may add public pointer definitions.
   const auto definitions = valueToNode;
+  std::vector<const ExtractValueInst *> extracts;
   for (const auto &entry : definitions) {
     const auto *extract = dyn_cast<ExtractValueInst>(entry.first);
     if (!extract || !extract->getType()->isPointerTy())
       continue;
+    extracts.push_back(extract);
     SVFGNode *destination = svfg->getNode(entry.second);
     Path path(extract->idx_begin(), extract->idx_end());
     svfg->addEdge(field(extract->getAggregateOperand(), path,
                         destination->getICFGNode()),
                   destination, SVFGEdgeK::IntraCopy);
   }
+
+  // The auxiliary PTA can miss register aggregates. Seed a conservative
+  // field solution before freezing memory regions, so stores through an
+  // extracted pointer connect to loads of the same concrete slot.
+  std::vector<SVFGNode *> work;
+  std::unordered_map<uint32_t, SVFGNodeBS> targets;
+  for (const auto &value : fields)
+    for (const auto &entry : value.second) {
+      SVFGNode *node = entry.second;
+      work.push_back(node);
+      if (const Value *pointer = node->getValue())
+        if (pointer->getType()->isPointerTy())
+          targets[node->getId()] = getObjectIdsForValue(pointer);
+    }
+  for (const auto *extract : extracts) {
+    SVFGNode *node = svfg->getValueNode(extract);
+    work.push_back(node);
+    targets[node->getId()];
+  }
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (SVFGNode *node : work)
+      for (const SVFGEdge *edge : node->getInEdges()) {
+        const SVFGNode *source = edge->getSrcNode();
+        auto sourceTargets = targets.find(source->getId());
+        SVFGNodeBS values;
+        if (sourceTargets != targets.end())
+          values = sourceTargets->second;
+        else if (const auto *address = dyn_cast<AddrSVFGNode>(source))
+          values.insert(address->getObjectId());
+        else if (const Value *pointer = source->getValue())
+          if (pointer->getType()->isPointerTy())
+            values = getObjectIdsForValue(pointer);
+        changed |= targets[node->getId()].unite(values);
+      }
+  }
+  for (const auto *extract : extracts)
+    svfg->setObjectsForValue(
+        extract, targets[svfg->getValueNode(extract)->getId()]);
 }
 
 void SVFGBuilder::buildDirectEdges() {

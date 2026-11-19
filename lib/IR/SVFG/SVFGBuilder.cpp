@@ -951,7 +951,7 @@ SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
   SVFG *graph = getActiveSVFG();
   if (!ptr)
     return result;
-  if (graph && isa<GetElementPtrInst, ConstantExpr>(ptr)) {
+  if (graph && isa<GetElementPtrInst, ConstantExpr, ExtractValueInst>(ptr)) {
     const SVFGNodeBS &mapped = graph->getObjectIds(ptr);
     if (!mapped.empty())
       return mapped;

@@ -739,9 +739,12 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveOrderedParallel() {
       break;
     }
     ++stats_.topologyEpochs;
+    const auto fiObjects = graph_->countBaseObjects().first;
     topologyChanged_ = false;
     initializeRecursiveFunctions();
     OrderedExecution(*this).run();
+    if (!stats_.timedOut && graph_->countBaseObjects().first != fiObjects)
+      resetAfterAbstractionChange();
   } while (topologyChanged_ && !stats_.timedOut);
   const auto scc = computeSCCs();
   stats_.sccs = scc.components.size();

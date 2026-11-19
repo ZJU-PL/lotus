@@ -196,6 +196,7 @@ void SVFGBuilder::buildNodes() {
             registerConstantFields(dyn_cast<Constant>(operand.get()));
   }
   buildTopLevelNodes();
+  buildAggregateEdges();
   prepareMemoryRegionPartitioning();
   buildAddressTakenNodes();
   buildFormalParmNodes();

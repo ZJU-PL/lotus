@@ -1091,7 +1091,8 @@ public:
   /// precision-preserving path.
   uint32_t canonicalObjectId(uint32_t objId) const;
   /// Expand base/FI pointees for alias queries, without coarsening transfers.
-  SVFGNodeBS expandObjectsForAlias(const SVFGNodeBS &objects) const;
+  SVFGNodeBS expandObjectsForAlias(const SVFGNodeBS &objects,
+                                   const llvm::Value *pointer = nullptr) const;
 
   inline void setNodeFunctionDebug(uint32_t nodeId, std::string label) {
     nodeFunctionDebug[nodeId] = std::move(label);

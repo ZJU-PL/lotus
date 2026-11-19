@@ -36,6 +36,7 @@ static constexpr const char *kHeaderV5 = "SVFG-TEXT-V5";
 static constexpr const char *kHeaderV6 = "SVFG-TEXT-V6";
 static constexpr const char *kHeaderV7 = "SVFG-TEXT-V7";
 static constexpr const char *kHeaderV8 = "SVFG-TEXT-V8";
+static constexpr const char *kHeaderV9 = "SVFG-TEXT-V9";
 
 namespace {
 
@@ -95,6 +96,14 @@ struct ParsedEdge {
   std::string callSiteDebug;
 };
 
+struct ParsedAllocation {
+  uint32_t object = 0;
+  unsigned argument = 0;
+  bool active = false;
+  SVFGNodeBS destinations;
+  Anchor callee;
+};
+
 struct ParsedNodeMeta {
   Anchor valueAnchor;
   Anchor instAnchor;
@@ -102,6 +111,7 @@ struct ParsedNodeMeta {
   Anchor callAnchor;
   std::vector<std::pair<uint32_t, Anchor>> valueOperands;
   std::vector<std::tuple<uint32_t, uint32_t, uint32_t>> mssaOperands;
+  std::vector<ParsedAllocation> allocations;
 };
 
 static const Module *getModuleFromICFG(const ICFG *icfg) {
@@ -769,7 +779,7 @@ bool SVFGSerializer::writeText(const SVFG &graph, const std::string &filename) {
   if (!file.is_open())
     return false;
 
-  file << kHeaderV8 << "\n";
+  file << kHeaderV9 << "\n";
 
   // Persist object debug labels to preserve points-to identity across reloads.
   for (const auto &pair : graph.getObjectDebugMap()) {
@@ -835,6 +845,24 @@ bool SVFGSerializer::writeText(const SVFG &graph, const std::string &filename) {
                         getNodeInstructionAnchor(node));
     writeNodeMetaAnchor(file, 'C', node->getId(), getNodeFunctionAnchor(node));
     writeNodeMetaAnchor(file, 'D', node->getId(), getNodeCallAnchor(node));
+
+    if (const auto *output = dyn_cast<ActualOutSVFGNode>(node))
+      for (const auto &allocation : output->getAllocations()) {
+        const CallBase *call = output->getCallSite();
+        unsigned argument = 0;
+        while (argument < call->arg_size() &&
+               call->getArgOperand(argument) != allocation.destination)
+          ++argument;
+        file << "L " << node->getId() << " " << allocation.object << " "
+             << argument << " "
+             << graph.hasConnectedCallee(call, allocation.callee) << " "
+             << allocation.destinations.size();
+        for (uint32_t object : allocation.destinations)
+          file << " " << object;
+        file << " ";
+        writeAnchor(file, getAnchorForValue(allocation.callee));
+        file << "\n";
+      }
 
     if (const auto *binary = dyn_cast<BinaryOpSVFGNode>(node)) {
       for (auto it = binary->opVerBegin(), eit = binary->opVerEnd(); it != eit;
@@ -976,6 +1004,10 @@ bool SVFGSerializer::readText(SVFG &graph, const std::string &filename) {
       sawV5 = true;
       continue;
     }
+    if (line == kHeaderV9) {
+      sawV5 = true;
+      continue;
+    }
     std::istringstream iss(line);
     char tag = 0;
     iss >> tag;
@@ -1050,6 +1082,23 @@ bool SVFGSerializer::readText(SVFG &graph, const std::string &filename) {
       default:
         break;
       }
+      continue;
+    }
+    if (tag == 'L') {
+      uint32_t nodeId = 0, count = 0;
+      ParsedAllocation allocation;
+      if (!(iss >> nodeId >> allocation.object >> allocation.argument >>
+            allocation.active >> count))
+        return false;
+      for (uint32_t index = 0; index < count; ++index) {
+        uint32_t object = 0;
+        if (!(iss >> object))
+          return false;
+        allocation.destinations.insert(object);
+      }
+      if (!readAnchor(iss, allocation.callee))
+        return false;
+      nodeMeta[nodeId].allocations.push_back(std::move(allocation));
       continue;
     }
     if (tag == 'P') {
@@ -1139,6 +1188,18 @@ bool SVFGSerializer::readText(SVFG &graph, const std::string &filename) {
     applyValueOperands(node, meta, module);
     applyMSSAOperands(node, meta);
     registerNodeBindings(graph, node);
+    if (auto *output = dyn_cast<ActualOutSVFGNode>(node))
+      for (const auto &allocation : meta.allocations) {
+        const CallBase *call = output->getCallSite();
+        const auto *callee = dyn_cast_or_null<Function>(
+            resolveValueAnchor(module, allocation.callee));
+        if (!call || !callee || allocation.argument >= call->arg_size())
+          return false;
+        output->addAllocation({callee, call->getArgOperand(allocation.argument),
+                                allocation.object, allocation.destinations});
+        if (allocation.active)
+          graph.markConnectedCallee(call, callee);
+      }
   }
 
   for (const ParsedObjectInfo &object : objects) {

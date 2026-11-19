@@ -388,6 +388,9 @@ private:
   std::vector<ObjectID> versionProcessingOrder_;
   /// Cached field-insensitive representative per base object.
   std::unordered_map<ObjectID, ObjectID> fieldInsensitiveObjects_;
+  // Runtime targets missing from the auxiliary store footprint. A store
+  // needs a definition for these objects before it may write their facts.
+  std::unordered_map<NodeID, PointsToSet> discoveredStoreTargets_;
   /// In-scope indirect edges that carry each object. Rebuilt by
   /// buildObjectIndex() before every labelling pass.
   std::unordered_map<ObjectID, std::vector<const lotus::analysis::SVFGEdge *>>

@@ -26,16 +26,34 @@
 #include <unordered_set>
 
 #include <llvm/Support/Casting.h>
+#include <llvm/IR/Operator.h>
 
 using namespace lotus::analysis;
 using namespace llvm;
 
-SVFGNodeBS SVFG::expandObjectsForAlias(const SVFGNodeBS &objects) const {
+SVFGNodeBS SVFG::expandObjectsForAlias(const SVFGNodeBS &objects,
+                                      const Value *pointer) const {
+  // Lotus uses the base ID for offset zero. A direct first-field GEP still
+  // denotes that field, whereas SVF represents it with a separate GepObjVar.
+  // Do not turn that field query into an aggregate-wide query.
+  const Value *origin = pointer;
+  while (origin) {
+    if (const auto *cast = dyn_cast<CastInst>(origin))
+      origin = cast->getOperand(0);
+    else if (const auto *constant = dyn_cast<ConstantExpr>(origin)) {
+      if (!constant->isCast())
+        break;
+      origin = constant->getOperand(0);
+    } else
+      break;
+  }
+  const bool fieldPointer = isa_and_nonnull<GEPOperator>(origin);
   SVFGNodeBS expanded = objects;
   for (uint32_t object : objects) {
     const ObjectInfo *info = getObjectInfo(object);
-    if (!info || info->baseObjId == 0 || info->baseObjId == object ||
-        isFieldInsensitiveObject(object)) {
+    if (isFieldInsensitiveObject(object) ||
+        (!fieldPointer &&
+         (!info || info->baseObjId == 0 || info->baseObjId == object))) {
       const auto fields = getFieldObjects(object);
       expanded.insert(fields.begin(), fields.end());
     }

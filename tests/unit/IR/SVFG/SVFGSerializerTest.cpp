@@ -229,7 +229,7 @@ TEST_F(SVFGSerializerTest, RoundTripsCanonicalGepOffsets) {
     std::ifstream serialized(path.c_str());
     std::string header;
     ASSERT_TRUE(static_cast<bool>(std::getline(serialized, header)));
-    EXPECT_EQ(header, "SVFG-TEXT-V8");
+    EXPECT_EQ(header, "SVFG-TEXT-V9");
   }
 
   SVFG reloaded;
@@ -781,6 +781,50 @@ TEST_F(SVFGSerializerTest, RoundTripsDeferredIndirectCallState) {
     }
   }
   EXPECT_TRUE(foundCallEdge);
+}
+
+TEST_F(SVFGSerializerTest, RoundTripsExternalOutputAllocation) {
+  auto module = parseModule(R"(
+    declare i32 @posix_memalign(i8**, i64, i64)
+    define void @main() {
+      %slot = alloca i8*
+      %rc = call i32 @posix_memalign(i8** %slot, i64 8, i64 32)
+      %p = load i8*, i8** %slot
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  ICFG icfg;
+  ICFGBuilder(&icfg).build(module.get());
+  SVFGBuilder builder;
+  std::unique_ptr<SVFG> graph(builder.build(&icfg));
+  SmallString<256> path;
+  int fd = -1;
+  ASSERT_FALSE(sys::fs::createTemporaryFile("svfg-allocation", "txt", fd, path));
+  ::close(fd);
+  ASSERT_TRUE(graph->writeToFile(path.str().str()));
+  SVFG reloaded;
+  reloaded.setICFG(&icfg);
+  ASSERT_TRUE(reloaded.readFromFile(path.str().str()));
+  sys::fs::remove(path);
+  unsigned allocations = 0;
+  for (const auto &entry : *graph)
+    if (const auto *output = dyn_cast<ActualOutSVFGNode>(entry.second)) {
+      const auto *copy =
+          dyn_cast<ActualOutSVFGNode>(reloaded.getNode(entry.first));
+      ASSERT_NE(copy, nullptr);
+      ASSERT_EQ(output->getAllocations().size(), copy->getAllocations().size());
+      for (unsigned index = 0; index < output->getAllocations().size(); ++index) {
+        const auto &expected = output->getAllocations()[index];
+        const auto &actual = copy->getAllocations()[index];
+        EXPECT_EQ(actual.callee, expected.callee);
+        EXPECT_EQ(actual.destination, expected.destination);
+        EXPECT_EQ(actual.object, expected.object);
+        EXPECT_EQ(actual.destinations, expected.destinations);
+        ++allocations;
+      }
+    }
+  EXPECT_GT(allocations, 0u);
 }
 
 } // namespace

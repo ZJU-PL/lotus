@@ -1501,6 +1501,23 @@ FlowSensitivePTA::SCCInfo FlowSensitivePTA::computeSCCs() const {
   return result;
 }
 
+void FlowSensitivePTA::resetAfterAbstractionChange() {
+  // A late FI collapse changes GEP/load/store equations even at nodes with
+  // no value-flow path from the GEP which discovered it. Drop facts computed
+  // under the old abstraction, including earlier strong-update results.
+  topLevelPointsTo_.clear();
+  dfIn_.clear();
+  dfOut_.clear();
+  initialMemory_.clear();
+  strongUpdateSites_.clear();
+  weakUpdateSites_.clear();
+  if (config_.setBackend == PointsToSetBackend::HashConsed)
+    arena_.reset();
+  buildObjectClustering();
+  initializeGlobalMemory();
+  topologyChanged_ = true;
+}
+
 const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
   if (config_.parallel)
     return solveParallel();
@@ -1534,6 +1551,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
       break;
     }
     ++stats_.topologyEpochs;
+    const auto fiObjects = graph_->countBaseObjects().first;
     topologyChanged_ = false;
     initializeRecursiveFunctions();
     SCCInfo scc = computeSCCs();
@@ -1592,6 +1610,8 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solve() {
             worklist.push(successor);
           }
     }
+    if (!stats_.timedOut && graph_->countBaseObjects().first != fiObjects)
+      resetAfterAbstractionChange();
   } while (topologyChanged_ && !stats_.timedOut);
   for (const auto &[node, pointsTo] : topLevelPointsTo_) {
     const PointsToSet &set = materialize(pointsTo);
@@ -1673,8 +1693,8 @@ std::optional<bool> FlowSensitivePTA::mayAlias(const Value *lhs,
         return true;
   // SVF's alias contract includes all fields of a base-object pointee, even
   // when transfers still distinguish its fields and permit strong updates.
-  *left = mapObjects(graph_->expandObjectsForAlias(*left));
-  *right = mapObjects(graph_->expandObjectsForAlias(*right));
+  *left = mapObjects(graph_->expandObjectsForAlias(*left, lhs));
+  *right = mapObjects(graph_->expandObjectsForAlias(*right, rhs));
   const PointsToSet *small = &*left, *large = &*right;
   if (large->size() < small->size())
     std::swap(small, large);

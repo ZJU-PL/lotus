@@ -334,6 +334,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
       break;
     }
     ++stats_.topologyEpochs;
+    const auto fiObjects = graph_->countBaseObjects().first;
     topLevelPointsTo_.clear();
     dfIn_.clear();
     dfOut_.clear();
@@ -346,7 +347,7 @@ const FlowSensitivePTA::Statistics &FlowSensitivePTA::solveParallel() {
     initializeGlobalMemory();
     ParallelExecution execution(*this);
     const auto calls = execution.run();
-    changed = false;
+    changed = graph_->countBaseObjects().first != fiObjects;
     for (const auto &call : calls) {
       if (config_.isIndirectCallTargetAllowed &&
           !config_.isIndirectCallTargetAllowed(call.first, call.second)) {
