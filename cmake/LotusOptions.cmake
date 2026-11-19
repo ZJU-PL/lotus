@@ -46,6 +46,8 @@ if(DEFINED LOTUS_USE_CCLYZER)
 endif()
 
 # Optional in-tree components
+option(LOTUS_ENABLE_SPARTA
+       "Enable the bundled SPARTA abstract interpretation primitives" OFF)
 option(LOTUS_ENABLE_TYPE_QUALIFIER
        "Enable the opt-in TypeQualifier uninitialized-data checker" OFF)
 option(LOTUS_ENABLE_FPSOLVE
@@ -137,7 +139,7 @@ endforeach()
 foreach(group ae concurrency framework gsaf kint pulse saber reports typequalifier tpa)
   list(APPEND _lotus_test_choices "checker/${group}")
 endforeach()
-foreach(group ifdside mono wpds apa demandapa npa vasco)
+foreach(group ifdside mono wpds apa demandapa npa vasco sparta)
   list(APPEND _lotus_test_choices "dataflow/${group}")
 endforeach()
 
@@ -171,6 +173,10 @@ endif()
 if(LOTUS_BUILD_TESTS AND "checker/typequalifier" IN_LIST LOTUS_SELECTED_TEST_SUBSYSTEMS
    AND NOT LOTUS_ENABLE_TYPE_QUALIFIER)
   message(FATAL_ERROR "Selecting checker/typequalifier requires LOTUS_ENABLE_TYPE_QUALIFIER=ON")
+endif()
+if(LOTUS_BUILD_TESTS AND "dataflow/sparta" IN_LIST LOTUS_SELECTED_TEST_SUBSYSTEMS
+   AND NOT LOTUS_ENABLE_SPARTA)
+  message(FATAL_ERROR "Selecting dataflow/sparta requires LOTUS_ENABLE_SPARTA=ON")
 endif()
 
 set(LOTUS_SELECTED_TEST_ROOTS)
@@ -228,6 +234,7 @@ function(lotus_print_build_summary)
   _lotus_summary_bool("CLAM" LOTUS_ENABLE_CLAM)
   _lotus_summary_bool("SeaHorn" LOTUS_ENABLE_SEAHORN)
   _lotus_summary_bool("SMACK" LOTUS_ENABLE_SMACK)
+  _lotus_summary_bool("SPARTA abstract interpretation" LOTUS_ENABLE_SPARTA)
   _lotus_summary_bool("Horn-ICE" LOTUS_ENABLE_HORN_ICE)
   _lotus_summary_bool("Seal/Popeye" LOTUS_ENABLE_SEAL)
   _lotus_summary_bool("PDAAAL" LOTUS_ENABLE_PDAAAL)

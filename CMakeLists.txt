@@ -75,6 +75,10 @@ install(FILES
   config/linux_kernel_api.spec
   DESTINATION share/lotus/config)
 
+if(LOTUS_ENABLE_SPARTA)
+  sparta_install("${CMAKE_CURRENT_SOURCE_DIR}/third-party/SPARTA")
+endif()
+
 include(cmake/LotusBuildAcceleration.cmake)
 lotus_apply_build_acceleration()
 lotus_print_build_summary()

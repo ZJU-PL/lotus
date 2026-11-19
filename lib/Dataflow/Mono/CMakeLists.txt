@@ -21,3 +21,4 @@ set(MONO_SOURCES
 )
 
 add_library(MONODataFlow STATIC ${MONO_SOURCES})
+target_link_libraries(MONODataFlow PUBLIC CanaryAliasAnalysisWrapper)

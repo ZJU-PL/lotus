@@ -1,3 +1,8 @@
+if(LOTUS_ENABLE_SPARTA)
+  # Header-only abstract interpretation primitives.
+  add_subdirectory(SPARTA)
+endif()
+
 # Third-party libraries (CUDD, WPDS, spdlog)
 add_subdirectory(CUDD)
 add_subdirectory(WPDS)

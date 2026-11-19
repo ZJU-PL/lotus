@@ -1,0 +1,35 @@
+# Vendored SPARTA library tests.
+lotus_collect_test_sources(dataflow_tests
+  MigrationRegressionTest.cpp
+  VariantExceptionTest.cpp
+  ConstantAbstractDomainTest.cpp
+  DirectProductAbstractDomainTest.cpp
+  DisjointUnionAbstractDomainTest.cpp
+  FiniteAbstractDomainTest.cpp
+  FlatMapTest.cpp
+  FlattenIteratorTest.cpp
+  HashedAbstractEnvironmentTest.cpp
+  HashedAbstractPartitionTest.cpp
+  HashedSetAbstractDomainTest.cpp
+  InterproceduralAnalyzerTest.cpp
+  IntervalDomainTest.cpp
+  LiftedDomainTest.cpp
+  MonotonicFixpointIteratorTest.cpp
+  PatriciaTreeCoreTest.cpp
+  PatriciaTreeHashMapAbstractEnvironmentTest.cpp
+  PatriciaTreeHashMapAbstractPartitionTest.cpp
+  PatriciaTreeHashMapTest.cpp
+  PatriciaTreeMapAbstractEnvironmentTest.cpp
+  PatriciaTreeMapAbstractPartitionTest.cpp
+  PatriciaTreeMapTest.cpp
+  PatriciaTreeOverUnderSetAbstractDomainTest.cpp
+  PatriciaTreeSetAbstractDomainTest.cpp
+  ReducedProductAbstractDomainTest.cpp
+  S_ExpressionTest.cpp
+  SetTest.cpp
+  SmallSortedSetAbstractDomainTest.cpp
+  SparseSetAbstractDomainTest.cpp
+  ThreadPoolTest.cpp
+  WeakPartialOrderingTest.cpp
+  WeakTopologicalOrderingTest.cpp
+  WorkQueueTest.cpp)
