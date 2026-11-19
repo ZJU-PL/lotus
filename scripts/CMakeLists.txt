@@ -9,5 +9,3 @@ endif()
 if(LOTUS_ENABLE_SEAHORN)
   add_subdirectory(seahorn)
 endif()
-
-add_subdirectory(verification/nwa_reference)

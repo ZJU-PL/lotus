@@ -102,6 +102,208 @@ TEST_P(FlowSensitiveMigrationTest, FieldInsensitiveAliasExpandsFields) {
   EXPECT_EQ(mayAlias(value("field"), value("var")), true);
 }
 
+TEST_P(FlowSensitiveMigrationTest, BaseAliasExpansionKeepsPreciseMemory) {
+  build(R"(
+    @x = global i8 0
+    @y = global i8 0
+    define void @main() {
+      %record = alloca {i8*, i8*}
+      %first = getelementptr {i8*, i8*}, {i8*, i8*}* %record, i32 0, i32 0
+      %second = getelementptr {i8*, i8*}, {i8*, i8*}* %record, i32 0, i32 1
+      store i8* @x, i8** %first
+      store i8* @y, i8** %second
+      %p = load i8*, i8** %first
+      %q = load i8*, i8** %second
+      ret void
+    }
+  )");
+  solve();
+  EXPECT_EQ(mayAlias(value("record"), value("second")), true);
+  EXPECT_EQ(mayAlias(value("second"), value("record")), true);
+  expectOnly("p", module->getGlobalVariable("x"));
+  expectOnly("q", module->getGlobalVariable("y"));
+  EXPECT_EQ(mayAlias(value("p"), value("q")), false);
+}
+
+TEST_P(FlowSensitiveMigrationTest, EmptyAuxiliaryTargetsRemainBounded) {
+  build(R"(
+    define void @target() { ret void }
+    define void @main() {
+      call void null()
+      ret void
+    }
+  )");
+  const auto *call = dyn_cast<CallBase>(
+      &module->getFunction("main")->getEntryBlock().front());
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(builder->isIndirectCallTargetAllowed(
+                call, module->getFunction("target")),
+            false);
+  SVFGBuilderConfig withoutPTA;
+  withoutPTA.usePointerAnalysis = false;
+  SVFGBuilder other(withoutPTA);
+  std::unique_ptr<SVFG> otherGraph(other.build(&icfg));
+  EXPECT_EQ(other.isIndirectCallTargetAllowed(
+                call, module->getFunction("target")),
+            std::nullopt);
+}
+
+TEST_P(FlowSensitiveMigrationTest, RegisterAggregateSelectPreservesPointers) {
+  build(R"(
+    @x = global i8 0
+    @y = global i8 0
+    define void @main(i1 %c) {
+      %a = insertvalue {i8*, i8*} undef, i8* @x, 0
+      %b = insertvalue {i8*, i8*} undef, i8* @y, 0
+      %s = select i1 %c, {i8*, i8*} %a, {i8*, i8*} %b
+      %p = extractvalue {i8*, i8*} %s, 0
+      ret void
+    }
+  )");
+  solve();
+  const auto result = pointsTo(value("p"));
+  ASSERT_EQ(result.size(), 2u);
+  EXPECT_EQ(mayAlias(value("p"), module->getGlobalVariable("x")), true);
+  EXPECT_EQ(mayAlias(value("p"), module->getGlobalVariable("y")), true);
+}
+
+TEST_P(FlowSensitiveMigrationTest, NestedAggregateOverwriteAndCyclicPhi) {
+  build(R"(
+    @x = global i8 0
+    @y = global i8 0
+    define void @main(i1 %c) {
+    entry:
+      %a = insertvalue {{i8*, i8*}} zeroinitializer, i8* @x, 0, 0
+      br label %loop
+    loop:
+      %s = phi {{i8*, i8*}} [%a, %entry], [%next, %loop]
+      %p = extractvalue {{i8*, i8*}} %s, 0, 0
+      %b = insertvalue {{i8*, i8*}} %s, i8* @y, 0, 0
+      %next = insertvalue {{i8*, i8*}} %b, i8* @x, 0, 1
+      %overwritten = extractvalue {{i8*, i8*}} %b, 0, 0
+      br i1 %c, label %loop, label %exit
+    exit:
+      ret void
+    }
+  )");
+  solve();
+  EXPECT_EQ(pointsTo(value("p")).size(), 2u);
+  expectOnly("overwritten", module->getGlobalVariable("y"));
+}
+
+TEST_P(FlowSensitiveMigrationTest, AggregateFieldsCrossDirectCalls) {
+  build(R"(
+    @x = global i8 0
+    define {i8*} @identity({i8*} %arg) {
+      ret {i8*} %arg
+    }
+    define void @main() {
+      %a = insertvalue {i8*} undef, i8* @x, 0
+      %b = call {i8*} @identity({i8*} %a)
+      %p = extractvalue {i8*} %b, 0
+      ret void
+    }
+  )");
+  solve();
+  expectOnly("p", module->getGlobalVariable("x"));
+}
+
+TEST_P(FlowSensitiveMigrationTest, ExtractedAggregatePointerOrdersMemory) {
+  build(R"(
+    @x = global i8 0
+    @y = global i8 0
+    define void @main() {
+      %slot = alloca i8*
+      store i8* @x, i8** %slot
+      %a = insertvalue {i8**} undef, i8** %slot, 0
+      %p = extractvalue {i8**} %a, 0
+      store i8* @y, i8** %p
+      %r = load i8*, i8** %slot
+      ret void
+    }
+  )");
+  solve();
+  expectOnly("r", module->getGlobalVariable("y"));
+}
+
+TEST_P(FlowSensitiveMigrationTest, UnsupportedAggregateSourceIsUnknown) {
+  build(R"(
+    @x = global i8 0
+    declare {i8*} @external()
+    define void @main() {
+      %xptr = bitcast i8* @x to i8*
+      %a = call {i8*} @external()
+      %p = extractvalue {i8*} %a, 0
+      ret void
+    }
+  )");
+  solve();
+  const auto result = pointsTo(value("p"));
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_TRUE(graph->isUnknownObject(*result.begin()));
+  EXPECT_EQ(mayAlias(value("p"), module->getGlobalVariable("x")), true);
+}
+
+TEST_P(FlowSensitiveMigrationTest, ExternalAllocationWritesThroughArgument) {
+  build(R"(
+    declare i32 @posix_memalign(i8**, i64, i64)
+    define void @main() {
+      %slot = alloca i8*
+      store i8* null, i8** %slot
+      %rc = call i32 @posix_memalign(i8** %slot, i64 8, i64 8)
+      %p = load i8*, i8** %slot
+      %q = load i8*, i8** %slot
+      ret void
+    }
+  )");
+  solve();
+  const auto result = pointsTo(value("p"));
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_TRUE(graph->getObjectInfo(*result.begin())->isHeap);
+  EXPECT_EQ(pointsTo(value("q")), result);
+  EXPECT_EQ(mayAlias(value("p"), value("q")), true);
+}
+
+TEST_P(FlowSensitiveMigrationTest, ExternalAllocationPreservesFailureValue) {
+  build(R"(
+    @old = global i8 0
+    declare i32 @posix_memalign(i8**, i64, i64)
+    define void @allocate(i8** %out) {
+      %rc = call i32 @posix_memalign(i8** %out, i64 8, i64 8)
+      ret void
+    }
+    define void @main() {
+      %slot = alloca i8*
+      store i8* @old, i8** %slot
+      call void @allocate(i8** %slot)
+      %p = load i8*, i8** %slot
+      ret void
+    }
+  )");
+  solve();
+  EXPECT_EQ(pointsTo(value("p")).size(), 2u);
+  EXPECT_EQ(mayAlias(value("p"), module->getGlobalVariable("old")), true);
+}
+
+TEST_P(FlowSensitiveMigrationTest, IndirectExternalAllocationWritesMemory) {
+  build(R"(
+    @fp = global i32 (i8**, i64, i64)* @posix_memalign
+    declare i32 @posix_memalign(i8**, i64, i64)
+    define void @main() {
+      %slot = alloca i8*
+      store i8* null, i8** %slot
+      %f = load i32 (i8**, i64, i64)*, i32 (i8**, i64, i64)** @fp
+      %rc = call i32 %f(i8** %slot, i64 8, i64 8)
+      %p = load i8*, i8** %slot
+      ret void
+    }
+  )");
+  solve();
+  const auto result = pointsTo(value("p"));
+  ASSERT_EQ(result.size(), 1u);
+  EXPECT_TRUE(graph->getObjectInfo(*result.begin())->isHeap);
+}
+
 TEST_P(FlowSensitiveMigrationTest, UnknownPointeeMayAliasConcreteObject) {
   build(R"(
     @x = global i8 0

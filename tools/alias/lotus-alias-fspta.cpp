@@ -549,11 +549,8 @@ int main(int argc, char **argv) {
 
   auto isAllowedIndirectCall = [&](const CallBase *callSite,
                                    const Function *target) {
-    const std::vector<const Function *> allowed =
-        graphBuilder->getIndirectCallTargets(callSite);
-    if (allowed.empty())
-      return true;
-    return std::find(allowed.begin(), allowed.end(), target) != allowed.end();
+    return graphBuilder->isIndirectCallTargetAllowed(callSite, target)
+        .value_or(true);
   };
   auto connectIndirectCall = [&](const CallBase *callSite,
                                  const Function *target) {

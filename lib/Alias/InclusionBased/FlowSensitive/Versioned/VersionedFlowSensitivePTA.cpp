@@ -349,6 +349,14 @@ VersionedFlowSensitivePTA::objectsWithFields(const Value *pointer) const {
 
 bool VersionedFlowSensitivePTA::intrinsicMayDefine(
     const ActualOutSVFGNode &actualOut, ObjectID object) const {
+  for (const auto &allocation : actualOut.getAllocations()) {
+    const auto targets = expandIndirectObjects(allocation.destinations);
+    if (targets.count(object) ||
+        std::any_of(targets.begin(), targets.end(), [&](ObjectID target) {
+          return graph_->isUnknownObject(target);
+        }))
+      return true;
+  }
   const auto *intrinsic =
       dyn_cast_or_null<IntrinsicInst>(actualOut.getCallSite());
   if (!intrinsic || intrinsic->arg_size() == 0)
@@ -472,6 +480,10 @@ VersionedFlowSensitivePTA::relevantObjects() const {
       objects.insert(targets.begin(), targets.end());
     }
     if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(node)) {
+      for (const auto &allocation : actualOut->getAllocations()) {
+        const auto destinations = expandIndirectObjects(allocation.destinations);
+        objects.insert(destinations.begin(), destinations.end());
+      }
       const auto *intrinsic =
           dyn_cast_or_null<IntrinsicInst>(actualOut->getCallSite());
       if (intrinsic && intrinsic->arg_size() != 0 &&
@@ -1928,6 +1940,44 @@ bool VersionedFlowSensitivePTA::drainVersionPropagation() {
 
 bool VersionedFlowSensitivePTA::processIntrinsicActualOut(
     const ActualOutSVFGNode &actualOut) {
+  if (!actualOut.getAllocations().empty()) {
+    const CallBase *call = actualOut.getCallSite();
+    bool active = false;
+    PointsToSet changedObjects;
+    auto mergeVersion = [&](ObjectID object, const PointsToSet &values) {
+      const Version yielded = getYield(actualOut.getId(), object);
+      if (yielded == InvalidVersion)
+        return;
+      const PointsToSet copy(values);
+      auto &result = versionedPointsTo_[{mapObject(object), yielded}];
+      const auto before = result.size();
+      result.insert(copy.begin(), copy.end());
+      if (result.size() != before)
+        changedObjects.insert(object);
+    };
+    const auto definitions = expandIndirectObjects(actualOut.getDefSVFVars());
+    for (const auto &allocation : actualOut.getAllocations()) {
+      if (call->getCalledFunction() != allocation.callee &&
+          !graph_->hasConnectedCallee(call, allocation.callee))
+        continue;
+      active = true;
+      const auto targets =
+          accessTargets(allocation.destination, allocation.destinations);
+      for (ObjectID object : targets)
+        if (definitions.count(object) && !graph_->isConstantObject(object))
+          mergeVersion(object, PointsToSet{mapObject(allocation.object)});
+    }
+    if (active)
+      if (auto it = consume_.find(actualOut.getId()); it != consume_.end())
+        for (const auto &[object, version] : it->second)
+          mergeVersion(object, versionedPointsTo(object, version));
+    for (ObjectID object : changedObjects) {
+      const Version yielded = getYield(actualOut.getId(), object);
+      propagateVersion(object, yielded);
+      enqueueDependentStatements(object, yielded);
+    }
+    return !changedObjects.empty();
+  }
   const auto *intrinsic =
       dyn_cast_or_null<IntrinsicInst>(actualOut.getCallSite());
   if (!intrinsic || intrinsic->arg_size() < 2)
@@ -2514,8 +2564,8 @@ VersionedFlowSensitivePTA::mayAlias(const Value *lhs, const Value *rhs) const {
     for (ObjectID object : *set)
       if (graph_->isUnknownObject(object))
         return true;
-  *left = expandIndirectObjects(*left);
-  *right = expandIndirectObjects(*right);
+  *left = mapObjects(graph_->expandObjectsForAlias(*left));
+  *right = mapObjects(graph_->expandObjectsForAlias(*right));
   const PointsToSet *small = &*left;
   const PointsToSet *large = &*right;
   if (large->size() < small->size())

@@ -189,6 +189,16 @@ void APISpec::applyAlloc(FunctionSpec &spec,
       eff.sizeArgIndex = -1;
     }
   }
+  // Optional output destination, e.g. "posix_memalign ALLOC Arg2 OUT Arg0".
+  if (tokens.size() >= 3 && tokens[1] == "OUT") {
+    const ValueSelector destination = parseSelector(tokens[2]);
+    if (!destination.isValid || destination.kind != SelectorKind::Arg) {
+      llvm::errs() << "[APISpec] Warning: invalid allocation destination for '"
+                   << spec.functionName << "' — entry skipped\n";
+      return;
+    }
+    eff.destinationArgIndex = destination.index;
+  }
   spec.allocs.push_back(eff);
 }
 

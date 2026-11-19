@@ -753,8 +753,17 @@ public:
 
 /// @brief Callsite actual memory out
 class ActualOutSVFGNode : public MSSASVFGNode {
+public:
+  struct Allocation {
+    const llvm::Function *callee;
+    const llvm::Value *destination;
+    uint32_t object;
+    SVFGNodeBS destinations;
+  };
+
 private:
   const llvm::CallBase *callSite;
+  std::vector<Allocation> allocations;
 
 public:
   ActualOutSVFGNode(uint32_t id, const ICFGNode *icfg, const llvm::CallBase *cs,
@@ -762,6 +771,17 @@ public:
       : MSSASVFGNode(id, SVFGK::ActualOut, icfg, reg, pts, ver), callSite(cs) {}
 
   const llvm::CallBase *getCallSite() const override { return callSite; }
+  void addAllocation(const Allocation &allocation) {
+    allocations.push_back(allocation);
+  }
+  const std::vector<Allocation> &getAllocations() const { return allocations; }
+  void remapObjectIds(const ObjectIdRemap &map) override {
+    MSSASVFGNode::remapObjectIds(map);
+    for (auto &allocation : allocations) {
+      allocation.object = map(allocation.object);
+      allocation.destinations.remapIds(map);
+    }
+  }
 
   SVFG_NODE_KIND(ActualOut)
 };

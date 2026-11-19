@@ -60,6 +60,7 @@
 
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -351,6 +352,11 @@ private:
   /// @brief Last graph returned by build(); used for compatibility accessors.
   SVFG *lastBuiltSVFG = nullptr;
   std::unique_ptr<lotus::alias::AliasSpecManager> externalSpecs;
+  std::unordered_map<const llvm::CallBase *,
+                     std::vector<ActualOutSVFGNode::Allocation>>
+      externalAllocations;
+
+  void prepareExternalAllocations();
 
   // Materialize library return summaries as ordinary address/copy edges so
   // sparse, versioned and demand solvers share the same external semantics.
@@ -432,6 +438,10 @@ public:
   /// @brief Get indirect call targets using pointer analysis
   std::vector<const llvm::Function *>
   getIndirectCallTargets(const llvm::CallBase *call);
+  /// nullopt means no auxiliary PTA is available; false includes a known
+  /// empty candidate set, which must not silently disable the bound.
+  std::optional<bool> isIndirectCallTargetAllowed(
+      const llvm::CallBase *call, const llvm::Function *target);
 
   /// @brief Build SVFG with configuration
   ///
@@ -552,6 +562,7 @@ private:
   //===------------------------------------------------------------------===
 
   void buildCopyEdges();
+  void buildAggregateEdges();
   void buildDirectEdges();
   void buildLoadEdges();
   void buildStoreEdges();

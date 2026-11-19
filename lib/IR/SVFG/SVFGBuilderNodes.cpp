@@ -854,6 +854,52 @@ void SVFGBuilder::buildActualRetNodes() {
   }
 }
 
+void SVFGBuilder::prepareExternalAllocations() {
+  const Module *module = getModuleFromICFG(icfg);
+  if (!module || !externalSpecs)
+    return;
+  for (const Function &function : *module)
+    for (const BasicBlock &block : function)
+      for (const Instruction &inst : block) {
+        const auto *call = dyn_cast<CallBase>(&inst);
+        if (!call)
+          continue;
+        std::vector<const Function *> callees;
+        if (const Function *direct = call->getCalledFunction())
+          callees.push_back(direct);
+        else
+          callees = getIndirectCallTargets(call);
+        for (const Function *callee : callees) {
+          if (!callee->isDeclaration())
+            continue;
+          const auto *spec = externalSpecs->getAPISpec().get(
+              callee->getName().str());
+          if (!spec)
+            continue;
+          for (const auto &effect : spec->allocs) {
+            if (effect.destinationArgIndex < 0 ||
+                static_cast<unsigned>(effect.destinationArgIndex) >=
+                    call->arg_size())
+              continue;
+            const Value *destination =
+                call->getArgOperand(effect.destinationArgIndex);
+            if (!destination->getType()->isPointerTy())
+              continue;
+            const uint32_t object = allocateObjectId();
+            SVFG::ObjectInfo info;
+            info.isHeap = true;
+            info.baseObjId = object;
+            svfg->setObjectInfo(object, info);
+            svfg->setObjectValue(object, call);
+            svfg->setObjectDebug(object, "EXT_ALLOC(" + callee->getName().str() +
+                                            ")");
+            externalAllocations[call].push_back(
+                {callee, destination, object, getObjectIdsForValue(destination)});
+          }
+        }
+      }
+}
+
 void SVFGBuilder::connectExternalReturn(SVFG *graph, const CallBase *call,
                                         const Function *callee,
                                         std::vector<SVFGEdge *> &edges) {
@@ -883,7 +929,17 @@ void SVFGBuilder::connectExternalReturn(SVFG *graph, const CallBase *call,
 
   // malloc/new already have an address node rather than a copy result.
   bool modeled = isa<AddrSVFGNode>(result);
-  if (externalSpecs && externalSpecs->isAllocator(callee) && !modeled) {
+  const auto *spec = externalSpecs
+                         ? externalSpecs->getAPISpec().get(callee->getName().str())
+                         : nullptr;
+  const bool allocatesReturn =
+      spec && spec->isAllocator &&
+      (spec->allocs.empty() ||
+       std::any_of(spec->allocs.begin(), spec->allocs.end(),
+                   [](const lotus::AllocEffect &effect) {
+                     return effect.destinationArgIndex < 0;
+                   }));
+  if (allocatesReturn && !modeled) {
     const uint32_t object = allocateObjectId();
     SVFG::ObjectInfo info;
     info.isHeap = true;

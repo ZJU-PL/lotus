@@ -30,6 +30,19 @@
 using namespace lotus::analysis;
 using namespace llvm;
 
+SVFGNodeBS SVFG::expandObjectsForAlias(const SVFGNodeBS &objects) const {
+  SVFGNodeBS expanded = objects;
+  for (uint32_t object : objects) {
+    const ObjectInfo *info = getObjectInfo(object);
+    if (!info || info->baseObjId == 0 || info->baseObjId == object ||
+        isFieldInsensitiveObject(object)) {
+      const auto fields = getFieldObjects(object);
+      expanded.insert(fields.begin(), fields.end());
+    }
+  }
+  return expanded;
+}
+
 // Forward declarations for stat helpers defined later in this file.
 static void adjustNodeStat(SVFGStat &stat, SVFGNode *node, int delta);
 static void adjustEdgeStat(SVFGStat &stat, SVFGEdge *edge, int delta);

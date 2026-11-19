@@ -281,7 +281,7 @@ malloc ALLOC Arg0
 calloc ALLOC Arg1
 calloc COPY Ret R NULL V
 valloc ALLOC Arg0
-posix_memalign ALLOC Arg2
+posix_memalign ALLOC Arg2 OUT Arg0
 realloc ALLOC Arg1
 realloc COPY Ret V Arg0 V
 memalign ALLOC Arg1

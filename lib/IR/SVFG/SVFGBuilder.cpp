@@ -333,6 +333,8 @@ SVFG *SVFGBuilder::build(const ICFG *icfg, const SVFGBuilderConfig &cfg) {
   buildNodes();
   buildEdges();
 
+  prepareExternalAllocations();
+
   if (config.buildMSSA) {
     buildMemorySSA();
     buildMemoryPHINodes();
@@ -368,6 +370,7 @@ void SVFGBuilder::initialize(const ICFG *cfg) {
   ptaSolverWrapper.reset();
 
   valueToNode.clear();
+  externalAllocations.clear();
   objectQueryStack.clear();
   objectQueryResults.clear();
   valueToValueId.clear();
@@ -987,6 +990,30 @@ SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
       merge = cast->getOperand(0)->getType()->isPointerTy();
       if (merge)
         addOperand(cast->getOperand(0));
+    } else if (const auto *call = dyn_cast<CallBase>(ptr)) {
+      const Function *callee = call->getCalledFunction();
+      const auto *spec = callee && callee->isDeclaration() && externalSpecs
+                             ? externalSpecs->getAPISpec().get(
+                                   callee->getName().str())
+                             : nullptr;
+      if (spec)
+        for (const auto &effect : spec->copies)
+          if (effect.dst.kind == lotus::SelectorKind::Ret &&
+              effect.dstQualifier == lotus::QualifierKind::Value &&
+              effect.src.kind == lotus::SelectorKind::Arg &&
+              effect.srcQualifier == lotus::QualifierKind::Value &&
+              effect.src.index >= 0 &&
+              static_cast<unsigned>(effect.src.index) < call->arg_size()) {
+            merge = true;
+            addOperand(call->getArgOperand(effect.src.index));
+          }
+      if (merge) {
+        // Return aliases (notably realloc's original allocation) must also
+        // bound the graph's memory regions and variant-GEP collapses. The
+        // auxiliary solver may model only the fresh allocation alternative.
+        const auto auxiliary = convertPTAObjectsToObjIDs(getPointsToSet(ptr));
+        result.insert(auxiliary.begin(), auxiliary.end());
+      }
     }
     if (merge && !result.empty()) {
       graph->setObjectsForValue(ptr, result);
@@ -1603,6 +1630,15 @@ SVFGBuilder::getIndirectCallTargets(const CallBase *call) {
   }
 
   return targets;
+}
+
+std::optional<bool> SVFGBuilder::isIndirectCallTargetAllowed(
+    const CallBase *call, const Function *target) {
+  if (!config.usePointerAnalysis || !ptaSolverWrapper ||
+      !ptaSolverWrapper->solver)
+    return std::nullopt;
+  const auto targets = getIndirectCallTargets(call);
+  return std::find(targets.begin(), targets.end(), target) != targets.end();
 }
 
 bool SVFGBuilder::isHeapAllocation(const Instruction *inst) const {

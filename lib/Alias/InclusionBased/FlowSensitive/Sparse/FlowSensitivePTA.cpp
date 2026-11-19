@@ -1113,6 +1113,22 @@ bool FlowSensitivePTA::transfer(const SVFGNode &node) {
     }
   } else if (const auto *actualOut = dyn_cast<ActualOutSVFGNode>(&node)) {
     ++stats_.processedMSSA;
+    const CallBase *call = actualOut->getCallSite();
+    const PointsToSet definitions =
+        expandIndirectObjects(actualOut->getDefSVFVars());
+    for (const auto &allocation : actualOut->getAllocations()) {
+      if (call->getCalledFunction() != allocation.callee &&
+          !graph_->hasConnectedCallee(call, allocation.callee))
+        continue;
+      const PointsToSet targets =
+          accessTargets(allocation.destination, allocation.destinations);
+      for (ObjectID object : targets)
+        if (definitions.count(object) && !graph_->isConstantObject(object))
+          // An allocation through an argument may fail and preserve the old
+          // pointer. Its memory summary is a weak update even at a singleton.
+          merge(outgoingState()[mapObject(object)],
+                singleton(mapObject(allocation.object)));
+    }
     const auto *intrinsic =
         dyn_cast_or_null<IntrinsicInst>(actualOut->getCallSite());
     if (intrinsic &&
@@ -1655,9 +1671,10 @@ std::optional<bool> FlowSensitivePTA::mayAlias(const Value *lhs,
     for (ObjectID object : *set)
       if (graph_->isUnknownObject(object))
         return true;
-  // A field-insensitive pointee overlaps each field of its base object.
-  *left = expandIndirectObjects(*left);
-  *right = expandIndirectObjects(*right);
+  // SVF's alias contract includes all fields of a base-object pointee, even
+  // when transfers still distinguish its fields and permit strong updates.
+  *left = mapObjects(graph_->expandObjectsForAlias(*left));
+  *right = mapObjects(graph_->expandObjectsForAlias(*right));
   const PointsToSet *small = &*left, *large = &*right;
   if (large->size() < small->size())
     std::swap(small, large);
