@@ -337,3 +337,23 @@ Use a Release or RelWithDebInfo build for performance comparisons; Debug leaves
 the template-heavy saturation and affine operations unoptimized. `--timings`
 reports the instrumented projection, session-setup, saturation, and readout
 times; the CLI also reports facts, promotions, and rules.
+
+## Condensed Shared-RHS Dyck & Corridor Slicing (`DyckReachability.h`)
+
+[`DyckReachability.h`](../../../../include/CFL/InterleavedDyck/SPDS/DyckReachability.h)
+provides the demand-driven graph-slicing and fast Dyck reachability primitives
+used as Stage 1 and Stage 2a of the `Hybrid` dual-core pipeline:
+
+- **Bit-parallel SCC-DAG corridor slicing** (`sliceGraphForDemands`,
+  `sliceGraphOnCandidatePaths`): prunes edges outside any directed walk from
+  demanded sources to targets in 64-way word-parallel passes over topological
+  SCC order.
+- **Stage 1 Boolean projection upper bound** (`filterInterleavedBooleanAll`,
+  `filterInterleavedBooleanDemands`, `queryDyckReachableFromAnchor`): computes
+  `U_1 = D_P \cap D_B` via `Neutral`-SCC condensation and shared-RHS Dyck-1
+  tabulation.
+- **Stage 2a Union-Dyck certified lower bound**
+  (`DyckProjectionKind::UnionDyck`, `filterDyckReachableDemands`): evaluates a
+  single Dyck reachability problem `L_1 = D_{P \cup B}` over the disjoint union
+  of parentheses and brackets in bounded memory (without quadratic all-pairs CNF
+  tables).

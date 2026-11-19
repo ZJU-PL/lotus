@@ -49,6 +49,14 @@ public:
                                 std::size_t modulus);
   static HistoryObserver
   directSum(const std::vector<HistoryObserver> &observers);
+  // Symmetric 2*groups parity blocks (dimension 4*groups): paren IDs mod groups
+  // in blocks [0, groups) and bracket IDs mod groups in [groups, 2*groups).
+  static HistoryObserver labelParity(const Graph &graph, unsigned groups = 8);
+  // Single-sided groups parity blocks (dimension 2*groups, e.g. 16 for groups=8):
+  // observes only brackets (for P_call) or only parentheses (for P_field).
+  static HistoryObserver singleSidedParity(const Graph &graph,
+                                           unsigned groups = 8,
+                                           bool observe_brackets = true);
   // Stable graph-only policy: one non-default edge per branch first, then
   // remaining edges; finite budgets, no random hashes or client-written laws.
   static HistoryObserver automatic(const Graph &graph,

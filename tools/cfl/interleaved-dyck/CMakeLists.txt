@@ -1,6 +1,7 @@
 add_executable(lotus-cfl-interleaved-dyck
     main.cpp
     affine-spds/lotus-cfl-interleaved-dyck-affine-spds.cpp
+    hybrid/lotus-cfl-interleaved-dyck-hybrid.cpp
     spds/lotus-cfl-interleaved-dyck-spds.cpp
     unary/lotus-cfl-interleaved-dyck-unary.cpp
     staged-bounds/lotus-cfl-interleaved-dyck-staged-bounds.cpp
@@ -12,6 +13,7 @@ add_executable(lotus-cfl-interleaved-dyck
 
 target_link_libraries(lotus-cfl-interleaved-dyck PRIVATE
     CanaryInterleavedDyckAffineSPDS
+    CanaryInterleavedDyckHybrid
     CanaryInterleavedDyckSPDS
     CanaryInterleavedDyckUnary
     CanaryInterleavedDyckStagedBounds

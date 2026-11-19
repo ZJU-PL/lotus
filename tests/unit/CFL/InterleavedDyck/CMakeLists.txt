@@ -2,6 +2,7 @@
 # Unary, and StagedBounds engines).
 lotus_collect_test_sources(cfl_tests
   AffineSPDSTest.cpp
+  HybridTest.cpp
   LCLTest.cpp
   ILPTest.cpp
   MCFLTest.cpp

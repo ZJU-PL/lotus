@@ -10,6 +10,7 @@ The same structure is mirrored by `include/CFL/InterleavedDyck`.
 | [`StagedBounds`](StagedBounds/README.md) | Projected languages, union-Dyck lower bounds, parity refinement, and on-demand checks | Certified lower bound and progressively tighter upper bounds |
 | [`LCL`](LCL/README.md) | POPL 2017 linear-conjunctive-language saturation with gray-node refinement | Sound upper bound for directed, typed interleaved Dyck |
 | [`ILP`](ILP/README.md) | POPL 2023 single-source/single-target path expressions and integer parenthesis counting | Demand-driven InterDyck over-approximation |
+| [`Hybrid`](Hybrid/README.md) | Dual-Core Sandwich demand pipeline (`SPDS U_1 -> Union-Dyck LB L_1 -> ParitySemiring AffineSPDS`) | Bounded-memory certified lower bound and tight demand upper bound |
 | [`MCFL`](MCFL/README.md) | Normal-form MCFG solver and the dimension-indexed `G_d` hierarchy | Exact for a supplied MCFG; underapproximation for generated Interleaved-Dyck grammars |
 | [`GraphReduction`](GraphReduction/README.md) | PLDI 2020 file-oriented graph simplification | Reduced graph preserving the reduction's reachability property |
 
@@ -20,6 +21,7 @@ lotus::cfl::interleaved_dyck
 ├── unary
 ├── spds
 ├── affine_spds
+├── hybrid
 ├── staged_bounds
 ├── lcl
 ├── ilp
@@ -39,6 +41,7 @@ The SAS'23 mutual-refinement CNF engine is internal to `StagedBounds`, under
 | Exact bidirected unary reachability | `interleaved_dyck::unary::AdaptiveSolver` |
 | POPL 2022 fixed-counter baseline | `interleaved_dyck::unary::FixedCounterSolver` |
 | Typed lower and upper bounds | `interleaved_dyck::staged_bounds::Solver` |
+| Dual-Core Sandwich demand lower and upper bounds | `interleaved_dyck::hybrid::Solver` |
 | POPL 2017 typed upper bound | `interleaved_dyck::lcl::Solver` |
 | POPL 2023 single-pair ILP upper bound | `interleaved_dyck::ilp::Solver` |
 | Dimension-indexed certified pairs | `interleaved_dyck::mcfl::InterleavedDyckSolver` |

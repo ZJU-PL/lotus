@@ -104,6 +104,57 @@ HistoryObserver::directSum(const std::vector<HistoryObserver> &observers) {
   }
   return result;
 }
+HistoryObserver HistoryObserver::labelParity(const Graph &graph,
+                                             unsigned groups) {
+  if (groups == 0)
+    throw std::invalid_argument("labelParity groups must be positive");
+  const std::size_t nblocks = static_cast<std::size_t>(groups) * 2U;
+  const std::size_t dim = nblocks * 2U;
+  HistoryObserver result(dim);
+  result.blocks_.clear();
+  result.blocks_.reserve(nblocks);
+  std::vector<Matrix> toggles(nblocks, Matrix::identity(dim));
+  for (std::size_t b = 0; b < nblocks; ++b) {
+    result.blocks_.emplace_back(2U * b, 2U);
+    toggles[b].set(2U * b, 2U * b + 1U);
+  }
+  for (const auto &edge : graph.edges()) {
+    if (edge.label.kind == LabelKind::OpenParenthesis ||
+        edge.label.kind == LabelKind::CloseParenthesis) {
+      result.set(edge, toggles[edge.label.id % groups]);
+    } else if (edge.label.kind == LabelKind::OpenBracket ||
+               edge.label.kind == LabelKind::CloseBracket) {
+      result.set(edge, toggles[groups + (edge.label.id % groups)]);
+    }
+  }
+  return result;
+}
+HistoryObserver HistoryObserver::singleSidedParity(const Graph &graph,
+                                                   unsigned groups,
+                                                   bool observe_brackets) {
+  if (groups == 0)
+    throw std::invalid_argument("singleSidedParity groups must be positive");
+  const std::size_t nblocks = static_cast<std::size_t>(groups);
+  const std::size_t dim = nblocks * 2U;
+  HistoryObserver result(dim);
+  result.blocks_.clear();
+  result.blocks_.reserve(nblocks);
+  std::vector<Matrix> toggles(nblocks, Matrix::identity(dim));
+  for (std::size_t b = 0; b < nblocks; ++b) {
+    result.blocks_.emplace_back(2U * b, 2U);
+    toggles[b].set(2U * b, 2U * b + 1U);
+  }
+  const LabelKind open =
+      observe_brackets ? LabelKind::OpenBracket : LabelKind::OpenParenthesis;
+  const LabelKind close =
+      observe_brackets ? LabelKind::CloseBracket : LabelKind::CloseParenthesis;
+  for (const auto &edge : graph.edges()) {
+    if (edge.label.kind == open || edge.label.kind == close) {
+      result.set(edge, toggles[edge.label.id % groups]);
+    }
+  }
+  return result;
+}
 HistoryObserver HistoryObserver::automatic(const Graph &graph,
                                            ObserverOptions options) {
   const auto count = std::min(options.max_events, graph.edges().size());

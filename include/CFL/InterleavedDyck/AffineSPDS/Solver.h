@@ -140,6 +140,19 @@ private:
   mutable std::map<StackKey, HistoryComparison> stack_cache_;
 };
 
+struct SingleSidedParityOptions {
+  // Number of 2x2 parity blocks per projection; the default best observer sets
+  // groups = 32 (64-dim virtual observer backed by ParitySemiring<uint32_t>)
+  // with corridor-local active rehashing (automatically narrowing to uint8_t or
+  // uint16_t when <= 8 or <= 16 matched delimiters are active in a corridor).
+  unsigned groups = 32;
+  // When true (default), drops corridor-unmatched delimiters and rehashes only
+  // active matched delimiter IDs in each demand corridor, eliminating fixed
+  // modulo collisions when active delimiter types <= groups.
+  bool corridor_active_rehash = true;
+  ComparisonMode mode = ComparisonMode::Joint;
+};
+
 // Fixed computational algebra, no SAT/observer synthesis. Computes exact
 // affine hulls for EACH projected witness language under the given observer.
 // Their intersection is a sound upper bound, NOT a concrete two-stack witness.
@@ -151,6 +164,19 @@ public:
   PreparedAnalysis prepare(const Graph &graph,
                            const HistoryObserver &observer) const;
 
+  Result analyzeSingleSidedParityAll(
+      const Graph &graph, SingleSidedParityOptions parity = {}) const;
+  Result analyzeSingleSidedParityFrom(
+      const Graph &graph, Vertex source,
+      SingleSidedParityOptions parity = {}) const;
+  Result analyzeSingleSidedParityTo(
+      const Graph &graph, Vertex target,
+      SingleSidedParityOptions parity = {}) const;
+  Result analyzeSingleSidedParityDemands(
+      const Graph &graph, const std::vector<Pair> &demands,
+      SingleSidedParityOptions parity = {},
+      spds::DemandDirection direction = spds::DemandDirection::Auto) const;
+
 private:
   void validate(const Graph &graph, const HistoryObserver &observer) const;
   Options options_;
@@ -160,6 +186,23 @@ class PreparedAnalysis {
 public:
   QueryResult queryFrom(Vertex source) const;
   QueryResult queryTo(Vertex target) const;
+  QueryResult queryPair(
+      Vertex source, Vertex target,
+      spds::DemandDirection direction = spds::DemandDirection::Auto,
+      ComparisonMode mode = ComparisonMode::Joint) const;
+  QueryResult queryPairStacks(
+      Vertex source, Vertex target, const std::vector<unsigned> &calls,
+      const std::vector<unsigned> &fields,
+      spds::DemandDirection direction = spds::DemandDirection::Auto,
+      ComparisonMode mode = ComparisonMode::Joint) const;
+  HistoryComparison compare(
+      Vertex source, Vertex target,
+      spds::DemandDirection direction = spds::DemandDirection::Auto) const;
+  bool mayReach(
+      Vertex source, Vertex target,
+      spds::DemandDirection direction = spds::DemandDirection::Auto) const {
+    return compare(source, target, direction).mayReach();
+  }
   Result analyzeFrom(Vertex source,
                      ComparisonMode mode = ComparisonMode::Joint) const;
   Result analyzeTo(Vertex target,
@@ -177,6 +220,15 @@ private:
   explicit PreparedAnalysis(std::shared_ptr<Storage> storage);
   QueryResult query(Vertex anchor, spds::Direction direction,
                     const std::vector<Vertex> *endpoints = nullptr) const;
+  QueryResult queryPairImpl(Vertex source, Vertex target,
+                            const std::vector<unsigned> *calls,
+                            const std::vector<unsigned> *fields,
+                            spds::DemandDirection direction,
+                            ComparisonMode mode) const;
+  Result analyzeAnchor(Vertex anchor, spds::Direction direction,
+                       ComparisonMode mode) const;
+  Result analyzeSingleSidedAnchor(Vertex anchor, spds::Direction direction,
+                                  SingleSidedParityOptions parity) const;
   std::shared_ptr<Storage> storage_;
 };
 

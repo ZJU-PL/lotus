@@ -373,6 +373,18 @@ wall-clock or memory-budget controller.
 
 The CLI buffers result output until the complete requested operation succeeds.
 Exit codes are 0 (complete), 2 (invalid input/I/O), and 3 (resource failure).
+Use `--label-parity N` to construct an in-memory block-diagonal parity observer
+with `N` parenthesis groups (`id mod N`) and `N` bracket groups (`id mod N`,
+total matrix dimension `4N`) without serializing an external observer file.
+For empty-stack queries, prefer `--best-observer` (equivalent to
+`--single-sided-parity 32 --corridor-rehash`, matching the default
+`SingleSidedParityOptions` in C++) or `--single-sided-parity N [--corridor-rehash]`:
+`P_call` observes only the `N` bracket parity blocks and `P_field` observes only
+the `N` parenthesis parity blocks (halving matrix dimension from `4N` to `2N`),
+backed by register-packed `ParitySemiring<Word>` (`uint8_t`/`uint16_t`/`uint32_t`/
+`uint64_t`) with `Neutral`-SCC contraction and corridor-local active delimiter
+rehashing (automatically narrowing the `Word` width when fewer than 9 or 17
+active matched delimiters appear in a demand corridor).
 
 Tests cover algebraic laws, exact small oracles, cyclic/recursive cases,
 post*/pre*, incremental updates, observer round trips, wide matrices, and the

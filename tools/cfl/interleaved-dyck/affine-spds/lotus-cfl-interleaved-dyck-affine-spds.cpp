@@ -56,6 +56,14 @@ void usage() {
          "  --order-pairs N         automatic ordered-pair budget (default 2)\n"
          "  --identity              identity observer, equivalent to Boolean "
          "SPDS\n"
+         "  --label-parity N        in-memory label-parity observer with N "
+         "paren + N bracket groups\n"
+         "  --single-sided-parity N asymmetric N-block observer per projection "
+         "(2*N dim, e.g. 64 for N=32)\n"
+         "  --corridor-rehash       rehash active matched delimiters per "
+         "corridor (with --single-sided-parity)\n"
+         "  --best-observer         best single-sided parity observer "
+         "(--single-sided-parity 32 --corridor-rehash)\n"
          "  --observer FILE         read a shared original-edge matrix map\n"
          "  --dump-observer FILE    save the map, including independent-block "
          "metadata\n"
@@ -226,7 +234,9 @@ int runInterleavedDyckAffineSPDS(int argc, char **argv) {
     std::optional<std::vector<unsigned>> call_stack, field_stack;
     bool single = false, all_pairs = false, identity = false, pairs = false;
     bool json = false, show_certificate = false, positional = false,
-         timings = false, feature_options = false;
+         timings = false, feature_options = false, corridor_rehash = false,
+         best_observer = false;
+    unsigned label_parity_groups = 0, single_sided_groups = 0;
     std::string path, observer_path, dump_path, queries_path, mode = "joint";
     spds::DemandDirection demand_direction = spds::DemandDirection::Auto;
     std::vector<dyck::Vertex> vertices;
@@ -293,7 +303,19 @@ int runInterleavedDyckAffineSPDS(int argc, char **argv) {
         feature_options = true;
       } else if (!positional && arg == "--observer")
         observer_path = argument(i);
-      else if (!positional && arg == "--dump-observer")
+      else if (!positional && arg == "--label-parity") {
+        label_parity_groups = number<unsigned>(argument(i));
+        if (label_parity_groups == 0)
+          throw std::invalid_argument("--label-parity must be >= 1");
+      } else if (!positional && arg == "--single-sided-parity") {
+        single_sided_groups = number<unsigned>(argument(i));
+        if (single_sided_groups == 0)
+          throw std::invalid_argument("--single-sided-parity must be >= 1");
+      } else if (!positional && arg == "--corridor-rehash") {
+        corridor_rehash = true;
+      } else if (!positional && arg == "--best-observer") {
+        best_observer = true;
+      } else if (!positional && arg == "--dump-observer")
         dump_path = argument(i);
       else if (!positional && arg == "--mode")
         mode = argument(i);
@@ -354,10 +376,30 @@ int runInterleavedDyckAffineSPDS(int argc, char **argv) {
          options.brackets == spds::StackAcceptance::Any))
       throw std::invalid_argument(
           "do not combine explicit stacks with prefix flags");
-    if ((!observer_path.empty() && (identity || feature_options)) ||
-        (identity && feature_options))
-      throw std::invalid_argument("choose automatic feature budgets, "
-                                  "--identity, or --observer, not a mixture");
+    const unsigned obs_modes =
+        (observer_path.empty() ? 0U : 1U) + (identity ? 1U : 0U) +
+        (feature_options ? 1U : 0U) + (label_parity_groups > 0 ? 1U : 0U) +
+        (single_sided_groups > 0 ? 1U : 0U) + (best_observer ? 1U : 0U);
+    if (obs_modes > 1U)
+      throw std::invalid_argument(
+          "choose automatic feature budgets, --identity, --label-parity, "
+          "--single-sided-parity, --best-observer, or --observer, not a mixture");
+    if (corridor_rehash && single_sided_groups == 0 && !best_observer)
+      throw std::invalid_argument(
+          "--corridor-rehash requires --single-sided-parity");
+    if (best_observer) {
+      if (corridor_rehash)
+        throw std::invalid_argument(
+            "do not combine --best-observer with --corridor-rehash");
+      const affine::SingleSidedParityOptions best;
+      single_sided_groups = best.groups;
+      corridor_rehash = best.corridor_active_rehash;
+    }
+    if (single_sided_groups > 0 &&
+        (call_stack || field_stack || show_certificate || !dump_path.empty()))
+      throw std::invalid_argument(
+          "--single-sided-parity/--best-observer do not support explicit stacks, "
+          "--certificate, or --dump-observer");
     if (!queries_path.empty() &&
         (options.parentheses != spds::StackAcceptance::Empty ||
          options.brackets != spds::StackAcceptance::Empty) &&
@@ -378,7 +420,9 @@ int runInterleavedDyckAffineSPDS(int argc, char **argv) {
       if (!input)
         throw std::invalid_argument("cannot open observer file");
       observer = affine::HistoryObserver::read(input);
-    } else if (!identity) {
+    } else if (label_parity_groups > 0) {
+      observer = affine::HistoryObserver::labelParity(graph, label_parity_groups);
+    } else if (!identity && single_sided_groups == 0) {
       try {
         observer = affine::HistoryObserver::automatic(graph, options.observer);
       } catch (const std::length_error &error) {
@@ -430,7 +474,51 @@ int runInterleavedDyckAffineSPDS(int argc, char **argv) {
                         : "post*")
           << '\n';
     dyck::PairSet candidates;
-    if (!queries_path.empty()) {
+    if (single_sided_groups > 0) {
+      affine::SingleSidedParityOptions ss_opts;
+      ss_opts.groups = single_sided_groups;
+      ss_opts.corridor_active_rehash = corridor_rehash;
+      ss_opts.mode = comparison_mode;
+      if (!queries_path.empty()) {
+        auto demands = readDemands(queries_path);
+        auto result = solver.analyzeSingleSidedParityDemands(
+            graph, demands, ss_opts, demand_direction);
+        candidates = std::move(result.pairs);
+        if (json)
+          out << "\"requested_pairs\":" << demands.size() << ',';
+        else
+          out << "requested-pairs: " << demands.size() << '\n';
+        statistics(out, result.statistics, json, timings, observer_us);
+      } else if (source || target) {
+        if (single) {
+          const auto direction = reverse ? spds::DemandDirection::Pre
+                                         : spds::DemandDirection::Post;
+          auto result = solver.analyzeSingleSidedParityDemands(
+              graph, {{*source, *target}}, ss_opts, direction);
+          const bool selected = result.pairs.count({*source, *target}) != 0;
+          if (selected)
+            candidates.insert({*source, *target});
+          if (json) {
+            out << "\"source\":" << *source << ",\"target\":" << *target
+                << ",\"may_reach\":" << boolean(selected) << ',';
+          } else {
+            out << "query: " << answer(selected) << '\n';
+          }
+          statistics(out, result.statistics, json, timings, observer_us);
+        } else {
+          auto result = reverse ? solver.analyzeSingleSidedParityTo(
+                                      graph, *target, ss_opts)
+                                : solver.analyzeSingleSidedParityFrom(
+                                      graph, *source, ss_opts);
+          candidates = std::move(result.pairs);
+          statistics(out, result.statistics, json, timings, observer_us);
+        }
+      } else {
+        auto result = solver.analyzeSingleSidedParityAll(graph, ss_opts);
+        candidates = std::move(result.pairs);
+        statistics(out, result.statistics, json, timings, observer_us);
+      }
+    } else if (!queries_path.empty()) {
       auto demands = readDemands(queries_path);
       auto direction = demand_direction;
       if (direction == spds::DemandDirection::Auto &&
@@ -447,11 +535,20 @@ int runInterleavedDyckAffineSPDS(int argc, char **argv) {
       statistics(out, result.statistics, json, timings, observer_us);
     } else if (source || target) {
       if (single) {
+        const auto direction =
+            reverse ? spds::DemandDirection::Pre : spds::DemandDirection::Post;
         auto result =
-            reverse ? analysis.queryTo(*target) : analysis.queryFrom(*source);
+            (call_stack || field_stack)
+                ? analysis.queryPairStacks(
+                      *source, *target,
+                      call_stack.value_or(std::vector<unsigned>{}),
+                      field_stack.value_or(std::vector<unsigned>{}), direction,
+                      comparison_mode)
+                : analysis.queryPair(*source, *target, direction,
+                                     comparison_mode);
         const auto vertex = reverse ? *source : *target;
         auto comparison =
-            call_stack || field_stack
+            (call_stack || field_stack)
                 ? result.compareStacks(
                       vertex, call_stack.value_or(std::vector<unsigned>{}),
                       field_stack.value_or(std::vector<unsigned>{}))

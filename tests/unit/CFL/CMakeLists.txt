@@ -15,6 +15,7 @@ add_lotus_collected_test_suite(cfl_tests
     CanaryInterleavedDyckILP
     CanaryInterleavedDyckSPDS
     CanaryInterleavedDyckAffineSPDS
+    CanaryInterleavedDyckHybrid
     CanaryInterleavedDyckUnary
     CanaryInterleavedDyckStagedBounds
     CanaryInterleavedDyckMCFL
