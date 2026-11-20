@@ -5,6 +5,7 @@
 #include "Analysis/CallGraph/CallGraphAnalysisType.h"
 #include "Annotation/Taint/TaintConfigParser.h"
 #include "Dataflow/ControlFlow/InterCFG.h"
+#include "Dataflow/IFDS/Core/SharedAnalysisServices.h"
 
 #include <functional>
 #include <memory>
@@ -83,6 +84,13 @@ public:
   std::shared_ptr<const lotus::DIBasedTypeHierarchy> type_hierarchy();
   std::shared_ptr<const AnalysisGraph> graph();
   std::shared_ptr<const TaintConfig> taint_config() const { return m_taint; }
+  std::shared_ptr<const FunctionIndex> function_index();
+  std::shared_ptr<const CallGraphSCCs> call_graph_sccs();
+  std::shared_ptr<const UsedGlobals> used_globals();
+  /// Exact reachability of known call edges only. A false result cannot exclude
+  /// paths through unresolved calls. This shares the SCC decomposition.
+  std::shared_ptr<const lotus::graph::IntervalReachabilityIndex>
+  call_graph_reachability();
   void invalidate();
 
 private:
@@ -93,5 +101,9 @@ private:
   std::shared_ptr<lotus::DIBasedTypeHierarchy> m_hierarchy;
   std::shared_ptr<lotus::LLVMVFTableProvider> m_vtables;
   std::shared_ptr<const AnalysisGraph> m_graph;
+  std::shared_ptr<const FunctionIndex> m_functions;
+  std::shared_ptr<const CallGraphSCCs> m_sccs;
+  std::shared_ptr<const UsedGlobals> m_globals;
+  std::shared_ptr<const lotus::graph::IntervalReachabilityIndex> m_reachability;
 };
 } // namespace ifds

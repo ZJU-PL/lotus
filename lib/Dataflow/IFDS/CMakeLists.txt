@@ -6,6 +6,7 @@
 # Framework core
 set(IFDS_FRAMEWORK_SOURCES
   AnalysisSession.cpp
+  SharedAnalysisServices.cpp
   Debug/IFDSDebugUtils.cpp
 )
 

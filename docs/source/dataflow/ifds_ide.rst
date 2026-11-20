@@ -220,3 +220,46 @@ Examples
 
 For other command-line tools that build on IFDS/IDE, see
 :doc:`../tools/checker/index`.
+
+Shared graph services
+=====================
+
+``AnalysisSession`` lazily shares the following immutable derived objects:
+
+* ``function_index()``: dense ``FunctionId`` values in module order, including
+  declarations and functions unreachable from the configured entry points.
+* ``call_graph_sccs()``: SCC membership, members, callee/caller condensation
+  edges, and cycle flags. Component IDs are sinks first: a caller component
+  has a greater ID than its distinct callee components.
+* ``used_globals()``: per-function direct references and transitive SCC summaries.
+* ``call_graph_reachability()``: an interval index sharing that SCC decomposition.
+
+.. code-block:: cpp
+
+   auto functions = session.function_index();
+   auto id = functions->id(module.getFunction("main"));
+   if (id) {
+     auto scc = session.call_graph_sccs()->componentOf(*id);
+     const auto &usage = session.used_globals()->transitive(*id);
+     bool might_use_g = usage.mayUse(module.getGlobalVariable("g"));
+   }
+
+Global summaries retain constants and non-pointer globals. They collect named
+references through constant expressions, aliases and global initializers, and
+propagate them along known call edges. ``may_access_unknown_globals`` records
+unresolved calls, memory-accessing declarations and unresolved pointer-based
+memory accesses; it propagates to callers. ``mayUse`` returns true for any
+non-null global when that flag is set. The reference set alone must not be used
+to rule out effects in such cases. These are usage summaries, not precise
+read/write, alias or points-to summaries.
+
+The call-graph index answers structural reachability through known edges only.
+A negative answer cannot exclude paths through unknown targets. No unknown
+callee is converted into a fabricated SCC vertex.
+
+All services follow the existing session lifetime contract: the module and LLVM
+context outlive users; IDs and results belong to one snapshot. After any IR
+mutation, call ``invalidate()`` and reacquire every derived service. Retaining a
+shared pointer keeps an old object alive but does not make it valid after IR
+mutation. Session service construction is not thread-safe. Completed snapshots
+can be queried read-only while the module remains unchanged.

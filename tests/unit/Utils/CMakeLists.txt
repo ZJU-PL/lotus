@@ -5,6 +5,7 @@ add_subdirectory(Parallel)
 lotus_collect_test_sources(utils_tests
   UtilsTestMain.cpp
   GraphSlicerTest.cpp
+  IntervalReachabilityTest.cpp
   LLVMCallUtilsTest.cpp
   LLVMFunctionUtilsTest.cpp
   StringUtilsTest.cpp
