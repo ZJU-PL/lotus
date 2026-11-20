@@ -76,6 +76,9 @@ lotus-dfa-mono --analysis=liveness --stdout /path/to/file.bc
 # IFDS driver
 lotus-dfa-ifds --analysis=taint --stdout /path/to/file.bc
 
+# Optionally treat main's pointer arguments as taint sources
+lotus-dfa-ifds --analysis=taint --taint-main-args --stdout /path/to/file.bc
+
 # Shared graph/model services and certified sparse propagation
 lotus-dfa-ifds --analysis=taint --taint-config=config/taint.spec \
   --call-graph=otf --entry-point=main --sparse --statistics --stdout /path/to/file.bc

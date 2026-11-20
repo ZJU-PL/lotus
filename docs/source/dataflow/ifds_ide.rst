@@ -173,6 +173,9 @@ and does not promise a general memory reduction.
    build/bin/lotus-dfa-ifds input.ll --analysis=taint \
      --taint-config=config/taint.spec --call-graph=otf --sparse --statistics --stdout
 
+By default, taint sources come from the configured source model. To also treat
+pointer arguments to ``main`` as tainted inputs, pass ``--taint-main-args``.
+
 The dense/sparse unit tests compare findings on an identity-heavy synthetic
 fixture and check facts and values at every instruction while preserving
 summaries and ESG edges. Timing, job-count, and RSS measurements require an

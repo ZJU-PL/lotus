@@ -507,10 +507,13 @@ TaintAnalysis::initial_facts(const llvm::Function *main) {
   FactSet result;
   result.insert(zero_fact());
 
-  // Taint command line arguments
-  for (const llvm::Argument &arg : main->args()) {
-    if (arg.getType()->isPointerTy()) {
-      result.insert(TaintFact::tainted_var(&arg));
+  // Taint main's pointer parameters only when explicitly requested. This
+  // keeps configured source functions in control of the default source model.
+  if (m_config.taint_main_args && main->getName() == "main") {
+    for (const llvm::Argument &arg : main->args()) {
+      if (arg.getType()->isPointerTy()) {
+        result.insert(TaintFact::tainted_var(&arg));
+      }
     }
   }
 
