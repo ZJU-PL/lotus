@@ -94,3 +94,8 @@ Klein, Yves Le Traon, Damien Octeau, and Patrick D. McDaniel.
 - SAS 03: Weighted Pushdown Systems and Their Application to Interprocedural Dataflow Analysis. Thomas Reps, Stefan Schwoon, and Somesh Jha.
 - Precise Interprocedural Dataflow Analysis with Applications to Constant Propagation
 - POPL 95: Precise Interprocedural Dataflow Analysis via Graph Reachability. Thomas Reps, Susan Horwitz, and Mooly Sagiv.
+
+## Imported API protocols
+
+`Analyses/TypeStateDescriptions.h` supplies file-I/O and OpenSSL descriptions
+for `IDETypeState`. See [usage, provenance, and limitations](../../../third-party/phasar/README.md).

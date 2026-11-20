@@ -38,7 +38,8 @@ endforeach()
 lotus_collect_test_sources(dataflow_tests DataflowTestMain.cpp)
 add_lotus_collected_test_suite(dataflow_tests
   CUSTOM_MAIN
-  LINK_LIBS ${dataflow_test_libs})
+  LINK_LIBS ${dataflow_test_libs}
+  COMPILE_DEFINITIONS LOTUS_PHASAR_CONFIG_DIR="${PROJECT_SOURCE_DIR}/config")
 
 lotus_test_group_enabled(dataflow vasco vasco_selected)
 if(vasco_selected)

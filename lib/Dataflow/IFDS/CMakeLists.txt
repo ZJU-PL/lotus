@@ -17,6 +17,7 @@ set(IFDS_CLIENT_SOURCES
   Analyses/IFDSReachingDefinitions.cpp
   Analyses/IDEConstantPropagation.cpp
   Analyses/IDETypeState.cpp
+  Analyses/TypeStateDescriptions.cpp
   Analyses/IDEProtoAnalysis.cpp
   Analyses/IDEExtendedTaintAnalysis.cpp
   Analyses/IDEFeatureTaintAnalysis.cpp
