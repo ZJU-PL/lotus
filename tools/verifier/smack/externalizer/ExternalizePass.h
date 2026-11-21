@@ -1,8 +1,7 @@
 //
 // This file is distributed under the MIT License. See LICENSE for details.
 //
-#ifndef EXTERNALIZEPASS_H
-#define EXTERNALIZEPASS_H
+#pragma once
 
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
@@ -16,4 +15,3 @@ struct ExternalizePass : public llvm::ModulePass {
   virtual bool runOnModule(llvm::Module &M) override;
 };
 } // namespace externalize
-#endif // EXTERNALIZEPASS_H

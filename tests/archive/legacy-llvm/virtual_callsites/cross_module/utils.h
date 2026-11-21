@@ -1,8 +1,5 @@
-#ifndef UTILS_H_
-#define UTILS_H_
+#pragma once
 
 #include "base.h"
 
 void callFunction(base &b);
-
-#endif

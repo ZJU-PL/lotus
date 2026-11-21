@@ -9,9 +9,6 @@
  * @ingroup TypeQualifier
  */
 
-#ifndef _CRANGE_H
-#define _CRANGE_H
-
 #pragma once
 
 #include <llvm/IR/ConstantRange.h>
@@ -61,5 +58,3 @@ public:
     return makeFullSet(getBitWidth());
   }
 };
-
-#endif

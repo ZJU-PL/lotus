@@ -1,8 +1,7 @@
 //
 // This file is distributed under the MIT License. See LICENSE for details.
 //
-#ifndef PTHREADTYPES_H
-#define PTHREADTYPES_H
+#pragma once
 #define _BITS_PTHREADTYPES_H 1
 
 /* Mutex types.  */
@@ -47,5 +46,3 @@ typedef int pthread_rwlockattr_t;
 struct sched_param {
   int dummy;
 };
-
-#endif

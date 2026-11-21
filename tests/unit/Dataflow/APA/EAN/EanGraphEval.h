@@ -1,5 +1,4 @@
-#ifndef LOTUS_TEST_EAN_GRAPHEVAL_H_
-#define LOTUS_TEST_EAN_GRAPHEVAL_H_
+#pragma once
 
 // Graph-side interpreter for the boolean-matrix Kleene oracle: evaluates e-nodes
 // directly on the e-graph so a test can assert that EVERY e-node in EVERY class
@@ -67,5 +66,3 @@ inline bool allClassesConsistent(ean::Graph &g,
 }
 
 } // namespace lotus_test_ean
-
-#endif // LOTUS_TEST_EAN_GRAPHEVAL_H_

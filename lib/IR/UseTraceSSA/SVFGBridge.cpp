@@ -638,7 +638,7 @@ void appendTemporalFacts(
 SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
                                                 const llvm::Module &module,
                                                 NativeHistoryMode mode,
-                                                NativeHistoryOptions options) {
+                                                const NativeHistoryOptions &options) {
   SVFGConstructionInput input;
   std::map<const llvm::Function *, Layout> layouts;
   PhaseTimer timer(options);

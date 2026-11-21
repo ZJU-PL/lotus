@@ -133,8 +133,8 @@ ObjectBatchResult QueryEngine::runObjects(const ObjectBatchQuery &request) const
   result.found = result.notFound = result.unknown = u.none();
   auto &stats = result.statistics;
   stats.candidateObjects = u.objects().size();
-  const Mask emptyMask = std::make_shared<MaskBits>(u.objects().size());
-  const Mask allMask =
+  Mask emptyMask = std::make_shared<MaskBits>(u.objects().size());
+  Mask allMask =
       u.objects().empty()
           ? emptyMask
           : std::make_shared<MaskBits>(u.objects().size(), true);

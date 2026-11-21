@@ -1,8 +1,7 @@
 //
 // This file is distributed under the MIT License. See LICENSE for details.
 //
-#ifndef SMACK_CONTRACTS_H_
-#define SMACK_CONTRACTS_H_
+#pragma once
 
 #include <stdbool.h>
 
@@ -31,5 +30,3 @@ void __CONTRACT_invariant(bool expr);
 
 // TODO provide procedure “result” expression
 // int result(void);
-
-#endif

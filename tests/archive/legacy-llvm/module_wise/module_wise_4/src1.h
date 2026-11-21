@@ -1,5 +1,4 @@
-#ifndef SRC1_H_
-#define SRC1_H_
+#pragma once
 
 struct MyStruct {
   int i = 0;
@@ -8,5 +7,3 @@ struct MyStruct {
 void foo(MyStruct &s);
 
 void bar(MyStruct &s);
-
-#endif

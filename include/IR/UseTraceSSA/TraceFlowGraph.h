@@ -1,5 +1,5 @@
-#ifndef LOTUS_IR_USETRACESSA_TRACEFLOWGRAPH_H
-#define LOTUS_IR_USETRACESSA_TRACEFLOWGRAPH_H
+#pragma once
+
 
 #include "IR/UseTraceSSA/UseTraceSSA.h"
 
@@ -167,4 +167,3 @@ private:
 
 } // namespace usetracessa
 } // namespace lotus
-#endif

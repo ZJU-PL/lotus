@@ -1,5 +1,5 @@
-#ifndef LOTUS_IR_USETRACESSA_USETRACESSA_H
-#define LOTUS_IR_USETRACESSA_USETRACESSA_H
+#pragma once
+
 
 #include <cstdint>
 #include <iosfwd>
@@ -173,4 +173,3 @@ private:
 
 } // namespace usetracessa
 } // namespace lotus
-#endif

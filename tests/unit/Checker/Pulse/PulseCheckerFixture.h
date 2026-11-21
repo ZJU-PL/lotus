@@ -8,8 +8,7 @@
  * so every test TU can use them without textual inclusion of .inc fragments.
  */
 
-#ifndef LOTUS_UNITTEST_CHECKER_PULSE_CHECKER_FIXTURE_H_
-#define LOTUS_UNITTEST_CHECKER_PULSE_CHECKER_FIXTURE_H_
+#pragma once
 
 #include "Checker/Framework/BugReport.h"
 #include "Checker/Framework/BugReportMgr.h"
@@ -123,5 +122,3 @@ protected:
     return nullptr;
   }
 };
-
-#endif // LOTUS_UNITTEST_CHECKER_PULSE_CHECKER_FIXTURE_H_

@@ -1,8 +1,5 @@
-#ifndef SRC2_H_
-#define SRC2_H_
+#pragma once
 
 #include "src1.h"
 
 int foo(int i);
-
-#endif

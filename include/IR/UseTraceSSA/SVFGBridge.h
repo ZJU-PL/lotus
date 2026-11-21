@@ -1,5 +1,5 @@
-#ifndef LOTUS_IR_USETRACESSA_SVFGBRIDGE_H
-#define LOTUS_IR_USETRACESSA_SVFGBRIDGE_H
+#pragma once
+
 
 #include "IR/SVFG/SVFG.h"
 #include "IR/UseTraceSSA/SVFGImporter.h"
@@ -29,7 +29,7 @@ struct NativeHistoryOptions {
 /// so negative queries remain Unknown. Rebuild for a different property.
 SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(
     const analysis::SVFG &svfg, const llvm::Module &module,
-    NativeHistoryMode mode, NativeHistoryOptions options = {});
+    NativeHistoryMode mode, const NativeHistoryOptions &options = {});
 
 /// Copy metadata carried by a Lotus SVFG edge. The caller assigns an ID and
 /// supplies the exact consumer site (or marks a genuine boundary). Empty
@@ -85,4 +85,3 @@ SVFGHistoryResult buildUseTraceSSAFromSVFG(const analysis::SVFG &svfg,
 
 } // namespace usetracessa
 } // namespace lotus
-#endif

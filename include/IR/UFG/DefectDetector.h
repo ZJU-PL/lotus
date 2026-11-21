@@ -1,5 +1,4 @@
-#ifndef LOTUS_IR_UFG_DEFECTDETECTOR_H
-#define LOTUS_IR_UFG_DEFECTDETECTOR_H
+#pragma once
 
 #include "IR/UFG/UFG.h"
 #include "IR/UseTraceSSA/DefectDetector.h"
@@ -34,4 +33,3 @@ private:
 
 } // namespace ufg
 } // namespace lotus
-#endif

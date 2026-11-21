@@ -225,7 +225,7 @@ QueryResult QueryEngine::runImpl(const Query &q, QueryScanResult *scan) const {
       bound(states.size(), q.maxSummaryPairs, SearchStopReason::SummaryPairs);
       ID id = asID(states.size());
       known.emplace(state, id);
-      states.push_back(std::move(state));
+      states.push_back(state);
       parents.push_back({previous, edge});
       queue.push_back(id);
     };
@@ -270,7 +270,7 @@ QueryResult QueryEngine::runImpl(const Query &q, QueryScanResult *scan) const {
           }
           ID edgeID = materialize(current.product, index);
           next.product = pe[edgeID].to;
-          insert(std::move(next), id, edgeID);
+          insert(next, id, edgeID);
         }
       }
     } catch (const Budget &budget) {
@@ -430,7 +430,7 @@ QueryResult QueryEngine::runImpl(const Query &q, QueryScanResult *scan) const {
   std::vector<Parent> parents(states);
   std::deque<ID> queue;
   auto encode = [&](ID p, unsigned phase, bool positive) {
-    return asID(std::size_t(p) * 4 + phase * 2 + unsigned(positive));
+    return asID(std::size_t(p) * 4 + std::size_t(phase) * 2 + unsigned(positive));
   };
   for (ID root : roots) {
     ID state = encode(root, 0, false);

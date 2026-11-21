@@ -1,8 +1,5 @@
-#ifndef SRC2_H_
-#define SRC2_H_
+#pragma once
 
 void bar(int &i);
 
 void tar(int &i);
-
-#endif

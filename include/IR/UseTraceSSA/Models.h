@@ -1,5 +1,5 @@
-#ifndef LOTUS_IR_USETRACESSA_MODELS_H
-#define LOTUS_IR_USETRACESSA_MODELS_H
+#pragma once
+
 
 #include "IR/UseTraceSSA/Query.h"
 
@@ -59,4 +59,4 @@ Query uncheckedUse(std::vector<FlowNodeID> sources, std::vector<FlowNodeID> uses
 
 } // namespace usetracessa
 } // namespace lotus
-#endif
+

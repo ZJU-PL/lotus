@@ -1,8 +1,7 @@
 //
 // This file is distributed under the MIT License. See LICENSE for details.
 //
-#ifndef FENV_H
-#define FENV_H
+#pragma once
 
 #define FE_TONEAREST 0
 #define FE_DOWNWARD 0x400
@@ -11,5 +10,3 @@
 
 int fegetround(void);
 int fesetround(int);
-
-#endif

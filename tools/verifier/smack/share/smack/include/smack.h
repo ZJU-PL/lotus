@@ -1,8 +1,7 @@
 //
 // This file is distributed under the MIT License. See LICENSE for details.
 //
-#ifndef SMACK_H_
-#define SMACK_H_
+#pragma once
 #include <limits.h>
 
 /**
@@ -170,5 +169,3 @@ void __VERIFIER_atomic_end();
 #ifdef __cplusplus
 }
 #endif
-
-#endif /*SMACK_H_*/

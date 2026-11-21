@@ -1,5 +1,4 @@
-#ifndef SRC1_H_
-#define SRC1_H_
+#pragma once
 
 #include "abst.h"
 #include "src2.h"
@@ -9,5 +8,3 @@ struct Concrete : Abstract {
 };
 
 Abstract *give_me();
-
-#endif

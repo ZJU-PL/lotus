@@ -1,5 +1,4 @@
-#ifndef CHILD_H_
-#define CHILD_H_
+#pragma once
 
 #include "base.h"
 
@@ -8,5 +7,3 @@ struct child : base {
   virtual int bar() override;
   int other();
 };
-
-#endif

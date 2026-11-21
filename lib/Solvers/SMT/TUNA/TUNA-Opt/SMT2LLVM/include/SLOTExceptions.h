@@ -1,3 +1,5 @@
+#pragma once
+
 namespace SLOT
 {
     class UnsupportedSMTOpException : public std::exception {

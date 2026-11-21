@@ -1,8 +1,7 @@
 //
 // This file is distributed under the MIT License. See LICENSE for details.
 //
-#ifndef MATH_H
-#define MATH_H
+#pragma once
 
 #define FP_NAN 0
 #define FP_INFINITE 1
@@ -145,5 +144,3 @@ int __isnegativel(long double x);
 int __signbitl(long double x);
 int __fpclassifyl(long double x);
 int __finitel(long double x);
-
-#endif
