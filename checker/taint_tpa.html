@@ -1,0 +1,412 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TPA Sparse Taint Research Baseline &mdash; Lotus Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=411a527d"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Checker Tooling" href="tooling.html" />
+    <link rel="prev" title="IFDS Taint Checker" href="taint.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Lotus
+              <img src="../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/architecture.html">Architecture &amp; Major Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/quickstart.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/pdg_query_language.html">PDG Query Language (Cypher)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/property_based_slicing.html">Property-Based Slicing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/verification_backends.html">Verification Driver Abstraction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/instrumentation_passes.html">Instrumentation Passes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tools/index.html">Command-Line Tools Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../apps/index.html">Applications</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cfl/index.html">Context-Free Language Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../concurrency/index.html">Concurrency Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dataflow/index.html">Data Flow Analysis Frameworks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ml/index.html">Machine Learning Features (CanaryML)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../optimization/index.html">Optimization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../security/index.html">Security Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../symbolic_execution/index.html">Symbolic Execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../utils/index.html">Utilities</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../verification/index.html">Verification</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Checker Framework</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="index.html#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#choosing-a-checker">Choosing a Checker</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#id2">Checker Framework</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#components">Components</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#build-targets">Build Targets</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#usage">Usage</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#programmatic-usage">Programmatic Usage</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#bug-types">Bug Types</a></li>
+<li class="toctree-l2"><a class="reference internal" href="index.html#integration-points">Integration Points</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="index.html#see-also">See Also</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="ae.html">Abstract Execution Checker</a></li>
+<li class="toctree-l3"><a class="reference internal" href="concurrency.html">Concurrency Bug Checker</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fitx.html">FiTx: Daily Development-friendly Bug Detection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fitx.html#bug-types">Bug Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kint.html">KINT Numerical Bug Checker</a></li>
+<li class="toctree-l3"><a class="reference internal" href="pulse.html">Pulse Checker</a></li>
+<li class="toctree-l3"><a class="reference internal" href="report.html">Checker Report Infrastructure</a></li>
+<li class="toctree-l3"><a class="reference internal" href="saber.html">Saber Checker</a></li>
+<li class="toctree-l3"><a class="reference internal" href="symex.html">Symbolic Execution Checker</a></li>
+<li class="toctree-l3"><a class="reference internal" href="gsaf.html">GSAF</a></li>
+<li class="toctree-l3"><a class="reference internal" href="taint.html">IFDS Taint Checker</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">TPA Sparse Taint Research Baseline</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#build-and-run">Build and run</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#options">Options</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#pipeline-and-semantics">Pipeline and semantics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#models-and-experimental-controls">Models and experimental controls</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#library-use">Library use</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#migration-changes">Migration changes</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="tooling.html">Checker Tooling</a></li>
+<li class="toctree-l3"><a class="reference internal" href="typequalifier.html">TypeQualifier</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="index.html">Checker Framework</a></li>
+      <li class="breadcrumb-item active">TPA Sparse Taint Research Baseline</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/checker/taint_tpa.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="tpa-sparse-taint-research-baseline">
+<h1>TPA Sparse Taint Research Baseline<a class="headerlink" href="#tpa-sparse-taint-research-baseline" title="Link to this heading"></a></h1>
+<p><code class="docutils literal notranslate"><span class="pre">lotus-check</span> <span class="pre">--engine=taint-tpa</span></code> runs an explicit-flow taint baseline ported from
+Jia Chen’s TPA taint engine and adapted to LLVM 14. It uses TPA’s native memory
+objects and context-specific points-to queries. It supports experiments on
+sparse propagation, context sensitivity and precision-loss tracking.</p>
+<p><strong>Library</strong>: <code class="docutils literal notranslate"><span class="pre">TPATaint</span></code></p>
+<p><strong>Implementation</strong>: <code class="docutils literal notranslate"><span class="pre">include/Checker/TPA/</span></code> and <code class="docutils literal notranslate"><span class="pre">lib/Checker/TPA/</span></code></p>
+<p><strong>Namespace</strong>: <code class="docutils literal notranslate"><span class="pre">tpa::taint</span></code></p>
+<section id="build-and-run">
+<h2>Build and run<a class="headerlink" href="#build-and-run" title="Link to this heading"></a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>cmake<span class="w"> </span>--build<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>lotus-check<span class="w"> </span>tpa_taint_tests<span class="w"> </span>-j4
+ctest<span class="w"> </span>--test-dir<span class="w"> </span>build<span class="w"> </span>-R<span class="w"> </span><span class="s1">'^tpa_taint'</span><span class="w"> </span>--output-on-failure
+
+build/bin/lotus-check<span class="w"> </span>--engine<span class="o">=</span>taint-tpa<span class="w"> </span>input.bc<span class="w"> </span>--taint-tpa.k-limit<span class="o">=</span><span class="m">1</span><span class="w"> </span>--analysis-stats
+build/bin/lotus-check<span class="w"> </span>--engine<span class="o">=</span>taint-tpa<span class="w"> </span>input.bc<span class="w"> </span>--taint-tpa.k-limit<span class="o">=</span><span class="m">0</span><span class="w"> </span>--taint-tpa.track-precision-loss
+</pre></div>
+</div>
+<p>A focused build can select <code class="docutils literal notranslate"><span class="pre">-DLOTUS_TEST_SUBSYSTEMS=checker/tpa</span></code> and
+<code class="docutils literal notranslate"><span class="pre">-DLOTUS_TOOL_FAMILIES=checker</span></code>. The regression tests exercise both the
+native API and the command-line tool.</p>
+<p>The tool follows the shared checker exit policy: 0 on success, 1 when
+<code class="docutils literal notranslate"><span class="pre">--fail-on-findings</span></code> is set and retained findings exist, and 2 for diagnosed
+input/model/report errors. Absence of a finding is relative to the supplied
+models and the supported IR subset. Reports support the common JSON, SARIF,
+suppression and minimum-score options. Native results carry the <code class="docutils literal notranslate"><span class="pre">taint-tpa</span></code>
+engine metadata, argument index and calling context.</p>
+</section>
+<section id="options">
+<h2>Options<a class="headerlink" href="#options" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--taint-tpa.strip-debug</span></code> explicitly strips all debug metadata before input
+verification; reports lose source locations. By default valid debug info is
+retained. Debug-only input verifier errors are recovered by stripping invalid
+metadata with a warning. Structural IR errors remain fatal, and verification
+after TPA preprocessing stays strict to expose transformation bugs.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--taint-tpa.unmodeled=ignore|error</span></code> selects the missing external model
+and unresolved-call policy. The default is <code class="docutils literal notranslate"><span class="pre">ignore</span></code>, an optimistic research
+setting. <code class="docutils literal notranslate"><span class="pre">error</span></code> requires all models and call targets.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--taint-tpa.k-limit=N</span></code> uses the same k-limited call-string policy for pointer and
+taint propagation. The default is 0, merging calling contexts.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--taint-tpa.ptr-config=FILE</span></code>, <code class="docutils literal notranslate"><span class="pre">--taint-tpa.modref-config=FILE</span></code> and <code class="docutils literal notranslate"><span class="pre">--taint-tpa.taint-config=FILE</span></code>
+select external models. Defaults are <code class="docutils literal notranslate"><span class="pre">ptr.spec</span></code>, <code class="docutils literal notranslate"><span class="pre">modref.spec</span></code> and
+<code class="docutils literal notranslate"><span class="pre">taint.spec</span></code> under <code class="docutils literal notranslate"><span class="pre">LOTUS_CONFIG_DIR</span></code> when set; otherwise the installed
+configuration directory, falling back to the source configuration directory.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--analysis-stats</span></code> reports static SSA/memory edge counts, forward evaluations,
+contexts, value facts, memoized memory states, sink instances, loss sites,
+raw sink-violation counts and wall-clock phase timings. The taint timing includes optional tracking
+and graph output. Pointer timing includes normalization and program building.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--taint-tpa.def-use-dot-dir=DIR</span></code> writes the sparse graphs. Dotted edges carry SSA
+dependencies; labeled edges carry individual TPA memory objects. Numeric
+filenames avoid interpreting function names as paths; each graph contains
+its function name.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--taint-tpa.track-precision-loss</span></code> traces ambiguous sink findings back through the
+upstream precision tracker. This produces candidate loss sites, without
+automatically refining contexts or proving a reported path feasible.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--taint-tpa.no-prepass</span></code> skips optional TPA normalization. Return unification still
+runs because TPA’s pointer CFG requires one exit node per function.</p></li>
+</ul>
+</section>
+<section id="pipeline-and-semantics">
+<h2>Pipeline and semantics<a class="headerlink" href="#pipeline-and-semantics" title="Link to this heading"></a></h2>
+<p>The pipeline normalizes LLVM IR, unifies function exits, runs TPA pointer
+analysis, computes interprocedural mod/ref summaries and reaching definitions,
+constructs SSA and memory def-use edges, then solves taint on that sparse graph.
+Graph construction merges points-to information across contexts; taint loads,
+stores and indirect calls query the pointer solution in the current context.
+Only functions reachable from <code class="docutils literal notranslate"><span class="pre">main</span></code> through TPA’s call targets and basic
+blocks reachable from their entries are included in the sparse graph.</p>
+<p>SSA taint is stored by <code class="docutils literal notranslate"><span class="pre">(context,</span> <span class="pre">LLVM</span> <span class="pre">value)</span></code>. Memory taint uses TPA memory
+objects with incoming stores memoized by <code class="docutils literal notranslate"><span class="pre">(context,</span> <span class="pre">def-use</span> <span class="pre">instruction)</span></code>.
+A store to one concrete nonsummary object overwrites its taint; multiple or
+summary targets receive weak updates. Field separation and array summarization
+follow TPA’s memory model.</p>
+<p>The original four-element lattice is retained: <code class="docutils literal notranslate"><span class="pre">Unknown</span></code> is bottom,
+<code class="docutils literal notranslate"><span class="pre">Untainted</span></code> and <code class="docutils literal notranslate"><span class="pre">Tainted</span></code> are incomparable, and <code class="docutils literal notranslate"><span class="pre">Either</span></code> is their join.
+Both <code class="docutils literal notranslate"><span class="pre">Tainted</span></code> and <code class="docutils literal notranslate"><span class="pre">Either</span></code> violate an untainted sink policy. Operand
+propagation also uses this join, so combining a tainted operand with a clean
+constant can yield <code class="docutils literal notranslate"><span class="pre">Either</span></code>. It does not establish that the instruction is
+safe or that any particular execution reaches a sink. Uninitialized or
+uncomputed memory can remain <code class="docutils literal notranslate"><span class="pre">Unknown</span></code>; it is not a separate vulnerability
+class in this baseline.</p>
+<p><code class="docutils literal notranslate"><span class="pre">argc</span></code> is initially tainted; <code class="docutils literal notranslate"><span class="pre">argv</span></code>/<code class="docutils literal notranslate"><span class="pre">envp</span></code> pointer values are clean and
+their modeled contents are tainted. Defined global contents start clean.
+Control conditions do not introduce implicit taint. Branch alternatives are
+joined without path-feasibility checks.</p>
+</section>
+<section id="models-and-experimental-controls">
+<h2>Models and experimental controls<a class="headerlink" href="#models-and-experimental-controls" title="Link to this heading"></a></h2>
+<p>The baseline retains the upstream annotation representation under
+<code class="docutils literal notranslate"><span class="pre">Checker/TPA/Annotation</span></code>. It reads the existing text specification syntax;
+it uses its own annotation representation and exports findings through the
+shared checker reporting infrastructure.
+Function names are matched exactly against LLVM symbol names.</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>SOURCE source Ret V T
+SINK sink Arg0 V
+SOURCE fill Arg0 D T
+PIPE copy Arg0 R Arg1 R
+IGNORE trusted_noop
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">V</span></code> denotes a value, <code class="docutils literal notranslate"><span class="pre">D</span></code> directly pointed-to memory and <code class="docutils literal notranslate"><span class="pre">R</span></code> the modeled
+objects in the same allocation block. <code class="docutils literal notranslate"><span class="pre">R</span></code> is not an arbitrary transitive
+heap traversal. <code class="docutils literal notranslate"><span class="pre">Ret</span></code>, <code class="docutils literal notranslate"><span class="pre">ArgN</span></code> and <code class="docutils literal notranslate"><span class="pre">AfterArgN</span></code> specify return values,
+individual arguments and argument ranges. Source values are <code class="docutils literal notranslate"><span class="pre">T</span></code> (tainted),
+<code class="docutils literal notranslate"><span class="pre">U</span></code> (untainted) or <code class="docutils literal notranslate"><span class="pre">E</span></code> (either). Pipes put the destination before the source.
+Sinks support <code class="docutils literal notranslate"><span class="pre">V</span></code> and <code class="docutils literal notranslate"><span class="pre">D</span></code>. Reachable-memory pipes copy offsets for individual
+<code class="docutils literal notranslate"><span class="pre">R</span></code>-to-<code class="docutils literal notranslate"><span class="pre">R</span></code> arguments; other pipes reduce source taint before updating the
+destination. Memory effects at external calls are weak updates. Legacy scalar-return
+effects on void calls are ignored, matching the pointer client.</p>
+<p>For mixed variadic inputs, paired value and memory rules are used:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>PIPE snprintf Arg0 D AfterArg2 V
+PIPE snprintf Arg0 D AfterArg2 D
+</pre></div>
+</div>
+<p>The value rule carries scalar argument taint (and pointer-value taint). The
+memory-input range selects only pointer arguments, so numeric arguments are
+never passed to points-to queries. Mod/ref argument ranges likewise select
+pointers; the shipped formatted-output summaries include matching reads, such
+as <code class="docutils literal notranslate"><span class="pre">snprintf</span> <span class="pre">REF</span> <span class="pre">AfterArg2</span> <span class="pre">D</span></code>, to construct sparse memory dependencies for
+string arguments. Fixed memory positions, taint source/sink positions and
+memory pipe destinations still require pointer operands. These are type-directed
+summaries; they do not parse format strings or unpack <code class="docutils literal notranslate"><span class="pre">va_list</span></code> contents.</p>
+<p>Indirect call candidates are filtered by calling convention, argument count,
+return type and fixed argument types in both the pointer solver and call-target
+queries. Compatible typed-pointer casts are retained when address spaces match;
+variadic targets accept additional arguments after their fixed prefix. This is
+a candidate filter, not a proof of full ABI compatibility. Explicit named
+callees, including casts of known function symbols, retain their identity.
+<code class="docutils literal notranslate"><span class="pre">filtered_indirect_targets</span></code> counts eliminated merged-context candidates per
+static call site. If none remain, the unresolved-call policy applies.</p>
+<p>Available external models are applied independently. When a taint model is
+missing in <code class="docutils literal notranslate"><span class="pre">ignore</span></code> mode, the call generates no taint and performs no taint
+kills; its new SSA return value is assumed untainted so dependent internal
+calls can still be analyzed. Existing argument and memory taint survives.
+Missing mod/ref models add no memory effects. This policy can miss real flows
+through unmodeled functions. Explicit <code class="docutils literal notranslate"><span class="pre">IGNORE</span></code> taint entries use the same
+no-effect/untainted-return behavior and are accepted in strict mode.</p>
+<p>LLVM debug declaration, value and label intrinsics are known no-ops in both
+modes. They are excluded from model validation, call reachability and the
+sparse def-use graph, and do not count as ignored externals. Debug locations
+remain available for reports.</p>
+<p><code class="docutils literal notranslate"><span class="pre">--analysis-stats</span></code> records the policy, unique ignored symbols, distinct static
+call sites, and per-symbol missing taint/mod-ref counts. An indirect call with
+multiple missing targets counts once in the total call-site count and once
+under each affected symbol. Worklist revisits do not inflate counts. A warning
+summarizes missing-model coverage unless logging is disabled; finding metadata
+also records the policy and aggregate counts.</p>
+<p>Unresolved calls, including inline assembly, follow the same policy. In
+<code class="docutils literal notranslate"><span class="pre">ignore</span></code> mode they preserve incoming taint and memory facts and assume an
+untainted new SSA return value; known callees continue to use their bodies or
+models. Statistics distinguish ignored unresolved call sites and inline-assembly
+sites, with per-caller counts. The counts include context-specific resolution
+failures encountered by the solver and do not count worklist revisits.
+<code class="docutils literal notranslate"><span class="pre">TaintAnalysis::getIgnoredUnresolvedCalls</span></code> exposes the executed call sites.
+Strict mode diagnoses a missing target, including the caller and call IR.</p>
+<p>The pointer analysis continues using its existing external-pointer models and
+fallback behavior; this option controls the taint and mod/ref layers. A memory
+taint source or pipe still needs a corresponding mod/ref effect so the sparse
+graph carries its result. Invalid available models remain errors. Pin and
+review the model files and policy used for benchmark comparisons.</p>
+<p>The tracker primarily diagnoses call/return context merging. External-model,
+alias, path and weak-update imprecision need not yield a loss site. Its output
+is a research diagnostic, not a complete explanation of every finding.</p>
+<p>Supported LLVM data operations include arithmetic and casts, <code class="docutils literal notranslate"><span class="pre">fneg</span></code>, scalar
+and pointer <code class="docutils literal notranslate"><span class="pre">freeze</span></code>, aggregates/vectors, loads/stores and scalar atomics.
+Indirect branches carry existing explicit data flows without introducing
+implicit control taint. <code class="docutils literal notranslate"><span class="pre">freeze</span></code> preserves operand taint; poison/undef
+nondeterminism is not modeled separately.</p>
+<p>Atomic loads/stores use the corresponding ordinary taint memory effects.
+<code class="docutils literal notranslate"><span class="pre">atomicrmw</span></code> returns the old contents and writes a value derived from its
+operation; exchange can strongly overwrite a concrete singleton object.
+<code class="docutils literal notranslate"><span class="pre">cmpxchg</span></code> joins retained and replacement memory because success is not proved,
+and conservatively combines old-value and comparison taint in its aggregate
+result. <code class="docutils literal notranslate"><span class="pre">fence</span></code> changes no taint facts. These are sequential data effects:
+thread scheduling, interference and memory-order guarantees are not analyzed.
+Pointer-valued RMW/compare-exchange remain unsupported because their pointer
+store effects also need implementation in the TPA backend.</p>
+<p><code class="docutils literal notranslate"><span class="pre">invoke</span></code> uses the ordinary interprocedural data transfers while normal and
+unwind CFG paths are conservatively joined. <code class="docutils literal notranslate"><span class="pre">landingpad</span></code> introduces an opaque
+runtime handle/selector; precise exception payload provenance and handler type
+matching are not modeled. <code class="docutils literal notranslate"><span class="pre">resume</span></code> propagates incoming memory to callers
+without manufacturing a scalar return. Both pointer and taint graphs retain
+exceptional memory exits, including functions that have no normal return.
+Windows funclet instructions and <code class="docutils literal notranslate"><span class="pre">va_arg</span></code> remain unsupported.</p>
+<p><code class="docutils literal notranslate"><span class="pre">callbr</span></code> inline assembly follows the unresolved-call policy and retains all
+CFG successors. Ignored assembly adds no taint effects. The pointer backend
+keeps pointer-valued assembly results queryable as unknown objects.</p>
+<p>Instruction-capability diagnostics print at most 20 opcode/function entries
+plus an omitted count, avoiding repeated full-module metadata printing.
+Constructor lowering retains all equal-priority entries in stable, ascending
+priority order and gives generated calls valid caller debug locations. The
+<code class="docutils literal notranslate"><span class="pre">mktime</span></code> mod/ref summary reads and writes its sole <code class="docutils literal notranslate"><span class="pre">Arg0</span></code> <code class="docutils literal notranslate"><span class="pre">struct</span> <span class="pre">tm*</span></code>.</p>
+<p>Store pruning expands a structural pointer-field suffix only when a smaller
+reachable offset requires it, while still following every reachable object’s
+stored pointers. For owning stores, global bindings are already roots and need
+no redundant structural expansion; overlays retain full base-aware traversal.
+This preserves the pruned mapping and reduces repeated layout enumeration.
+The optimization is checked against an independent reachability implementation.
+Large programs can still require substantial pointer-analysis time;
+<code class="docutils literal notranslate"><span class="pre">--analysis-stats</span></code> includes pointer evaluation counts and solve timings.</p>
+<p>This baseline does not claim full C++ exception semantics, concurrency support
+or whole-program soundness with optimistic external models.</p>
+</section>
+<section id="library-use">
+<h2>Library use<a class="headerlink" href="#library-use" title="Link to this heading"></a></h2>
+<p>Call <code class="docutils literal notranslate"><span class="pre">validateModule</span></code> and <code class="docutils literal notranslate"><span class="pre">prepareModule</span></code> before building the TPA pointer
+program. Keep that program, the LLVM module, the pointer analysis and the sparse
+graph alive while using taint results. Do not change the context policy between
+analyses. Pass the same <code class="docutils literal notranslate"><span class="pre">UnmodeledPolicy</span></code> to <code class="docutils literal notranslate"><span class="pre">DefUseModuleBuilder</span></code> and
+<code class="docutils literal notranslate"><span class="pre">TaintAnalysis</span></code> (both default to <code class="docutils literal notranslate"><span class="pre">Ignore</span></code>), then run
+<code class="docutils literal notranslate"><span class="pre">TaintAnalysis::runOnDefUseModule(graph,</span> <span class="pre">trackPrecisionLoss)</span></code>.</p>
+<p>The analysis exposes its environment, incoming memory stores, violations,
+precision-loss sites and counters through read-only getters. Re-running clears
+previous taint results. <code class="docutils literal notranslate"><span class="pre">TrackingTaintAnalysis</span></code> provides a compatibility
+facade over the same forward solver.</p>
+</section>
+<section id="migration-changes">
+<h2>Migration changes<a class="headerlink" href="#migration-changes" title="Link to this heading"></a></h2>
+<p>The port replaces obsolete LLVM call-site wrappers with <code class="docutils literal notranslate"><span class="pre">CallBase</span></code>, preserves
+the upstream MIT license, and fixes memory-copy direction and reading of source
+objects, multiple taint exits, late caller return replay, conditional write
+pass-through and global field initialization. Exit unification satisfies the
+existing pointer frontend’s single-return requirement. Configuration parsing
+supports final comments and bounded indices; mod/ref parsing accepts both
+<code class="docutils literal notranslate"><span class="pre">IGNORE</span> <span class="pre">name</span></code> and the shipped <code class="docutils literal notranslate"><span class="pre">name</span> <span class="pre">IGNORE</span></code> spelling.</p>
+<p>A small context-sensitivity example is in
+<code class="docutils literal notranslate"><span class="pre">tests/unit/Checker/TPA/Inputs/context.ll</span></code>. Use the three <code class="docutils literal notranslate"><span class="pre">.spec</span></code> files in
+that directory with the corresponding CLI options. It produces two sink
+violations at k=0 and one at k=1.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="taint.html" class="btn btn-neutral float-left" title="IFDS Taint Checker" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="tooling.html" class="btn btn-neutral float-right" title="Checker Tooling" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
