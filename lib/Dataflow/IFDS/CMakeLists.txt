@@ -7,6 +7,7 @@
 set(IFDS_FRAMEWORK_SOURCES
   AnalysisSession.cpp
   SharedAnalysisServices.cpp
+  Solver/DFI/DFIExplodedSupergraph.cpp
   Debug/IFDSDebugUtils.cpp
 )
 

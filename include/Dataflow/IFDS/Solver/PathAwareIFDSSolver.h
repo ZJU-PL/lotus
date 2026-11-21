@@ -232,7 +232,7 @@ public:
 
   // Solver configuration
   void set_solver_config(IFDSIDESolverConfig config) {
-    m_solver.set_solver_config(std::move(config));
+    m_solver.set_solver_config(config);
   }
 
   IFDSIDESolverConfig &get_solver_config() {

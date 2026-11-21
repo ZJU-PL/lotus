@@ -2,6 +2,7 @@
 
 lotus_collect_test_sources(dataflow_tests
   PhasarMigrationTest.cpp
+  DFISolverTest.cpp
   AnalysisSessionTest.cpp
   SharedAnalysisServicesTest.cpp
   IFDSFrameworkCoreTest.cpp
