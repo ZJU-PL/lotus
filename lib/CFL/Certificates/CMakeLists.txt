@@ -8,7 +8,10 @@ if(NOT Boost_FOUND)
   message(STATUS "Boost headers not found; skipping CFL Certificates")
   return()
 endif()
-add_library(CanaryCFLCertificates INTERFACE)
+# Static (not INTERFACE) so the Boost.Multiprecision exception hook compiled in
+# BoostExceptionShim.cpp reaches every consumer of the header-only kernels.
+add_library(CanaryCFLCertificates STATIC BoostExceptionShim.cpp)
+target_link_libraries(CanaryCFLCertificates PUBLIC Boost::headers)
 
 add_library(CanaryCFLCertificateAdapter STATIC LotusAdapter.cpp)
 target_link_libraries(CanaryCFLCertificateAdapter PUBLIC
