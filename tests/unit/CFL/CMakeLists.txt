@@ -1,16 +1,21 @@
-# Every CFL gtest source is collected into one binary so the shared CFL/Lotus
-# libraries are linked only once. The child directories mirror the lib/CFL
-# subsystems and contribute their GTest sources. CLI cases are registered under
-# tests/regress/CFL.
+# CFL GTest sources share one binary. Optional certificate sources and their
+# adapter are included only when Boost headers are available.
 add_subdirectory(Classical)
 add_subdirectory(ConditionalDyck)
 add_subdirectory(CSIndex)
 add_subdirectory(DynamicDyck)
 add_subdirectory(InterleavedDyck)
 
+set(cfl_certificate_libs)
+if(TARGET CanaryCFLCertificateAdapter)
+  add_subdirectory(Certificates)
+  list(APPEND cfl_certificate_libs CanaryCFLCertificateAdapter)
+endif()
+
 add_lotus_collected_test_suite(cfl_tests
   TIMEOUT 240
   LINK_LIBS
+    ${cfl_certificate_libs}
     CanaryConditionalDyck
     CanaryDynamicDyck
     CanaryInterleavedDyckLCL

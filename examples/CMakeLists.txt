@@ -34,3 +34,7 @@ target_link_libraries(PointerAnalysisExample PRIVATE
     SeaDsaAnalysis
     ${llvm_libs}
 )
+
+if(TARGET CanaryCFLCertificates)
+  add_subdirectory(cfl/certificates)
+endif()
