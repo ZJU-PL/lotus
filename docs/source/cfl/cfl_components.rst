@@ -44,6 +44,20 @@ See :doc:`/cfl/classical/cat_ieoce` for the CAT and IEOCE engines.
 See :doc:`/cfl/classical/cert_cfl` for the CERT-CFL engine.
 See :doc:`/cfl/classical/sparse_subset` for the all-pairs set-pair engine.
 
+Conditional Dyck Library Summarization
+--------------------------------------
+
+ESOP 2017 ConCRA-f and ConCRA-k compute reusable conditional library summaries
+and discharge their premises during client analysis. Bounded summaries retain
+bridging dependencies to preserve whole-program client reachability under the
+paper's boundary assumptions.
+
+**Location**: ``include/CFL/ConditionalDyck/``, ``lib/CFL/ConditionalDyck/``.
+
+The ``CanaryConditionalDyck`` target provides an owning, immutable summary API,
+explicit callback and external-condition premises, and four Dyck query
+languages. See :doc:`/cfl/conditional_dyck` for usage and validation details.
+
 Dynamic Bidirected Dyck Reachability
 ------------------------------------
 

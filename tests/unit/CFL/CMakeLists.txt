@@ -1,8 +1,9 @@
 # Every CFL gtest source is collected into one binary so the shared CFL/Lotus
 # libraries are linked only once. The child directories mirror the lib/CFL
-# subsystems (Classical, CSIndex, DynamicDyck, InterleavedDyck) and contribute
-# their GTest sources. CLI cases are registered under tests/regress/CFL.
+# subsystems and contribute their GTest sources. CLI cases are registered under
+# tests/regress/CFL.
 add_subdirectory(Classical)
+add_subdirectory(ConditionalDyck)
 add_subdirectory(CSIndex)
 add_subdirectory(DynamicDyck)
 add_subdirectory(InterleavedDyck)
@@ -10,6 +11,7 @@ add_subdirectory(InterleavedDyck)
 add_lotus_collected_test_suite(cfl_tests
   TIMEOUT 240
   LINK_LIBS
+    CanaryConditionalDyck
     CanaryDynamicDyck
     CanaryInterleavedDyckLCL
     CanaryInterleavedDyckILP
