@@ -18,16 +18,18 @@ Key Features
 ------------
 
 - **Demand-Driven Evaluation**: Only analyzes paths and summaries necessary to satisfy the requested queries.
-- **Tree Decompositions**: Uses the tree-decomposition heuristics from `flow-cutter-pace17/20` to pick variable elimination orders.
+- **Tree Decompositions**: Reads precomputed treewidth and treedepth decompositions for each program from its dataset.
 - **BDD Integration**: Uses the ``buddy`` Binary Decision Diagram library for compact algebraic state representation and fast subset/equality comparisons.
 - **Boolean Program Support**: Parses and evaluates CEGAR-generated Boolean programs through the Boolean Program Frontend.
 
 Dependencies
 ------------
 
-DemandAPA introduces two major vendored dependencies in ``third-party/``:
-* ``buddy-2.4``: A widely used BDD package for boolean function manipulation.
-* ``flow-cutter-pace17`` / ``flow-cutter-pace20``: Tree decomposition libraries for optimizing query evaluation paths.
+DemandAPA links the vendored ``buddy-2.4`` BDD package for Boolean-function
+manipulation. Dataset preparation also uses treewidth and treedepth
+decompositions; build the vendored ``flow-cutter-pace17`` and
+``flow-cutter-pace20`` solvers with ``-DLOTUS_ENABLE_FLOW_CUTTER=ON`` when
+generating those decomposition outputs.
 
 Usage
 -----

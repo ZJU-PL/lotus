@@ -56,6 +56,8 @@ Options use a consistent ``LOTUS_*`` naming scheme.
 
 **Optional in-tree tool families and components:**
 
+* ``-DLOTUS_ENABLE_SPARTA=ON``: Build the bundled SPARTA abstract-interpretation
+  primitives (default: OFF)
 * ``-DLOTUS_ENABLE_CFL=OFF``: Disable CFL reachability solvers (default: ON)
 * ``-DLOTUS_ENABLE_CSR=ON``: Build the indexing context-sensitive reachability solver (default: OFF)
 * ``-DLOTUS_ENABLE_GUROBI=ON``: Build the optional Gurobi ILP backend for interleaved-Dyck
@@ -175,7 +177,7 @@ Supported groups:
 * ``concurrency``: ``mhp``, ``lockset``, ``valueflow``, ``thread``, ``clocks``,
   ``threadapi``, ``threadlocal``, ``openmp``, ``mpi``, ``cuda``, ``linuxkernel``.
 * ``dataflow``: ``ifdside``, ``mono``, ``wpds``, ``apa``, ``demandapa``, ``npa``,
-  ``vasco``.
+  ``vasco``, ``sparta``.
 * ``security``: ``constanttime``, ``spectre``.
 * ``transform``: ``nisse``.
 

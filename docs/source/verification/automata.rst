@@ -162,24 +162,6 @@ trace and audit hot-phase allocations. A separate 122-state model with 60
 recursive procedures exercises both game reducers and reduces to four states.
 These are regression workloads, not a run of the entire SV-COMP competition.
 
-The external reference adapters and their build target live in
-``scripts/verification/nwa_reference``. They execute unchanged algorithms from a
-user-supplied Ultimate checkout; no semantic stubs are used.
-
-.. code-block:: sh
-
-   cmake --build build --target nwa_differential_runner -j4
-   python3 scripts/verification/nwa_differential.py \
-     --ultimate ~/Downloads/ultimate-dev \
-     --cpp-runner build/bin/nwa_differential_runner
-
-The script builds with local ECJ/support JARs and generates parsers from
-Ultimate's grammars in a temporary directory. It records source/binary hashes,
-the corpus, both outputs, and a JSON report. The default corpus compares 189,860
-Boolean results across 44 automaton pairs, 419 finite words and 24 ultimately
-periodic words per pair, including both game reducers. Pending returns are
-covered by native tests because the Java operations generally exclude them.
-
 Algorithm references
 --------------------
 

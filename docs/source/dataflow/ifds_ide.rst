@@ -301,7 +301,7 @@ receive the original caller fact. Explicit ``summary_flow`` results are additive
 and do not suppress calls into available function bodies.
 
 Results and graph services
--------------------------
+--------------------------
 
 ``get_facts_at_entry``, ``get_facts_at_exit``, ``get_facts_at_in_llvm_ssa``,
 ``fact_reaches`` and ``get_summary_edges`` follow the existing IFDS query

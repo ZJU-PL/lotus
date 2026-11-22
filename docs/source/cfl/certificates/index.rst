@@ -1,5 +1,5 @@
 CFL Reachability Certificates
-============================
+=============================
 
 The ``CFL/Certificates`` module includes positive and negative
 certificates for Dyck-2, arbitrary context-free grammars, PDA/P-automaton
@@ -28,7 +28,7 @@ test sources in Release builds because the original tests use assertion
 expressions to invoke checks.
 
 Lotus grammar and graph inputs
------------------------------
+------------------------------
 
 .. code-block:: cpp
 

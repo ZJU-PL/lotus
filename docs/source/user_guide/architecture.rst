@@ -203,6 +203,6 @@ Core libraries under ``third-party/`` added in standard builds include:
 * **WPDS**: Weighted pushdown systems; used by the ``lib/Dataflow/`` WPDS engine.
 * **spdlog**: A fast C++ logging library used for framework diagnostics.
 
-Additional vendored packages (such as Seal, CLAM, SeaHorn, SMACK, FPsolve, WALi/OpenNWA,
-PDAAAL, Horn-ICE, and FlowCutter) are managed as opt-in components gated by their respective
-``LOTUS_ENABLE_*`` configuration toggles.
+Additional vendored packages (such as SPARTA, Seal, CLAM, SeaHorn, SMACK, FPsolve,
+WALi/OpenNWA, PDAAAL, Horn-ICE, and FlowCutter) are managed as opt-in components gated by
+their respective ``LOTUS_ENABLE_*`` configuration toggles.
