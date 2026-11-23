@@ -25,7 +25,7 @@ PIPE atan2 Ret V Arg1 V
 PIPE floor Ret V Arg0 V
 PIPE ceil Ret V Arg0 V
 PIPE modf Ret V Arg0 V
-PIPE modf Arg2 D Arg0 V
+PIPE modf Arg1 D Arg0 V
 PIPE log10 Ret V Arg0 V
 PIPE bcopy Arg1 R Arg0 R
 PIPE fgets Ret V Arg0 V
@@ -508,3 +508,99 @@ PIPE nexttoward Ret V Arg1 V
 PIPE nexttowardf Ret V Arg1 V
 PIPE nexttowardl Ret V Arg1 V
 PIPE scalblnf Ret V Arg1 V
+
+# Further audited dependencies from the same PhASAR LibCSummary.cpp revision.
+# Search results point into the first input: preserve both pointer and data
+# taint. Search operands affect the selected address, not the stored contents.
+PIPE memmem Ret V Arg0 V
+PIPE memmem Ret V Arg0 D
+PIPE memmem Ret D Arg0 D
+PIPE memmem Ret V Arg1 V
+PIPE memmem Ret V Arg2 D
+PIPE memmem Ret V Arg3 V
+PIPE memrchr Ret V Arg0 V
+PIPE memrchr Ret V Arg0 D
+PIPE memrchr Ret D Arg0 D
+PIPE memrchr Ret V Arg1 V
+PIPE memrchr Ret V Arg2 V
+PIPE rawmemchr Ret V Arg0 V
+PIPE rawmemchr Ret V Arg0 D
+PIPE rawmemchr Ret D Arg0 D
+PIPE rawmemchr Ret V Arg1 V
+PIPE strchrnul Ret V Arg0 V
+PIPE strchrnul Ret V Arg0 D
+PIPE strchrnul Ret D Arg0 D
+PIPE strchrnul Ret V Arg1 V
+PIPE index Ret V Arg0 V
+PIPE index Ret V Arg0 D
+PIPE index Ret D Arg0 D
+PIPE index Ret V Arg1 V
+PIPE rindex Ret V Arg0 V
+PIPE rindex Ret V Arg0 D
+PIPE rindex Ret D Arg0 D
+PIPE rindex Ret V Arg1 V
+PIPE wcschr Ret V Arg0 V
+PIPE wcschr Ret V Arg0 D
+PIPE wcschr Ret D Arg0 D
+PIPE wcschr Ret V Arg1 V
+PIPE wcsrchr Ret V Arg0 V
+PIPE wcsrchr Ret V Arg0 D
+PIPE wcsrchr Ret D Arg0 D
+PIPE wcsrchr Ret V Arg1 V
+PIPE wcspbrk Ret V Arg0 V
+PIPE wcspbrk Ret V Arg0 D
+PIPE wcspbrk Ret D Arg0 D
+PIPE wcspbrk Ret V Arg1 D
+PIPE wcsstr Ret V Arg0 V
+PIPE wcsstr Ret V Arg0 D
+PIPE wcsstr Ret D Arg0 D
+PIPE wcsstr Ret V Arg1 D
+PIPE wmemchr Ret V Arg0 V
+PIPE wmemchr Ret V Arg0 D
+PIPE wmemchr Ret D Arg0 D
+PIPE wmemchr Ret V Arg1 V
+PIPE wmemchr Ret V Arg2 V
+
+# Copies/fills: source contents or fill value reach destination contents.
+# memccpy returns an interior destination pointer; it can also return NULL.
+PIPE memccpy Arg0 D Arg1 D
+PIPE memccpy Ret D Arg1 D
+PIPE memccpy Ret V Arg0 V
+PIPE memccpy Ret V Arg1 D
+PIPE memccpy Ret V Arg2 V
+PIPE memccpy Ret V Arg3 V
+PIPE wmemset Arg0 D Arg1 V
+PIPE wmemset Ret D Arg1 V
+PIPE wmemset Ret V Arg0 V
+
+# Collation transforms also return the full transformed length, independent
+# of the output capacity. Neither function returns a pointer.
+PIPE strxfrm Arg0 D Arg1 D
+PIPE strxfrm Ret V Arg1 D
+PIPE wcsxfrm Arg0 D Arg1 D
+PIPE wcsxfrm Ret V Arg1 D
+
+# Address conversion reads source bytes and writes destination bytes.
+# inet_ntop returns the destination pointer; inet_pton returns a status.
+PIPE inet_ntop Arg2 D Arg1 D
+PIPE inet_ntop Ret D Arg1 D
+PIPE inet_ntop Ret V Arg2 V
+PIPE inet_pton Arg2 D Arg1 D
+PIPE inet_pton Ret V Arg1 D
+
+# Floating-point decomposition writes through argument 1. sincos is void
+# and writes two outputs. Output-pointer taint is not an input dependency.
+PIPE frexpf Ret V Arg0 V
+PIPE frexpf Arg1 D Arg0 V
+PIPE frexpl Ret V Arg0 V
+PIPE frexpl Arg1 D Arg0 V
+PIPE modff Ret V Arg0 V
+PIPE modff Arg1 D Arg0 V
+PIPE modfl Ret V Arg0 V
+PIPE modfl Arg1 D Arg0 V
+PIPE sincos Arg1 D Arg0 V
+PIPE sincos Arg2 D Arg0 V
+PIPE sincosf Arg1 D Arg0 V
+PIPE sincosf Arg2 D Arg0 V
+PIPE sincosl Arg1 D Arg0 V
+PIPE sincosl Arg2 D Arg0 V
