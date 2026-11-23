@@ -201,19 +201,20 @@ static bool queryIsComplete(const std::string &text) {
          upper.find("LIMIT") != std::string::npos;
 }
 
-static void runBatchMode(CypherQueryExecutor &executor,
+static bool runBatchMode(CypherQueryExecutor &executor,
                          const std::string &filename, const Options &config,
                          const Output &output) {
   std::ifstream file(filename);
   if (!file.is_open()) {
     errs() << "Error: Could not open file " << filename << "\n";
-    return;
+    return false;
   }
 
   std::string pending;
+  bool success = true;
   auto flush = [&]() {
     if (!pending.empty()) {
-      executeQuery(executor, pending, config, output);
+      success = executeQuery(executor, pending, config, output) && success;
       pending.clear();
     }
   };
@@ -237,6 +238,7 @@ static void runBatchMode(CypherQueryExecutor &executor,
       flush();
   }
   flush();
+  return success;
 }
 
 static bool selectNodesWithCypher(CypherQueryExecutor &executor,
@@ -348,6 +350,7 @@ static bool executeAnalysis(ProgramGraph &pdg, const Module &module,
       taint_policy.max_steps = config.taintStepLimit;
       RuleQueryPolicy rule_policy;
       rule_policy.lifetime_states_per_object = config.lifetimeStateLimit;
+      rule_policy.protocol_states_per_search = config.protocolStateLimit;
       output.printRuleResult(RuleQuery(pdg).analyze(
           ids, criteria, options, &module, taint_policy, rule_policy));
       return true;
@@ -523,8 +526,7 @@ int runQueries(ProgramGraph &pdg, const Module &module, const Options &config) {
   if (!config.queryString.empty())
     return executeQuery(executor, config.queryString, config, output) ? 0 : 1;
   if (!config.queryFile.empty()) {
-    runBatchMode(executor, config.queryFile, config, output);
-    return 0;
+    return runBatchMode(executor, config.queryFile, config, output) ? 0 : 1;
   }
   errs() << "No mode specified. Use -q, -i, -f, or --analysis\n";
   return 1;

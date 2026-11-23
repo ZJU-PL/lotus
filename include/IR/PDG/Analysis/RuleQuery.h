@@ -11,7 +11,8 @@ struct RuleDescriptor {
   std::string codeql_query;
   /// Explicit coverage boundary, also included in machine-readable results.
   std::string coverage;
-  /// Original CodeQL CWE tags; membership does not imply complete CWE coverage.
+  /// Original CWE tags for CodeQL migrations, classifications for Lotus rules;
+  /// membership does not imply complete CWE coverage.
   std::vector<unsigned> cwes;
 };
 
@@ -33,6 +34,9 @@ struct RuleQueryPolicy {
   /// Separate per-object lifetime budget; zero uses shared traversal limits.
   /// This does not lower the independent taint worklist budget.
   size_t lifetime_states_per_object = 0;
+  /// Per-worker, per-path-check and per-cycle-search protocol budget.
+  /// Zero disables this budget; shared query limits can still constrain it.
+  size_t protocol_states_per_search = 4096;
 };
 
 /// Semantic checks over LLVM values associated with PDG nodes. Dependence

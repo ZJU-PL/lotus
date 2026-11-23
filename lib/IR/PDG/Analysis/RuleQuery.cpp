@@ -1,4 +1,5 @@
 #include "IR/PDG/Analysis/RuleQuery.h"
+#include "IR/PDG/Analysis/ProtocolQuery.h"
 
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -216,96 +217,104 @@ const std::vector<RuleDescriptor> &RuleQuery::catalog() {
     append(ArithmeticQuery::catalog());
     append(ApiQuery::catalog());
     append(CallContractQuery::catalog());
-    static const std::map<std::string, std::vector<unsigned>>
-        original_cwe_tags = {
-            {"cpp/alloca-in-loop", {770}},
-            {"cpp/arithmetic-with-extreme-values", {190, 191}},
-            {"cpp/bad-addition-overflow-check", {190, 192}},
-            {"cpp/bad-strncpy-size", {119, 251, 676}},
-            {"cpp/badly-bounded-write", {120, 787, 805}},
-            {"cpp/certificate-not-checked", {295}},
-            {"cpp/certificate-result-conflation", {295}},
-            {"cpp/command-line-injection", {78, 88}},
-            {"cpp/conditionally-uninitialized-variable", {457}},
-            {"cpp/curl-disabled-ssl", {295}},
-            {"cpp/dangerous-function-overflow", {242, 676}},
-            {"cpp/dangerous-use-of-ssl-shutdown", {670}},
-            {"cpp/dead-code-function", {561}},
-            {"cpp/deref-null-result", {476}},
-            {"cpp/descriptor-may-not-be-closed", {775}},
-            {"cpp/descriptor-never-closed", {775}},
-            {"cpp/divide-by-zero-using-return-value", {369}},
-            {"cpp/double-free", {415}},
-            {"cpp/double-release", {666, 675}},
-            {"cpp/external-entity-expansion", {611}},
-            {"cpp/file-may-not-be-closed", {775}},
-            {"cpp/file-never-closed", {775}},
-            {"cpp/if-statement-addition-overflow", {190}},
-            {"cpp/improper-check-return-value-scanf", {754, 908}},
-            {"cpp/improper-null-termination", {170, 665}},
-            {"cpp/inconsistent-null-check", {476}},
-            {"cpp/inconsistent-nullness-testing", {476}},
-            {"cpp/incorrectly-checked-scanf", {253}},
-            {"cpp/insecure-generation-of-filename", {377}},
-            {"cpp/insufficient-key-size", {326}},
-            {"cpp/integer-multiplication-cast-to-long", {190, 192, 197, 681}},
-            {"cpp/integer-overflow-tainted", {190, 197, 681}},
-            {"cpp/invalid-pointer-deref", {119, 125, 193, 787}},
-            {"cpp/late-check-of-function-argument", {20}},
-            {"cpp/memory-leak-on-failed-call-to-realloc", {401}},
-            {"cpp/memory-may-not-be-freed", {401}},
-            {"cpp/memory-never-freed", {401}},
-            {"cpp/memory-unsafe-function-scan", {120}},
-            {"cpp/missing-check-scanf", {252, 253}},
-            {"cpp/missing-null-test", {476}},
-            {"cpp/multiplication-overflow-in-alloc", {128, 190}},
-            {"cpp/new-free-mismatch", {762}},
-            {"cpp/no-space-for-terminator", {120, 122, 131}},
-            {"cpp/non-constant-format", {134}},
-            {"cpp/not-initialised", {457}},
-            {"cpp/open-call-with-mode-argument", {732}},
-            {"cpp/overflow-buffer", {119, 121, 122, 126}},
-            {"cpp/overflow-calculated", {120, 131}},
-            {"cpp/overflow-destination", {119, 131}},
-            {"cpp/overflowing-snprintf", {190, 253}},
-            {"cpp/overrunning-write", {120, 787, 805}},
-            {"cpp/overrunning-write-with-float", {120, 787, 805}},
-            {"cpp/path-injection", {22, 23, 36, 73}},
-            {"cpp/potential-buffer-overflow", {676}},
-            {"cpp/potentially-dangerous-function", {676}},
-            {"cpp/return-stack-allocated-memory", {825}},
-            {"cpp/return-value-ignored", {252}},
-            {"cpp/signed-overflow-check", {128, 190}},
-            {"cpp/sql-injection", {89}},
-            {"cpp/static-buffer-overflow", {119, 131}},
-            {"cpp/tainted-arithmetic", {190, 191}},
-            {"cpp/tainted-format-string", {134}},
-            {"cpp/too-few-arguments", {234, 685}},
-            {"cpp/twice-locked", {764, 833}},
-            {"cpp/unbounded-write", {120, 787, 805}},
-            {"cpp/unclear-array-index-validation", {129}},
-            {"cpp/uncontrolled-allocation-size", {190, 789}},
-            {"cpp/uncontrolled-arithmetic", {190, 191}},
-            {"cpp/uncontrolled-process-operation", {73, 78, 114}},
-            {"cpp/uninitialized-local", {457, 665}},
-            {"cpp/unreleased-lock", {764, 833}},
-            {"cpp/unsafe-dacl-security-descriptor", {732}},
-            {"cpp/unsafe-strncat", {119, 251, 676, 788}},
-            {"cpp/unsigned-difference-expression-compared-zero", {191}},
-            {"cpp/unterminated-variadic-call", {121}},
-            {"cpp/use-after-free", {416}},
-            {"cpp/user-controlled-null-termination-tainted", {170}},
-            {"cpp/very-likely-overrunning-write", {120, 787, 805}},
-            {"cpp/weak-cryptographic-algorithm", {327}},
-            {"cpp/wordexp-injection", {78}},
-            {"cpp/world-writable-file-creation", {732}},
-            {"cpp/wrong-number-format-arguments", {234, 685}},
-            {"cpp/wrong-type-format-argument", {686}},
-            {"cpp/wrong-use-of-the-umask", {200, 264, 266, 560, 687}},
-        };
+    append(ProtocolQuery::catalog());
+    for (auto &rule : rules)
+      rule.coverage +=
+          " Shared callee resolution includes immutable function-pointer "
+          "globals, unchanged local spills and agreeing select/phi targets; "
+          "ambiguous or clobbered targets remain unresolved.";
+    static const std::map<std::string, std::vector<unsigned>> cwe_tags = {
+        {"cpp/alloca-in-loop", {770}},
+        {"cpp/arithmetic-with-extreme-values", {190, 191}},
+        {"cpp/bad-addition-overflow-check", {190, 192}},
+        {"cpp/bad-strncpy-size", {119, 251, 676}},
+        {"cpp/badly-bounded-write", {120, 787, 805}},
+        {"cpp/certificate-not-checked", {295}},
+        {"cpp/certificate-result-conflation", {295}},
+        {"cpp/command-line-injection", {78, 88}},
+        {"cpp/conditionally-uninitialized-variable", {457}},
+        {"cpp/curl-disabled-ssl", {295}},
+        {"cpp/dangerous-function-overflow", {242, 676}},
+        {"cpp/dangerous-use-of-ssl-shutdown", {670}},
+        {"cpp/dead-code-function", {561}},
+        {"cpp/deref-null-result", {476}},
+        {"cpp/descriptor-may-not-be-closed", {775}},
+        {"cpp/descriptor-never-closed", {775}},
+        {"cpp/divide-by-zero-using-return-value", {369}},
+        {"cpp/double-free", {415}},
+        {"cpp/double-release", {666, 675}},
+        {"cpp/external-entity-expansion", {611}},
+        {"cpp/file-may-not-be-closed", {775}},
+        {"cpp/file-never-closed", {775}},
+        {"cpp/if-statement-addition-overflow", {190}},
+        {"cpp/improper-check-return-value-scanf", {754, 908}},
+        {"cpp/improper-null-termination", {170, 665}},
+        {"cpp/inconsistent-null-check", {476}},
+        {"cpp/inconsistent-nullness-testing", {476}},
+        {"cpp/incorrectly-checked-scanf", {253}},
+        {"cpp/insecure-generation-of-filename", {377}},
+        {"cpp/insufficient-key-size", {326}},
+        {"cpp/integer-multiplication-cast-to-long", {190, 192, 197, 681}},
+        {"cpp/integer-overflow-tainted", {190, 197, 681}},
+        {"cpp/invalid-pointer-deref", {119, 125, 193, 787}},
+        {"cpp/late-check-of-function-argument", {20}},
+        {"cpp/memory-leak-on-failed-call-to-realloc", {401}},
+        {"cpp/memory-may-not-be-freed", {401}},
+        {"cpp/memory-never-freed", {401}},
+        {"cpp/memory-unsafe-function-scan", {120}},
+        {"cpp/missing-check-scanf", {252, 253}},
+        {"cpp/missing-null-test", {476}},
+        {"cpp/multiplication-overflow-in-alloc", {128, 190}},
+        {"cpp/new-free-mismatch", {762}},
+        {"cpp/no-space-for-terminator", {120, 122, 131}},
+        {"cpp/non-constant-format", {134}},
+        {"cpp/not-initialised", {457}},
+        {"cpp/open-call-with-mode-argument", {732}},
+        {"cpp/overflow-buffer", {119, 121, 122, 126}},
+        {"cpp/overflow-calculated", {120, 131}},
+        {"cpp/overflow-destination", {119, 131}},
+        {"cpp/overflowing-snprintf", {190, 253}},
+        {"cpp/overrunning-write", {120, 787, 805}},
+        {"cpp/overrunning-write-with-float", {120, 787, 805}},
+        {"cpp/path-injection", {22, 23, 36, 73}},
+        {"cpp/potential-buffer-overflow", {676}},
+        {"cpp/potentially-dangerous-function", {676}},
+        {"cpp/return-stack-allocated-memory", {825}},
+        {"cpp/return-value-ignored", {252}},
+        {"cpp/signed-overflow-check", {128, 190}},
+        {"cpp/sql-injection", {89}},
+        {"cpp/static-buffer-overflow", {119, 131}},
+        {"cpp/tainted-arithmetic", {190, 191}},
+        {"cpp/tainted-format-string", {134}},
+        {"cpp/too-few-arguments", {234, 685}},
+        {"cpp/twice-locked", {764, 833}},
+        {"cpp/unbounded-write", {120, 787, 805}},
+        {"cpp/unclear-array-index-validation", {129}},
+        {"cpp/uncontrolled-allocation-size", {190, 789}},
+        {"cpp/uncontrolled-arithmetic", {190, 191}},
+        {"cpp/uncontrolled-process-operation", {73, 78, 114}},
+        {"cpp/uninitialized-local", {457, 665}},
+        {"cpp/unreleased-lock", {764, 833}},
+        {"cpp/unsafe-dacl-security-descriptor", {732}},
+        {"cpp/unsafe-strncat", {119, 251, 676, 788}},
+        {"cpp/unsigned-difference-expression-compared-zero", {191}},
+        {"cpp/unterminated-variadic-call", {121}},
+        {"cpp/use-after-free", {416}},
+        {"cpp/user-controlled-null-termination-tainted", {170}},
+        {"cpp/very-likely-overrunning-write", {120, 787, 805}},
+        {"cpp/weak-cryptographic-algorithm", {327}},
+        {"cpp/wordexp-injection", {78}},
+        {"cpp/world-writable-file-creation", {732}},
+        {"cpp/wrong-number-format-arguments", {234, 685}},
+        {"cpp/wrong-type-format-argument", {686}},
+        {"cpp/wrong-use-of-the-umask", {200, 264, 266, 560, 687}},
+        {"lotus/shared-global-race", {362}},
+        {"lotus/lock-order-cycle", {833}},
+        {"lotus/filesystem-toctou", {367}},
+    };
     for (auto &rule : rules) {
-      auto it = original_cwe_tags.find(rule.id);
-      if (it != original_cwe_tags.end())
+      auto it = cwe_tags.find(rule.id);
+      if (it != cwe_tags.end())
         rule.cwes = it->second;
     }
     return rules;
@@ -830,6 +839,18 @@ RuleQueryResult RuleQuery::analyze(const std::vector<std::string> &rule_ids,
       appendFindings(ApiQuery().analyze(*input).findings);
     if (selected(CallContractQuery::catalog()))
       appendFindings(CallContractQuery().analyze(*input).findings);
+    if (selected(ProtocolQuery::catalog())) {
+      size_t budget = rule_policy.protocol_states_per_search;
+      if (options.limits.max_states)
+        budget = budget ? std::min(budget, options.limits.max_states)
+                        : options.limits.max_states;
+      auto protocols = ProtocolQuery().analyze(*input, budget);
+      appendFindings(protocols.findings);
+      result.diagnostics.state_limit_hit |= protocols.incomplete;
+      if (protocols.incomplete)
+        result.diagnostics.notes.push_back(
+            "Protocol exploration incomplete: state limit reached.");
+    }
     for (const Function &function : *input) {
       if (function.isDeclaration())
         continue;

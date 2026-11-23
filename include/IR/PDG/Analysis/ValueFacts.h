@@ -13,6 +13,8 @@ namespace pdg {
 /// facts stay unknown; textual LLVM dumps are never used to infer semantics.
 class ValueFacts {
 public:
+  /// Unique targets through aliases, immutable pointer globals, unchanged
+  /// local spills and agreeing select/phi alternatives. Ambiguity stays null.
   static const llvm::Function *callee(const llvm::CallBase &call);
   static const llvm::Value *argument(const llvm::CallBase &call,
                                      unsigned index);

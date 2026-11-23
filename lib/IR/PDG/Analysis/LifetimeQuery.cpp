@@ -87,6 +87,7 @@ struct State {
   bool success_checked = false;
   std::map<const Value *, Identity> aliases;
   std::map<Slot, Identity> slots;
+  std::map<Slot, Identity> owners;
   std::map<const Value *, const Value *> scalar_roots;
   std::map<Slot, const Value *> scalar_slots;
   std::map<const Value *, bool> conditions;
@@ -652,6 +653,9 @@ std::string key(const Work &work) {
   for (const auto &slot : work.state.slots)
     out << 's' << slot.first.base << ':' << slot.first.offset << ':'
         << static_cast<int>(slot.second);
+  for (const auto &slot : work.state.owners)
+    out << 'u' << slot.first.base << ':' << slot.first.offset << ':'
+        << static_cast<int>(slot.second);
   for (const auto &entry : work.state.scalar_roots)
     out << 'r' << entry.first << ':' << entry.second;
   for (const auto &entry : work.state.scalar_slots)
@@ -1127,6 +1131,41 @@ struct Explorer {
     } else if (const auto *call = dyn_cast<CallBase>(&instruction)) {
       if (harmlessCall(*call))
         return true;
+      if (object.family == Family::Memory && !call->arg_empty()) {
+        const Function *target = ValueFacts::callee(*call);
+        const std::string full =
+            target ? llvm::demangle(target->getName().str()) : "";
+        const bool unique =
+            (StringRef(full).startswith("std::unique_ptr<") ||
+             StringRef(full).startswith("std::__1::unique_ptr<")) &&
+            (StringRef(full).contains("std::default_delete<") ||
+             StringRef(full).contains("std::__1::default_delete<"));
+        auto owner = localSlot(call->getArgOperand(0), layout, state);
+        if (unique && target->isDeclaration() && owner) {
+          const std::string method = ValueFacts::functionBaseName(*target);
+          if (method == "unique_ptr" && call->arg_size() == 2 &&
+              !StringRef(full).contains("&&")) {
+            state.owners[*owner] = valueIdentity(call->getArgOperand(1), state);
+            return true;
+          }
+          if (method == "~unique_ptr" || method == "reset") {
+            if (state.owners[*owner] == Identity::Base)
+              release(call, state);
+            state.owners[*owner] =
+                method == "reset" && call->arg_size() == 2
+                    ? valueIdentity(call->getArgOperand(1), state)
+                    : Identity::None;
+            return true;
+          }
+          if ((method == "get" || method == "release") &&
+              call->getType()->isPointerTy()) {
+            bind(state, call, state.owners[*owner]);
+            if (method == "release")
+              state.owners[*owner] = Identity::None;
+            return true;
+          }
+        }
+      }
       if (object.family == Family::Memory)
         if (auto mutex = lockModel(*call))
           if (mutex->family == Family::Mutex && mutex->argument >= 0) {
@@ -1157,6 +1196,11 @@ struct Explorer {
           // Passing the local address of a tracked slot can transfer ownership
           // or overwrite it through a pointer-to-pointer parameter.
           if (const AllocaInst *local = localBase(argument, state)) {
+            for (auto &owner : state.owners)
+              if (owner.first.base == local && owner.second != Identity::None) {
+                escape(state);
+                owner.second = Identity::None;
+              }
             escapeLocal(local, state);
             if (invalidateSlots(state, Slot{local, 0}, layout))
               escape(state);
@@ -1653,7 +1697,11 @@ const std::vector<LifetimeRuleDescriptor> &LifetimeQuery::catalog() {
       "straight-line release/return summaries and matched nonrecursive direct "
       "calls (16-frame cap). Known C allocation/release and heap dereferences, "
       "including nonzero realloc success/failure; unknown ownership effects "
-      "escape. Preserves Boolean/complementary comparison, equality/switch and "
+      "escape. Local std::unique_ptr with std::default_delete models "
+      "raw-pointer "
+      "construction, get/release/reset and destructor calls, including invoke "
+      "cleanup edges; moves and custom deleters remain excluded. "
+      "Preserves Boolean/complementary comparison, equality/switch and "
       "allocation-failure alternatives. General relational feasibility, "
       "indirect calls, heap/global-field aliases, opaque C++ library ownership "
       "and zero-size realloc remain excluded. Budget, recursion and repeated "

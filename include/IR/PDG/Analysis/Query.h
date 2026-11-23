@@ -28,6 +28,7 @@
 #include "IR/PDG/Analysis/ImpactQuery.h"
 #include "IR/PDG/Analysis/LifetimeQuery.h"
 #include "IR/PDG/Analysis/QueryCore.h"
+#include "IR/PDG/Analysis/ProtocolQuery.h"
 #include "IR/PDG/Analysis/ResourceFlowQuery.h"
 #include "IR/PDG/Analysis/RuleQuery.h"
 #include "IR/PDG/Analysis/SliceQuery.h"

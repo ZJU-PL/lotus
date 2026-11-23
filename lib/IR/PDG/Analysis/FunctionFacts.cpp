@@ -648,4 +648,44 @@ bool FunctionFacts::boundedAt(const Value &value, const Instruction &at) const {
   return bound && !bound->isAllOnes();
 }
 
+Optional<ConstantRange>
+FunctionFacts::integerRangeAt(const Value &value, const Instruction &at) const {
+  if (!value.getType()->isIntegerTy() ||
+      value.getType()->getIntegerBitWidth() > 64)
+    return None;
+  ConstantRange range = impl_->evolution.getSignedRange(
+      impl_->evolution.getSCEV(const_cast<Value *>(&value)));
+  for (const BasicBlock &block : impl_->function) {
+    const auto *branch = dyn_cast<BranchInst>(block.getTerminator());
+    if (!branch || !branch->isConditional())
+      continue;
+    const auto *cmp = dyn_cast<ICmpInst>(branch->getCondition());
+    if (!cmp)
+      continue;
+    auto predicate = cmp->getPredicate();
+    const ConstantInt *constant = nullptr;
+    if (equivalent(value, *cmp->getOperand(0)))
+      constant = dyn_cast<ConstantInt>(cmp->getOperand(1));
+    else if (equivalent(value, *cmp->getOperand(1))) {
+      constant = dyn_cast<ConstantInt>(cmp->getOperand(0));
+      predicate = ICmpInst::getSwappedPredicate(predicate);
+    }
+    if (!constant)
+      continue;
+    bool yes = impl_->dominators.dominates(
+        BasicBlockEdge(&block, branch->getSuccessor(0)), at.getParent());
+    bool no = impl_->dominators.dominates(
+        BasicBlockEdge(&block, branch->getSuccessor(1)), at.getParent());
+    if (yes == no)
+      continue;
+    if (no)
+      predicate = ICmpInst::getInversePredicate(predicate);
+    range = range.intersectWith(
+        ConstantRange::makeExactICmpRegion(predicate, constant->getValue()));
+  }
+  if (range.isEmptySet())
+    return None;
+  return range;
+}
+
 } // namespace pdg

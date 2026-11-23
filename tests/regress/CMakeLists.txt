@@ -1,4 +1,9 @@
 # Match the same subsystem/group selection as the GTest manifests.
+lotus_test_group_enabled(ir pdg pdg_selected)
+if(pdg_selected AND TARGET lotus-ir-pdg-query)
+    add_subdirectory(IR/PDG)
+endif()
+
 lotus_test_group_enabled(alias bootstrapaa bootstrap_selected)
 if(bootstrap_selected)
     add_subdirectory(Alias/BootstrapAA)

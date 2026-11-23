@@ -1,5 +1,7 @@
 #include "IR/PDG/Analysis/ValueFacts.h"
+#include "IR/PDG/Analysis/FunctionFacts.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -10,14 +12,68 @@
 #include "llvm/IR/Operator.h"
 
 #include <cstdlib>
+#include <functional>
 
 using namespace llvm;
 
 namespace pdg {
 
 const Function *ValueFacts::callee(const CallBase &call) {
-  const Value *target = call.getCalledOperand()->stripPointerCastsAndAliases();
-  return dyn_cast<Function>(target);
+  const Value *operand = call.getCalledOperand()->stripPointerCastsAndAliases();
+  if (const auto *direct = dyn_cast<Function>(operand))
+    return direct;
+  SmallPtrSet<const Value *, 16> active;
+  std::unique_ptr<FunctionFacts> facts;
+  std::function<const Function *(const Value *, unsigned)> resolve =
+      [&](const Value *value, unsigned depth) -> const Function * {
+    value = value->stripPointerCastsAndAliases();
+    if (const auto *function = dyn_cast<Function>(value))
+      return function;
+    if (!depth || !active.insert(value).second)
+      return nullptr;
+    const Function *result = nullptr;
+    if (const auto *load = dyn_cast<LoadInst>(value)) {
+      if (!load->isAtomic() && !load->isVolatile()) {
+        const Value *address = load->getPointerOperand()->stripPointerCasts();
+        if (const auto *global = dyn_cast<GlobalVariable>(address)) {
+          if (global->isConstant() && global->hasDefinitiveInitializer())
+            result = resolve(global->getInitializer(), depth - 1);
+        } else if (load->getFunction() == call.getFunction()) {
+          if (!facts)
+            facts = std::make_unique<FunctionFacts>(
+                *const_cast<Function *>(call.getFunction()));
+          const Value *origin = &facts->pointerOrigin(*load);
+          if (origin != load)
+            result = resolve(origin, depth - 1);
+        }
+      }
+    } else {
+      SmallVector<const Value *, 4> alternatives;
+      if (const auto *select = dyn_cast<SelectInst>(value)) {
+        if (const auto *condition =
+                dyn_cast<ConstantInt>(select->getCondition()))
+          alternatives.push_back(condition->isZero() ? select->getFalseValue()
+                                                     : select->getTrueValue());
+        else {
+          alternatives.push_back(select->getTrueValue());
+          alternatives.push_back(select->getFalseValue());
+        }
+      } else if (const auto *phi = dyn_cast<PHINode>(value))
+        for (const Value *incoming : phi->incoming_values())
+          alternatives.push_back(incoming);
+      for (const Value *alternative : alternatives) {
+        const Function *target = resolve(alternative, depth - 1);
+        if (!target || (result && result != target)) {
+          result = nullptr;
+          break;
+        }
+        result = target;
+      }
+    }
+    active.erase(value);
+    return result;
+  };
+  return resolve(operand, 16);
 }
 
 const Value *ValueFacts::argument(const CallBase &call, unsigned index) {

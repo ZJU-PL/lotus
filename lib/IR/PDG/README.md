@@ -54,6 +54,10 @@ The Cypher query-language parser and executor live separately under
   cryptography, XML entities, DACLs and permission masks
 - **`CallContractQuery`**: target-ABI format types, argument contracts and
   inferred variadic sentinel conventions
+- **`ProtocolQuery`**: bounded shared-global race and lock-order candidates
+  across potentially overlapping pthread workers, plus stable-path filesystem
+  check/use protocols. These are Lotus-specific `lotus/` rules with explicit
+  modeling limits, separate from the migrated `cpp/` IDs.
 - **`CppLibraryModels`**: exact standard string API effects with separate opaque
   object contents and bytes; stable object-return aliases and numeric barriers
 - **`PDGCriteriaResolver`**: criteria resolution from nodes, LLVM values,
@@ -148,7 +152,15 @@ not infer taint or path feasibility from dependence reachability.
 CLI lifetime exploration defaults to 4096 states per object
 (`--lifetime-state-limit`, 0 disables this budget), independently of the
 `--taint-step-limit` worklist budget. Incomplete exploration is reported.
+`--protocol-state-limit` separately controls protocol worker/check/cycle
+searches (default 4096, zero disables the budget).
 Each rule descriptor records retained-IR and source-information limitations.
+Shared callee resolution follows immutable function-pointer globals, unchanged
+local spills and agreeing select/phi targets. Bounds checks also use guarded
+SCEV index ranges for stack/global arrays, and lifetime checks model local
+`unique_ptr` default-deleter cleanup/get/release/reset effects. See
+`tools/ir/examples/README.md` and `COVERAGE.md` for the capability boundaries
+and the catalog-to-example mapping.
 
 ## See Also
 

@@ -29,6 +29,7 @@ struct Options {
   bool listRules = false;
   unsigned long long taintStepLimit = 200000;
   unsigned long long lifetimeStateLimit = 4096;
+  unsigned long long protocolStateLimit = 4096;
   std::string criteriaQuery;
   std::string targetQuery;
   std::string baselineQuery;

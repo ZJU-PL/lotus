@@ -74,9 +74,26 @@ This prints all node labels, edge types, node/edge properties, group labels, and
 ## Security queries
 
 The `security/` directory contains categorized security analysis patterns.
+[COVERAGE.md](COVERAGE.md) maps every native rule ID to an example. The catalog
+includes both migrated `cpp/` IDs and Lotus-specific `lotus/` protocol IDs;
+IDs and CWE tags do not establish complete coverage of a weakness category.
+
+There are three distinct kinds of example:
+
+- API inventories select sites worth inspecting; API presence alone is not a bug.
+- Semantic predicates compare modeled facts such as access size and capacity.
+  Unknown facts remain unknown; missing findings do not establish safety.
+- Native `--analysis rules` commands use CFG, memory, argument roles and object
+  state. Dependence paths from chop/slice explain relationships and cannot
+  replace taint, lifetime, synchronization or path-feasibility reasoning.
 
 | File | Patterns | Analysis modes |
 |------|----------|----------------|
+| `static-rules.cypher` | Recursion, stack allocation, conversions, comparisons and return contracts | Inventories + native retained-IR checks |
+| `security/codeql-arithmetic.cypher` | Promotions, overflow, truncation, division and tainted arithmetic | Inventories + native range/MemorySSA checks |
+| `security/codeql-api-protocols.cypher` | TLS/certificates, cryptography, XML entities, DACLs and permissions | Inventories + native configuration/CFG protocols |
+| `security/codeql-call-contracts.cypher` | Format ABI types, signatures and variadic sentinels | Inventories + native ABI/contract checks |
+| `security/protocols.cypher` | Shared-global races, lock-order cycles and filesystem TOCTOU candidates | Inventories + bounded native protocol checks |
 | `security/codeql-taint.cypher` | Shared source/sink roles for PDG-native process, command, SQL, path and format flows | Cypher selections + `--analysis rules`; source/concat evidence in JSON |
 | `security/codeql-string-bounds.cypher` | Program-point string termination/length, buffer formatting roles and output bounds | Shared MemorySSA string/format facts; native rules for taint and relative guards |
 | `security/codeql-memory-access.cypher` | Subobject capacity, access width, negative offsets, read/write overflow | Shared BoundsQuery facts; native rules also check symbolic ends |
@@ -85,16 +102,16 @@ The `security/` directory contains categorized security analysis patterns.
 | `security/codeql-format-arguments.cypher` | Parsed format counts and unbounded scanf conversions | Semantic Cypher predicates |
 | `security/codeql-resource-origins.cypher` | Allocation/release families and value-flow explanations | Cypher + native family checks/context-sensitive chop |
 | `security/codeql-patterns.cypher` | Semantic call/argument facts for CodeQL migrations | Cypher inspection; `--analysis rules` for supported checks |
-| `security/injection.cypher` | Command injection: system/popen/exec sinks + input source tracing | Cypher API scan + `--analysis chop` |
-| `security/memory.cypher` | Use-after-free, double-free, memory leaks | `--analysis resource-flow`, `--analysis chop`, `--analysis shortest-path` |
-| `security/unsafe-libc.cypher` | strcpy/gets/sprintf, format string, buffer overflow | Cypher API scan + `--analysis chop` + backward slice |
-| `security/resource.cypher` | File handle leaks, lock/unlock, mmap/munmap | `--analysis resource-flow`, `--analysis summary` |
-| `security/double-free.cypher` | Double-free, use-after-free, new/delete mismatch | `--analysis resource-flow`, `--analysis chop`, `--analysis shortest-path` |
-| `security/taint.cypher` | Input-to-sink taint tracking, format string, argument tracing | Cypher API scan + `--analysis chop` + `--analysis slice-backward` |
+| `security/injection.cypher` | Process, shell-command and wordexp sink roles | Inventories + native domain-specific taint checks |
+| `security/memory.cypher` | UAF, double-free, never/may leaks and realloc failure | Inventories + native lifetime checks |
+| `security/unsafe-libc.cypher` | Copy/format argument roles and unsafe APIs | Inventories + native bounds/format checks |
+| `security/resource.cypher` | File/descriptor leaks, release and mutex protocols | Inventories + native lifetime checks; mmap exploration |
+| `security/double-free.cypher` | Double-free, UAF, C++ ownership and allocation families | Shared-pointer candidates + native object/CFG checks |
+| `security/taint.cypher` | Input-to-sink content flow, overwrites and format roles | Inventories + native taint summaries |
 
 Each file documents the prerequisites and CLI invocation for each pattern.
 
-`--list-rules` lists supported CodeQL rule IDs and their coverage. Run
+`--list-rules` lists supported rule IDs and their coverage. Run
 `--analysis rules --rule cpp/bad-strncpy-size --format json` for semantic
 checks. `--list-cwes` groups implemented IDs by original CodeQL CWE tags;
 `--analysis rules --cwe 401,415,416,457,476,775 --format json` selects relevant
@@ -116,18 +133,14 @@ ownership summaries, relative ranges and C++ library models.
 # 1. Find all shell execution call sites
 ./build/bin/lotus-ir-pdg-query input.bc -f tools/ir/examples/security/injection.cypher
 
-# 2. Detect heap memory leaks (malloc without free)
+# 2. Check heap lifetime and realloc failure
 ./build/bin/lotus-ir-pdg-query input.bc \
-  --analysis resource-flow \
-  --criteria-query "MATCH (c:INST_FUNCALL) WHERE c.callee IN ['malloc','calloc','realloc'] RETURN c" \
-  --resource-kind heap \
+  --analysis rules --cwe 401,415,416 \
   --format json
 
-# 3. Detect file handle leaks (fopen without fclose)
+# 3. Check file/descriptor lifetimes
 ./build/bin/lotus-ir-pdg-query input.bc \
-  --analysis resource-flow \
-  --criteria-query "MATCH (c:INST_FUNCALL) WHERE c.callee = 'fopen' RETURN c" \
-  --resource-kind file \
+  --analysis rules --cwe 775 \
   --format json
 
 # 4. Find strcpy/gets call sites
@@ -136,7 +149,7 @@ ownership summaries, relative ranges and C++ library models.
 
 ### Source-sink data flow (chop analysis)
 
-For tracing data flow from input sources to security-sensitive sinks:
+For exploring dependence paths from input-like calls to sensitive calls:
 
 ```bash
 ./build/bin/lotus-ir-pdg-query input.bc \
@@ -148,5 +161,50 @@ For tracing data flow from input sources to security-sensitive sinks:
   --format json
 ```
 
-The `witness_paths` field in the JSON output shows the instruction chain
-connecting source to sink.
+The `witness_paths` field explains graph connectivity. This does not establish
+input content flow, effective sanitization, or a feasible execution. Use
+`--analysis rules --rule cpp/uncontrolled-process-operation` for modeled taint.
+
+## Semantic coverage and remaining boundaries
+
+| Area | Implemented extension | Remaining boundary |
+| --- | --- | --- |
+| Indirect calls | Unique immutable pointer globals, unmodified local spills and agreeing select/phi targets share native callee resolution | Mutable/ambiguous targets, virtual dispatch and general points-to sets |
+| Dynamic bounds | SCEV and dominating guards prove all possible indices of a two-index GEP outside a stack/global array | Partially overlapping ranges, multidimensional dynamic subobjects and cross-call capacities |
+| C++ ownership | Local `unique_ptr` with `default_delete`: construction, get/release/reset and destructor effects | Moves, custom deleters, shared ownership and arbitrary RAII classes |
+| Races | Conflicting shared-global byte ranges in potentially overlapping registered pthread workers; atomic and mutex suppression | Heap aliases, parent-thread accesses, helper effects and general happens-before |
+| Deadlocks | Global mutex lock-order cycles across potentially overlapping workers | Feasible schedules, recursive POSIX mutex attributes, try-lock protocols and general lock aliases |
+| TOCTOU | CFG-connected stable-path access/stat/lstat followed by a separate filesystem use | Symlink resolution, openat-relative/descriptor protocols and general feasibility |
+| LLVM input | Retained instructions, target ABI, modeled memory and library effects | Source AST distinctions and optimized-away behavior; use `-g`, and `-fdebug-macro` when flags require it |
+
+The `lotus/` concurrency rules report candidates under successful blocking-lock
+models. No findings does not prove race freedom or deadlock freedom. Native
+protocol exploration is bounded; budget exhaustion is reported in diagnostics.
+`--protocol-state-limit` controls the per-worker/check/cycle budget (default
+4096 states; zero disables it), independently of taint and lifetime budgets.
+The shared callee extension affects native facts and the Cypher `callee`
+property. Graph call-edge construction retains its own target-resolution scope.
+
+## Regression fixtures
+
+`fixtures/security.ll` contains unsafe, safe and unknown cases for the actual
+Cypher predicates and native lifetime/taint/format checks. Backend regressions
+in `tests/unit/IR/PDG/RuleCoverageTest.cpp` cover each extension above, including
+clobbered pointers, guarded array indices, ownership release/reset, atomic and
+mutex suppression, joined workers, path mutation and exclusive file creation.
+The wider native rule suite is in `RuleQueryTest.cpp`. These are regression
+fixtures; they do not measure real-world precision or recall.
+
+```bash
+cmake --build build --target lotus-ir-pdg-query ir_tests
+python3 tests/regress/IR/PDG/check_examples.py
+build/bin/tests/ir_tests --gtest_filter='PDGRuleQueryTest.*:PDGRuleCoverageTest.*'
+ctest --test-dir build -R '^pdg_example_queries$' --output-on-failure
+
+# Regenerate the catalog-to-example matrix after adding a rule/example.
+python3 tests/regress/IR/PDG/check_examples.py --write-coverage
+```
+
+The checker executes every query file, checks positive and negative predicate
+results and native findings, and requires a current matrix for every catalog ID.
+Batch parse/execution errors and missing files return a nonzero exit code.

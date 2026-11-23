@@ -2193,6 +2193,52 @@ struct BoundsQuery::Impl {
             accessType = store->getValueOperand()->getType();
           }
           if (dereferenced) {
+            // Prove a dynamic access bad only when its entire conservative
+            // index range is outside a real array object. A range straddling
+            // the boundary is not evidence of an executable bad index.
+            const auto *indexed = dyn_cast<GEPOperator>(
+                resolve(dereferenced)->stripPointerCasts());
+            if (indexed && indexed->getNumIndices() == 2) {
+              const auto *array =
+                  dyn_cast<ArrayType>(indexed->getSourceElementType());
+              auto index = indexed->idx_begin();
+              const auto *zero = dyn_cast<ConstantInt>(index++->get());
+              const Value *subscript = index->get();
+              const Value *base =
+                  indexed->getPointerOperand()->stripPointerCasts();
+              const auto *stack = dyn_cast<AllocaInst>(base);
+              const auto *global = dyn_cast<GlobalVariable>(base);
+              bool object = (stack && stack->getAllocatedType() == array) ||
+                            (global && global->getValueType() == array);
+              auto access_bytes = typeBytes(accessType, layout, false);
+              if (array && object && zero && zero->isZero() &&
+                  !isa<ConstantInt>(subscript) && array->getNumElements() &&
+                  access_bytes && *access_bytes) {
+                auto range = analysis.facts.integerRangeAt(*subscript, inst);
+                // GEP truncates/sign-extends indices to the target pointer
+                // index width, independently of the source integer width.
+                unsigned width = layout.getIndexSizeInBits(
+                    indexed->getPointerAddressSpace());
+                if (range)
+                  range = range->sextOrTrunc(width);
+                ConstantRange valid = ConstantRange::makeExactICmpRegion(
+                    ICmpInst::ICMP_SGE, APInt(width, 0));
+                if (width <= 64 &&
+                    array->getNumElements() <=
+                        APInt::getSignedMaxValue(width).getZExtValue())
+                  valid =
+                      valid.intersectWith(ConstantRange::makeExactICmpRegion(
+                          ICmpInst::ICMP_ULT,
+                          APInt(width, array->getNumElements())));
+                if (range && range->intersectWith(valid).isEmptySet())
+                  emit("cpp/overflow-buffer", &inst,
+                       "Every index in the guarded dynamic range is outside "
+                       "this array's " +
+                           std::to_string(array->getNumElements()) +
+                           " elements.",
+                       {dereferenced, subscript});
+              }
+            }
             auto end = allocationEnd(dereferenced, inst);
             auto bytes = typeBytes(accessType, layout, false);
             if (end && bytes && *bytes) {
@@ -2312,7 +2358,10 @@ const std::vector<BoundsRuleDescriptor> &BoundsQuery::catalog() {
        "Known object/subobject capacity, constant byte offset and access size; "
        "loads/stores/atomics, memory intrinsics, and modeled C buffer APIs. "
        "Local pointer spills use must-alias dominating MemorySSA definitions. "
-       "Dynamic indices and interprocedural pointer origins remain unknown."},
+       "Dynamic two-index GEPs on real stack/global arrays are checked when "
+       "SCEV and dominating constant guards place the entire index range "
+       "outside the array. Straddling ranges and cross-call origins remain "
+       "unknown."},
       {"cpp/static-buffer-overflow", "warning", "Critical/OverflowStatic.ql",
        "Statically sized char arrays and char array members with constant "
        "out-of-bounds dereferences or overlarge modeled API lengths. Loop "
@@ -2341,9 +2390,11 @@ const std::vector<BoundsRuleDescriptor> &BoundsQuery::catalog() {
        "are not yet modeled."},
       {"cpp/improper-null-termination", "warning",
        "Likely Bugs/Memory Management/ImproperNullTermination.ql",
-       "Tracked local-array/field contents immediately before string consumers, "
+       "Tracked local-array/field contents immediately before string "
+       "consumers, "
        "using MemorySSA stores, zero regions, memset/memcpy, string copies/"
-       "concatenation, formatting, readlink and exact pointer aliases. CFG joins "
+       "concatenation, formatting, readlink and exact pointer aliases. CFG "
+       "joins "
        "require matching termination state; mixed/unknown/escaped/loop states "
        "remain unknown. Direct null-consuming wrappers are summarized."},
       {"cpp/user-controlled-null-termination-tainted", "warning",
@@ -2352,45 +2403,60 @@ const std::vector<BoundsRuleDescriptor> &BoundsQuery::catalog() {
        "string consumers without an established terminator. Uses PDG memory "
        "taint at the consumer, preserving clean overwrites and field offsets. "
        "Partial/unknown write bounds and recvmsg objects remain unknown."},
-      {"cpp/overflowing-snprintf", "warning", "Likely Bugs/Format/SnprintfOverflow.ql",
-       "snprintf/vsnprintf/snprintf_s size expressions derived through arithmetic from "
+      {"cpp/overflowing-snprintf", "warning",
+       "Likely Bugs/Format/SnprintfOverflow.ql",
+       "snprintf/vsnprintf/snprintf_s size expressions derived through "
+       "arithmetic from "
        "snprintf's full return length, including SSA/MemorySSA loop backedges, "
        "pointer updates and casts. Controlling relational/equality guards cut "
-       "flow. Unknown aliases, call summaries and arbitrary range proofs remain partial."},
+       "flow. Unknown aliases, call summaries and arbitrary range proofs "
+       "remain partial."},
       {"cpp/overflow-calculated", "warning", "Critical/OverflowCalculated.ql",
        "A known strlen/wcslen-affine allocation followed by same-object source "
        "copy and append needing more than the reserved constant slack. Tracks "
        "real memory versions and target character width; sums of unrelated "
        "lengths, custom allocators and cross-call content remain unknown."},
       {"cpp/overflow-destination", "warning", "Critical/OverflowDestination.ql",
-       "PDG input-content flow into memcpy/memmove/strncpy/strncat whose length "
-       "is strlen/wcslen-derived from that source, without a controlling bound. "
+       "PDG input-content flow into memcpy/memmove/strncpy/strncat whose "
+       "length "
+       "is strlen/wcslen-derived from that source, without a controlling "
+       "bound. "
        "sizeof provenance, source AST exclusions and destination-dependent "
        "expressions are not inferred from constant byte counts."},
       {"cpp/unbounded-write", "error", "Security/CWE/CWE-120/UnboundedWrite.ql",
-       "PDG input content reaches unbounded strcpy/strcat/sprintf roles with no "
+       "PDG input content reaches unbounded strcpy/strcat/sprintf roles with "
+       "no "
        "known content/output upper bound; gets and unbounded scanf %s model "
-       "implicit input. Precisions, bounded copies, literals and clean overwrite "
-       "facts suppress. Full CodeQL barrier and C++ library models remain partial."},
+       "implicit input. Precisions, bounded copies, literals and clean "
+       "overwrite "
+       "facts suppress. Full CodeQL barrier and C++ library models remain "
+       "partial."},
       {"cpp/overrunning-write", "error", "Security/CWE/CWE-120/OverrunWrite.ql",
        "Unbounded printf-family string writes with known destination capacity "
        "and format/type-derived maximum output beyond it. Parses width, "
-       "precision, positional/star arguments and target integer/pointer widths. "
-       "Unknown directives, locale grouping, va_list and long double stay unknown."},
+       "precision, positional/star arguments and target integer/pointer "
+       "widths. "
+       "Unknown directives, locale grouping, va_list and long double stay "
+       "unknown."},
       {"cpp/very-likely-overrunning-write", "error",
        "Security/CWE/CWE-120/VeryLikelyOverrunWrite.ql",
        "Known literal/content/range-derived lengths for strcpy/strcat/sprintf "
-       "and scanf %s field widths exceed object capacity including the terminator. "
+       "and scanf %s field widths exceed object capacity including the "
+       "terminator. "
        "MemorySSA content updates and integer Guard/SCEV ranges are shared. "
-       "Cross-call sources, indirect calls and C++ string objects are excluded."},
+       "Cross-call sources, indirect calls and C++ string objects are "
+       "excluded."},
       {"cpp/overrunning-write-with-float", "error",
        "Security/CWE/CWE-120/OverrunWriteFloat.ql",
        "Printf writes whose full %f upper bound exceeds capacity while the "
-       "CodeQL eight-character %f estimate fits; supports literal/constant-star "
+       "CodeQL eight-character %f estimate fits; supports "
+       "literal/constant-star "
        "widths and precisions and other modeled conversions. Va_lists, long "
        "double and locale-specific conversions stay unknown."},
-      {"cpp/badly-bounded-write", "error", "Security/CWE/CWE-120/BadlyBoundedWrite.ql",
-       "Known explicit limits of strncpy/strncat/fgets/snprintf and their modeled "
+      {"cpp/badly-bounded-write", "error",
+       "Security/CWE/CWE-120/BadlyBoundedWrite.ql",
+       "Known explicit limits of strncpy/strncat/fgets/snprintf and their "
+       "modeled "
        "wide variants exceed remaining destination capacity. Correct byte/"
        "character units and signed fgets counts are preserved; unknown dynamic "
        "limits and source configuration-file exclusions are unavailable."},
@@ -2398,13 +2464,17 @@ const std::vector<BoundsRuleDescriptor> &BoundsQuery::catalog() {
        "Likely Bugs/Memory Management/PotentialBufferOverflow.ql",
        "Deprecated upstream rule: sprintf-family format-output maximum exceeds "
        "known destination capacity. Reuses shared format/content/range bounds, "
-       "including %f extrema; va_list and custom format declarations remain unknown."},
+       "including %f extrema; va_list and custom format declarations remain "
+       "unknown."},
       {"cpp/unclear-array-index-validation", "warning",
        "Security/CWE/CWE-129/ImproperArrayIndexValidation.ql",
        "PDG scalar user-input origins reach retained indexed load/store GEPs "
-       "without a controlling range/equality guard or proven fixed-array range. "
-       "Uses signedness/nonnegativity and shared LLVM range facts; source-level "
-       "variable/macro exclusions, indirect calls and full Guard models are partial."}};
+       "without a controlling range/equality guard or proven fixed-array "
+       "range. "
+       "Uses signedness/nonnegativity and shared LLVM range facts; "
+       "source-level "
+       "variable/macro exclusions, indirect calls and full Guard models are "
+       "partial."}};
   return rules;
 }
 

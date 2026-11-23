@@ -13,20 +13,24 @@ static cl::opt<std::string> InputFilename(cl::Positional,
                                           cl::value_desc("filename"));
 
 static cl::opt<std::string>
-    QueryString("query", "q", cl::desc("Execute a single Cypher query"),
+    QueryString("query", cl::desc("Execute a single Cypher query"),
                 cl::value_desc("cypher_query"));
+static cl::alias QueryAlias("q", cl::aliasopt(QueryString));
 
 static cl::opt<std::string>
-    QueryFile("query-file", "f", cl::desc("Execute Cypher queries from file"),
+    QueryFile("query-file", cl::desc("Execute Cypher queries from file"),
               cl::value_desc("filename"));
+static cl::alias QueryFileAlias("f", cl::aliasopt(QueryFile));
 
-static cl::opt<bool> Interactive("interactive", "i",
+static cl::opt<bool> Interactive("interactive",
                                  cl::desc("Run in interactive mode"));
+static cl::alias InteractiveAlias("i", cl::aliasopt(Interactive));
 
-static cl::opt<bool> Verbose("verbose", "v", cl::desc("Enable verbose output"));
+static cl::opt<bool> Verbose("verbose", cl::desc("Enable verbose output"));
+static cl::alias VerboseAlias("v", cl::aliasopt(Verbose));
 
-static cl::opt<bool> Explain("explain", "e",
-                             cl::desc("Show query execution plan"));
+static cl::opt<bool> Explain("explain", cl::desc("Show query execution plan"));
+static cl::alias ExplainAlias("e", cl::aliasopt(Explain));
 
 static cl::opt<bool>
     BuildPDG("build-pdg",
@@ -104,6 +108,11 @@ static cl::opt<unsigned long long> LifetimeStateLimit(
     "lifetime-state-limit",
     cl::desc(
         "Lifetime exploration budget per object (default: 4096, 0: unbounded)"),
+    cl::init(4096));
+
+static cl::opt<unsigned long long> ProtocolStateLimit(
+    "protocol-state-limit",
+    cl::desc("Maximum protocol states per worker/check/cycle search (0 disables budget)"),
     cl::init(4096));
 
 static cl::opt<std::string>
@@ -194,6 +203,7 @@ Options parseOptions(int argc, char **argv) {
   config.listRules = ListRules.getValue();
   config.taintStepLimit = TaintStepLimit.getValue();
   config.lifetimeStateLimit = LifetimeStateLimit.getValue();
+  config.protocolStateLimit = ProtocolStateLimit.getValue();
   config.criteriaQuery = CriteriaQuery.getValue();
   config.targetQuery = TargetQuery.getValue();
   config.baselineQuery = BaselineQuery.getValue();

@@ -1,8 +1,11 @@
 #pragma once
 
 #include "llvm/IR/Instructions.h"
+#include "llvm/ADT/Optional.h"
+#include "llvm/IR/ConstantRange.h"
 
 #include <memory>
+#include <utility>
 
 namespace pdg {
 
@@ -28,6 +31,9 @@ public:
   /// A finite unsigned bound established by the controlling CFG edge or by
   /// range-reducing operations. Signed guards also need a nonnegative proof.
   bool boundedAt(const llvm::Value &value, const llvm::Instruction &at) const;
+  /// Conservative machine-integer range, refined by dominating comparisons.
+  llvm::Optional<llvm::ConstantRange>
+  integerRangeAt(const llvm::Value &value, const llvm::Instruction &at) const;
 
 private:
   struct Impl;
