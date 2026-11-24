@@ -1,8 +1,43 @@
 #include "Dataflow/IFDS/Analyses/IDEFeatureTaintAnalysis.h"
 
+#include <sstream>
+
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Instructions.h>
 
 namespace ifds {
+
+FeatureTaintGenerator::FeatureTaintGenerator()
+    : m_source([](InstOrGlobal) { return false; }),
+      m_generator([](InstOrGlobal) { return FeatureSet{}; }),
+      m_printer(default_print) {}
+
+FeatureTaintGenerator::FeatureTaintGenerator(GenerateFeaturesFn generator)
+    : FeatureTaintGenerator(
+          [generator](InstOrGlobal value) { return !generator(value).empty(); },
+          std::move(generator)) {}
+
+FeatureTaintGenerator::FeatureTaintGenerator(IsSourceFn source,
+                                             GenerateFeaturesFn generator,
+                                             PrinterFn printer)
+    : m_source(std::move(source)), m_generator(std::move(generator)),
+      m_printer(printer ? std::move(printer) : PrinterFn(default_print)) {}
+
+std::string
+FeatureTaintGenerator::default_print(const FeatureTaintValue &value) {
+  std::ostringstream stream;
+  stream << '<';
+  bool first = true;
+  for (const auto &feature : value.named_features) {
+    if (!first) {
+      stream << ',';
+    }
+    first = false;
+    stream << feature;
+  }
+  stream << '>';
+  return stream.str();
+}
 
 IDEFeatureTaintAnalysis::IDEFeatureTaintAnalysis() {
   m_source_feature_bits["recv"] = 1ull << 0;
@@ -15,10 +50,18 @@ IDEFeatureTaintAnalysis::IDEFeatureTaintAnalysis() {
   m_sanitizer_clears["escape_html"] = (1ull << 1) | (1ull << 3);
 }
 
+IDEFeatureTaintAnalysis::IDEFeatureTaintAnalysis(
+    FeatureTaintGenerator generator)
+    : IDEFeatureTaintAnalysis() {
+  m_feature_generator = std::move(generator);
+  m_has_feature_generator = true;
+}
+
 IDEFeatureTaintAnalysis::FactSet
 IDEFeatureTaintAnalysis::normal_flow(const llvm::Instruction *stmt,
                                      const llvm::Instruction *succ,
                                      const Fact &fact) {
+  (void)succ;
   FactSet out;
   out.insert(fact);
   if (!stmt || stmt->getType()->isVoidTy()) {
@@ -91,8 +134,14 @@ IDEFeatureTaintAnalysis::FactSet IDEFeatureTaintAnalysis::return_flow(
 IDEFeatureTaintAnalysis::FactSet IDEFeatureTaintAnalysis::call_to_return_flow(
     const llvm::CallBase *call, const llvm::Instruction *return_site,
     llvm::ArrayRef<const llvm::Function *> callees, const Fact &fact) {
+  (void)return_site;
+  (void)callees;
   FactSet out;
-  out.insert(fact);
+  // A call result is a fresh SSA definition.  Drop a fact for the previous
+  // value with the same instruction so a strong update cannot retain a stale
+  // feature set across an unresolved or sanitizer call.
+  if (!call || fact != call)
+    out.insert(fact);
   if (call && !call->getType()->isVoidTy()) {
     out.insert(call);
   }
@@ -112,6 +161,28 @@ IDEFeatureTaintAnalysis::initial_facts(const llvm::Function *main) {
   return out;
 }
 
+IDEFeatureTaintAnalysis::IDEInitialSeeds
+IDEFeatureTaintAnalysis::initial_ide_seeds(const llvm::Module &module) {
+  auto seeds = this->lift_ifds_initial_seeds(module, bottom_value());
+  if (!m_has_feature_generator)
+    return seeds;
+
+  // Generalized feature-taint seeds include configured globals at every
+  // entry-point seed.  Lotus's seed representation is instruction-based, so
+  // the global remains the fact while the entry instruction is the seed node.
+  for (auto &entry : seeds.seeds) {
+    for (const auto &global : module.globals()) {
+      const auto *gv = &global;
+      if (!m_feature_generator.is_source(gv))
+        continue;
+      const Value generated = m_feature_generator.generate(gv);
+      if (!generated.empty())
+        entry.second[gv] = generated;
+    }
+  }
+  return seeds;
+}
+
 IDEFeatureTaintAnalysis::Value
 IDEFeatureTaintAnalysis::join(const Value &v1, const Value &v2) const {
   if (v1.kind == Value::Bottom) {
@@ -123,14 +194,35 @@ IDEFeatureTaintAnalysis::join(const Value &v1, const Value &v2) const {
   if (v1.kind == Value::Top || v2.kind == Value::Top) {
     return Value::top();
   }
-  return Value::features(v1.mask | v2.mask);
+  Value::FeatureSet features = v1.named_features;
+  features.insert(v2.named_features.begin(), v2.named_features.end());
+  return Value::features(v1.mask | v2.mask, std::move(features));
 }
 
 IDEFeatureTaintAnalysis::EdgeFunction
 IDEFeatureTaintAnalysis::normal_edge_function(
-    const llvm::Instruction * /*stmt*/, const llvm::Instruction * /*succ*/,
-    const Fact & /*src_fact*/, const Fact & /*tgt_fact*/) {
-  return edge::identity<Value>();
+    const llvm::Instruction *stmt, const llvm::Instruction * /*succ*/,
+    const Fact & /*src_fact*/, const Fact &tgt_fact) {
+  if (!m_has_feature_generator || tgt_fact != stmt ||
+      !m_feature_generator.is_source(stmt)) {
+    return edge::identity<Value>();
+  }
+  const Value generated = m_feature_generator.generate(stmt);
+  return edge::lambda<Value>(
+      "feature-taint-generator", [generated](const Value &value) {
+        if (value.kind == Value::Top) {
+          return value;
+        }
+        if (value.kind == Value::Bottom) {
+          return generated;
+        }
+        Value result = value;
+        result.kind = Value::Features;
+        result.mask |= generated.mask;
+        result.named_features.insert(generated.named_features.begin(),
+                                     generated.named_features.end());
+        return result;
+      });
 }
 
 IDEFeatureTaintAnalysis::EdgeFunction
@@ -153,11 +245,30 @@ IDEFeatureTaintAnalysis::return_edge_function(
 
 IDEFeatureTaintAnalysis::EdgeFunction
 IDEFeatureTaintAnalysis::call_to_return_edge_function(
-    const llvm::CallBase * /*call*/, const llvm::Instruction *return_site,
+    const llvm::CallBase *call, const llvm::Instruction *return_site,
     llvm::ArrayRef<const llvm::Function *> /*callees*/,
-    const Fact & /*src_fact*/, const Fact & /*tgt_fact*/) {
+    const Fact & /*src_fact*/, const Fact &tgt_fact) {
   (void)return_site;
-  return edge::identity<Value>();
+  if (!m_has_feature_generator || !call || tgt_fact != call ||
+      !m_feature_generator.is_source(call)) {
+    return edge::identity<Value>();
+  }
+  const Value generated = m_feature_generator.generate(call);
+  return edge::lambda<Value>(
+      "feature-taint-generator", [generated](const Value &value) {
+        if (value.kind == Value::Top) {
+          return value;
+        }
+        if (value.kind == Value::Bottom) {
+          return generated;
+        }
+        Value result = value;
+        result.kind = Value::Features;
+        result.mask |= generated.mask;
+        result.named_features.insert(generated.named_features.begin(),
+                                     generated.named_features.end());
+        return result;
+      });
 }
 
 IDEFeatureTaintAnalysis::FactSet
@@ -169,7 +280,9 @@ IDEFeatureTaintAnalysis::summary_flow(const llvm::CallBase *call,
     return out;
   }
   const std::string name = callee->getName().str();
-  if (m_source_feature_bits.count(name) > 0 && fact == zero_fact()) {
+  if ((m_source_feature_bits.count(name) > 0 ||
+       (m_has_feature_generator && m_feature_generator.is_source(call))) &&
+      fact == zero_fact()) {
     out.insert(call);
   }
   if (m_sanitizer_clears.count(name) > 0 && fact != zero_fact()) {
@@ -183,8 +296,25 @@ IDEFeatureTaintAnalysis::summary_edge_function(
     const llvm::CallBase *call, const llvm::Function *callee,
     const llvm::Instruction *return_site, const Fact & /*src_fact*/,
     const Fact & /*tgt_fact*/) {
-  (void)call;
   (void)return_site;
+  if (m_has_feature_generator && call && m_feature_generator.is_source(call)) {
+    const Value generated = m_feature_generator.generate(call);
+    return edge::lambda<Value>(
+        "feature-taint-generator", [generated](const Value &value) {
+          if (value.kind == Value::Top) {
+            return value;
+          }
+          if (value.kind == Value::Bottom) {
+            return generated;
+          }
+          Value result = value;
+          result.kind = Value::Features;
+          result.mask |= generated.mask;
+          result.named_features.insert(generated.named_features.begin(),
+                                       generated.named_features.end());
+          return result;
+        });
+  }
   if (!callee) {
     return edge::identity<Value>();
   }
@@ -203,12 +333,13 @@ IDEFeatureTaintAnalysis::summary_edge_function(
   auto sanIt = m_sanitizer_clears.find(name);
   if (sanIt != m_sanitizer_clears.end()) {
     const uint64_t clearMask = sanIt->second;
-    return edge::lambda<Value>("feature-taint-sanitizer", [clearMask](const Value &v) {
-      if (v.kind == Value::Top || v.kind == Value::Bottom) {
-        return v;
-      }
-      return Value::features(v.mask & ~clearMask);
-    });
+    return edge::lambda<Value>(
+        "feature-taint-sanitizer", [clearMask](const Value &v) {
+          if (v.kind == Value::Top || v.kind == Value::Bottom) {
+            return v;
+          }
+          return Value::features(v.mask & ~clearMask, v.named_features);
+        });
   }
   return edge::identity<Value>();
 }

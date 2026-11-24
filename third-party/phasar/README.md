@@ -70,3 +70,19 @@ standard containers. It is an experimental alternative backend; upstream or
 paper performance figures are not measurements of this adaptation. No IDE
 lattice-value computation, tabulation path-edge export or CLI engine selection
 is included. The existing IFDS and IDE solvers remain independent.
+
+## Precision and IDE migration layers
+
+The focused XTaint migration is available through
+`IDEAliasAwareExtendedTaintAnalysis` (also exposed as
+`IDEExtendedTaintMemoryAnalysis`). Its `AbstractMemoryLocation` facts are
+interned, field-sensitive, k-bounded paths with optional alias-aware loads,
+stores, sanitizer strong updates, interprocedural formal-to-actual transfer,
+and the existing Lotus source/PIPE configuration model.
+
+`IterativeIDESolver` is a Lotus-compatible facade over `IDESolver`: it keeps
+the existing tabulation semantics while optionally collecting dense integer
+IDs for instructions, facts, and path edges. It can release the pointer-rich
+tabulation caches after value propagation. `IDEFeatureTaintAnalysis` accepts
+callback-driven generators and named feature sets while retaining its legacy
+64-bit source-mask API.

@@ -22,6 +22,8 @@ set(IFDS_CLIENT_SOURCES
   Analyses/TypeStateDescriptions.cpp
   Analyses/IDEProtoAnalysis.cpp
   Analyses/IDEExtendedTaintAnalysis.cpp
+  Analyses/AbstractMemoryLocation.cpp
+  Analyses/IDEExtendedTaintMemoryAnalysis.cpp
   Analyses/IDEFeatureTaintAnalysis.cpp
   Analyses/IDESecureHeapPropagation.cpp
   Analyses/IDEInstInteractionAnalysis.cpp

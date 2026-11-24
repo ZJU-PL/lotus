@@ -33,6 +33,22 @@ IDESolver<Problem>::~IDESolver() {
     }
 }
 
+template<typename Problem>
+void IDESolver<Problem>::release_transient_storage() {
+    // Values, statistics, and explicitly recorded path/summary edges are
+    // retained. Everything below is only needed while tabulating jump
+    // functions and applying summaries.
+    m_jump_functions.clear();
+    m_incoming.clear();
+    m_end_summaries.clear();
+    m_compose_cache.clear();
+    m_join_cache.clear();
+    m_join_members.clear();
+    m_normal_edge_cache.clear();
+    m_call_to_return_edge_cache.clear();
+    m_worklist.clear();
+}
+
 // ============================================================================
 // Helper Methods
 // ============================================================================
@@ -208,8 +224,16 @@ void IDESolver<Problem>::solve(const llvm::Module& module) {
             auto it = m_jump_functions.find(current);
             if (it == m_jump_functions.end()) {
                 m_jump_functions.emplace(current, phi);
-                if (m_config.record_edges() && m_path_edges.insert(current).second)
+                // Keep the traditional pointer-rich path-edge table only
+                // when requested.  Compact solver variants can subscribe to
+                // this notification and maintain their own ID-based table
+                // without turning on the expensive debugging export.
+                if (m_config.record_edges()) {
+                    if (m_path_edges.insert(current).second)
+                        on_path_edge_added(current);
+                } else if (wants_path_edge_callbacks()) {
                     on_path_edge_added(current);
+                }
             } else {
                 auto joined = join_cached(it->second, phi);
                 if (joined == it->second)
