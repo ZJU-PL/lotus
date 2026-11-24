@@ -2,8 +2,8 @@
 
 #include "Analysis/CallGraph/CallGraph.h"
 #include "Analysis/CallGraph/CallGraphAnalysisType.h"
-#include "Analysis/TypeHierarchy/LLVMVFTableProvider.h"
 #include "Analysis/CallGraph/Resolver.h"
+#include "Analysis/TypeHierarchy/LLVMVFTableProvider.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"

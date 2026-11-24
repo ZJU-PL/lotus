@@ -1,7 +1,7 @@
 #include "IR/PDG/Query/SliceQuery.h"
 
 #include "IR/PDG/Query/DependenceQuery.h"
-#include "IR/PDG/Query/Traversal.h"
+#include "Traversal.h"
 
 namespace pdg {
 using namespace llvm;

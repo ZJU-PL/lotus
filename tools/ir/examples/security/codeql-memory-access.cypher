@@ -17,7 +17,7 @@
 # --rule cpp/potential-buffer-overflow
 # --rule cpp/unclear-array-index-validation
 
-# Object/subobject capacity and access widths, shared with BoundsQuery.
+# Object/subobject capacity and access widths, shared with BoundsAnalysis.
 # Run: lotus-ir-pdg-query input.bc -f tools/ir/examples/security/codeql-memory-access.cypher
 # Unknown sizes/offsets stay unknown. False means no proven bad access among
 # known accesses; it does not prove an instruction's unknown accesses safe.

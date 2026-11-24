@@ -1,9 +1,9 @@
-#include "IR/PDG/Core/GraphBuilder.h"
+#include "IR/PDG/Construction/GraphBuilder.h"
 
-#include "IR/PDG/Core/PDGCallGraph.h"
-#include "IR/PDG/Core/DataDependencyGraph.h"
+#include "IR/PDG/Construction/PDGCallGraph.h"
+#include "IR/PDG/Construction/DataDependencyGraph.h"
 #include "IR/PDG/Query/SliceQuery.h"
-#include "IR/PDG/Analysis/RuleQuery.h"
+#include "IR/PDG/Rules/RuleEngine.h"
 #include "TestUtils/LLVMHelpers.h"
 
 #include "llvm/IR/LegacyPassManager.h"
@@ -140,7 +140,7 @@ TEST(PDGGraphBuilderTest, EmptySelectionDoesNotFallBackToAllRuleSites) {
   ASSERT_NE(module, nullptr);
   ProgramGraph graph;
   GraphBuilder(graph).build(*module);
-  RuleQuery rules(graph);
+  RuleEngine rules(graph);
   EXPECT_EQ(
       rules.analyze({"cpp/dangerous-function-overflow"}, {}, {}, module.get())
           .findings.size(),

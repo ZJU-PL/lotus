@@ -1,6 +1,6 @@
 /// @file Query.h
-/// @brief Convenience include for graph queries. Semantic analyses and rules
-/// have their own headers under Analysis/ and Rules/.
+/// @brief Convenience include for PDG graph queries. IR models, analyses,
+/// rules, and Cypher live in Models/, Analyses/, Rules/, and Cypher/.
 #pragma once
 
 #include "IR/PDG/Query/Criteria.h"

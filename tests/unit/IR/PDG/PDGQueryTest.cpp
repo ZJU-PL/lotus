@@ -7,10 +7,10 @@
 #include "llvm/PassRegistry.h"
 #include "llvm/Support/SourceMgr.h"
 
-#include "IR/PDG/Core/ControlDependencyGraph.h"
-#include "IR/PDG/Core/DataDependencyGraph.h"
-#include "IR/PDG/Core/GraphBuilder.h"
-#include "IR/PDG/Core/ProgramDependencyGraph.h"
+#include "IR/PDG/Construction/ControlDependencyGraph.h"
+#include "IR/PDG/Construction/DataDependencyGraph.h"
+#include "IR/PDG/Construction/GraphBuilder.h"
+#include "IR/PDG/Construction/ProgramDependencyGraph.h"
 #include "IR/PDG/Query/Query.h"
 #include "TestUtils/LLVMHelpers.h"
 

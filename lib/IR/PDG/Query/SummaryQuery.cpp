@@ -1,5 +1,5 @@
 #include "IR/PDG/Core/Graph.h"
-#include "IR/PDG/Support/PDGUtils.h"
+#include "IR/PDG/Core/PDGUtils.h"
 /**
  * @file SummaryQuery.cpp
  * @brief Implementation of function-scoped PDG summaries.

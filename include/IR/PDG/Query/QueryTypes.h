@@ -8,7 +8,7 @@
 #pragma once
 
 #include "IR/PDG/Core/PDGEnums.h"
-#include "IR/PDG/Query/QueryDiagnostics.h"
+#include "IR/PDG/Core/QueryDiagnostics.h"
 
 #include <map>
 #include <set>

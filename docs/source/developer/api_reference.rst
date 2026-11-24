@@ -142,7 +142,7 @@ Include headers:
 
 .. code-block:: cpp
 
-   #include "IR/PDG/Core/ProgramDependencyGraph.h"
+   #include "IR/PDG/Construction/ProgramDependencyGraph.h"
    #include "IR/PDG/Core/Graph.h"
    #include "IR/PDG/Core/PDGNode.h"
    #include "IR/PDG/Core/PDGEdge.h"
@@ -206,9 +206,9 @@ Include headers:
 
 .. code-block:: cpp
 
-   #include "IR/PDG/QueryLanguage/Cypher.h"
-   #include "IR/PDG/Core/ProgramDependencyGraph.h"
-   #include "IR/PDG/Support/PDGUtils.h"
+   #include "IR/PDG/Cypher/Cypher.h"
+   #include "IR/PDG/Construction/ProgramDependencyGraph.h"
+   #include "IR/PDG/Core/PDGUtils.h"
 
 Parse and execute Cypher queries:
 
@@ -240,7 +240,7 @@ Include headers:
 
 .. code-block:: cpp
 
-   #include "IR/PDG/Core/PDGCallGraph.h"
+   #include "IR/PDG/Construction/PDGCallGraph.h"
 
 Build and query call graph:
 
@@ -328,7 +328,7 @@ Here is an example building an analysis tool that integrates alias analysis, the
    #include "llvm/Support/SourceMgr.h"
    #include "llvm/IR/LegacyPassManager.h"
    #include "Alias/UnificationBased/DyckAA/DyckAliasAnalysis.h"
-   #include "IR/PDG/Core/ProgramDependencyGraph.h"
+   #include "IR/PDG/Construction/ProgramDependencyGraph.h"
    #include "Dataflow/IFDS/Analyses/IFDSTaintAnalysis.h"
    #include "Dataflow/IFDS/Solver/IFDSSolver.h"
    

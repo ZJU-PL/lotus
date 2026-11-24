@@ -1,7 +1,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 
-#include "IR/PDG/Query/QuerySupport.h"
+#include "QuerySupport.h"
 
 #include <algorithm>
 #include <queue>

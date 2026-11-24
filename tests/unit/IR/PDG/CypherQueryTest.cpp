@@ -1,6 +1,6 @@
-#include "IR/PDG/Core/GraphBuilder.h"
-#include "IR/PDG/Core/ProgramDependencyGraph.h"
-#include "IR/PDG/QueryLanguage/Cypher.h"
+#include "IR/PDG/Construction/GraphBuilder.h"
+#include "IR/PDG/Construction/ProgramDependencyGraph.h"
+#include "IR/PDG/Cypher/Cypher.h"
 #include "TestUtils/LLVMHelpers.h"
 
 #include <iostream>

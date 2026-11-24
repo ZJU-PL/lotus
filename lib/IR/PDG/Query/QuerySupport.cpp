@@ -1,4 +1,4 @@
-#include "IR/PDG/Query/QuerySupport.h"
+#include "QuerySupport.h"
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/DebugInfoMetadata.h"

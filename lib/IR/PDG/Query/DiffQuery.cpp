@@ -1,6 +1,6 @@
 #include "IR/PDG/Query/DiffQuery.h"
 
-#include "IR/PDG/Query/QuerySupport.h"
+#include "QuerySupport.h"
 
 #include <unordered_set>
 

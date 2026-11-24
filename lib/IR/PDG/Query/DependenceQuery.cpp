@@ -1,7 +1,7 @@
 #include "IR/PDG/Query/DependenceQuery.h"
 
-#include "IR/PDG/Query/QuerySupport.h"
 #include "IR/PDG/Query/SliceQuery.h"
+#include "QuerySupport.h"
 
 #include <algorithm>
 #include <functional>

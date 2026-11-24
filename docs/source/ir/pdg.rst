@@ -14,24 +14,25 @@ and other dependence-aware queries.
 Module Organization
 ===================
 
-Headers and implementations use five flat directories; all headers, including
-internal helpers, live under ``include/IR/PDG/``:
+Headers and implementations use eight flat directories matching the eight CMake
+targets 1:1. Public headers live under ``include/IR/PDG/`` and internal query
+helpers live privately under ``lib/IR/PDG/Query/``:
 
-* ``Core/``: graph representation, structural builder, call graph and LLVM passes
-* ``Analysis/``: semantic engines, reusable facts, library models and rule dispatch
-* ``Query/``: graph-query vocabulary, criteria, traversal and concrete services
-* ``QueryLanguage/``: Cypher AST, parser and executor
-* ``Support/``: debug metadata, graph helpers, options, graph traits and DOT printer
+* ``Core/`` (``CanaryPDGCore``): graph representation, wrappers, core utilities, debug metadata, options, and query diagnostics
+* ``Construction/`` (``CanaryPDGConstruction``): structural builder, call graph, and LLVM dependence passes
+* ``Query/`` (``CanaryPDGQuery``): PDG graph-query vocabulary, criteria, traversal, and concrete graph query services
+* ``Models/`` (``CanaryPDGModels``): shared finding/rule types, reusable LLVM facts, and C/C++ library models
+* ``Analyses/`` (``CanaryPDGAnalyses``): LLVM IR domain analyses (bounds, lifetime, state, taint, arithmetic, API, contracts, protocols)
+* ``Rules/`` (``CanaryPDGRules``): rule catalog and rule engine dispatch
+* ``Cypher/`` (``CanaryPDGCypher``): Cypher AST, parser, and executor
+* ``Visualization/`` (``CanaryPDGVisualization``): LLVM ``GraphTraits`` and DOT printer pass
 
-Classes and CMake targets separate logical layers within these directories.
-Link the targets a consumer needs: ``CanaryPDGCore``,
-``CanaryPDGConstruction``, ``CanaryPDGQuery``, ``CanaryPDGSemanticSupport``,
-``CanaryPDGSemantics``, ``CanaryPDGRules``, ``CanaryPDGCypher`` or
-``CanaryPDGVisualization``. Construction and graph queries depend on Core;
-Rules and Cypher depend on graph queries and semantic services. Graph queries
-have no dependency on Cypher or rule evaluation.
+Link only the targets a consumer needs. Construction and graph queries depend on
+Core; Analyses depends on Core and Models; Rules and Cypher depend on Query and
+Analyses; Visualization depends on Construction. Graph queries have no
+dependency on Cypher, IR analyses, or rule evaluation.
 
-``Core/GraphBuilder.h`` builds a structural graph into an explicitly supplied
+``Construction/GraphBuilder.h`` builds a structural graph into an explicitly supplied
 ``ProgramGraph``; ``build`` replaces prior contents and invalidates query
 caches. ``bindDebugInfo`` adds debug-type annotations. Independent graph
 instances own their objects and release them on destruction. The LLVM
@@ -64,10 +65,10 @@ umbrella header over the focused query headers. The core services are:
 
 Additional graph services include ``SummaryQuery`` (function summaries),
 ``ImpactQuery`` (change ranking) and ``ResourceFlowQuery`` (resource tracking).
-The separate ``Analysis/`` headers expose ``TaintQuery``, ``LifetimeQuery``,
-``StateQuery``, ``ApiQuery``, ``ArithmeticQuery``, ``BoundsQuery``,
-``ProtocolQuery`` and ``CallContractQuery``. ``Analysis/RuleQuery.h`` orchestrates
-these semantic engines and owns rule selection and findings.
+The separate ``Analyses/`` headers expose ``TaintAnalysis``, ``LifetimeAnalysis``,
+``StateAnalysis``, ``ApiAnalysis``, ``ArithmeticAnalysis``, ``BoundsAnalysis``,
+``ProtocolAnalysis`` and ``CallContractAnalysis``. ``Rules/RuleEngine.h`` orchestrates
+these IR analyses and owns rule selection and findings.
 
 Graph services share the following option/result model; semantic engines have
 their own typed results:
@@ -90,7 +91,7 @@ PDG is exposed as an LLVM ``ModulePass``. A typical usage pattern:
 
 .. code-block:: cpp
 
-   #include "IR/PDG/Core/ProgramDependencyGraph.h"
+   #include "IR/PDG/Construction/ProgramDependencyGraph.h"
    #include "IR/PDG/Query/SliceQuery.h"
    #include "llvm/IR/LegacyPassManager.h"
    using namespace llvm;
@@ -119,8 +120,8 @@ For interactive querying and slicing, see the :doc:`../user_guide/pdg_query_lang
 and the ``lotus-ir-pdg-query`` tool described in :doc:`../tools/ir/index`.
 
 The Cypher selector language implementation is separated from these concrete
-analysis services under ``include/IR/PDG/QueryLanguage/`` and
-``lib/IR/PDG/QueryLanguage/``.
+analysis services under ``include/IR/PDG/Cypher/`` and
+``lib/IR/PDG/Cypher/``.
 
 The Cypher query rule set provides pattern matching over the PDG IR, including
 security-focused query templates. See ``tools/ir/examples/`` for example queries

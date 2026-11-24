@@ -1,4 +1,4 @@
-#include "IR/PDG/Support/DebugInfoUtils.h"
+#include "IR/PDG/Core/DebugInfoUtils.h"
 /**
  * @file Tree.cpp
  * @brief Implementation of tree structures for field-sensitive analysis in the
@@ -22,7 +22,7 @@
  */
 
 #include "IR/PDG/Core/Tree.h"
-#include "IR/PDG/Support/PDGUtils.h"
+#include "IR/PDG/Core/PDGUtils.h"
 
 using namespace llvm;
 

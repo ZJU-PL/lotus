@@ -1,8 +1,8 @@
 #include "llvm/IR/IRBuilder.h"
 
-#include "IR/PDG/Analysis/ValueFacts.h"
-#include "IR/PDG/Core/GraphBuilder.h"
-#include "IR/PDG/Analysis/RuleQuery.h"
+#include "IR/PDG/Models/ValueFacts.h"
+#include "IR/PDG/Construction/GraphBuilder.h"
+#include "IR/PDG/Rules/RuleEngine.h"
 #include "TestUtils/LLVMHelpers.h"
 
 #include <gtest/gtest.h>
@@ -24,8 +24,8 @@ protected:
     ASSERT_NE(module, nullptr);
     pdg::GraphBuilder(graph).build(*module);
   }
-  RuleQueryResult run(const std::string &id) {
-    return RuleQuery(graph).analyze({id}, {}, {}, module.get());
+  RuleEngineResult run(const std::string &id) {
+    return RuleEngine(graph).analyze({id}, {}, {}, module.get());
   }
 };
 
@@ -240,7 +240,7 @@ TEST_F(PDGRuleCoverageTest, FilesystemChecksRequireStablePathsAndSeparateUse) {
   PDGQueryOptions limited;
   limited.limits.max_states = 1;
   EXPECT_TRUE(
-      RuleQuery(graph)
+      RuleEngine(graph)
           .analyze({"lotus/filesystem-toctou"}, {}, limited, module.get())
           .diagnostics.state_limit_hit);
 }

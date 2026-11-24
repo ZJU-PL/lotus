@@ -2,7 +2,7 @@
 
 #include "llvm/IR/Module.h"
 
-#include "IR/PDG/Query/QuerySupport.h"
+#include "QuerySupport.h"
 
 namespace pdg {
 using namespace llvm;

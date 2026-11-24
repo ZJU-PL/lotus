@@ -1,7 +1,7 @@
 #include "IR/PDG/Query/DataFlowQuery.h"
 
-#include "IR/PDG/Query/QuerySupport.h"
 #include "IR/PDG/Query/SliceQuery.h"
+#include "QuerySupport.h"
 
 namespace pdg {
 using namespace llvm;

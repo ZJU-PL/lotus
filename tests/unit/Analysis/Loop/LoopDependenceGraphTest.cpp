@@ -6,9 +6,9 @@
 #include "llvm/PassRegistry.h"
 
 #include "Analysis/Loop/FunctionLoopAnalyses.h"
-#include "IR/PDG/Core/ControlDependencyGraph.h"
-#include "IR/PDG/Core/DataDependencyGraph.h"
-#include "IR/PDG/Core/ProgramDependencyGraph.h"
+#include "IR/PDG/Construction/ControlDependencyGraph.h"
+#include "IR/PDG/Construction/DataDependencyGraph.h"
+#include "IR/PDG/Construction/ProgramDependencyGraph.h"
 #include "TestUtils/LLVMHelpers.h"
 
 #include <gtest/gtest.h>

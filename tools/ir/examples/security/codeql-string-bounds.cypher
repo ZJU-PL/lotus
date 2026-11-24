@@ -1,5 +1,5 @@
 # String/content facts are evaluated immediately before each call, using the
-# same MemorySSA, object aliases and format-output model as BoundsQuery.
+# same MemorySSA, object aliases and format-output model as BoundsAnalysis.
 # Byte lengths exclude a source string's NUL; formatted output sizes include
 # its NUL. Unknown facts remain empty, not a proof of safety.
 

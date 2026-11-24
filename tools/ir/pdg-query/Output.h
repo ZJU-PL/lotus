@@ -8,7 +8,7 @@ class CypherQueryExecutor;
 class CypherResult;
 class CypherQuery;
 struct RuleDescriptor;
-struct RuleQueryResult;
+struct RuleEngineResult;
 struct PDGQueryResult;
 struct DiffQueryResult;
 struct SummaryQueryResult;
@@ -29,7 +29,7 @@ public:
   void printRules(const std::vector<pdg::RuleDescriptor> &rules) const;
   void
   printCweCatalog(const std::vector<pdg::RuleDescriptor> &selectedRules) const;
-  void printRuleResult(const pdg::RuleQueryResult &result) const;
+  void printRuleResult(const pdg::RuleEngineResult &result) const;
   void printResult(const pdg::PDGQueryResult &result) const;
   void printDiff(const pdg::DiffQueryResult &result) const;
   void printSummary(const pdg::SummaryQueryResult &result) const;

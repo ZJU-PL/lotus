@@ -1,6 +1,6 @@
 #include "IR/PDG/Core/PDGNode.h"
-#include "IR/PDG/Support/DebugInfoUtils.h"
-#include "IR/PDG/Support/PDGUtils.h"
+#include "IR/PDG/Core/DebugInfoUtils.h"
+#include "IR/PDG/Core/PDGUtils.h"
 
 #include "TestUtils/LLVMHelpers.h"
 

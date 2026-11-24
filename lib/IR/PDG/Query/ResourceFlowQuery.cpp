@@ -1,6 +1,6 @@
 #include "IR/PDG/Core/Graph.h"
-#include "IR/PDG/Query/QuerySupport.h"
-#include "IR/PDG/Support/PDGUtils.h"
+#include "IR/PDG/Core/PDGUtils.h"
+#include "QuerySupport.h"
 /**
  * @file ResourceFlowQuery.cpp
  * @brief Implementation of built-in resource-flow analysis over the PDG.

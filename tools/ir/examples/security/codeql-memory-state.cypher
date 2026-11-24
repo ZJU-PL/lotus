@@ -10,7 +10,7 @@
 # --rule cpp/inconsistent-nullness-testing
 # --rule cpp/inconsistent-null-check
 
-# StateQuery facts immediately BEFORE a load/store dereferences its address.
+# StateAnalysis facts immediately BEFORE a load/store dereferences its address.
 # The pointer state describes the address operand, not the loaded pointer value.
 # Initialization refers to the pointee before the access, not after a store.
 # Unknown/unreachable facts are not treated as safe or as bugs.

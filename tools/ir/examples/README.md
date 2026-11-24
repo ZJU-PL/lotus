@@ -96,8 +96,8 @@ There are three distinct kinds of example:
 | `security/protocols.cypher` | Shared-global races, lock-order cycles and filesystem TOCTOU candidates | Inventories + bounded native protocol checks |
 | `security/codeql-taint.cypher` | Shared source/sink roles for PDG-native process, command, SQL, path and format flows | Cypher selections + `--analysis rules`; source/concat evidence in JSON |
 | `security/codeql-string-bounds.cypher` | Program-point string termination/length, buffer formatting roles and output bounds | Shared MemorySSA string/format facts; native rules for taint and relative guards |
-| `security/codeql-memory-access.cypher` | Subobject capacity, access width, negative offsets, read/write overflow | Shared BoundsQuery facts; native rules also check symbolic ends |
-| `security/codeql-memory-state.cypher` | Nullable dereferences, definite/conditional uninitialized loads | Shared StateQuery facts; native lifetime rules retain object/path state |
+| `security/codeql-memory-access.cypher` | Subobject capacity, access width, negative offsets, read/write overflow | Shared BoundsAnalysis facts; native rules also check symbolic ends |
+| `security/codeql-memory-state.cypher` | Nullable dereferences, definite/conditional uninitialized loads | Shared StateAnalysis facts; native lifetime rules retain object/path state |
 | `security/codeql-buffer-bounds.cypher` | Target-ABI copy bounds versus destination capacity | Semantic Cypher predicates; native rules for dynamic lengths |
 | `security/codeql-format-arguments.cypher` | Parsed format counts and unbounded scanf conversions | Semantic Cypher predicates |
 | `security/codeql-resource-origins.cypher` | Allocation/release families and value-flow explanations | Cypher + native family checks/context-sensitive chop |
@@ -122,8 +122,8 @@ candidates for inspection, not proofs of taint or feasible resource misuse.
 The semantic examples support property-to-property comparisons such as
 `c.copy_size_bytes > c.copy_destination_bytes`. Models supply argument roles,
 target ABI sizes and parsed format facts, so these are checks over program
-semantics rather than spelling or coding style. BoundsQuery, StateQuery and
-LifetimeQuery share reusable analysis services; none depends on IFDS, Saber,
+semantics rather than spelling or coding style. BoundsAnalysis, StateAnalysis and
+LifetimeAnalysis share reusable analysis services; none depends on IFDS, Saber,
 Pulse or UseTraceSSA. Further work prioritizes interprocedural object identity,
 ownership summaries, relative ranges and C++ library models.
 
@@ -192,13 +192,13 @@ Cypher predicates and native lifetime/taint/format checks. Backend regressions
 in `tests/unit/IR/PDG/RuleCoverageTest.cpp` cover each extension above, including
 clobbered pointers, guarded array indices, ownership release/reset, atomic and
 mutex suppression, joined workers, path mutation and exclusive file creation.
-The wider native rule suite is in `RuleQueryTest.cpp`. These are regression
+The wider native rule suite is in `RuleEngineTest.cpp`. These are regression
 fixtures; they do not measure real-world precision or recall.
 
 ```bash
 cmake --build build --target lotus-ir-pdg-query ir_tests
 python3 tests/regress/IR/PDG/check_examples.py
-build/bin/tests/ir_tests --gtest_filter='PDGRuleQueryTest.*:PDGRuleCoverageTest.*'
+build/bin/tests/ir_tests --gtest_filter='PDGRuleEngineTest.*:PDGRuleCoverageTest.*'
 ctest --test-dir build -R '^pdg_example_queries$' --output-on-failure
 
 # Regenerate the catalog-to-example matrix after adding a rule/example.

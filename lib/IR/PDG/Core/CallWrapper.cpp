@@ -22,7 +22,7 @@
 
 #include "IR/PDG/Core/CallWrapper.h"
 
-#include "IR/PDG/Support/PDGUtils.h"
+#include "IR/PDG/Core/PDGUtils.h"
 
 using namespace llvm;
 

@@ -1,4 +1,3 @@
-#include "IR/PDG/Core/GraphBuilder.h"
 //===-- PDGExample.cpp - Example code for using Program Dependency Graph  ----===//
 //
 // This file demonstrates how to use the PDG (Program Dependency Graph) library
@@ -13,10 +12,11 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "IR/PDG/Core/ControlDependencyGraph.h"
-#include "IR/PDG/Core/DataDependencyGraph.h"
-#include "IR/PDG/Core/PDGCallGraph.h"
-#include "IR/PDG/Core/ProgramDependencyGraph.h"
+#include "IR/PDG/Construction/ControlDependencyGraph.h"
+#include "IR/PDG/Construction/DataDependencyGraph.h"
+#include "IR/PDG/Construction/GraphBuilder.h"
+#include "IR/PDG/Construction/PDGCallGraph.h"
+#include "IR/PDG/Construction/ProgramDependencyGraph.h"
 
 using namespace llvm;
 using namespace pdg;

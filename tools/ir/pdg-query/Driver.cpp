@@ -1,11 +1,12 @@
 #include "Driver.h"
 
+#include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "IR/PDG/Query/PropertySpec.h"
 #include "IR/PDG/Query/Query.h"
-#include "IR/PDG/QueryLanguage/Cypher.h"
-#include "IR/PDG/Analysis/RuleQuery.h"
+#include "IR/PDG/Cypher/Cypher.h"
+#include "IR/PDG/Rules/RuleEngine.h"
 #include "Options.h"
 #include "Output.h"
 
@@ -25,7 +26,7 @@ static bool selectedRuleIds(std::vector<std::string> &ids,
                             const Options &config) {
   for (const auto &id : config.ruleIds)
     if (std::none_of(
-            RuleQuery::catalog().begin(), RuleQuery::catalog().end(),
+            RuleEngine::catalog().begin(), RuleEngine::catalog().end(),
             [&](const RuleDescriptor &rule) { return rule.id == id; })) {
       errs() << "Unknown PDG rule: " << id << "\n";
       return false;
@@ -34,7 +35,7 @@ static bool selectedRuleIds(std::vector<std::string> &ids,
     ids.assign(config.ruleIds.begin(), config.ruleIds.end());
     return true;
   }
-  for (const auto &rule : RuleQuery::catalog()) {
+  for (const auto &rule : RuleEngine::catalog()) {
     bool tagged =
         std::any_of(rule.cwes.begin(), rule.cwes.end(), [&](unsigned cwe) {
           return std::find(config.cweIds.begin(), config.cweIds.end(), cwe) !=
@@ -363,10 +364,10 @@ static bool executeAnalysis(ProgramGraph &pdg, const Module &module,
         return false;
       TaintPolicy taint_policy;
       taint_policy.max_steps = config.taintStepLimit;
-      RuleQueryPolicy rule_policy;
+      RuleEnginePolicy rule_policy;
       rule_policy.lifetime_states_per_object = config.lifetimeStateLimit;
       rule_policy.protocol_states_per_search = config.protocolStateLimit;
-      output.printRuleResult(RuleQuery(pdg).analyze(
+      output.printRuleResult(RuleEngine(pdg).analyze(
           ids, criteria, options, &module, taint_policy, rule_policy));
       return true;
     } catch (const std::invalid_argument &error) {
@@ -505,7 +506,7 @@ Optional<int> handleCatalogOptions(const Options &config) {
     if (!selectedRuleIds(ids, config))
       return 1;
     std::vector<RuleDescriptor> rules;
-    for (const auto &rule : RuleQuery::catalog())
+    for (const auto &rule : RuleEngine::catalog())
       if (ids.empty() ||
           std::find(ids.begin(), ids.end(), rule.id) != ids.end())
         rules.push_back(rule);

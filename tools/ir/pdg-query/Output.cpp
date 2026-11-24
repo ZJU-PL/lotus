@@ -10,11 +10,11 @@
 #include "IR/PDG/Query/QueryTypes.h"
 #include "IR/PDG/Query/ResourceFlowQuery.h"
 #include "IR/PDG/Query/SummaryQuery.h"
-#include "IR/PDG/QueryLanguage/CypherAST.h"
-#include "IR/PDG/QueryLanguage/CypherExecutor.h"
-#include "IR/PDG/QueryLanguage/CypherResult.h"
-#include "IR/PDG/Analysis/RuleQuery.h"
-#include "IR/PDG/Support/PDGUtils.h"
+#include "IR/PDG/Cypher/CypherAST.h"
+#include "IR/PDG/Cypher/CypherExecutor.h"
+#include "IR/PDG/Cypher/CypherResult.h"
+#include "IR/PDG/Rules/RuleEngine.h"
+#include "IR/PDG/Core/PDGUtils.h"
 #include "Options.h"
 
 #include <algorithm>
@@ -389,7 +389,7 @@ void Output::printSchema() const {
   outs() << "}\n";
 }
 
-void Output::printRuleResult(const RuleQueryResult &result) const {
+void Output::printRuleResult(const RuleEngineResult &result) const {
   if (config_.format == "json") {
     json::Array findings;
     for (const auto &finding : result.findings) {

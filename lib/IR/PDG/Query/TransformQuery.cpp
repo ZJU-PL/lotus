@@ -6,7 +6,7 @@
 #include "llvm/IR/Dominators.h"
 
 #include "IR/PDG/Query/DependenceQuery.h"
-#include "IR/PDG/Query/QuerySupport.h"
+#include "QuerySupport.h"
 
 #include <functional>
 #include <queue>

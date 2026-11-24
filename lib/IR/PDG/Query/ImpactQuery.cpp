@@ -1,6 +1,6 @@
 #include "IR/PDG/Core/Graph.h"
-#include "IR/PDG/Query/QuerySupport.h"
-#include "IR/PDG/Support/PDGUtils.h"
+#include "IR/PDG/Core/PDGUtils.h"
+#include "QuerySupport.h"
 /**
  * @file ImpactQuery.cpp
  * @brief Implementation of PDG impact analysis.

@@ -1,4 +1,4 @@
-#include "IR/PDG/Query/Traversal.h"
+#include "Traversal.h"
 
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"

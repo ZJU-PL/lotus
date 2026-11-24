@@ -1,4 +1,4 @@
-# Taint/content provenance uses native TaintQuery and modeled argument roles.
+# Taint/content provenance uses native TaintAnalysis and modeled argument roles.
 # lotus-ir-pdg-query input.bc --analysis rules --rule cpp/uncontrolled-process-operation --rule cpp/tainted-format-string --format json
 # Other domains: --rule cpp/sql-injection --rule cpp/path-injection
 # --rule cpp/command-line-injection --rule cpp/non-constant-format
