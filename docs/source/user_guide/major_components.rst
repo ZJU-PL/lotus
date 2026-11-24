@@ -102,9 +102,6 @@ See :doc:`../ir/index` for builder APIs and code snippets.
 * **UseTraceSSA** – Ordered use-history overlay over Lotus SVFG for temporal
   resource defect checking (``lib/IR/UseTraceSSA``). See
   :doc:`../ir/usetracessa`.
-* **PathProgram** – Control-flow abstractions induced by concrete execution
-  paths for verification analyses (``lib/Verification/PathProgram``). See
-  :doc:`../ir/path_program`.
 
 Machine Learning Features
 -------------------------

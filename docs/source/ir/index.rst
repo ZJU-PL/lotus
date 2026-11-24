@@ -16,5 +16,4 @@ value-flow analyses across program abstractions.
    gvfg
    gsa
    shadowmemssa
-   path_program
    ufg

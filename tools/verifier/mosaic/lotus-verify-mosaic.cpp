@@ -1,5 +1,5 @@
-#include "Verification/Mosaic/CHCParser.h"
-#include "Verification/Mosaic/MosaicFixedpoint.h"
+#include "Mosaic/CHCParser.h"
+#include "Mosaic/MosaicFixedpoint.h"
 
 #include <cstdlib>
 #include <cstring>

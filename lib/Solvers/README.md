@@ -4,6 +4,8 @@ Constraint, logic, and SMT solver integrations for Lotus.
 
 ## Generic Solver Infrastructure
 
+- **Automata** - Nested word automata (NWA), Büchi automata, operations,
+  minimization, inclusion, and simulation games
 - **Datalog** - Native C++ Datalog engine supporting Stratified Datalog, lattice
   fixed-point semantics, and frontends for JSON, native Datalog, and Z3 fixedpoint
 - **EGraph** - Solver-agnostic equality graph and rewrite engine inspired by

@@ -23,7 +23,7 @@ The repository is organized into a small number of top-level directories. Every 
    * - ``tests/``
      - Unit and integration tests
    * - ``third-party/``
-     - Bundled third-party libraries (CUDD, WPDS, spdlog)
+     - Bundled third-party libraries (CUDD, WPDS, spdlog, Mosaic)
    * - ``benchmarks/``
      - Benchmark programs for internal evaluation
    * - ``examples/``
@@ -63,10 +63,10 @@ The ``lib/`` directory is divided into 16 CMake subdirectories, each of which co
      - ``Framework``, ``AE``, ``KINT``, ``Pulse``, ``Saber``, ``Concurrency``, ``GSAF``, ``FiTx``, ``TypeQualifier``, ``Tooling``
      - Bug detection engines and linters
    * - ``lib/Solvers/``
-     - ``Datalog``, ``EGraph``, ``SMT`` (LIBSMT, TUNA, STAUB, SymAbs, SMTStabilizer, SMTSampler, QuantSimp)
+     - ``Automata``, ``Datalog``, ``EGraph``, ``SMT`` (LIBSMT, TUNA, STAUB, SymAbs, SMTStabilizer, SMTSampler, QuantSimp)
      - Constraint and reachability solvers
    * - ``lib/Verification/``
-     - ``SymAbsAI``, ``Sifa``, ``Mosaic``, ``TraceAbstraction``, ``Automata``, ``PathProgram``, backend adapters (IKOS)
+     - ``SymAbsAI``, ``Sifa``, backend adapters (IKOS)
      - Formal verification backends
    * - ``lib/CFL/``
      - ``Classical``, ``DynamicDyck``, ``InterleavedDyck``, and ``CSIndex`` (CSR/FLARE indexing) engines
@@ -202,6 +202,8 @@ Core libraries under ``third-party/`` added in standard builds include:
 * **CUDD**: BDD-based symbolic computations used heavily in ``lib/Solvers/``.
 * **WPDS**: Weighted pushdown systems; used by the ``lib/Dataflow/`` WPDS engine.
 * **spdlog**: A fast C++ logging library used for framework diagnostics.
+* **Mosaic**: A theory-modular CHC solver for fixed-size bit-vectors and
+  integer arithmetic, used by the ``lotus-verify-mosaic`` tool.
 
 Additional vendored packages (such as SPARTA, Seal, CLAM, SeaHorn, SMACK, FPsolve,
 WALi/OpenNWA, PDAAAL, Horn-ICE, and FlowCutter) are managed as opt-in components gated by

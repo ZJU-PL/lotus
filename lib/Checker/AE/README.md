@@ -99,7 +99,6 @@ The main suites are:
 
 - `checker_tests`: AE semantics, detectors, interprocedural behavior, sparse
   equivalence, and instruction parity.
-- `trace_abstraction_tests`: the separate trace-abstraction engine.
 
 `tests/unit/Checker/AE/AEInstructionParityTest.cpp` covers LLVM cases that
 previously diverged from SVF or between storage layouts, including floating

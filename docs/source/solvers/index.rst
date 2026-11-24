@@ -13,6 +13,7 @@ SMTSampler).
    :maxdepth: 2
 
    cudd
+   automata
    smt
    wpds
    smtsampler
