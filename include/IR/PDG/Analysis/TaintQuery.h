@@ -1,11 +1,16 @@
 #pragma once
 
 #include "IR/PDG/Analysis/LibraryModels.h"
-#include "IR/PDG/Analysis/QueryCore.h"
+#include "IR/PDG/Query/QueryDiagnostics.h"
 
 #include <functional>
+#include <map>
+#include <set>
+#include <utility>
 
 namespace pdg {
+
+class ProgramGraph;
 
 struct TaintPolicy {
   bool include_nonconstant_sources = false;

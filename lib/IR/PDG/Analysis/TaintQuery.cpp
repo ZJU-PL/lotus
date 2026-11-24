@@ -9,6 +9,7 @@
 #include "IR/PDG/Analysis/FunctionFacts.h"
 #include "IR/PDG/Analysis/ValueFacts.h"
 #include "IR/PDG/Core/CallWrapper.h"
+#include "IR/PDG/Core/Graph.h"
 
 #include <algorithm>
 #include <deque>

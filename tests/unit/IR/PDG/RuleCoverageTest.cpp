@@ -1,7 +1,8 @@
 #include "llvm/IR/IRBuilder.h"
 
-#include "IR/PDG/Analysis/RuleQuery.h"
 #include "IR/PDG/Analysis/ValueFacts.h"
+#include "IR/PDG/Core/GraphBuilder.h"
+#include "IR/PDG/Analysis/RuleQuery.h"
 #include "TestUtils/LLVMHelpers.h"
 
 #include <gtest/gtest.h>
@@ -21,7 +22,7 @@ protected:
     module =
         lotus::unittest::parseModuleChecked(context, ir, "RuleCoverageTest");
     ASSERT_NE(module, nullptr);
-    graph.build(*module);
+    pdg::GraphBuilder(graph).build(*module);
   }
   RuleQueryResult run(const std::string &id) {
     return RuleQuery(graph).analyze({id}, {}, {}, module.get());

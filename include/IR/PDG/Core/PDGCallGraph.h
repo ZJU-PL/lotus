@@ -4,8 +4,9 @@
  */
 
 #pragma once
+#include "llvm/IR/Module.h"
+
 #include "IR/PDG/Core/Graph.h"
-#include "IR/PDG/Support/LLVMEssentials.h"
 #include "IR/PDG/Support/PDGUtils.h"
 
 namespace pdg {
@@ -14,7 +15,7 @@ namespace pdg {
  *
  * This class represents the call graph of the program, where nodes are
  * functions and edges represent function calls. It supports:
- * - Construction from LLVM Module
+ * - Instance-owned construction from LLVM Module
  * - Handling of both direct and indirect calls
  * - Reachability analysis between functions
  * - Path computation between functions
@@ -30,28 +31,10 @@ public:
   PDGCallGraph &operator=(PDGCallGraph &&) = delete;
 
   /**
-   * @brief Singleton accessor
-   * @return Reference to the singleton instance
-   */
-  static PDGCallGraph &getInstance() {
-    static PDGCallGraph g{};
-    return g;
-  }
-
-  /**
    * @brief Build the call graph for the given module
    * @param M The LLVM Module
    */
-  void build(llvm::Module &M) override;
-
-  bool isBuiltForModule(const llvm::Module &M) const {
-    return _is_build && _built_module == &M;
-  }
-
-  void reset() {
-    GenericGraph::reset();
-    _built_module = nullptr;
-  }
+  void build(llvm::Module &M);
 
   /**
    * @brief Identify potential targets for an indirect call
@@ -111,7 +94,5 @@ public:
                           std::unordered_set<llvm::Function *> visited_funcs,
                           bool &found_path);
 
-private:
-  llvm::Module *_built_module = nullptr;
 };
 } // namespace pdg

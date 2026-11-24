@@ -1,4 +1,6 @@
 #pragma once
+#include "llvm/Pass.h"
+
 #include "IR/PDG/Core/Graph.h"
 
 namespace pdg {

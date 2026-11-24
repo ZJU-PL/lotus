@@ -7,7 +7,9 @@ add_executable(lotus-ir-pdg-query
 
 target_link_libraries(lotus-ir-pdg-query
   PRIVATE
-  CanaryPDG
+  CanaryPDGConstruction
+  CanaryPDGRules
+  CanaryPDGCypher
   CanaryCUDD
   CanaryAliasAnalysisWrapper
   LLVMIRReader

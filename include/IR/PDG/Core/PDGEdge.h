@@ -7,7 +7,6 @@
 
 #pragma once
 #include "IR/PDG/Core/PDGEnums.h"
-#include "IR/PDG/Core/PDGNode.h"
 
 namespace pdg {
 class Node;

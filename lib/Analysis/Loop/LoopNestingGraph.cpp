@@ -183,11 +183,8 @@ std::unique_ptr<LoopNestingGraph> LoopNestingGraph::buildFromAnalyses(
     std::vector<FunctionLoopAnalyses *> const &analyses,
     llvm::Module &module,
     Function *entryFunction) {
-  auto &callGraph = pdg::PDGCallGraph::getInstance();
-  if (!callGraph.isBuiltForModule(module)) {
-    callGraph.reset();
-    callGraph.build(module);
-  }
+  pdg::PDGCallGraph callGraph;
+  callGraph.build(module);
 
   auto reachableFunctions = collectReachableFunctions(callGraph, entryFunction);
 

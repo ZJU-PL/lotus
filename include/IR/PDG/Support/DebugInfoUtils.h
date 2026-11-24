@@ -5,7 +5,12 @@
 
 #pragma once
 
-#include "IR/PDG/Support/LLVMEssentials.h"
+namespace llvm {
+class DIType;
+class DINode;
+class GlobalVariable;
+class Function;
+} // namespace llvm
 
 #include <queue>
 #include <set>

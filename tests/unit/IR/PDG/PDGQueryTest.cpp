@@ -1,21 +1,25 @@
-#include "IR/PDG/Analysis/Query.h"
-#include "IR/PDG/Core/ControlDependencyGraph.h"
-#include "IR/PDG/Core/DataDependencyGraph.h"
-#include "IR/PDG/Core/ProgramDependencyGraph.h"
-
-#include "TestUtils/LLVMHelpers.h"
-
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/PostDominators.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/PassRegistry.h"
 #include "llvm/Support/SourceMgr.h"
 
+#include "IR/PDG/Core/ControlDependencyGraph.h"
+#include "IR/PDG/Core/DataDependencyGraph.h"
+#include "IR/PDG/Core/GraphBuilder.h"
+#include "IR/PDG/Core/ProgramDependencyGraph.h"
+#include "IR/PDG/Query/Query.h"
+#include "TestUtils/LLVMHelpers.h"
+
 #include <array>
 #include <cstdio>
 #include <memory>
 #include <set>
 #include <string>
+
 #include <sys/stat.h>
 
 using namespace llvm;
@@ -129,7 +133,7 @@ TEST_F(PDGQueryTest, ControlDependencyGraphUsesStandardControlDependence) {
     }
   )";
   ASSERT_TRUE(loadModule(IR));
-  graph.build(*module);
+  pdg::GraphBuilder(graph).build(*module);
 
   legacy::PassManager pm;
   pm.add(new ControlDependencyGraph());
@@ -172,7 +176,7 @@ TEST_F(PDGQueryTest, ControlDependencyGraphPreservesIndirectBranchEdgeType) {
     }
   )";
   ASSERT_TRUE(loadModule(IR));
-  graph.build(*module);
+  pdg::GraphBuilder(graph).build(*module);
 
   legacy::PassManager pm;
   pm.add(new ControlDependencyGraph());
@@ -440,8 +444,8 @@ TEST_F(PDGQueryTest, BindDITypeToNodesSkipsUnsupportedInstructionsWithoutCrash) 
   BinaryOperator *sum = findInstruction<BinaryOperator>(*function, "sum");
   ASSERT_NE(sum, nullptr);
 
-  graph.build(*module);
-  graph.bindDITypeToNodes(*module);
+  pdg::GraphBuilder(graph).build(*module);
+  pdg::GraphBuilder(graph).bindDebugInfo(*module);
 
   Node *sum_node = graph.getNode(*sum);
   ASSERT_NE(sum_node, nullptr);
@@ -510,7 +514,7 @@ TEST_F(PDGQueryTest, ProgramGraphBuildCreatesCallWrapperForInvoke) {
   ASSERT_NE(caller, nullptr);
   ASSERT_NE(callee, nullptr);
 
-  graph.build(*module);
+  pdg::GraphBuilder(graph).build(*module);
 
   InvokeInst *invoke = findInstruction<InvokeInst>(*caller);
   ASSERT_NE(invoke, nullptr);

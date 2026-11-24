@@ -1,3 +1,4 @@
+#include "IR/PDG/Core/GraphBuilder.h"
 //===-- PDGExample.cpp - Example code for using Program Dependency Graph  ----===//
 //
 // This file demonstrates how to use the PDG (Program Dependency Graph) library
@@ -5,17 +6,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "IR/PDG/Core/ProgramDependencyGraph.h"
-#include "IR/PDG/Core/ControlDependencyGraph.h"
-#include "IR/PDG/Core/DataDependencyGraph.h"
-#include "IR/PDG/Core/PDGCallGraph.h"
-
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include "IR/PDG/Core/ControlDependencyGraph.h"
+#include "IR/PDG/Core/DataDependencyGraph.h"
+#include "IR/PDG/Core/PDGCallGraph.h"
+#include "IR/PDG/Core/ProgramDependencyGraph.h"
 
 using namespace llvm;
 using namespace pdg;
@@ -82,9 +83,9 @@ int main(int argc, char **argv) {
   
   // Build the PDG and Call Graph
   ProgramGraph &PDG = ProgramGraph::getInstance();
-  PDG.build(*M);
-  PDG.bindDITypeToNodes(*M);
-  
+  pdg::GraphBuilder(PDG).build(*M);
+  pdg::GraphBuilder(PDG).bindDebugInfo(*M);
+
   PDGCallGraph callGraph;
   callGraph.build(*M);
   outs() << "Call Graph:\n";

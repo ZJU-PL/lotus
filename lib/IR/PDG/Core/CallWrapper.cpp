@@ -22,6 +22,8 @@
 
 #include "IR/PDG/Core/CallWrapper.h"
 
+#include "IR/PDG/Support/PDGUtils.h"
+
 using namespace llvm;
 
 /**
@@ -115,4 +117,14 @@ pdg::Tree *pdg::CallWrapper::getArgActualOutTree(Value &actual_arg) {
   if (iter == _arg_actual_out_tree_map.end())
     return nullptr;
   return _arg_actual_out_tree_map[&actual_arg];
+}
+
+pdg::CallWrapper::CallWrapper(llvm::CallBase &ci) {
+  _call_inst = &ci;
+  _called_func = pdgutils::getCalledFunc(ci);
+  _ret_val_actual_in_tree = nullptr;
+  _ret_val_actual_out_tree = nullptr;
+  for (auto *arg_iter = ci.arg_begin(); arg_iter != ci.arg_end(); arg_iter++) {
+    _arg_list.push_back(*arg_iter);
+  }
 }

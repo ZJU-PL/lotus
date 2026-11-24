@@ -23,7 +23,7 @@ add_library(CanaryLoopAnalysis STATIC ${CanaryLoopAnalysis_SOURCES})
 target_link_libraries(CanaryLoopAnalysis
   CanaryCFG
   CanaryDebugInfo
-  CanaryPDG
+  CanaryPDGConstruction
   CanaryAliasAnalysisWrapper
   LLVMAnalysis
 )

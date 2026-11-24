@@ -5,9 +5,14 @@
 
 #pragma once
 
+#include "llvm/IR/IntrinsicInst.h"
+
 #include "IR/PDG/Core/Tree.h"
-#include "IR/PDG/Support/LLVMEssentials.h"
-#include "IR/PDG/Support/PDGUtils.h"
+
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace pdg {
 /**
@@ -49,7 +54,7 @@ public:
   }
 
   /**
-   * @brief Release (null out) all Tree pointers without deleting them.
+   * @brief Release owned Tree wrappers and clear their stored pointers.
    *
    * Trees are heap-allocated wrapper objects; their TreeNode contents are owned
    * by the PDG node set and are deleted separately by ProgramGraph::reset().

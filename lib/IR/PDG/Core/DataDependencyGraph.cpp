@@ -1,3 +1,7 @@
+#include "llvm/IR/InstIterator.h"
+#include "llvm/Support/CommandLine.h"
+
+#include "IR/PDG/Core/GraphBuilder.h"
 /**
  * @file DataDependencyGraph.cpp
  * @brief Implementation of the data dependency analysis for the PDG
@@ -19,9 +23,8 @@
  * program dependencies.
  */
 
+#include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
 #include "IR/PDG/Core/DataDependencyGraph.h"
-
-#include "IR/PDG/Core/PDGAliasWrapper.h"
 #include "IR/PDG/Support/PDGCommandLineOptions.h"
 
 #include <algorithm>
@@ -66,15 +69,15 @@ static opt<std::string> PdgAliasUnderOpt(
 
 // Map a user-facing string to an AAConfig. Defaults to the provided fallback
 // when the string is unknown.
-static pdg::AAConfig parseAAConfig(const std::string &aa,
-                                   const pdg::AAConfig &fallback) {
+static lotus::AAConfig parseAAConfig(const std::string &aa,
+                                     const lotus::AAConfig &fallback) {
   return lotus::parseAAConfigFromString(aa, fallback);
 }
 
 // Helper that builds an alias wrapper or returns nullptr when disabled/failed.
-static std::unique_ptr<pdg::PDGAliasWrapper>
+static std::unique_ptr<lotus::AliasAnalysisWrapper>
 buildAliasWrapper(llvm::Module &M, const std::string &userChoice,
-                  const pdg::AAConfig &fallback, const char *label) {
+                  const lotus::AAConfig &fallback, const char *label) {
   std::string lower = userChoice;
   std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
@@ -84,17 +87,18 @@ buildAliasWrapper(llvm::Module &M, const std::string &userChoice,
   }
 
   auto config = parseAAConfig(userChoice, fallback);
-  auto wrapper = pdg::PDGAliasFactory::create(M, config);
+  auto wrapper = lotus::AliasAnalysisFactory::create(M, config);
 
   if (!wrapper || !wrapper->isInitialized()) {
     llvm::errs() << "pdg: failed to initialize " << label << " alias analysis: "
-                 << pdg::PDGAliasFactory::getTypeName(config) << "\n";
+                 << lotus::AliasAnalysisFactory::getTypeName(config) << "\n";
     return nullptr;
   }
 
   if (pdg::DEBUG)
-    llvm::errs() << "pdg: using " << pdg::PDGAliasFactory::getTypeName(config)
-                 << " for " << label << " alias queries\n";
+    llvm::errs() << "pdg: using "
+                 << lotus::AliasAnalysisFactory::getTypeName(config) << " for "
+                 << label << " alias queries\n";
 
   return wrapper;
 }
@@ -106,19 +110,18 @@ using namespace llvm;
 
 bool pdg::DataDependencyGraph::runOnModule(Module &M) {
   ProgramGraph &g = ProgramGraph::getInstance();
-  if (!g.isBuiltForModule(M)) {
-    g.reset();
-    g.build(M);
-    g.bindDITypeToNodes(M);
-  }
+  // Each dependence-pass invocation owns a fresh construction cycle. A raw
+  // module address cannot identify cached IR across mutation or destruction.
+  pdg::GraphBuilder(g).build(M);
+  pdg::GraphBuilder(g).bindDebugInfo(M);
 
   // Initialize alias analysis wrappers based on command-line choices.
   _alias_wrapper_over =
       buildAliasWrapper(M, PdgAliasOverOpt.getValue(),
-                        pdg::AAConfig::SparrowAA_NoCtx(), "over-approximate");
+                        lotus::AAConfig::SparrowAA_NoCtx(), "over-approximate");
   _alias_wrapper_under =
       buildAliasWrapper(M, PdgAliasUnderOpt.getValue(),
-                        pdg::AAConfig::UnderApprox(), "under-approximate");
+                        lotus::AAConfig::UnderApprox(), "under-approximate");
 
   for (auto &F : M) {
     if (F.isDeclaration() || F.empty())
@@ -134,15 +137,6 @@ bool pdg::DataDependencyGraph::runOnModule(Module &M) {
     addAliasEdgesForFunction(F);
   }
   return false;
-}
-
-void pdg::DataDependencyGraph::addAliasEdges(Instruction &inst) {
-  // This method is intentionally left as a no-op here.
-  // Alias edges are now built once per function in addAliasEdgesForFunction()
-  // to avoid the O(n²) per-instruction outer loop that the original design
-  // produced (addAliasEdges was called for every instruction, making the
-  // overall complexity O(n³) for a function with n instructions).
-  (void)inst;
 }
 
 void pdg::DataDependencyGraph::addAliasEdgesForFunction(Function &F) {

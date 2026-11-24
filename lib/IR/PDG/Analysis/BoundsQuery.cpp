@@ -1,17 +1,17 @@
 #include "IR/PDG/Analysis/BoundsQuery.h"
 
-#include "llvm/ADT/Triple.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/CaptureTracking.h"
-#include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
-#include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -19,14 +19,14 @@
 
 #include "IR/PDG/Analysis/FunctionFacts.h"
 #include "IR/PDG/Analysis/LibraryModels.h"
-#include "IR/PDG/Analysis/ValueFacts.h"
 #include "IR/PDG/Analysis/TaintQuery.h"
+#include "IR/PDG/Analysis/ValueFacts.h"
 
+#include <cctype>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <set>
-#include <cmath>
-#include <cctype>
 
 using namespace llvm;
 
@@ -1245,7 +1245,7 @@ struct BoundsQuery::Impl {
       Type *type = gep->getSourceElementType();
       bool first = true;
       if (!result && type->isStructTy() && gep->getNumIndices() >= 2) {
-        auto index = gep->idx_begin();
+        const auto *index = gep->idx_begin();
         auto leading = integer(index++->get());
         auto field = integer(index->get());
         auto *structure = cast<StructType>(type);
@@ -2201,7 +2201,7 @@ struct BoundsQuery::Impl {
             if (indexed && indexed->getNumIndices() == 2) {
               const auto *array =
                   dyn_cast<ArrayType>(indexed->getSourceElementType());
-              auto index = indexed->idx_begin();
+              const auto *index = indexed->idx_begin();
               const auto *zero = dyn_cast<ConstantInt>(index++->get());
               const Value *subscript = index->get();
               const Value *base =

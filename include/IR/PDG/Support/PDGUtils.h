@@ -5,8 +5,23 @@
 
 #pragma once
 
-#include "IR/PDG/Core/Tree.h"
-#include "IR/PDG/Support/LLVMEssentials.h"
+#include "llvm/IR/InstIterator.h"
+
+#include "IR/PDG/Core/PDGEnums.h"
+
+#include <cstdint>
+#include <string>
+
+namespace llvm {
+class AllocaInst;
+class CallBase;
+class DIType;
+class GetElementPtrInst;
+class GlobalVariable;
+class Module;
+class StructType;
+class raw_string_ostream;
+} // namespace llvm
 
 #include <queue>
 #include <set>
@@ -15,6 +30,7 @@
 #include <vector>
 
 namespace pdg {
+class Node;
 class TreeNode;
 
 namespace pdgutils {

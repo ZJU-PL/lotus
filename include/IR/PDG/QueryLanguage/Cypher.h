@@ -1,6 +1,6 @@
 #pragma once
 
-#include "IR/PDG/QueryLanguage/AST/CypherAST.h"
-#include "IR/PDG/QueryLanguage/Execution/CypherExecutor.h"
-#include "IR/PDG/QueryLanguage/Execution/CypherResult.h"
-#include "IR/PDG/QueryLanguage/Parser/CypherParser.h"
+#include "IR/PDG/QueryLanguage/CypherAST.h"
+#include "IR/PDG/QueryLanguage/CypherExecutor.h"
+#include "IR/PDG/QueryLanguage/CypherParser.h"
+#include "IR/PDG/QueryLanguage/CypherResult.h"

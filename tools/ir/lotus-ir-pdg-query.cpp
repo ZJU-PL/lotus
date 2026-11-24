@@ -1,3 +1,4 @@
+#include "IR/PDG/Core/GraphBuilder.h"
 /**
  * @file lotus-ir-pdg-query.cpp
  * @brief Initialize LLVM, load IR, build PDG, and launch the query driver.
@@ -53,8 +54,8 @@ int main(int argc, char **argv) {
     passes.run(*module);
   } else {
     pdg.reset();
-    pdg.build(*module);
-    pdg.bindDITypeToNodes(*module);
+    pdg::GraphBuilder(pdg).build(*module);
+    pdg::GraphBuilder(pdg).bindDebugInfo(*module);
   }
 
   return lotus::pdg_query::runQueries(pdg, *module, config);

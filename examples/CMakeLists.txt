@@ -16,10 +16,10 @@ function(lotus_add_example target_name source_file)
   target_include_directories(${target_name} PUBLIC ${EXAMPLES_INCLUDE_DIR})
 endfunction()
 
-# PDGExample needs CanaryPDG, AliasAnalysisWrapper (for DataDependencyGraph), and LLVM libs
+# PDGExample constructs the graph and its dependence edges.
 lotus_add_example(PDGExample ir/PDGExample.cpp)
 target_link_libraries(PDGExample PRIVATE 
-    CanaryPDG 
+    CanaryPDGConstruction
     CanaryAliasAnalysisWrapper 
     ${llvm_libs}
 )

@@ -2,9 +2,10 @@
 
 #include "llvm/Support/raw_ostream.h"
 
-#include "IR/PDG/Analysis/PropertySpec.h"
-#include "IR/PDG/Analysis/Query.h"
+#include "IR/PDG/Query/PropertySpec.h"
+#include "IR/PDG/Query/Query.h"
 #include "IR/PDG/QueryLanguage/Cypher.h"
+#include "IR/PDG/Analysis/RuleQuery.h"
 #include "Options.h"
 #include "Output.h"
 
@@ -259,9 +260,9 @@ static bool selectNodesWithCypher(CypherQueryExecutor &executor,
   return true;
 }
 
-static PDGQueryOptions buildAnalysisOptions(const Module &module,
-                                            CypherQueryExecutor &executor,
-                                            const Options &config) {
+static Optional<PDGQueryOptions>
+buildAnalysisOptions(const Module &module, CypherQueryExecutor &executor,
+                     const Options &config) {
   PDGQueryOptions options;
   options.edge_preset = parseEdgePreset(config);
   options.context_mode = config.contextSensitive
@@ -272,10 +273,15 @@ static PDGQueryOptions buildAnalysisOptions(const Module &module,
   if (!config.scopeFunction.empty()) {
     if (Function *function = module.getFunction(config.scopeFunction))
       options.scope = PDGQueryScope::functionScope(*function);
+    else {
+      errs() << "Unknown scope function: " << config.scopeFunction << "\n";
+      return None;
+    }
   } else if (!config.scopeQuery.empty()) {
     std::set<Node *> nodes;
-    if (selectNodesWithCypher(executor, config.scopeQuery, nodes))
-      options.scope = PDGQueryScope::nodeSet(nodes);
+    if (!selectNodesWithCypher(executor, config.scopeQuery, nodes))
+      return None;
+    options.scope = PDGQueryScope::nodeSet(nodes);
   } else {
     options.scope = PDGQueryScope::wholeGraph();
   }
@@ -286,20 +292,29 @@ static bool executeAnalysis(ProgramGraph &pdg, const Module &module,
                             CypherQueryExecutor &executor,
                             const Options &config, const Output &output) {
   std::string analysis = config.analysisName;
-  PDGQueryOptions options = buildAnalysisOptions(module, executor, config);
+  auto selected_options = buildAnalysisOptions(module, executor, config);
+  if (!selected_options)
+    return false;
+  PDGQueryOptions options = *selected_options;
   PDGCriteria criteria;
   PDGCriteria targets;
   PDGCriteria baseline;
 
-  if (!config.criteriaQuery.empty())
-    criteria.cypher_selections.push_back(
-        CypherSelection{config.criteriaQuery, ""});
-  if (!config.targetQuery.empty())
-    targets.cypher_selections.push_back(
-        CypherSelection{config.targetQuery, ""});
-  if (!config.baselineQuery.empty())
-    baseline.cypher_selections.push_back(
-        CypherSelection{config.baselineQuery, ""});
+  // Resolve selectors at the front end. Graph queries consume concrete
+  // criteria and never invoke a query-language parser or executor.
+  auto select = [&](const std::string &query, PDGCriteria &selected) {
+    if (query.empty())
+      return true;
+    PDGQueryResult::NodeSet nodes;
+    if (!selectNodesWithCypher(executor, query, nodes))
+      return false;
+    selected = PDGCriteria::nodeSet(std::move(nodes));
+    return true;
+  };
+  if (!select(config.criteriaQuery, criteria) ||
+      !select(config.targetQuery, targets) ||
+      !select(config.baselineQuery, baseline))
+    return false;
 
   if (!config.propertyFile.empty()) {
     PropertySpec spec;

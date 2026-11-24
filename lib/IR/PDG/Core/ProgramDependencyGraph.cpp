@@ -1,3 +1,6 @@
+#include "llvm/Support/CommandLine.h"
+
+#include "IR/PDG/Core/GraphBuilder.h"
 /**
  * @file ProgramDependencyGraph.cpp
  * @brief Implementation of the Program Dependency Graph (PDG) pass
@@ -18,21 +21,16 @@
  * structures that enable field-sensitive parameter analysis.
  */
 
-#include "IR/PDG/Core/ProgramDependencyGraph.h"
-
 #include "llvm/ADT/DenseSet.h"
+
+#include "IR/PDG/Core/ProgramDependencyGraph.h"
+#include "IR/PDG/Support/PDGCommandLineOptions.h"
 
 #include <chrono>
 
 using namespace llvm;
 
 char pdg::ProgramDependencyGraph::ID = 0;
-
-bool pdg::DEBUG;
-
-cl::opt<bool, true> DEBUG("pdg-debug", cl::desc("print debug messages"),
-                          cl::value_desc("print debug messages"),
-                          cl::location(pdg::DEBUG), cl::init(false));
 
 void pdg::ProgramDependencyGraph::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<DataDependencyGraph>();
@@ -54,16 +52,12 @@ bool pdg::ProgramDependencyGraph::runOnModule(Module &M) {
   _module = &M;
   _PDG = &ProgramGraph::getInstance();
 
-  PDGCallGraph &call_g = PDGCallGraph::getInstance();
-  if (!call_g.isBuiltForModule(M)) {
-    call_g.reset();
-    call_g.build(M);
-  }
+  _call_graph.build(M);
 
   if (!_PDG->isBuiltForModule(M)) {
     _PDG->reset();
-    _PDG->build(M);
-    _PDG->bindDITypeToNodes(M);
+    pdg::GraphBuilder(*_PDG).build(M);
+    pdg::GraphBuilder(*_PDG).bindDebugInfo(M);
   }
 
   unsigned func_size = 0;
@@ -362,7 +356,7 @@ void pdg::ProgramDependencyGraph::connectInterprocDependencies(Function &F) {
 
   // Use the call graph for indirect-call candidate discovery, but connect
   // inter-procedural edges per-callsite (rather than per-caller-function).
-  PDGCallGraph &call_g = PDGCallGraph::getInstance();
+  PDGCallGraph &call_g = _call_graph;
   auto call_insts = func_w->getCallInsts();
   for (auto *call_inst : call_insts) {
     if (_PDG->hasCallWrapper(*call_inst)) {

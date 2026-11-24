@@ -1,15 +1,69 @@
 # PDG: Program Dependence Graph
 
 The **Program Dependence Graph (PDG)** is a fine-grained representation of data
-and control dependences. It is built on top of the ICFG and is used for
-slicing, security analyses, and other dependence-aware queries.
+and control dependences built directly from LLVM IR. It supports slicing,
+security analyses, and other dependence-aware queries.
 
 The PDG is field-sensitive and flow-insensitive. The query layer exposes
 both context-insensitive and call/return-matched context-sensitive traversals
-through focused ``*Query`` headers under ``include/IR/PDG/Analysis/``, with
+through focused ``*Query`` headers under ``include/IR/PDG/Query/``, with
 ``Query.h`` as the umbrella include.
 The Cypher query-language parser and executor live separately under
 ``include/IR/PDG/QueryLanguage/`` and ``lib/IR/PDG/QueryLanguage/``.
+
+## Organization and dependencies
+
+Headers and implementations use five flat directories. All headers, including
+implementation helpers, live under `include/IR/PDG/`; `lib/IR/PDG/` contains
+implementations and the build configuration.
+
+| Directory | Responsibility | CMake targets |
+| --- | --- | --- |
+| `Core/` | Graph representation, parameter trees, structural builder, LLVM dependence passes, call graph | `CanaryPDGCore`, `CanaryPDGConstruction` |
+| `Analysis/` | LLVM facts, library models, semantic engines, rule catalog and dispatch | `CanaryPDGSemanticSupport`, `CanaryPDGSemantics`, `CanaryPDGRules` |
+| `Query/` | Criteria, traversal, slicing, paths, summaries, impact, and diff | `CanaryPDGQuery` |
+| `QueryLanguage/` | Cypher AST, parser, executor, and semantic properties | `CanaryPDGCypher` |
+| `Support/` | Debug metadata, graph helpers, diagnostic options, LLVM graph traits and DOT printer | `CanaryPDGCore`, `CanaryPDGVisualization` |
+
+Logical layers use distinct classes and build targets rather than additional
+subdirectories. Their dependencies are directed:
+
+```text
+Construction  --> Core, alias analysis, control dependence
+Query         --> Core
+SemanticSupport --> LLVM
+Semantics     --> SemanticSupport, Core
+Rules         --> Query, Semantics
+Cypher        --> Query, Semantics
+Visualization --> Construction
+```
+
+Link only the targets a consumer uses. There is no aggregate `CanaryPDG`
+library or forwarding headers. Graph queries do not depend on the parser,
+semantic engines, or rule catalog. `Query/Query.h` includes only graph queries;
+include `Analysis/` services and `Analysis/RuleQuery.h` explicitly.
+`QueryTypes.h` contains shared graph-query vocabulary. Criteria, diagnostics,
+resource types, and transform/diff/dataflow-specific results have focused headers.
+`QuerySupport.h` and `Traversal.h` are internal helpers in the `query_detail`
+namespace; they are excluded from the query umbrella.
+
+`ProgramGraph` owns nodes, edges, function/call wrappers, and tree wrappers.
+LLVM values and debug metadata remain owned by the module. Construct a local
+graph with `GraphBuilder(graph).build(module)` and optionally annotate it with
+`bindDebugInfo(module)`. Rebuilding replaces its contents and advances the
+query-cache epoch; previously returned nodes, edges, and query results must
+be discarded. Each data-dependence pass starts a fresh construction cycle,
+including after changes to the same module. The legacy LLVM dependence passes use the shared
+`ProgramGraph::getInstance()`; structural builders and queries also support
+independent graph instances. Call graphs are owned by the pass or caller that
+constructs them, with no process-global cached module state.
+
+Cypher is a front end: execute a selector, then pass its nodes through
+`PDGCriteria::nodeSet(...)` to graph queries or rules. This factory preserves
+an explicitly empty selection instead of treating it as omitted criteria.
+Invalid selectors are diagnosed before an analysis runs. The unused,
+unbuilt advanced-extension API has been removed; supported Cypher behavior
+is defined by the parser and executor compiled into `CanaryPDGCypher`.
 
 ## Key Features
 
@@ -19,7 +73,7 @@ The Cypher query-language parser and executor live separately under
 - **Field-Sensitive**: Handles structure fields and array elements separately
 - **Parameter Trees**: Tree structures for field-sensitive parameter analysis
 
-## Query Services
+## Graph queries and semantic services
 
 - **`SliceQuery`**: forward slices, backward slices, chops, and thin slices
 - **`DependenceQuery`**: reachability, shortest paths, all shortest paths, and
@@ -61,10 +115,10 @@ The Cypher query-language parser and executor live separately under
 - **`CppLibraryModels`**: exact standard string API effects with separate opaque
   object contents and bytes; stable object-return aliases and numeric barriers
 - **`PDGCriteriaResolver`**: criteria resolution from nodes, LLVM values,
-  function names, callee names, source locations, property specs, and Cypher
-  selections
+  function names, callee names, source locations, and property specs
 
-Each service consumes a common option/result vocabulary:
+Graph traversal services consume a common option/result vocabulary. Semantic
+analyses expose their own typed facts/results and feed rule evaluation:
 
 - ``PDGQueryOptions``: edge preset, scope, context mode, limits, cache policy,
   and explanation mode
@@ -75,18 +129,19 @@ Each service consumes a common option/result vocabulary:
 ## Usage
 
 ```cpp
-#include "IR/PDG/Analysis/SliceQuery.h"
+#include "IR/PDG/Query/SliceQuery.h"
 #include "IR/PDG/Core/ProgramDependencyGraph.h"
+#include "llvm/IR/LegacyPassManager.h"
 
 // Run PDG passes
-legacy::PassManager PM;
-PM.add(new DataDependencyGraph());
-PM.add(new ControlDependencyGraph());
-auto *pdgPass = new ProgramDependencyGraph();
+llvm::legacy::PassManager PM;
+PM.add(new pdg::DataDependencyGraph());
+PM.add(new pdg::ControlDependencyGraph());
+auto *pdgPass = new pdg::ProgramDependencyGraph();
 PM.add(pdgPass);
 PM.run(module);
 
-ProgramGraph *G = pdgPass->getPDG();
+pdg::ProgramGraph *G = pdgPass->getPDG();
 pdg::SliceQuery slicer(*G);
 
 pdg::PDGCriteria criteria;
@@ -166,6 +221,6 @@ and the catalog-to-example mapping.
 
 - Headers: `include/IR/PDG/`
 - Documentation: `docs/source/ir/pdg.rst`
-- Query API: `include/IR/PDG/Analysis/Query.h`
-- Focused slicing API: `include/IR/PDG/Analysis/SliceQuery.h`
+- Query API: `include/IR/PDG/Query/Query.h`
+- Focused slicing API: `include/IR/PDG/Query/SliceQuery.h`
 - Cypher query language: `include/IR/PDG/QueryLanguage/Cypher.h`

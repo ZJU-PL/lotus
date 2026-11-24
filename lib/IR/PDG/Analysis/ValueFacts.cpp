@@ -1,5 +1,4 @@
 #include "IR/PDG/Analysis/ValueFacts.h"
-#include "IR/PDG/Analysis/FunctionFacts.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Triple.h"
@@ -10,6 +9,8 @@
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
+
+#include "IR/PDG/Analysis/FunctionFacts.h"
 
 #include <cstdlib>
 #include <functional>

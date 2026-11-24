@@ -8,11 +8,12 @@
 
 #pragma once
 
+#include "llvm/Pass.h"
+
 #include "IR/PDG/Core/ControlDependencyGraph.h"
 #include "IR/PDG/Core/DataDependencyGraph.h"
 #include "IR/PDG/Core/Graph.h"
 #include "IR/PDG/Core/PDGCallGraph.h"
-#include "IR/PDG/Support/LLVMEssentials.h"
 
 namespace pdg {
 /// @brief LLVM ModulePass for building the Program Dependency Graph
@@ -135,7 +136,8 @@ public:
   bool canReach(Node &src, Node &dst, std::set<EdgeType> exclude_edge_types);
 
 private:
-  llvm::Module *_module;
-  ProgramGraph *_PDG;
+  llvm::Module *_module = nullptr;
+  ProgramGraph *_PDG = nullptr;
+  PDGCallGraph _call_graph;
 };
 } // namespace pdg

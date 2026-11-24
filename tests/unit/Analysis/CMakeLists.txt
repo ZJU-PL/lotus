@@ -219,7 +219,7 @@ lotus_collect_test_sources(analysis_tests
   Loop/LoopParityIterationSpaceTest.cpp
   Loop/LoopParitySCCDAGAttrsTest.cpp)
 set_property(GLOBAL APPEND PROPERTY LOTUS_TEST_SUITE_analysis_tests_LINK_LIBS
-  CanaryLoopAnalysis CanaryPDG LLVMAnalysis LLVMTransformUtils LLVMPasses)
+  CanaryLoopAnalysis CanaryPDGConstruction LLVMAnalysis LLVMTransformUtils LLVMPasses)
 endif()
 
 get_property(analysis_test_libs GLOBAL PROPERTY LOTUS_TEST_SUITE_analysis_tests_LINK_LIBS)

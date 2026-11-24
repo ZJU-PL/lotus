@@ -8,9 +8,14 @@
 /// edge connections for dependency tracking.
 
 #pragma once
+#include "llvm/IR/Instructions.h"
+
 #include "IR/PDG/Core/PDGEdge.h"
 #include "IR/PDG/Core/PDGEnums.h"
-#include "IR/PDG/Support/LLVMEssentials.h"
+
+namespace llvm {
+class DIType;
+} // namespace llvm
 
 #include <iterator>
 #include <set>

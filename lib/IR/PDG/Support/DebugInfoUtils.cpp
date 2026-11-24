@@ -1,3 +1,7 @@
+#include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 /**
  * @file DebugInfoUtils.cpp
  * @brief Implementation of debug information utilities for the PDG system

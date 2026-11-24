@@ -1,3 +1,9 @@
+#include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include "IR/PDG/Support/DebugInfoUtils.h"
 /**
  * @file PDGUtils.cpp
  * @brief Implementation of utility functions for the Program Dependency Graph
@@ -18,8 +24,9 @@
  * by providing common operations used across multiple components.
  */
 
-#include "IR/PDG/Support/PDGUtils.h"
+#include "IR/PDG/Core/Tree.h"
 #include "IR/PDG/Support/PDGCommandLineOptions.h"
+#include "IR/PDG/Support/PDGUtils.h"
 
 using namespace llvm;
 

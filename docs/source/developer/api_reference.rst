@@ -381,7 +381,7 @@ Compile and link:
    clang++ -o my_analyzer my_analyzer.cpp \
        $(llvm-config --cxxflags --ldflags --libs) \
        -L/path/to/lotus/build/lib \
-       -lCanaryDyckAA -lCanaryPDG -lIFDS
+       -lCanaryDyckAA -lCanaryPDGConstruction -lCanaryPDGCore -lIFDS
 
 See Also
 --------

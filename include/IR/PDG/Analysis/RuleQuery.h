@@ -1,7 +1,7 @@
 #pragma once
 
-#include "IR/PDG/Analysis/QueryCore.h"
 #include "IR/PDG/Analysis/TaintQuery.h"
+#include "IR/PDG/Query/Criteria.h"
 
 namespace pdg {
 

@@ -1,8 +1,8 @@
 /// @file Graph.h
 /// @brief Core graph container classes for Program Dependency Graph (PDG)
 ///
-/// This file defines GenericGraph (abstract base class) and ProgramGraph
-/// (singleton) that serve as containers for nodes and edges in the PDG.
+/// This file defines GenericGraph (base container) and ProgramGraph
+/// that serve as containers for nodes and edges in the PDG.
 /// GenericGraph provides common graph operations while ProgramGraph adds
 /// program-specific functionality for handling functions, calls, and debug
 /// information.
@@ -14,23 +14,20 @@
 #include "IR/PDG/Core/PDGEnums.h"
 #include "IR/PDG/Core/PDGNode.h"
 #include "IR/PDG/Core/Tree.h"
-#include "IR/PDG/Support/PDGCommandLineOptions.h"
 
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
-// #include <map>
-#include <set>
 
 namespace pdg {
 class Node;
 class Edge;
 
-/// @brief Abstract base class for graph containers
+/// @brief Base container for graph nodes and edges
 ///
 /// Provides common functionality for managing nodes and edges, including
 /// lookup operations, reachability queries, and iteration support.
-/// Derived classes implement the build() method to construct the graph
-/// from an LLVM module.
+/// Construction from LLVM modules belongs to GraphBuilder and the LLVM passes.
 class GenericGraph {
 public:
   using ValueNodeMap = std::unordered_map<llvm::Value *, Node *>;
@@ -47,6 +44,11 @@ public:
 
   /// @brief Default constructor
   GenericGraph() = default;
+  virtual ~GenericGraph();
+  GenericGraph(const GenericGraph &) = delete;
+  GenericGraph &operator=(const GenericGraph &) = delete;
+  GenericGraph(GenericGraph &&) = delete;
+  GenericGraph &operator=(GenericGraph &&) = delete;
 
   /// @brief Gets iterator to beginning of node set
   /// @return Iterator to first node
@@ -63,10 +65,6 @@ public:
   /// @brief Gets const iterator to end of node set
   /// @return Const iterator past last node
   NodeSet::iterator end() const { return _node_set.end(); }
-
-  /// @brief Builds the graph from an LLVM module
-  /// @param M The LLVM module to process
-  virtual void build(llvm::Module &M) = 0;
 
   /// @brief Adds an edge to the graph
   /// @param e Edge to add
@@ -114,29 +112,7 @@ public:
   /// used for deletion.  We collect edges from every node's out-edge set
   /// (each edge appears exactly once there) and delete them before deleting
   /// the nodes themselves.
-  void reset() {
-    bumpEpoch();
-    _is_build = false;
-    // Collect every edge exactly once via out-edge sets.
-    std::unordered_set<Edge *> edges_to_delete;
-    for (auto *node : _node_set) {
-      if (!node)
-        continue;
-      for (auto *edge : node->getOutEdgeSet()) {
-        if (edge)
-          edges_to_delete.insert(edge);
-      }
-    }
-    for (auto *edge : edges_to_delete) {
-      delete edge;
-    }
-    for (auto *node : _node_set) {
-      delete node;
-    }
-    _val_node_map.clear();
-    _edge_set.clear();
-    _node_set.clear();
-  }
+  void reset();
 
   unsigned long long getEpoch() const { return _epoch; }
 
@@ -172,15 +148,16 @@ protected:
   unsigned long long _epoch = 1;
 };
 
-/// @brief Program-specific graph container (singleton)
+/// @brief Owning program-specific graph container
 ///
 /// Extends GenericGraph with program-specific features including:
 /// - Function wrapper management for intra-procedural analysis
 /// - Call wrapper management for inter-procedural analysis
-/// - Debug information (DIType) binding for type-aware analysis
+/// - Debug information (DIType) associations for type-aware analysis
 /// - Class hierarchy support for object-oriented programs
 ///
-/// This is a singleton class - use getInstance() to access.
+/// Construct independent instances for structural queries, or use getInstance()
+/// for the shared graph populated by the legacy LLVM dependence passes.
 class ProgramGraph : public GenericGraph {
 public:
   using FuncWrapperMap =
@@ -191,17 +168,18 @@ public:
 
   /// @brief Default constructor
   ProgramGraph() = default;
+  ~ProgramGraph() override;
 
-  /// @brief Deleted copy constructor (singleton)
+  /// @brief Deleted copy constructor (owning container)
   ProgramGraph(const ProgramGraph &) = delete;
 
-  /// @brief Deleted move constructor (singleton)
+  /// @brief Deleted move constructor (stable graph identity)
   ProgramGraph(ProgramGraph &&) = delete;
 
-  /// @brief Deleted copy assignment (singleton)
+  /// @brief Deleted copy assignment (owning container)
   ProgramGraph &operator=(const ProgramGraph &) = delete;
 
-  /// @brief Deleted move assignment (singleton)
+  /// @brief Deleted move assignment (stable graph identity)
   ProgramGraph &operator=(ProgramGraph &&) = delete;
 
   /// @brief Gets the singleton instance
@@ -229,10 +207,6 @@ public:
   bool isBuiltForModule(const llvm::Module &M) const {
     return _is_build && _built_module == &M;
   }
-
-  /// @brief Builds the program graph from an LLVM module
-  /// @param M The LLVM module to process
-  void build(llvm::Module &M) override;
 
   /// @brief Checks if a function wrapper exists for a function
   /// @param F The function to check
@@ -268,15 +242,6 @@ public:
     return it->second;
   }
 
-  /// @brief Binds debug information types to nodes in the graph
-  /// @param M The LLVM module to process
-  void bindDITypeToNodes(llvm::Module &M);
-
-  /// @brief Computes the debug type for a node
-  /// @param n The node to compute type for
-  /// @return The computed DIType, or nullptr
-  llvm::DIType *computeNodeDIType(Node &n);
-
   /// @brief Adds tree nodes to the graph (for field-sensitive analysis)
   /// @param tree The tree to add
   void addTreeNodesToGraph(Tree &tree);
@@ -284,15 +249,6 @@ public:
   /// @brief Adds formal parameter tree nodes for a function
   /// @param func_w The function wrapper to process
   void addFormalTreeNodesToGraph(FunctionWrapper &func_w);
-
-  /// @brief Checks if an instruction is an annotation call
-  /// @param inst The instruction to check
-  /// @return True if this is an annotation call
-  bool isAnnotationCallInst(llvm::Instruction &inst);
-
-  /// @brief Builds nodes for global annotations
-  /// @param M The LLVM module to process
-  void buildGlobalAnnotationNodes(llvm::Module &M);
 
   /// @brief Gets the class node map
   /// @return Reference to the map of class names to class nodes
@@ -309,35 +265,11 @@ public:
   /// TreeNode objects they reference are also inserted into GenericGraph's
   /// _node_set and deleted there. Releasing the wrapper Trees first prevents
   /// leaking them across rebuilds without affecting node ownership.
-  void reset() {
-    // Step 1: release Tree wrapper objects from wrappers.
-    for (auto &entry : _func_wrapper_map) {
-      if (entry.second)
-        entry.second->releaseTrees();
-    }
-    for (auto &entry : _call_wrapper_map) {
-      if (entry.second)
-        entry.second->releaseTrees();
-    }
-    // Step 2: delete wrapper objects (trees already released, so no
-    // double-free).
-    for (auto &entry : _call_wrapper_map) {
-      delete entry.second;
-    }
-    for (auto &entry : _func_wrapper_map) {
-      delete entry.second;
-    }
-    // Step 3: delete all nodes and edges.
-    GenericGraph::reset();
-    _func_wrapper_map.clear();
-    _call_wrapper_map.clear();
-    _node_di_type_map.clear();
-    _class_node_map.clear();
-    _class_name_set.clear();
-    _built_module = nullptr;
-  }
+  void reset();
 
 private:
+  friend class GraphBuilder;
+
   FuncWrapperMap _func_wrapper_map;
   CallWrapperMap _call_wrapper_map;
   NodeDIMap _node_di_type_map;

@@ -3,11 +3,12 @@
 #include "IR/PDG/Analysis/ArithmeticQuery.h"
 #include "IR/PDG/Analysis/BoundsQuery.h"
 #include "IR/PDG/Analysis/FunctionFacts.h"
-#include "IR/PDG/Analysis/LibraryModels.h"
+#include "IR/PDG/Analysis/ValueFacts.h"
 #include "IR/PDG/Analysis/LifetimeQuery.h"
 #include "IR/PDG/Analysis/StateQuery.h"
 #include "IR/PDG/Analysis/TaintQuery.h"
-#include "IR/PDG/Analysis/ValueFacts.h"
+#include "IR/PDG/Core/GraphBuilder.h"
+#include "IR/PDG/Analysis/LibraryModels.h"
 #include "IR/PDG/QueryLanguage/Cypher.h"
 #include "TestUtils/LLVMHelpers.h"
 
@@ -27,7 +28,7 @@ protected:
   void load(const char *ir) {
     module = lotus::unittest::parseModuleChecked(context, ir, "RuleQueryTest");
     ASSERT_NE(module, nullptr);
-    graph.build(*module);
+    pdg::GraphBuilder(graph).build(*module);
   }
 
   RuleQueryResult run(const std::string &id) {

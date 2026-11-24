@@ -3,8 +3,8 @@
 #include "llvm/Analysis/MemoryDependenceAnalysis.h"
 #include "llvm/Analysis/MemoryLocation.h"
 
+#include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
 #include "IR/PDG/Core/Graph.h"
-#include "IR/PDG/Core/PDGAliasWrapper.h"
 
 #include <memory>
 
@@ -20,9 +20,6 @@ public:
   bool runOnModule(llvm::Module &M) override;
   void addDefUseEdges(llvm::Instruction &inst);
   void addRAWEdges(llvm::Instruction &inst);
-  /// @brief No-op stub kept for API compatibility; use
-  /// addAliasEdgesForFunction.
-  void addAliasEdges(llvm::Instruction &inst);
   /// @brief Builds DATA_ALIAS edges for all relevant instruction pairs in F.
   ///
   /// Called once per function instead of once per instruction to reduce
@@ -35,9 +32,9 @@ public:
 
 private:
   llvm::MemoryDependenceResults *_mem_dep_res;
-  std::unique_ptr<PDGAliasWrapper>
+  std::unique_ptr<lotus::AliasAnalysisWrapper>
       _alias_wrapper_over; // For over-approximation (Andersen)
-  std::unique_ptr<PDGAliasWrapper>
+  std::unique_ptr<lotus::AliasAnalysisWrapper>
       _alias_wrapper_under; // For under-approximation (syntactic)
 };
 } // namespace pdg

@@ -3,7 +3,14 @@
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/Analysis/DOTGraphTraitsPass.h"
 
+#include "IR/PDG/Support/DebugInfoUtils.h"
 #include "IR/PDG/Support/GraphTraits.h"
+#include "IR/PDG/Support/PDGUtils.h"
+
+namespace pdg {
+extern bool DOTONLYDDG;
+extern bool DOTONLYCDG;
+} // namespace pdg
 
 namespace llvm {
 template <> struct DOTGraphTraits<pdg::Node *> : public DefaultDOTGraphTraits {

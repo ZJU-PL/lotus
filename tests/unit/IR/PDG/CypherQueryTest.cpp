@@ -1,7 +1,7 @@
+#include "IR/PDG/Core/GraphBuilder.h"
+#include "IR/PDG/Core/ProgramDependencyGraph.h"
 #include "IR/PDG/QueryLanguage/Cypher.h"
 #include "TestUtils/LLVMHelpers.h"
-
-#include "IR/PDG/Core/ProgramDependencyGraph.h"
 
 #include <iostream>
 #include <sstream>
@@ -34,7 +34,7 @@ protected:
     if (module_) {
       pdg_ = &ProgramGraph::getInstance();
       pdg_->reset();
-      pdg_->build(*module_);
+      pdg::GraphBuilder(*pdg_).build(*module_);
     }
   }
 
