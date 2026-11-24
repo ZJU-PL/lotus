@@ -5,9 +5,9 @@ Parameter effect summaries capture per-function side effects on function
 parameters, enabling downstream analyses to reason about interprocedural
 effects without re-analyzing callees.
 
-**Headers**: ``include/Analysis/ParameterSummary/``
+**Headers**: ``include/Analysis/Summary/ParameterSummary/``
 
-**Implementation**: ``lib/Analysis/ParameterSummary/``
+**Implementation**: ``lib/Analysis/Summary/ParameterSummary/``
 
 **Public API**:
 
@@ -57,7 +57,7 @@ Usage
 
 .. code-block:: cpp
 
-   #include "Analysis/ParameterSummary/ParameterEffectSummary.h"
+   #include "Analysis/Summary/ParameterSummary/ParameterEffectSummary.h"
 
    llvm::Module &M = ...;
    auto summaries = lotus::analysis::parametersummary::

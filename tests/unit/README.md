@@ -14,7 +14,7 @@ Top-level test buckets:
 
 - `Alias/` for alias-analysis and pointer-analysis tests
 - `Analysis/` for general analyses, with subdirectories such as `CFG/`,
-  `DebugInfo/`, `Loop/`, `NullPointer/`, `Profile/`, and `Purity/`
+  `DebugInfo/`, `Loop/`, `NullPointer/`, `Profile/`, and `Summary/`
 - `CFL/` with subdirectories `Classical/`, `CSIndex/`, `DynamicDyck/`, and
   `InterleavedDyck/` mirroring `lib/CFL`
 - `Checker/`

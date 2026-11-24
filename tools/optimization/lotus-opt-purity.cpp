@@ -5,8 +5,8 @@
 #include "Alias/UnificationBased/seadsa/InitializePasses.hh"
 #include "Alias/UnificationBased/seadsa/ShadowMem.hh"
 #include "Alias/UnificationBased/seadsa/support/RemovePtrToInt.hh"
-#include "Analysis/Purity/ExternalPuritySummaryStore.h"
-#include "Analysis/Purity/PurityInferenceDriver.h"
+#include "Analysis/Summary/Purity/ExternalPuritySummaryStore.h"
+#include "Analysis/Summary/Purity/PurityInferenceDriver.h"
 
 #include <memory>
 #include <string>

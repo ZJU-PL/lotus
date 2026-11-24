@@ -40,7 +40,6 @@ The framework is designed with modularity and extensibility in mind, allowing re
    concurrency/index
    dataflow/index
    ir/index
-   ml/index
    optimization/index
    security/index
    solvers/index

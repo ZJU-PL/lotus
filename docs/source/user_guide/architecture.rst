@@ -57,7 +57,7 @@ The ``lib/`` directory is divided into 16 CMake subdirectories, each of which co
      - ``IFDSSolver``, ``IDESolver``, ``IntraMonoSolver``, ``InterMonoSolver``, ``WPDS engine``, ``NPA``
      - Interprocedural dataflow solvers
    * - ``lib/Analysis/``
-     - Call graph construction (CHA, RTA, VTA, FPA, OTF), CFG, control dependence, memory, null pointer, purity, SCCP, type hierarchy, feature extraction (``CanaryML``)
+     - Call graph construction (CHA, RTA, VTA, FPA, OTF), CFG, control dependence, memory, null pointer, purity, SCCP, type hierarchy
      - Foundational analysis utilities
    * - ``lib/Checker/``
      - ``Framework``, ``AE``, ``KINT``, ``Pulse``, ``Saber``, ``Concurrency``, ``GSAF``, ``FiTx``, ``TypeQualifier``, ``Tooling``

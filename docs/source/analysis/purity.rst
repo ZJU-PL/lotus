@@ -3,9 +3,9 @@ Purity Analysis
 
 Function-level purity and side-effect analysis for LLVM bitcode.
 
-**Headers**: ``include/Analysis/Purity/``
+**Headers**: ``include/Analysis/Summary/Purity/``
 
-**Implementation**: ``lib/Analysis/Purity/``
+**Implementation**: ``lib/Analysis/Summary/Purity/``
 
 **Build target**: ``CanaryPurityAnalysis``
 
@@ -41,7 +41,7 @@ a module, using optional MemorySSA-backed summaries for more precise results.
 
 .. code-block:: cpp
 
-   #include "Analysis/Purity/FunctionPurityAnalysis.h"
+   #include "Analysis/Summary/Purity/FunctionPurityAnalysis.h"
 
    lotus::analysis::purity::FunctionPurityAnalysis purity(M);
    purity.run();
@@ -108,7 +108,7 @@ Usage
 
 .. code-block:: cpp
 
-   #include "Analysis/Purity/FunctionPurityAnalysis.h"
+   #include "Analysis/Summary/Purity/FunctionPurityAnalysis.h"
 
    llvm::Module &M = ...;
    lotus::analysis::purity::FunctionPurityAnalysis purity(M);

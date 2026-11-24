@@ -103,16 +103,6 @@ See :doc:`../ir/index` for builder APIs and code snippets.
   resource defect checking (``lib/IR/UseTraceSSA``). See
   :doc:`../ir/usetracessa`.
 
-Machine Learning Features
--------------------------
-
-See :doc:`../ml/index` for ML feature extraction APIs.
-
-* **CanaryML** – Memory-related feature extraction using Sea-DSA for ML applications
-  (``lib/Analysis/FeatureExtraction/``). Provides ``MemoryMLFeaturesPass`` for extracting memory access
-  patterns and structural features from call sites, useful for training memory
-  safety predictors.
-
 Abstract Interpretation
 -----------------------
 

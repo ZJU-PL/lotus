@@ -37,16 +37,20 @@ At a glance:
 - **SCCP** (``lib/Analysis/SCCP``): Sparse conditional constant propagation
   using a three-valued lattice (Top/Constant/Bottom) to discover constants
   and dead code. See :doc:`sccp`.
-- **ParameterSummary** (``lib/Analysis/ParameterSummary``): Per-function
-  parameter effect summaries tracking freed, dereferenced, and allocated
-  parameters, with transitive call-graph composition. See :doc:`parameter_summary`.
-- **Multiplicity** (``lib/Analysis/Multiplicity``): Allocation multiplicity
-  classification — classifies global, stack, and heap allocations as
-  *Unique* or *Summary*. See :doc:`multiplicity`.
-- **Purity** (``lib/Analysis/Purity``): Function-level purity and side-effect
-  analysis — classifies functions as *Const*, *Pure*, *Impure*, or *Unknown*
-  using attribute inference, MemorySSA summaries, and external summary stores.
-  See :doc:`purity`.
+- **Summary** (``lib/Analysis/Summary``): Function- and allocation-level summary
+  and side-effect analyses:
+
+  - **ParameterSummary** (``lib/Analysis/Summary/ParameterSummary``):
+    Per-function parameter effect summaries tracking freed, dereferenced, and
+    allocated parameters, with transitive call-graph composition. See
+    :doc:`parameter_summary`.
+  - **Multiplicity** (``lib/Analysis/Summary/Multiplicity``): Allocation
+    multiplicity classification — classifies global, stack, and heap allocations
+    as *Unique* or *Summary*. See :doc:`multiplicity`.
+  - **Purity** (``lib/Analysis/Summary/Purity``): Function-level purity and
+    side-effect analysis — classifies functions as *Const*, *Pure*, *Impure*, or
+    *Unknown* using attribute inference, MemorySSA summaries, and external
+    summary stores. See :doc:`purity`.
 - **Profile** (``lib/Analysis/Profile``): Profile-guided hot-code detection
   using LLVM's ``BlockFrequencyInfo`` and ``BranchProbabilityInfo`` for
   instruction, basic-block, and loop frequency queries. See :doc:`profile`.

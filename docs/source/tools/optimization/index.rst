@@ -12,7 +12,7 @@ The front ends in this directory cover three areas:
   ``lib/Optimization/Prefetch/`` via
   ``tools/optimization/lotus-opt-prefetch.cpp``
 - ``lotus-opt-purity`` drives function purity inference in
-  ``lib/Analysis/Purity/`` via ``tools/optimization/lotus-opt-purity.cpp``
+  ``lib/Analysis/Summary/Purity/`` via ``tools/optimization/lotus-opt-purity.cpp``
 
 Other optimization libraries, such as ``Scalar/``, ``PassOrdering/``, and
 ``PartialEvaluation/``, exist in the source tree but are not documented here as
@@ -33,7 +33,7 @@ levels using a MemorySSA-based pipeline (SeaDsa/ShadowMem):
 - **Unknown** — could not be determined
 
 **Source**: ``tools/optimization/lotus-opt-purity.cpp``. See
-``lib/Analysis/Purity/`` for the underlying analysis framework.
+``lib/Analysis/Summary/Purity/`` for the underlying analysis framework.
 
 Key options:
 
