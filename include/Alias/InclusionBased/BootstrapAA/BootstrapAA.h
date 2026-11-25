@@ -36,16 +36,34 @@ public:
   QueryResult pointsToAllContexts(const llvm::Value &value,
                                   const llvm::Instruction &site,
                                   Point point = Point::Before);
+  struct LLVMAliasResult {
+    std::vector<const llvm::Value *> aliases;
+    bool may_alias_all = false;
+    QueryStatus status = QueryStatus::Unreachable;
+    bool reachable() const { return status != QueryStatus::Unreachable; }
+  };
+  LLVMAliasResult aliases(const llvm::Value &value,
+                          const llvm::Instruction &site,
+                          const CallContext &context = {},
+                          Point point = Point::Before);
+  LLVMAliasResult aliasesAllContexts(const llvm::Value &value,
+                                     const llvm::Instruction &site,
+                                     Point point = Point::Before);
   void precomputeAll();
   bool mayAlias(const llvm::Value &lhs, const llvm::Value &rhs,
                 const llvm::Instruction &site, const CallContext &context = {});
 
   // UNKNOWN and NULL_OBJECT have no LLVM allocation site. A function object
   // maps to its Function, a global to its GlobalVariable, and storage to its
-  // allocating AllocaInst/CallBase. INVALID means the value is not an
-  // allocation site.
+  // allocating AllocaInst/CallBase. Flattened struct field objects map back to
+  // their parent allocation site; use objectInfo(object).offset for the field
+  // byte offset. INVALID means the value is not an allocation site.
   const llvm::Value *allocationSite(Id object) const;
   Id objectId(const llvm::Value &allocation) const;
+  // Look up a flattened field object at a byte offset within allocation
+  // (returns INVALID if no such flattened field object exists).
+  Id fieldObjectId(const llvm::Value &allocation,
+                   std::uint64_t byte_offset) const;
   const Object &objectInfo(Id object) const;
   const Statistics &statistics() const;
   const SteensgaardHierarchy &hierarchy() const;

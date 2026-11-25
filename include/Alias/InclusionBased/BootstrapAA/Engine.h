@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -85,16 +86,39 @@ private:
 };
 
 enum class ObjectKind { Unknown, Null, Global, Stack, Heap, Function };
+
+// Collapsed array region inside a flattened aggregate object: accesses to any
+// byte offset in [begin, end) fold modulo stride to begin + ((off-begin)%stride).
+struct ArrayRegion {
+  std::uint64_t begin = 0;
+  std::uint64_t end = 0;
+  std::uint64_t stride = 0;
+};
+
 struct Object {
   std::string name;
   ObjectKind kind = ObjectKind::Heap;
   // True only for one concrete, whole pointer cell. Never true for summary
-  // heaps, aggregate objects, loop allocations, or recursive-frame allocations.
+  // heaps, aggregate objects, array elements, loop allocations, or
+  // recursive-frame allocations.
   bool singleton = false;
-  std::uint64_t bytes = 0; // 0 means a normalized, indivisible pointer cell.
+  std::uint64_t bytes = 0; // 0 means an indivisible cell or non-pointer field.
   PointsToSet initial = PointsToSet::top();
   Id function = INVALID;
+
+  // Field-sensitivity metadata (Remark 1 struct flattening).
+  // For root objects, base_object == INVALID (meaning self).
+  // For flattened field objects, base_object is the root allocation object ID
+  // and offset is the byte offset within base_object.
+  Id base_object = INVALID;
+  std::uint64_t offset = 0;
+  // Total byte span of the allocation (on root objects) or field span (on
+  // flattened fields). 0 means unspecified / indivisible.
+  std::uint64_t size_bytes = 0;
+  bool field_sensitive = false;
+  std::vector<ArrayRegion> array_regions;
 };
+
 struct Value {
   std::string name;
   Id function = INVALID;
@@ -108,18 +132,22 @@ enum class Opcode {
   Allocate,
   Copy,
   Join,
+  Field,
   Load,
   Store,
+  MemCopy,
   Havoc,
   Unknown,
   Call,
   Return
 };
+
 struct Instruction {
   Id id = INVALID;
   Opcode opcode = Opcode::Nop;
   Id result = INVALID;
-  // Copy/Join/Load: sources. Store: {address, value}. Havoc: optional address.
+  // Copy/Join/Load/Field: sources. Store: {address, value}.
+  // MemCopy: {dest_address, src_address}. Havoc: optional address.
   // Call: positional actual arguments, including INVALID for non-pointer args.
   std::vector<Id> operands;
   Id object = INVALID;
@@ -130,22 +158,44 @@ struct Instruction {
   bool writes_memory = true;       // Honored for opaque/external calls.
   std::uint64_t write_bytes = 0;
   std::uint64_t read_bytes = 0;
+  // For Opcode::Field: byte offset relative to operands[0]. When field_known is
+  // false, represents an inbounds variable-offset access within the same base
+  // allocation (or collapsed array stride when array_stride > 0).
+  std::int64_t field_offset = 0;
+  bool field_known = true;
+  std::uint64_t field_array_stride = 0;
+  // Optional condition variable(s) defined/killed by this instruction (for
+  // path sensitivity: existentially quantifies these boolean predicates when
+  // stepping backwards across loop backedges or global flag writes).
+  Id defines_condition = INVALID;
+  std::vector<Id> kills_conditions;
 };
+
 struct Edge {
   Id target = INVALID;
   // All assignments on an edge are simultaneous (LLVM PHI semantics).
   std::vector<std::pair<Id, Id>> phi;
+  // Optional path-sensitivity branch condition (Section 3, p. 258):
+  // cond_var == INVALID means unconditional edge.
+  Id cond_var = INVALID;
+  bool cond_polarity = true;
 };
+
 struct Block {
   std::vector<Instruction> instructions;
   std::vector<Edge> successors;
 };
+
 struct Function {
   std::string name;
   std::vector<Id> parameters;
   std::vector<Block> blocks;
   bool external = false;
   bool writes_memory = true;
+  // Condition variables scoped to a single activation of this function (e.g.,
+  // predicates over its own formal arguments) that must be existentially
+  // quantified when crossing this function's entry boundary.
+  std::vector<Id> entry_kills_conditions;
 };
 
 // Small LLVM-independent IR. All IDs are stable vector indices except site IDs,
@@ -156,25 +206,75 @@ struct Program {
   std::vector<Value> values;
   std::vector<Function> functions;
   Id entry = INVALID;
+
+  // Map from base object ID to sorted (byte_offset, field_object_id) entries
+  // for flattened field-sensitive aggregates (including base itself at offset
+  // 0).
+  std::vector<std::vector<std::pair<std::uint64_t, Id>>> fields_of_base;
+  // Number of boolean path-condition variables used for path sensitivity.
+  Id condition_count = 0;
+  // Condition variables backed by mutable global storage (quantified across
+  // opaque or memory-writing external calls).
+  std::vector<Id> global_conditions;
+
   Id addObject(Object object);
+  Id addFieldObject(Id base, std::uint64_t offset, Object object);
   Id addValue(Value value);
   Id addConstant(PointsToSet points_to, std::string name = {});
   Id addFunction(std::string name, bool external = false);
   Id addBlock(Id function);
   Id append(Id function, Id block, Instruction instruction);
+  Id addCondition();
+
+  // Field-resolution helpers.
+  Id baseOf(Id object) const;
+  std::uint64_t foldOffset(Id base, std::uint64_t offset) const;
+  // Resolve applying a byte offset delta (or unknown offset) to an object.
+  PointsToSet resolveField(Id object, std::int64_t delta, bool known,
+                           std::uint64_t array_stride = 0) const;
+  // Collect all flattened field objects of baseOf(object) whose byte ranges
+  // overlap [offset(object), offset(object) + bytes). bytes == 0 means entire
+  // object / all fields of base.
+  std::vector<Id> overlappingFields(Id object, std::uint64_t bytes) const;
   void validate() const;
 
 private:
   Id m_next_site = 0;
 };
 
+enum class SolverMode {
+  // Faithful Kahlon (PLDI '08) Section 3 solver: top-down Steensgaard-depth
+  // dovetailing (Alg. 2), guarded backward update-sequence summaries (Def. 8,
+  // Algs. 4-5), and FSCI/FSCS summary splicing (Alg. 3) with optional ROBDD
+  // path sensitivity.
+  GuardedSummary,
+  // Reference forward input-state tabulation solver (useful as a differential
+  // oracle and fallback verification backend).
+  InputStateTabulation
+};
+
 struct Options {
+  SolverMode solver_mode = SolverMode::GuardedSummary;
   std::size_t andersen_threshold = 60;
   bool adaptive_andersen_threshold = true;
   // Zero disables this adaptive preprocessing cost guard.
   std::size_t max_andersen_partition_size = 4096;
   // Estimated partition-size x hierarchy-node budget; zero is unlimited.
   std::size_t max_andersen_work = 4 * 1024 * 1024;
+  // Optional Das (2000) one-level-flow intermediate cascade stage between
+  // Steensgaard partitioning and Andersen clustering (paper §4, p. 258).
+  bool enable_one_level_flow = false;
+  // Optional ROBDD-based path sensitivity for summary tuples (paper §3, p. 258).
+  bool path_sensitive = false;
+  bool path_sensitive_interprocedural = false;
+  // Literal Algorithm 2 eager summary precomputation across Steensgaard depths
+  // (in reverse topological SCC order); false keeps summaries demand-driven.
+  bool eager_dovetail_summaries = false;
+  // Sound guard widening bounds for GuardedSummary mode (dropping guard atoms
+  // weakens constraints and preserves may-alias soundness).
+  std::size_t max_guard_atoms = 8;
+  std::size_t max_guards_per_state = 16;
+  std::size_t max_bdd_nodes = 65536;
   bool parallel_clusters = true;
   // Zero selects hardware_concurrency. Values above one enable parallel work.
   std::size_t parallelism = 0;
@@ -209,6 +309,7 @@ struct Statistics {
   std::size_t hierarchy_edges = 0;
   std::size_t hierarchy_max_depth = 0;
   std::size_t hierarchy_cyclic_components = 0;
+  std::size_t one_level_flow_runs = 0;
   std::size_t andersen_runs = 0;
   std::size_t adaptive_refinement_skips = 0;
   std::size_t adaptive_refinement_rejections = 0;
@@ -222,6 +323,7 @@ struct Statistics {
   std::size_t maximum_cover_memberships = 0;
   std::size_t slice_values = 0;
   std::size_t slice_objects = 0;
+  std::size_t slice_statements = 0;
   std::size_t evaluated_clusters = 0;
   std::size_t parallel_cluster_tasks = 0;
   std::size_t call_graph_sccs = 0;
@@ -232,6 +334,17 @@ struct Statistics {
   std::size_t context_cache_misses = 0;
   std::size_t maximum_contexts_per_cluster = 0;
   std::size_t summary_updates = 0;
+  // Paper Section 3 (Algorithms 2-5 & Path Sensitivity) counters.
+  std::size_t dovetail_levels = 0;
+  std::size_t fsci_queries = 0;
+  std::size_t fsci_cache_hits = 0;
+  std::size_t summary_tuples = 0;
+  std::size_t guard_atoms_created = 0;
+  std::size_t guards_pruned = 0;
+  std::size_t guards_widened = 0;
+  std::size_t skipped_functions = 0;
+  std::size_t path_infeasible_prunes = 0;
+  std::size_t bdd_nodes = 0;
   double preprocessing_milliseconds = 0.0;
   std::vector<double> cluster_solve_milliseconds;
   std::size_t steps = 0;
@@ -242,6 +355,13 @@ enum class QueryStatus { Complete, Unreachable, ResourceLimit };
 enum class Point { Before, After };
 struct QueryResult {
   PointsToSet points_to;
+  QueryStatus status = QueryStatus::Unreachable;
+  bool reachable() const { return status != QueryStatus::Unreachable; }
+};
+
+struct AliasResult {
+  std::vector<Id> aliases;
+  bool may_alias_all = false;
   QueryStatus status = QueryStatus::Unreachable;
   bool reachable() const { return status != QueryStatus::Unreachable; }
 };
@@ -262,6 +382,12 @@ public:
                        Point point = Point::Before);
   QueryResult pointsToAllContexts(Id value, Id site,
                                   Point point = Point::Before);
+  // Direct may-alias set computation (Algorithm 3 Step 2: backward A + forward
+  // Q, unioned over all clusters in the Disjunctive Alias Cover per Theorem 7).
+  AliasResult aliases(Id value, Id site, const Context &context = {},
+                      Point point = Point::Before);
+  AliasResult aliasesAllContexts(Id value, Id site,
+                                 Point point = Point::Before);
   // Eagerly construct every cluster solver, using configured parallelism.
   void precomputeAll();
   // Conservative query helper. Unreachable is not used to prove disjointness.
