@@ -12,6 +12,10 @@ value-flow client additionally constrains each witness to start/end with
 opening/closing brackets. Both return nonreflexive upper-bound pairs and
 reject prefix acceptance. The taint relation matches the classic CFL
 intersection baseline, not necessarily Regularization or Mutual Refinement.
+The RQ3 Mutual Refinement command explicitly passes `--plain-mr` so its
+measurements continue to use plain MR semantics; standalone
+`staged-bounds` commands use the optimized semantics unless that flag is
+provided.
 Shared binary, dataset, repetition, timeout, and memory settings live in
 `../config.py`. Method and output settings live in `config_rq3.py`.
 

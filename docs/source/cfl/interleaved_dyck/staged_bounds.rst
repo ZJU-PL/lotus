@@ -196,8 +196,10 @@ The CLI exposes ``--method NAME`` for selecting ``regularization``,
 ``stronger-grammar``, ``on-demand``, or ``all``. ``--analysis NAME`` selects
 the client analysis: ``taint`` (default) or ``value-flow``. It also supports
 ``--parity-groups N``, ``--factorized-tracing``,
-``--print-lower``, and ``--print-result``. It preserves the directed input
-arcs exactly as parsed.
+``--plain-mr``, ``--print-lower``, and ``--print-result``. MR uses its
+optimized semantics by default; ``--plain-mr`` enables plain MR semantics:
+reflexive tracing roots are retained internally and pre-MR candidate-path
+pruning is skipped. It preserves the directed input arcs exactly as parsed.
 
 Cost Considerations
 -------------------

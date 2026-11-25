@@ -40,9 +40,14 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
     return result;
   }
 
-  // Pruning by intersection candidates before MR changes its refinement
-  // result. Keep those paths available to the classic MR stage.
-  graph = detail::retainMatchedLabels(graph);
+  if (options.mutual_refinement_mode == MutualRefinementMode::Plain) {
+    // Plain MR keeps all matched-label paths available to the classic stage.
+    graph = detail::retainMatchedLabels(graph);
+  } else {
+    // Optimized MR prunes the graph by intersection candidates first.
+    graph = detail::retainMatchedLabels(
+        detail::removeNotOnCandidatePaths(graph, result.intersection));
+  }
   Graph under_graph = graph;
   if (benchmark == BenchmarkKind::ValueFlow) {
     under_graph = detail::valueFlowTransform(under_graph);
@@ -61,7 +66,8 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
 
   result.mutual_refinement = detail::refinedWithCondensation(
       graph, result.underapproximation, GrammarStrength::Classic,
-      options.parity_groups, benchmark, options.factorized_tracing);
+      options.parity_groups, benchmark, options.factorized_tracing,
+      options.mutual_refinement_mode);
   graph = detail::retainMatchedLabels(
       detail::removeNotOnCandidatePaths(graph, result.mutual_refinement));
   if (options.stage_completed) {
@@ -73,7 +79,8 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
 
   result.stronger_grammar = detail::refinedWithCondensation(
       graph, result.underapproximation, GrammarStrength::Parity,
-      options.parity_groups, benchmark, options.factorized_tracing);
+      options.parity_groups, benchmark, options.factorized_tracing,
+      options.mutual_refinement_mode);
   graph = detail::retainMatchedLabels(
       detail::removeNotOnCandidatePaths(graph, result.stronger_grammar));
   if (options.stage_completed) {
@@ -86,13 +93,14 @@ ApproximationResult Solver::analyze(const Graph &input, BenchmarkKind benchmark,
   const PairSet classic_on_demand = detail::onDemand(
       graph, result.underapproximation, result.stronger_grammar,
       GrammarStrength::Classic, options.parity_groups, benchmark,
-      options.factorized_tracing);
+      options.factorized_tracing, options.mutual_refinement_mode);
   graph = detail::retainMatchedLabels(
       detail::removeNotOnCandidatePaths(graph, classic_on_demand));
   result.on_demand =
       detail::onDemand(graph, result.underapproximation, classic_on_demand,
                        GrammarStrength::Parity, options.parity_groups,
-                       benchmark, options.factorized_tracing);
+                       benchmark, options.factorized_tracing,
+                       options.mutual_refinement_mode);
   if (options.stage_completed) {
     options.stage_completed(Method::OnDemand);
   }

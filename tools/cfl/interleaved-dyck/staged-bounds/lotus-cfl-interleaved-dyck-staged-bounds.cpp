@@ -36,6 +36,7 @@ struct CommandLine {
   approximation::BenchmarkKind analysis = approximation::BenchmarkKind::Taint;
   unsigned parity_groups = 2;
   bool factorized_tracing = false;
+  bool plain_mr = false;
   bool stage_stats = false;
   PrintedPairs printed_pairs = PrintedPairs::None;
   bool bidirect = false;
@@ -79,6 +80,9 @@ void usage(std::ostream &output) {
          "                     reconstruct provenance from the CFL closure\n"
          "                     instead of recording derivations eagerly;\n"
          "                     avoids storing derivation records.\n"
+         "  --plain-mr          use plain MR semantics; reflexive roots are\n"
+         "                     kept internally and pre-MR candidate-path\n"
+         "                     pruning is skipped.\n"
          "  --bidirect         add missing complement reverse arcs\n"
          "  --stage-stats      report stage time and cumulative process peak\n"
          "                     RSS to stderr (the RSS high-water mark does\n"
@@ -175,6 +179,10 @@ CommandLine parseCommandLine(int argc, char **argv) {
     }
     if (argument == "--factorized-tracing") {
       result.factorized_tracing = true;
+      continue;
+    }
+    if (argument == "--plain-mr") {
+      result.plain_mr = true;
       continue;
     }
     if (argument == "--bidirect") {
@@ -364,6 +372,9 @@ int runInterleavedDyckStagedBounds(int argc, char **argv) {
     options.method = command_line.method;
     options.parity_groups = command_line.parity_groups;
     options.factorized_tracing = command_line.factorized_tracing;
+    options.mutual_refinement_mode =
+        command_line.plain_mr ? approximation::MutualRefinementMode::Plain
+                              : approximation::MutualRefinementMode::Optimized;
     const auto start = std::chrono::steady_clock::now();
     if (command_line.stage_stats) {
       options.stage_completed = [last = start](

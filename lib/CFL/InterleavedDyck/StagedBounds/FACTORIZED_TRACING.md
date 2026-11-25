@@ -206,7 +206,8 @@ constructed separately and does not use this taint-specific trim.
 ## Integration with the refinement methods
 
 All three methods in [Solver.cpp](Solver.cpp) pass `options.factorized_tracing`
-through [Refinement.cpp](Refinement.cpp) to the same saturation and tracing engine:
+and the selected MR mode through [Refinement.cpp](Refinement.cpp) to the same
+saturation and tracing engine:
 
 | Method | Grammar and root selection |
 |---|---|
@@ -220,6 +221,9 @@ Each solve reconstructs its own contributing-edge union; the optimization does
 not provide incremental closure reuse between different target pairs.
 
 `--factorized-tracing` selects reconstruction; eager tracing remains the default.
+The optimized MR mode is the default. `--plain-mr` selects plain MR semantics,
+which keeps reflexive roots during tracing and skips the pre-MR candidate-path
+pruning; both modes omit reflexive pairs from public results.
 The CLI's `--method` selects the last pipeline stage, so prerequisite stages still
 run. Product trimming and compact output handling benefit both modes and every
 method using those prerequisites.

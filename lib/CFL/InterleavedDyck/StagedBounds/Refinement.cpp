@@ -47,6 +47,7 @@ std::vector<Graph> weakComponents(const Graph &graph) {
 PairSet mutualRefinementImpl(const Graph &input, GrammarStrength strength,
                              unsigned parity_groups, BenchmarkKind benchmark,
                              bool factorized_tracing,
+                             MutualRefinementMode mode,
                              const std::optional<Pair> &target = std::nullopt) {
   const std::vector<Graph> components = weakComponents(input);
   if (components.size() > 1U) {
@@ -54,7 +55,7 @@ PairSet mutualRefinementImpl(const Graph &input, GrammarStrength strength,
     for (const Graph &component : components) {
       PairSet component_result =
           mutualRefinementImpl(component, strength, parity_groups, benchmark,
-                               factorized_tracing, target);
+                               factorized_tracing, mode, target);
       result.insert(component_result.begin(), component_result.end());
     }
     return result;
@@ -69,7 +70,8 @@ PairSet mutualRefinementImpl(const Graph &input, GrammarStrength strength,
   while (!graph.empty()) {
     const std::size_t old_edge_count = graph.edges().size();
     auto alpha = runProjected(graph, Alphabet::Parenthesis, strength,
-                              parity_groups, true, factorized_tracing, target);
+                              parity_groups, true, factorized_tracing, target,
+                              mode);
     alpha_paths = std::move(alpha.pairs);
     if (target && alpha_paths.count(*target) == 0U) {
       return {};
@@ -80,7 +82,7 @@ PairSet mutualRefinementImpl(const Graph &input, GrammarStrength strength,
     }
 
     auto beta = runProjected(graph, Alphabet::Bracket, strength, parity_groups,
-                             true, factorized_tracing, target);
+                             true, factorized_tracing, target, mode);
     beta_paths = std::move(beta.pairs);
     if (target && beta_paths.count(*target) == 0U) {
       return {};
@@ -209,18 +211,19 @@ PairSet refinedWithCondensation(const Graph &graph,
                                 const PairSet &underapproximation,
                                 GrammarStrength strength,
                                 unsigned parity_groups, BenchmarkKind benchmark,
-                                bool factorized_tracing) {
+                                bool factorized_tracing,
+                                MutualRefinementMode mode) {
   const Condensation condensation = condense(graph, underapproximation);
   const PairSet condensed =
       mutualRefinementImpl(condensation.graph, strength, parity_groups,
-                           benchmark, factorized_tracing);
+                           benchmark, factorized_tracing, mode);
   return expandCondensedPairs(condensation, condensed);
 }
 
 PairSet onDemand(const Graph &graph, const PairSet &underapproximation,
                  const PairSet &overapproximation, GrammarStrength strength,
                  unsigned parity_groups, BenchmarkKind benchmark,
-                 bool factorized_tracing) {
+                 bool factorized_tracing, MutualRefinementMode mode) {
   const Condensation condensation = condense(graph, underapproximation);
   PairSet result = underapproximation;
   std::unordered_map<Pair, bool, PairHash> memory;
@@ -239,7 +242,7 @@ PairSet onDemand(const Graph &graph, const PairSet &underapproximation,
     if (found == memory.end()) {
       const bool accepted =
           mutualRefinementImpl(condensation.graph, strength, parity_groups,
-                               benchmark, factorized_tracing, root_pair)
+                               benchmark, factorized_tracing, mode, root_pair)
               .count(root_pair) != 0U;
       found = memory.emplace(root_pair, accepted).first;
     }
@@ -257,9 +260,10 @@ namespace lotus::cfl::interleaved_dyck::staged_bounds {
 PairSet Solver::mutualRefinement(const Graph &graph, GrammarStrength strength,
                                  unsigned parity_groups,
                                  BenchmarkKind benchmark,
-                                 bool factorized_tracing) const {
+                                 bool factorized_tracing,
+                                 MutualRefinementMode mode) const {
   return detail::mutualRefinementImpl(graph, strength, parity_groups, benchmark,
-                                      factorized_tracing);
+                                      factorized_tracing, mode);
 }
 
 } // namespace lotus::cfl::interleaved_dyck::staged_bounds

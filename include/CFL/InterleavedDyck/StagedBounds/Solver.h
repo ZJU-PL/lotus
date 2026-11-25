@@ -20,6 +20,8 @@ using interleaved_dyck::Vertex;
 enum class Alphabet { Parenthesis, Bracket };
 enum class GrammarStrength { Classic, Parity };
 enum class BenchmarkKind { Taint, ValueFlow };
+/// Selects the optimized or plain mutual-refinement semantics.
+enum class MutualRefinementMode { Optimized, Plain };
 enum class Method {
   All,
   Regularization,
@@ -38,6 +40,11 @@ struct Options {
   /// Reconstruct contributing edges from the saturated CFL relations instead
   /// of recording derivations eagerly. Disabled by default for compatibility.
   bool factorized_tracing = false;
+  /// Use plain MR semantics: retain reflexive tracing roots internally and
+  /// skip pre-MR candidate-path pruning. Optimized behavior is the default so
+  /// existing command lines retain their optimized results.
+  MutualRefinementMode mutual_refinement_mode =
+      MutualRefinementMode::Optimized;
   /// Optional observation hook, invoked synchronously after each completed
   /// stage (including its graph filtering). Useful for phase timing and RSS
   /// high-water marks without changing which stages or results are computed.
@@ -89,7 +96,9 @@ public:
                            GrammarStrength strength = GrammarStrength::Classic,
                            unsigned parity_groups = 2,
                            BenchmarkKind benchmark = BenchmarkKind::Taint,
-                           bool factorized_tracing = false) const;
+                           bool factorized_tracing = false,
+                           MutualRefinementMode mode =
+                               MutualRefinementMode::Optimized) const;
 
   /// Runs through the selected method in the reference-artifact pipeline.
   ApproximationResult analyze(const Graph &graph,
