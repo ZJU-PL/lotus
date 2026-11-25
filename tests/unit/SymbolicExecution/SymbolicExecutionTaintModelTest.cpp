@@ -1,10 +1,11 @@
-#include "SymbolicExecution/Core/TaintModel.h"
+#include "SymbolicExecution/Models/TaintModel.h"
 #include "TestUtils/LLVMHelpers.h"
 
-#include <llvm/IR/Instructions.h>
 #include <gtest/gtest.h>
+#include <llvm/IR/Instructions.h>
 
 using namespace llvm;
+using namespace SymbolicExecution;
 using namespace lotus::unittest;
 
 namespace {
@@ -72,6 +73,7 @@ TEST_F(SymbolicExecutionTaintModelTest, BuiltinTransferVectorDefaultsToEmpty) {
   std::vector<Value *> dsts;
   model.getTransferDstVect(call, call->getArgOperand(1), dsts);
   EXPECT_TRUE(dsts.empty());
+  EXPECT_TRUE(model.isSinkFunction(module->getFunction("memcpy")));
 }
 
 } // namespace

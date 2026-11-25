@@ -22,94 +22,97 @@ path-condition checks before emitting bug reports.
 
 The subsystem lives at the top level of the source tree (``lib/SymbolicExecution/``
 and ``include/SymbolicExecution/``) rather than under ``lib/Analysis/`` because it
-owns a full driver, symbolic state model, solver bridge, memory modeling layer,
-taint model, and LLVM pass wrapper. It is consumed by the checker framework
-through ``SymbolicExecutionWrapper``.
+owns a full driver, symbolic state model, solver bridge, library modeling layer,
+bug-checking engine, and LLVM pass wrapper. It is consumed by the checker
+framework through ``SymbolicExecution::SymbolicExecutionWrapper``.
 
 Directory layout
 ----------------
 
-Headers and implementations are grouped by architectural responsibility:
+Headers and implementations mirror one another across seven acyclic layers:
 
-* ``Core/`` – the symbolic execution engine and its fundamental state/value
-  abstractions (driver, ``AnalysisState``, ``AnalysisSummary``, symbolic memory,
-  guarded value sets, ``CStringState``, taint state, scalar properties).
-* ``Solver/`` – constraint representation and solver infrastructure
+* ``Support/`` – module-scoped ``AnalysisContext``, configurable
+  ``AnalysisLimit`` options, and hashing/formatting helpers (``HashUtil``).
+* ``Domain/`` – symbolic value and memory abstractions (``BigInteger``,
+  ``ProgramVar``, ``PropertyValue``, ``PropertyInteger``, ``PropertySym``,
+  ``PropertyAllocator``, ``SymbolicMemory``).
+* ``Models/`` – library and taint models (``MemoryAPI``, ``TaintModel``).
+* ``Solver/`` – path-condition representation and SMT solving
   (``ConstraintRepr``, ``PathCondSolver``, ``SummarySolverManager``).
-* ``Checks/`` – query representation and bug-specific checking logic (the query
-  hierarchy and the per-bug query construction, inlining, and reporting).
-* ``Integration/`` – adapters to LLVM/Lotus/GVFG infrastructure
-  (``SymbolicExecutionWrapper``, ``GVFGUtility``).
+* ``Engine/`` – symbolic execution driver, state, summaries, guarded containers,
+  C-string and taint state, and extension hooks (``AnalysisDriver``,
+  ``AnalysisState``, ``AnalysisSummary``, ``AnalysisExtension``,
+  ``GuardedValue``, ``CStringState``, ``TaintState``).
+* ``Checks/`` – bug taxonomy, query hierarchy, and checking logic
+  (``BugTypes``, ``Query``, ``QueryEngine``, ``MemoryChecks``,
+  ``ArithmeticChecks``).
+* ``Integration/`` – outer LLVM pass and Lotus report adapter
+  (``SymbolicExecutionWrapper``).
 
-``Core`` does not depend on ``Checks``; ``Checks`` may inspect ``Core`` state and
-use ``Solver`` functionality, and ``Integration`` sits at the outer boundary.
+Dependencies flow strictly downward: ``Engine`` has no compile-time or link-time
+dependency on ``Checks`` (checkers attach via ``AnalysisExtension``), and
+``Integration`` sits strictly at the outer boundary.
 
 Core Components
 ---------------
 
-The engine is composed of the following headers under
+The engine is composed of the following layers under
 ``include/SymbolicExecution/``:
 
-Driver and state
-~~~~~~~~~~~~~~~~
+Support and models
+~~~~~~~~~~~~~~~~~~
 
-* ``AnalysisDriver`` – Coordinates whole-module symbolic execution and summary
-  scheduling across functions.
-* ``AnalysisState`` – Represents symbolic memory, guarded values, points-to
-  items, interprocedural summaries, taint updates, and pending bug queries.
-* ``AnalysisLimit`` – Configurable resource and depth budgets that bound
-  exploration.
-
-Symbolic values and properties
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-* ``ProgramVar`` – Names symbolic values tied to LLVM values and contexts.
-* ``PropertyAllocator`` – Allocates and manages symbolic properties.
-* ``PropertyValue``, ``PropertyInteger``, ``PropertySym`` – Represent scalar
-  properties such as offsets, sizes, and affine expressions attached to
-  symbolic values.
-* ``BigInteger`` – Arbitrary-precision integer support for symbolic reasoning.
-
-Path conditions and solving
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-* ``ConstraintRepr`` – Encodes symbolic predicates used in path conditions.
-* ``PathCondSolver`` – Discharges path-feasibility queries through the SMT
-  (Z3) backend; paths proven infeasible are pruned before reporting.
-
-Memory and control flow
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-* ``MemoryAPI`` – Connects symbolic execution to allocation modeling, data
-  layout, and library function summaries.
-* ``GVFGUtility`` – Builds and queries the guarded value-flow graph that the
-  engine walks.
-
-Taint and reporting
-~~~~~~~~~~~~~~~~~~~
-
-* ``TaintModel`` – Provides source, transfer, and sink facts used by
+* ``Support/AnalysisContext`` – Module-scoped layout, GVFG lookup, and
+  call-graph topological ordering.
+* ``Support/AnalysisLimit`` – Configurable resource and depth budgets.
+* ``Models/MemoryAPI`` – Allocator, deallocator, and known-library recognition.
+* ``Models/TaintModel`` – Source, transfer, and sink specifications for
   taint-sensitive bug checks.
-* ``SymbolicExecutionWrapper`` – Integrates the engine with the LLVM pass
-  pipeline and the checker report infrastructure (``BugReportMgr``).
+
+Symbolic domain and solver
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``Domain/ProgramVar`` – Symbolic variables backed by GVFG nodes or auxiliary
+  names.
+* ``Domain/PropertyValue``, ``Domain/PropertyInteger``, ``Domain/PropertySym``,
+  ``Domain/BigInteger`` – Concrete integers and affine symbolic expressions.
+* ``Domain/SymbolicMemory`` – Access paths and abstract memory objects.
+* ``Solver/ConstraintRepr``, ``Solver/PathCondSolver``,
+  ``Solver/SummarySolverManager`` – Path conditions, SMT (Z3) feasibility checks,
+  and summary solver pooling.
+
+Execution engine, checks, and integration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``Engine/AnalysisDriver`` – Whole-module scheduling and summary ownership.
+* ``Engine/AnalysisState`` & ``Engine/AnalysisSummary`` – Per-function abstract
+  state and interprocedural summary import/export.
+* ``Checks/Query`` & ``Checks/QueryEngine`` – Unified bug query construction,
+  interprocedural inlining, and MPA batch discharging.
+* ``Integration/SymbolicExecutionWrapper`` – LLVM module pass and
+  ``BugReportMgr`` emission.
 
 Analysis flow
 -------------
 
 A typical symbolic-execution run proceeds as follows:
 
-1. **GVFG construction** – ``GVFGUtility`` builds the guarded value-flow graph,
-   capturing data and guarded control dependencies.
-2. **Driver scheduling** – ``AnalysisDriver`` selects entry functions and
-   schedules interprocedural exploration, applying summaries where available.
-3. **Path exploration** – ``AnalysisState`` advances along paths, updating
-   symbolic memory, properties, and taint facts.
-4. **Feasibility check** – ``PathCondSolver`` queries the SMT solver; paths
-   whose path conditions are unsatisfiable are pruned.
-5. **Bug query** – At suspect instructions (e.g. dereferences, divisions), the
-   engine emits bug queries through ``AnalysisState``.
-6. **Reporting** – Confirmed bugs flow through ``SymbolicExecutionWrapper`` into
-   the centralized ``BugReportMgr`` (JSON/SARIF output).
+1. **Context setup** – ``SymbolicExecutionWrapper`` builds an
+   ``AnalysisContext`` around the module, data layout, and GVFG builder pass.
+2. **Driver scheduling** – ``AnalysisDriver`` computes a bottom-up call-graph
+   order and schedules interprocedural execution, reusing ``AnalysisSummary``
+   objects across call sites.
+3. **Path exploration** – ``AnalysisState`` propagates symbolic values, memory
+   objects, C-string lengths, freed-pointer sets, and taint facts over GVFG
+   nodes.
+4. **Query generation & inlining** – ``QueryEngine`` hooks into
+   ``AnalysisState`` via ``StateExtension`` to emit memory and arithmetic safety
+   queries and inline callee ``QuerySummary`` payloads.
+5. **Feasibility check** – ``PathCondSolver`` discharges path conditions and
+   query predicates via SMT (Z3), pruning infeasible paths.
+6. **Reporting** – Confirmed ``BugReportRecord`` entries collected by
+   ``BugReportCollector`` are emitted by ``SymbolicExecutionWrapper`` into
+   ``BugReportMgr`` (JSON/SARIF output).
 
 Usage
 -----
@@ -126,22 +129,25 @@ For the full list of engine options, see :doc:`../checker/symex`.
 Programmatic usage
 ------------------
 
-The engine is exposed as an LLVM pass via ``SymbolicExecutionWrapper`` and can be
-added to a pass pipeline like other Lotus passes:
+The engine is exposed as an LLVM pass via
+``SymbolicExecution::SymbolicExecutionWrapper``:
 
 .. code-block:: cpp
 
    #include "SymbolicExecution/Integration/SymbolicExecutionWrapper.h"
 
    // Within a pass manager setup:
-   auto *seWrapper = new llvm::SymbolicExecutionWrapper();
+   auto *seWrapper = new SymbolicExecution::SymbolicExecutionWrapper(
+       SymbolicExecution::BUG_TY_BOF | SymbolicExecution::BUG_TY_DBZ);
    pm.add(seWrapper);
 
 Tests
 -----
 
-Focused unit tests live under ``tests/unit/SymbolicExecution`` and build against
-``CanarySymbolicExecution``. They cover spec compatibility and the taint model.
+Unit and end-to-end pipeline tests live under ``tests/unit/SymbolicExecution``
+and build against ``CanarySymbolicExecution``. They cover the symbolic domain,
+library/taint models, call-graph context helpers, and intraprocedural and
+interprocedural bug checks.
 
 See Also
 --------

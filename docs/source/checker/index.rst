@@ -253,8 +253,8 @@ Components
 
 **Symbolic Execution Checker** (``lib/SymbolicExecution/``):
 
-* ``Core/AnalysisDriver.cpp`` – Whole-module symbolic execution driver
-* ``Core/AnalysisState*.cpp`` – Symbolic state, summaries, taint updates, and bug queries
+* ``Engine/AnalysisDriver.cpp`` & ``Engine/AnalysisState*.cpp`` – Whole-module driver, symbolic state, taint updates, and summaries
+* ``Checks/QueryEngine.cpp``, ``Checks/MemoryChecks.cpp``, ``Checks/ArithmeticChecks.cpp`` – Decoupled bug query engine and check builders
 * ``Solver/PathCondSolver.cpp`` – SMT-backed feasibility checking for path conditions
 * ``Integration/SymbolicExecutionWrapper.cpp`` – LLVM pass wrapper used by ``lotus-check --engine=symex``
 

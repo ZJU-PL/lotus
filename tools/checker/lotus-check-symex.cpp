@@ -44,39 +44,28 @@ int runSymExCheckerTool(const char *argv0) {
   }
   const auto &selected = *selectedOr;
 
-  unsigned bugTypes = SymbolicExecution::AnalysisState::BUG_TY_UNDEF;
-  const std::pair<StringRef, SymbolicExecution::AnalysisState::SymexBugType>
-      checkTypes[] = {
-          {"buffer-overflow", SymbolicExecution::AnalysisState::BUG_TY_BOF},
-          {"div-by-zero", SymbolicExecution::AnalysisState::BUG_TY_DBZ},
-          {"int-overflow",
-           SymbolicExecution::AnalysisState::BUG_TY_INT_OVERFLOW},
-          {"int-underflow",
-           SymbolicExecution::AnalysisState::BUG_TY_INT_UNDERFLOW},
-          {"null-deref", SymbolicExecution::AnalysisState::BUG_TY_NULL_DEREF},
-          {"signed-int-overflow",
-           SymbolicExecution::AnalysisState::BUG_TY_SIGNED_INT_OVERFLOW},
-          {"signed-int-underflow",
-           SymbolicExecution::AnalysisState::BUG_TY_SIGNED_INT_UNDERFLOW},
-          {"shift-overflow",
-           SymbolicExecution::AnalysisState::BUG_TY_SHIFT_OVERFLOW},
-          {"array-oob",
-           SymbolicExecution::AnalysisState::BUG_TY_ARRAY_INDEX_OOB},
-          {"uninitialized-read",
-           SymbolicExecution::AnalysisState::BUG_TY_UNINIT_READ},
-          {"use-after-free", SymbolicExecution::AnalysisState::BUG_TY_UAF},
-          {"double-free", SymbolicExecution::AnalysisState::BUG_TY_DOUBLE_FREE},
-          {"negative-array-index",
-           SymbolicExecution::AnalysisState::BUG_TY_NEGATIVE_ARRAY_INDEX},
-          {"int-truncation",
-           SymbolicExecution::AnalysisState::BUG_TY_INT_TRUNCATION},
-      };
+  unsigned bugTypes = SymbolicExecution::BUG_TY_UNDEF;
+  const std::pair<StringRef, SymbolicExecution::SymexBugType> checkTypes[] = {
+      {"buffer-overflow", SymbolicExecution::BUG_TY_BOF},
+      {"div-by-zero", SymbolicExecution::BUG_TY_DBZ},
+      {"int-overflow", SymbolicExecution::BUG_TY_INT_OVERFLOW},
+      {"int-underflow", SymbolicExecution::BUG_TY_INT_UNDERFLOW},
+      {"null-deref", SymbolicExecution::BUG_TY_NULL_DEREF},
+      {"signed-int-overflow", SymbolicExecution::BUG_TY_SIGNED_INT_OVERFLOW},
+      {"signed-int-underflow", SymbolicExecution::BUG_TY_SIGNED_INT_UNDERFLOW},
+      {"shift-overflow", SymbolicExecution::BUG_TY_SHIFT_OVERFLOW},
+      {"array-oob", SymbolicExecution::BUG_TY_ARRAY_INDEX_OOB},
+      {"uninitialized-read", SymbolicExecution::BUG_TY_UNINIT_READ},
+      {"use-after-free", SymbolicExecution::BUG_TY_UAF},
+      {"double-free", SymbolicExecution::BUG_TY_DOUBLE_FREE},
+      {"negative-array-index", SymbolicExecution::BUG_TY_NEGATIVE_ARRAY_INDEX},
+      {"int-truncation", SymbolicExecution::BUG_TY_INT_TRUNCATION},
+  };
   for (const auto &[id, type] : checkTypes) {
     if (selected.count(id.str())) {
       bugTypes |= type;
     }
   }
-  SymbolicExecution::AnalysisDriver::setEnabledBugTypes(bugTypes);
 
   LLVMContext Context;
   SMDiagnostic Err;
@@ -103,7 +92,7 @@ int runSymExCheckerTool(const char *argv0) {
   PM.add(new LotusAA());
   PM.add(new lotus::gvfg::GuardedValueFlowGraphBuilderPass());
   PM.add(new lotus::gvfg::LotusAAWrapper());
-  PM.add(new SymbolicExecutionWrapper());
+  PM.add(new SymbolicExecution::SymbolicExecutionWrapper(bugTypes));
   PM.run(*M);
   stats.emit();
 

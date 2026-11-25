@@ -1,62 +1,46 @@
-/** @file ConstraintRepr.h @brief Constraint representation for symbolic execution path conditions. */
+/** @file ConstraintRepr.h @brief Path condition representation backed by SMT expressions. */
 #pragma once
-
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/Instruction.h"
 
 #include "IR/GVFG/GuardedValueFlowGraph.h"
 #include "Solvers/SMT/LIBSMT/SMTExpr.h"
-#include "SymbolicExecution/Core/AnalysisLimit.h"
-#include "SymbolicExecution/Core/PropertyAllocator.h"
+#include "SymbolicExecution/Domain/PropertyAllocator.h"
+#include "SymbolicExecution/Support/AnalysisLimit.h"
 
-#include <map>
+#include "llvm/IR/Instructions.h"
+
+#include <cassert>
+#include <cstdint>
 #include <memory>
-#include <set>
-#include <unordered_map>
-#include <vector>
+#include <string>
+#include <utility>
 
 namespace SymbolicExecution {
-
-/// Encodes symbolic path conditions used by the symbolic execution engine.
-///
-/// This header keeps the public condition abstraction lightweight. Most clients
-/// manipulate Condition values symbolically and only materialize solver terms
-/// when a query needs to be discharged.
 
 using lotus::gvfg::GuardedValueFlowRegionNode;
 
 class PathCondSolver;
 
-class AnalysisState;
-
-/// A solver backed boolean condition attached to symbolic states and sets.
-///
-/// Conditions are either literals or SMT expressions owned by a
-/// PathCondSolver. They serve as the shared guard representation for symbolic
-/// values, points to facts, and bug queries, which lets the analysis combine
-/// dataflow style joins with path sensitive reasoning.
+/// Solver-backed boolean condition attached to guarded values and queries.
 class SMTCondition {
 public:
   SMTCondition() = default;
-  SMTCondition(bool V);
+  explicit SMTCondition(bool V);
   SMTCondition(GuardedValueFlowRegionNode *Cond, PathCondSolver *Solver);
   SMTCondition(const SMTExpr &Constr, PathCondSolver *Solver);
-  SMTCondition(PropertyValuePtr L, PropertyValuePtr R, CmpInst::Predicate Pred,
-               PathCondSolver *Solver);
+  SMTCondition(PropertyValuePtr L, PropertyValuePtr R,
+               llvm::CmpInst::Predicate Pred, PathCondSolver *Solver);
 
   static SMTCondition getFalseCond() { return SMTCondition(false); }
-
   static SMTCondition getTrueCond() { return SMTCondition(true); }
 
   SMTCondition(const SMTCondition &R)
       : Index(R.Index), Lit(R.Lit), Solver(R.Solver) {
     if (R.Constr) {
-      Constr = std::unique_ptr<SMTExpr>(new SMTExpr(*R.Constr));
+      Constr = std::make_unique<SMTExpr>(*R.Constr);
     }
   }
 
-  SMTCondition(SMTCondition &&R)
+  SMTCondition(SMTCondition &&R) noexcept
       : Index(R.Index), Lit(R.Lit), Constr(std::move(R.Constr)),
         Solver(R.Solver) {}
 
@@ -75,30 +59,19 @@ public:
   SMTCondition operator&&(const SMTCondition &R) const;
   SMTCondition operator!() const;
 
-  // Utilities for enabling constraint as map key
   bool operator==(const SMTCondition &R) const;
   bool operator!=(const SMTCondition &R) const;
   bool operator<(const SMTCondition &R) const;
   size_t hash() const;
 
   void orCond(const SMTCondition &R) { *this = operator||(R); }
-
   void andCond(const SMTCondition &R) { *this = operator&&(R); }
 
-  bool isLit() const {
-    if (Lit != -1) {
-      return true;
-    } else {
-      return false;
-    }
-  }
-
+  bool isLit() const { return Lit != -1; }
   int64_t getIndex() const;
 
   SMTCondition translate(PathCondSolver *NewSolver, bool &ToUnknown) const;
-
   SMTCondition translateNoLock(PathCondSolver *NewSolver) const;
-
   SMTCondition rename(const std::string &Suffix) const;
 
   SMTExpr getSMTConstr() const {
@@ -112,10 +85,8 @@ public:
 
 private:
   int64_t Index = -3;
-
   // 1 => true; 0 => false; -1 => not a literal
   int Lit = 1;
-  // For literal, Constr == nullptr and Solver == nullptr
   std::unique_ptr<SMTExpr> Constr = nullptr;
   PathCondSolver *Solver = nullptr;
 };
@@ -123,4 +94,3 @@ private:
 using Condition = SMTCondition;
 
 } // namespace SymbolicExecution
-
