@@ -26,7 +26,8 @@ bool touches(const Program &program, const Slice &slice,
 Slice relevant(const Program &program, const ProgramIndex &index,
                const Sets &upper, const SteensgaardHierarchy &hierarchy,
                const ReachabilityInfo &reachability,
-               const std::vector<Id> &seeds, bool enabled);
+               const std::vector<Id> &seeds, bool enabled,
+               const std::vector<Id> &seed_objects = {});
 
 } // namespace detail
 } // namespace bootstrap

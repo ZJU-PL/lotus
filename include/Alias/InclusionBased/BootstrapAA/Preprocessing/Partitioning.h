@@ -20,9 +20,11 @@ struct CoarseResult {
 CoarseResult steensgaard(const Program &program);
 
 // Optional Stage 1.5 (§4, p. 258): Das (2000) one-level-flow directional
-// refinement over a Steensgaard partition.
+// refinement over a Steensgaard partition's slice (directional inclusion on
+// top-level assignments AND single-level memory loads/stores using
+// Steensgaard-fixed dereference addresses).
 Sets oneLevelFlow(const Program &program, const ProgramIndex &index,
-                  const std::vector<Id> &partition, const Sets &coarse_upper);
+                  const Slice &slice, const Sets &coarse_upper);
 
 // Stage 2 (§2.1, Theorem 7): Sparse St_P-restricted Andersen inclusion
 // analysis for refining large partitions into overlapping inverse covers.

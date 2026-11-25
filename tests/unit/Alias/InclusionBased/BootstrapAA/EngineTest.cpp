@@ -1753,6 +1753,1190 @@ void interproceduralUpwardPathSensitiveKillAndAliases() {
   CHECK(afterRes.reachable());
   CHECK(afterRes.points_to.contains(b));
 }
+
+void steensgaardNoNullBridge() {
+  // Storing `null` into disjoint stack slots (or merging `null` in disjoint
+  // PHIs) must NOT unify unrelated partitions through a global NULL vertex.
+  Fixture f;
+  Id a = f.object("a"), b = f.object("b");
+  Id s1 = f.object("s1", PointsToSet{}, true, ObjectKind::Stack);
+  Id s2 = f.object("s2", PointsToSet{}, true, ObjectKind::Stack);
+  Id pa = f.addr(a), pb = f.addr(b), ps1 = f.addr(s1), ps2 = f.addr(s2);
+  Id cnull = f.addr(NULL_OBJECT);
+
+  Id b1 = f.p.addBlock(f.main), b2 = f.p.addBlock(f.main);
+  f.inst(Opcode::Store, INVALID, {ps1, cnull}, f.main, 0);
+  f.inst(Opcode::Store, INVALID, {ps2, cnull}, f.main, 0);
+  f.p.functions[f.main].blocks[0].successors = {{b1, {}}, {b2, {}}};
+  f.inst(Opcode::Store, INVALID, {ps1, pa}, f.main, b1);
+  f.inst(Opcode::Store, INVALID, {ps2, pb}, f.main, b1);
+  f.p.functions[f.main].blocks[b1].successors = {{b2, {}}};
+
+  Id r1 = f.value("r1"), r2 = f.value("r2");
+  Id l1 = f.inst(Opcode::Load, r1, {ps1}, f.main, b2);
+  Id l2 = f.inst(Opcode::Load, r2, {ps2}, f.main, b2);
+  f.inst(Opcode::Return, INVALID, {}, f.main, b2);
+
+  Options opt = refined();
+  opt.andersen_threshold = 1000; // purely Steensgaard partitioning
+  Analysis aa(f.p, opt);
+  // `r1` and `r2` must remain in distinct Steensgaard partitions!
+  CHECK(aa.clustersFor(r1) != aa.clustersFor(r2));
+  CHECK(aa.pointsTo(r1, l1, {}, Point::After).points_to ==
+        pts({a, NULL_OBJECT}));
+  CHECK(aa.pointsTo(r2, l2, {}, Point::After).points_to ==
+        pts({b, NULL_OBJECT}));
+}
+
+void oneLevelFlowMemoryPrecision() {
+  // Genuine Das (2000) one-level-flow over memory: Steensgaard unifies `s1`
+  // and `s2` via a shared read-only source `common` stored into both slots,
+  // while directional memory-slot inclusion separates `s1` (also holds `a`)
+  // from `s2` (also holds `b`) without running Andersen!
+  Fixture f;
+  Id a = f.object("a"), b = f.object("b"), c = f.object("c");
+  Id s1 = f.object("s1", PointsToSet{}, true, ObjectKind::Stack);
+  Id s2 = f.object("s2", PointsToSet{}, true, ObjectKind::Stack);
+  Id pa = f.addr(a), pb = f.addr(b), pc = f.addr(c);
+  Id ps1 = f.addr(s1), ps2 = f.addr(s2);
+  Id shared = f.value("shared");
+  Id b1 = f.p.addBlock(f.main), b2 = f.p.addBlock(f.main);
+  f.inst(Opcode::Copy, shared, {pc}, f.main, 0);
+  f.p.functions[f.main].blocks[0].successors = {{b1, {}}, {b2, {}}};
+  f.inst(Opcode::Store, INVALID, {ps1, shared}, f.main, b1);
+  f.inst(Opcode::Store, INVALID, {ps2, shared}, f.main, b1);
+  f.p.functions[f.main].blocks[b1].successors = {{b2, {}}};
+  f.inst(Opcode::Store, INVALID, {ps1, pa}, f.main, b2);
+  f.inst(Opcode::Store, INVALID, {ps2, pb}, f.main, b2);
+  Id l1 = f.value("l1"), l2 = f.value("l2");
+  Id sL1 = f.inst(Opcode::Load, l1, {ps1}, f.main, b2);
+  Id sL2 = f.inst(Opcode::Load, l2, {ps2}, f.main, b2);
+  f.inst(Opcode::Return, INVALID, {}, f.main, b2);
+
+  Options olfOpt = refined();
+  olfOpt.enable_one_level_flow = true;
+  olfOpt.andersen_threshold = 4; // Steensgaard merges > 4; OLF splits <= 4!
+  Analysis olf(f.p, olfOpt);
+  CHECK(olf.statistics().one_level_flow_runs > 0);
+  CHECK(olf.statistics().andersen_runs == 0);
+  CHECK(olf.statistics().largest_cluster <
+        olf.statistics().steensgaard_largest_partition);
+  CHECK(olf.pointsTo(l1, sL1, {}, Point::After).points_to == PointsToSet(a));
+  CHECK(olf.pointsTo(l2, sL2, {}, Point::After).points_to == PointsToSet(b));
+
+  Options tabOpt = refined();
+  tabOpt.solver_mode = SolverMode::InputStateTabulation;
+  Analysis tab(f.p, tabOpt);
+  CHECK(olf.pointsTo(l1, sL1, {}, Point::After).points_to ==
+        tab.pointsTo(l1, sL1, {}, Point::After).points_to);
+  CHECK(olf.pointsTo(l2, sL2, {}, Point::After).points_to ==
+        tab.pointsTo(l2, sL2, {}, Point::After).points_to);
+}
+
+void fieldAwareDovetailCyclicStruct() {
+  // Cyclic field-sensitive struct `Node { i8* data @0, Node* next @8 }`
+  // traversed in a loop via `Opcode::Field(+8)` + `Opcode::Load`.
+  Fixture f;
+  Id a = f.object("a"), b = f.object("b");
+  Id pa = f.addr(a), pb = f.addr(b);
+  auto makeNode = [&](const char *name) -> std::pair<Id, Id> {
+    Object base;
+    base.name = name;
+    base.kind = ObjectKind::Heap;
+    base.singleton = false;
+    base.bytes = 8;
+    base.size_bytes = 16;
+    base.field_sensitive = true;
+    Id bid = f.p.addObject(base);
+    Object next_f;
+    next_f.name = std::string(name) + "+8";
+    next_f.kind = ObjectKind::Heap;
+    next_f.singleton = false;
+    next_f.bytes = 8;
+    next_f.size_bytes = 8;
+    Id nid = f.p.addFieldObject(bid, 8, next_f);
+    return {bid, nid};
+  };
+  auto [n1, n1_next] = makeNode("n1");
+  auto [n2, n2_next] = makeNode("n2");
+  (void)n1_next;
+  (void)n2_next;
+  Id pn1 = f.addr(n1), pn2 = f.addr(n2);
+
+  Id f1Next = f.value("f1_next"), f2Next = f.value("f2_next");
+  Instruction g1;
+  g1.opcode = Opcode::Field;
+  g1.result = f1Next;
+  g1.operands = {pn1};
+  g1.field_offset = 8;
+  g1.field_known = true;
+  f.p.append(f.main, 0, g1);
+
+  Instruction g2;
+  g2.opcode = Opcode::Field;
+  g2.result = f2Next;
+  g2.operands = {pn2};
+  g2.field_offset = 8;
+  g2.field_known = true;
+  f.p.append(f.main, 0, g2);
+
+  f.inst(Opcode::Store, INVALID, {pn1, pa}, f.main, 0);
+  f.inst(Opcode::Store, INVALID, {f1Next, pn2}, f.main, 0);
+  f.inst(Opcode::Store, INVALID, {pn2, pb}, f.main, 0);
+  f.inst(Opcode::Store, INVALID, {f2Next, pn1}, f.main, 0);
+
+  Id loop = f.p.addBlock(f.main), exit = f.p.addBlock(f.main);
+  Id cur = f.value("cur"), curNextPtr = f.value("cur_next_ptr"),
+     nextVal = f.value("next_val"), dataVal = f.value("data_val");
+  f.p.functions[f.main].blocks[0].successors = {{loop, {{cur, pn1}}}};
+  Instruction gCur;
+  gCur.opcode = Opcode::Field;
+  gCur.result = curNextPtr;
+  gCur.operands = {cur};
+  gCur.field_offset = 8;
+  gCur.field_known = true;
+  f.p.append(f.main, loop, gCur);
+  f.inst(Opcode::Load, nextVal, {curNextPtr}, f.main, loop);
+  Id sData = f.inst(Opcode::Load, dataVal, {cur}, f.main, loop);
+  f.p.functions[f.main].blocks[loop].successors = {
+      {loop, {{cur, nextVal}}}, {exit, {}}};
+  f.inst(Opcode::Return, INVALID, {}, f.main, exit);
+
+  Options gOpt = refined();
+  gOpt.solver_mode = SolverMode::GuardedSummary;
+  Options tOpt = refined();
+  tOpt.solver_mode = SolverMode::InputStateTabulation;
+  Analysis guarded(f.p, gOpt);
+  Analysis tab(f.p, tOpt);
+
+  CHECK(guarded.pointsTo(cur, sData).points_to == pts({n1, n2}));
+  CHECK(guarded.pointsTo(dataVal, sData, {}, Point::After).points_to ==
+        pts({a, b}));
+  CHECK(guarded.pointsTo(dataVal, sData, {}, Point::After).points_to ==
+        tab.pointsTo(dataVal, sData, {}, Point::After).points_to);
+}
+
+void compoundRobddSelectEdgePtrGuardsAndCallCondSubst() {
+  // Part A: Compound ROBDD (And/Or/Not) + path-sensitive Select (`Opcode::Join`
+  // with `select_cond_var`).
+  {
+    Fixture f;
+    Id a = f.object("a"), b = f.object("b");
+    Id pa = f.addr(a), pb = f.addr(b);
+    Id c1 = f.p.addCondition(), c2 = f.p.addCondition();
+    Id c1AndC2 = f.p.addCondAnd(c1, c2);
+    Id notC1 = f.p.addCondNot(c1);
+    Id sel = f.value("sel"), out = f.value("out");
+
+    Id bThen = f.p.addBlock(f.main), bElse = f.p.addBlock(f.main);
+    Instruction joinInst;
+    joinInst.opcode = Opcode::Join;
+    joinInst.result = sel;
+    joinInst.operands = {pa, pb};
+    joinInst.select_cond_var = c1;
+    joinInst.select_cond_polarity = true;
+    f.p.append(f.main, 0, joinInst);
+    f.p.functions[f.main].blocks[0].successors = {
+        {bThen, {}, c1AndC2, true}, {bElse, {}, notC1, true}};
+
+    Id sThen = f.inst(Opcode::Copy, out, {sel}, f.main, bThen);
+    f.inst(Opcode::Return, INVALID, {}, f.main, bThen);
+    Id out2 = f.value("out2");
+    Id sElse = f.inst(Opcode::Copy, out2, {sel}, f.main, bElse);
+    f.inst(Opcode::Return, INVALID, {}, f.main, bElse);
+
+    Options opt = refined();
+    opt.path_sensitive = true;
+    Analysis aa(f.p, opt);
+    CHECK(aa.pointsTo(out, sThen, {}, Point::After).points_to ==
+          PointsToSet(a));
+    CHECK(aa.pointsTo(out2, sElse, {}, Point::After).points_to ==
+          PointsToSet(b));
+  }
+
+  // Part B: EdgePtrGuard pruning (`p == &a` vs `p != &a` context-sensitively,
+  // plus `NULL == NULL` soundness).
+  {
+    Fixture f;
+    Id a = f.object("a"), b = f.object("b"), x = f.object("x");
+    Id outSlot = f.object("out_slot", PointsToSet{}, true, ObjectKind::Stack);
+    Id pa = f.addr(a), pb = f.addr(b), px = f.addr(x);
+    Id pout = f.addr(outSlot);
+    Id cnull = f.addr(NULL_OBJECT);
+
+    Id helper = f.p.addFunction("helper");
+    f.p.addBlock(helper);
+    Id bEq = f.p.addBlock(helper), bNe = f.p.addBlock(helper),
+       bJoin = f.p.addBlock(helper);
+    Id hp = f.value("hp", helper);
+    f.p.functions[helper].parameters = {hp};
+    Id brSite = f.inst(Opcode::Nop, INVALID, {}, helper, 0);
+    Edge eEq;
+    eEq.target = bEq;
+    eEq.ptr_guards.push_back({EdgeGuardKind::PointsTo, hp, a, brSite});
+    Edge eNe;
+    eNe.target = bNe;
+    eNe.ptr_guards.push_back({EdgeGuardKind::NotPointsTo, hp, a, brSite});
+    f.p.functions[helper].blocks[0].successors = {eEq, eNe};
+    f.inst(Opcode::Store, INVALID, {pout, px}, helper, bEq);
+    f.p.functions[helper].blocks[bEq].successors = {{bJoin, {}}};
+    f.inst(Opcode::Store, INVALID, {pout, hp}, helper, bNe);
+    f.p.functions[helper].blocks[bNe].successors = {{bJoin, {}}};
+    f.inst(Opcode::Return, INVALID, {}, helper, bJoin);
+
+    f.call(helper, INVALID, {pa}, f.main, 0);
+    Id r1 = f.value("r1"), r2 = f.value("r2");
+    Id sR1 = f.inst(Opcode::Load, r1, {pout}, f.main, 0);
+    f.call(helper, INVALID, {pb}, f.main, 0);
+    Id sR2 = f.inst(Opcode::Load, r2, {pout}, f.main, 0);
+
+    // NULL == NULL branch must remain reachable (soundness!).
+    Id np1 = f.value("np1"), np2 = f.value("np2");
+    f.inst(Opcode::Copy, np1, {cnull}, f.main, 0);
+    Id sCmp = f.inst(Opcode::Copy, np2, {cnull}, f.main, 0);
+    Id bNullEq = f.p.addBlock(f.main), bEnd = f.p.addBlock(f.main);
+    Edge eNullEq;
+    eNullEq.target = bNullEq;
+    eNullEq.ptr_guards.push_back({EdgeGuardKind::Alias, np1, np2, sCmp});
+    f.p.functions[f.main].blocks[0].successors = {eNullEq, {bEnd, {}}};
+    Id rNull = f.value("r_null");
+    Id sNull = f.inst(Opcode::Copy, rNull, {px}, f.main, bNullEq);
+    f.p.functions[f.main].blocks[bNullEq].successors = {{bEnd, {}}};
+    f.inst(Opcode::Return, INVALID, {}, f.main, bEnd);
+
+    Options opt = refined();
+    opt.path_sensitive = true;
+    Analysis aa(f.p, opt);
+    CHECK(aa.pointsTo(r1, sR1, {}, Point::After).points_to == PointsToSet(x));
+    CHECK(aa.pointsTo(r2, sR2, {}, Point::After).points_to == PointsToSet(b));
+    auto nr = aa.pointsTo(rNull, sNull, {}, Point::After);
+    CHECK(nr.reachable());
+    CHECK(nr.points_to == PointsToSet(x));
+  }
+
+  // Part C: General call-site `cond_subst` for constant and variable actuals.
+  {
+    Fixture f;
+    Id a = f.object("a"), b = f.object("b");
+    Id s1 = f.object("s1", PointsToSet{}, true, ObjectKind::Stack);
+    Id s2 = f.object("s2", PointsToSet{}, true, ObjectKind::Stack);
+    Id s3 = f.object("s3", PointsToSet{}, true, ObjectKind::Stack);
+    Id pa = f.addr(a), pb = f.addr(b);
+    Id ps1 = f.addr(s1), ps2 = f.addr(s2), ps3 = f.addr(s3);
+    Id calleeCond = f.p.addCondition();
+    Id callerCond = f.p.addCondition();
+
+    Id pick = f.p.addFunction("pick");
+    f.p.functions[pick].entry_kills_conditions = {calleeCond};
+    f.p.addBlock(pick);
+    Id bT = f.p.addBlock(pick), bF = f.p.addBlock(pick),
+       bDone = f.p.addBlock(pick);
+    Id dst = f.value("dst", pick);
+    f.p.functions[pick].parameters = {dst};
+    f.inst(Opcode::Nop, INVALID, {}, pick, 0);
+    f.p.functions[pick].blocks[0].successors = {{bT, {}, calleeCond, true},
+                                                {bF, {}, calleeCond, false}};
+    f.inst(Opcode::Store, INVALID, {dst, pa}, pick, bT);
+    f.p.functions[pick].blocks[bT].successors = {{bDone, {}}};
+    f.inst(Opcode::Store, INVALID, {dst, pb}, pick, bF);
+    f.p.functions[pick].blocks[bF].successors = {{bDone, {}}};
+    f.inst(Opcode::Return, INVALID, {}, pick, bDone);
+
+    Instruction cTrue;
+    cTrue.opcode = Opcode::Call;
+    cTrue.callee = pick;
+    cTrue.operands = {ps1};
+    cTrue.cond_subst.push_back({calleeCond, INVALID, true});
+    f.p.append(f.main, 0, cTrue);
+
+    Instruction cFalse;
+    cFalse.opcode = Opcode::Call;
+    cFalse.callee = pick;
+    cFalse.operands = {ps2};
+    cFalse.cond_subst.push_back({calleeCond, INVALID, false});
+    f.p.append(f.main, 0, cFalse);
+
+    Id bMainT = f.p.addBlock(f.main), bMainF = f.p.addBlock(f.main);
+    f.p.functions[f.main].blocks[0].successors = {
+        {bMainT, {}, callerCond, true}, {bMainF, {}, callerCond, false}};
+    Instruction cVar;
+    cVar.opcode = Opcode::Call;
+    cVar.callee = pick;
+    cVar.operands = {ps3};
+    cVar.cond_subst.push_back({calleeCond, callerCond, true});
+    f.p.append(f.main, bMainT, cVar);
+
+    Id r1 = f.value("r1"), r2 = f.value("r2"), r3 = f.value("r3");
+    Id l1 = f.inst(Opcode::Load, r1, {ps1}, f.main, bMainT);
+    Id l2 = f.inst(Opcode::Load, r2, {ps2}, f.main, bMainT);
+    Id l3 = f.inst(Opcode::Load, r3, {ps3}, f.main, bMainT);
+    f.inst(Opcode::Return, INVALID, {}, f.main, bMainT);
+    f.inst(Opcode::Return, INVALID, {}, f.main, bMainF);
+
+    Options opt = refined();
+    opt.path_sensitive = true;
+    opt.path_sensitive_interprocedural = true;
+    Analysis aa(f.p, opt);
+    CHECK(aa.pointsTo(r1, l1, {}, Point::After).points_to == PointsToSet(a));
+    CHECK(aa.pointsTo(r2, l2, {}, Point::After).points_to == PointsToSet(b));
+    CHECK(aa.pointsTo(r3, l3, {}, Point::After).points_to == PointsToSet(a));
+  }
+}
+
+void perPartitionAndersenRejectionAndHybridSolver() {
+  // Part A: Per-partition Andersen rejection without global escalation.
+  {
+    Fixture f;
+    // Partition 1 (size 4): cyclic copies where Andersen cannot reduce size.
+    Id a = f.object("a"), pa = f.addr(a);
+    Id u1 = f.value("u1"), u2 = f.value("u2"), u3 = f.value("u3");
+    Id b1 = f.p.addBlock(f.main), b2 = f.p.addBlock(f.main);
+    f.p.functions[f.main].blocks[0].successors = {{b1, {{u1, pa}}},
+                                                  {b2, {{u1, pa}}}};
+    f.inst(Opcode::Copy, u2, {u1}, f.main, b1);
+    f.inst(Opcode::Copy, u3, {u2}, f.main, b1);
+    f.p.functions[f.main].blocks[b1].successors = {{b2, {}}};
+    // Partition 2 (size 5): directional fan-in where Andersen splits cleanly.
+    Id x = f.object("x"), y = f.object("y");
+    Id px = f.addr(x), py = f.addr(y);
+    Id vx = f.value("vx"), vy = f.value("vy"), vm = f.value("vm");
+    f.inst(Opcode::Copy, vx, {px}, f.main, b2);
+    f.inst(Opcode::Copy, vy, {py}, f.main, b2);
+    f.inst(Opcode::Join, vm, {vx, vy}, f.main, b2);
+    Id sRet = f.inst(Opcode::Return, INVALID, {}, f.main, b2);
+
+    Options opt = refined();
+    opt.andersen_threshold = 2;
+    opt.adaptive_andersen_threshold = true;
+    opt.adaptive_global_threshold_escalation = false;
+    Analysis aa(f.p, opt);
+    CHECK(aa.statistics().effective_andersen_threshold == 2);
+    CHECK(aa.statistics().andersen_runs >= 2);
+    CHECK(aa.pointsTo(vx, sRet).points_to == PointsToSet(x));
+    CHECK(aa.pointsTo(vy, sRet).points_to == PointsToSet(y));
+  }
+
+  // Part B: Hybrid per-cluster solver selection (threshold + custom selector).
+  {
+    Fixture f;
+    Id a = f.object("a"), b = f.object("b"), c = f.object("c");
+    Id pa = f.addr(a), pb = f.addr(b), pc = f.addr(c);
+    Id sSmall = f.object("s_small", PointsToSet{}, true, ObjectKind::Stack);
+    Id psSmall = f.addr(sSmall);
+    f.inst(Opcode::Store, INVALID, {psSmall, pa});
+    Id vSmall = f.value("v_small");
+    Id sLoadSmall = f.inst(Opcode::Load, vSmall, {psSmall});
+
+    Id p1 = f.value("p1"), p2 = f.value("p2"), p3 = f.value("p3"),
+       p4 = f.value("p4"), p5 = f.value("p5");
+    f.inst(Opcode::Copy, p1, {pb});
+    f.inst(Opcode::Copy, p2, {p1});
+    f.inst(Opcode::Copy, p3, {p2});
+    f.inst(Opcode::Join, p4, {p3, pc});
+    Id sP5 = f.inst(Opcode::Copy, p5, {p4});
+    f.inst(Opcode::Return);
+
+    Options hOpt = refined();
+    hOpt.hybrid_tabulation_max_cluster_size = 3;
+    std::size_t selector_calls = 0;
+    hOpt.cluster_solver_selector = [&](std::size_t, std::size_t csz,
+                                       std::size_t) {
+      ++selector_calls;
+      return csz <= 3 ? SolverMode::InputStateTabulation
+                      : SolverMode::GuardedSummary;
+    };
+    Analysis hybrid(f.p, hOpt);
+    CHECK(hybrid.pointsTo(vSmall, sLoadSmall, {}, Point::After).points_to ==
+          PointsToSet(a));
+    CHECK(hybrid.pointsTo(p5, sP5, {}, Point::After).points_to == pts({b, c}));
+    CHECK(selector_calls >= 2);
+  }
+}
+
+void selectivePrecomputationObjectQueriesAndMustAlias() {
+  Fixture f;
+  Id a = f.object("a"), b = f.object("b");
+  Id gWriteOnly = f.object("g_wo", PointsToSet(NULL_OBJECT), true,
+                           ObjectKind::Global);
+  Id sOther = f.object("s_other", PointsToSet{}, true, ObjectKind::Stack);
+  Id h1 = f.object("h1", PointsToSet{}, false, ObjectKind::Heap);
+  Id h2 = f.object("h2", PointsToSet{}, false, ObjectKind::Heap);
+  Id pa = f.addr(a), pb = f.addr(b), pg = f.addr(gWriteOnly),
+     psOther = f.addr(sOther);
+  Id cnull = f.addr(NULL_OBJECT);
+
+  // Write-only global `gWriteOnly` (no Load from `gWriteOnly`!).
+  f.inst(Opcode::Store, INVALID, {pg, pa});
+  Id aliasOfG = f.value("alias_of_g");
+  f.inst(Opcode::Copy, aliasOfG, {pa});
+
+  // Unrelated cluster for selective precomputation.
+  f.inst(Opcode::Store, INVALID, {psOther, pb});
+  Id vOther = f.value("v_other");
+  f.inst(Opcode::Load, vOther, {psOther});
+
+  // Symbolic heap must-alias (`qHeap = pHeap`) vs distinct heap allocations.
+  Id pHeap = f.value("p_heap"), qHeap = f.value("q_heap"),
+     rHeap = f.value("r_heap");
+  Instruction alloc1;
+  alloc1.opcode = Opcode::Allocate;
+  alloc1.object = h1;
+  alloc1.result = pHeap;
+  f.p.append(f.main, 0, alloc1);
+  f.inst(Opcode::Copy, qHeap, {pHeap});
+  Instruction alloc2;
+  alloc2.opcode = Opcode::Allocate;
+  alloc2.object = h2;
+  alloc2.result = rHeap;
+  f.p.append(f.main, 0, alloc2);
+
+  // Strict NULL pointers must not alias each other.
+  Id n1 = f.value("n1"), n2 = f.value("n2");
+  f.inst(Opcode::Copy, n1, {cnull});
+  f.inst(Opcode::Copy, n2, {cnull});
+
+  Id sRet = f.inst(Opcode::Return);
+
+  // Test selective precomputation first on a fresh instance.
+  {
+    Analysis sel(f.p, refined());
+    CHECK(sel.statistics().evaluated_clusters == 0);
+    const auto otherClusters = sel.clustersFor(vOther);
+    CHECK(!otherClusters.empty());
+    sel.precomputeForValues({vOther});
+    CHECK(sel.statistics().evaluated_clusters == otherClusters.size());
+    CHECK(sel.statistics().evaluated_clusters < sel.clusters().size());
+  }
+
+  for (SolverMode mode :
+       {SolverMode::GuardedSummary, SolverMode::InputStateTabulation}) {
+    Options opt = refined();
+    opt.solver_mode = mode;
+    Analysis aa(f.p, opt);
+
+    // Direct memory-object queries (Paper Fig. 5) on write-only global!
+    auto gPts = aa.objectPointsTo(gWriteOnly, sRet);
+    CHECK(gPts.reachable());
+    CHECK(gPts.points_to == PointsToSet(a));
+    auto gFsci = aa.objectPointsToAllContexts(gWriteOnly, sRet);
+    CHECK(gFsci.reachable());
+    CHECK(gFsci.points_to == PointsToSet(a));
+    auto gAl = aa.objectAliases(gWriteOnly, sRet);
+    CHECK(gAl.reachable());
+    CHECK(std::find(gAl.aliases.begin(), gAl.aliases.end(), aliasOfG) !=
+          gAl.aliases.end());
+
+    // Must-alias checks.
+    CHECK(aa.mustAlias(aliasOfG, pa, sRet));
+    CHECK(!aa.mustAlias(pHeap, rHeap, sRet));
+    if (mode == SolverMode::GuardedSummary)
+      CHECK(aa.mustAlias(pHeap, qHeap, sRet));
+
+    // Consistent non-null `mayAlias` / `aliases` / `mustAlias` semantics!
+    CHECK(!aa.mayAlias(n1, n2, sRet));
+    CHECK(!aa.mustAlias(n1, n2, sRet));
+    auto nAl = aa.aliases(n1, sRet);
+    CHECK(nAl.reachable());
+    CHECK(std::find(nAl.aliases.begin(), nAl.aliases.end(), n2) ==
+          nAl.aliases.end());
+  }
+}
+
+void steensgaardTopStorePreservesRhsAndNullAliasExcludesTop() {
+  // 1. Storing `&a` through an already-top pointer (`argv`) must NOT merge `a`
+  //    into `top` in Steensgaard Pass 1.
+  // 2. `aliases(null_ptr)` must NOT include `top_component` values (`argv`)
+  //    when `null_ptr` strictly holds `NULL_OBJECT` (`mayAlias == false`).
+  Fixture f;
+  Id argv = f.value("argv");
+  f.p.functions[f.main].parameters = {argv};
+  Id a = f.object("a", PointsToSet{}, true, ObjectKind::Stack);
+  Id b = f.object("b", PointsToSet{}, true, ObjectKind::Stack);
+  Id pa = f.addr(a), pb = f.addr(b);
+  Id cnull = f.addr(NULL_OBJECT);
+  f.inst(Opcode::Store, INVALID, {argv, pa});
+  Id va = f.value("va"), vb = f.value("vb"), vn = f.value("vn");
+  f.inst(Opcode::Copy, va, {pa});
+  f.inst(Opcode::Copy, vb, {pb});
+  f.inst(Opcode::Copy, vn, {cnull});
+  Id sRet = f.inst(Opcode::Return);
+
+  Analysis aa(f.p, refined());
+  CHECK(aa.pointsTo(va, sRet).points_to == PointsToSet(a));
+  CHECK(aa.pointsTo(vb, sRet).points_to == PointsToSet(b));
+  CHECK(aa.clustersFor(va) != aa.clustersFor(argv));
+  CHECK(!aa.mayAlias(vn, argv, sRet));
+  auto vnAl = aa.aliases(vn, sRet);
+  CHECK(vnAl.reachable());
+  CHECK(std::find(vnAl.aliases.begin(), vnAl.aliases.end(), argv) ==
+        vnAl.aliases.end());
+}
+
+void edgePtrGuardPostDefAndInterprocAnchorAliasSoundness() {
+  // Part A: Outgoing EdgePtrGuard from a block ending directly in a defining
+  // Load must evaluate at Point::After of that Load (not Point::Before where
+  // the loaded SSA value is not yet defined!).
+  {
+    Fixture f;
+    Id a = f.object("a");
+    Id g = f.object("g", PointsToSet(a), true, ObjectKind::Global);
+    Id pa = f.addr(a), pg = f.addr(g);
+    Id b1 = f.p.addBlock(f.main);
+
+    Id v1 = f.value("v1"), v2 = f.value("v2");
+    f.inst(Opcode::Copy, v1, {pa}, f.main, 0);
+    Id sLoad = f.inst(Opcode::Load, v2, {pg}, f.main, 0);
+    Edge e;
+    e.target = b1;
+    e.ptr_guards.push_back({EdgeGuardKind::Alias, v1, v2, sLoad});
+    f.p.functions[f.main].blocks[0].successors = {e};
+    Id res = f.value("res");
+    Id sRes = f.inst(Opcode::Copy, res, {v2}, f.main, b1);
+    f.inst(Opcode::Return, INVALID, {}, f.main, b1);
+
+    Options opt = refined();
+    opt.path_sensitive = true;
+    Analysis aa(f.p, opt);
+    auto qr = aa.pointsTo(res, sRes, {}, Point::After);
+    CHECK(qr.reachable());
+    CHECK(qr.points_to == PointsToSet(a));
+  }
+
+  // Part B: Interprocedural path-sensitive forward anchor propagation when
+  // entry global `g` initially holds `&a`, `main` loads `p = *g`, overwrites
+  // `*g = &b`, and passes `p` to `callee(param)` which defines `q = &a`.
+  // `aliases(param)` MUST include `q` even though `Mem(g)` no longer holds `a`!
+  {
+    Fixture f;
+    Id a = f.object("a"), b = f.object("b");
+    Id g = f.object("g", PointsToSet(a), true, ObjectKind::Global);
+    Id pa = f.addr(a), pb = f.addr(b), pg = f.addr(g);
+
+    Id callee = f.p.addFunction("callee");
+    f.p.addBlock(callee);
+    Id param = f.value("param", callee);
+    Id q = f.value("q", callee);
+    f.p.functions[callee].parameters = {param};
+    f.inst(Opcode::Copy, q, {pa}, callee, 0);
+    Id cRet = f.inst(Opcode::Return, INVALID, {}, callee, 0);
+
+    Id p = f.value("p");
+    f.inst(Opcode::Load, p, {pg}, f.main, 0);
+    f.inst(Opcode::Store, INVALID, {pg, pb}, f.main, 0);
+    Id cs = f.call(callee, INVALID, {p}, f.main, 0);
+    f.inst(Opcode::Return, INVALID, {}, f.main, 0);
+
+    Options opt = refined();
+    opt.path_sensitive = true;
+    opt.path_sensitive_interprocedural = true;
+    Analysis aa(f.p, opt);
+    auto alFscs = aa.aliases(param, cRet, {cs});
+    CHECK(alFscs.reachable());
+    CHECK(std::find(alFscs.aliases.begin(), alFscs.aliases.end(), q) !=
+          alFscs.aliases.end());
+    auto alFsci = aa.aliasesAllContexts(param, cRet);
+    CHECK(alFsci.reachable());
+    CHECK(std::find(alFsci.aliases.begin(), alFsci.aliases.end(), q) !=
+          alFsci.aliases.end());
+  }
+}
+
+void arrayFoldingWraparoundInteriorStrongUpdateMutualRecAndLoadFuncSoundness() {
+  // Part A & B: A raw non-field-sensitive singleton (`size_bytes == 0`) with
+  // an interior `Opcode::Field` offset must NOT strong-update across distinct
+  // offsets, must NOT `mustAlias(p, q)`, and must NOT let an `EdgePtrGuard`
+  // `p != q` contradict a Def. 8 store-alias guard on the same object.
+  {
+    Fixture f;
+    Id x = f.object("x"), y = f.object("y");
+    Id buf = f.object("buf", PointsToSet{}, /*singleton=*/true);
+    Id px = f.addr(x), py = f.addr(y), pbuf = f.addr(buf);
+    Id b1 = f.p.addBlock(f.main);
+
+    Id q = f.value("q");
+    Instruction fld;
+    fld.opcode = Opcode::Field;
+    fld.result = q;
+    fld.operands = {pbuf};
+    fld.field_offset = 8;
+    fld.field_known = true;
+    f.p.append(f.main, 0, fld);
+
+    f.inst(Opcode::Store, INVALID, {pbuf, px}, f.main, 0);
+    Edge e;
+    e.target = b1;
+    e.ptr_guards.push_back({EdgeGuardKind::NotAlias, pbuf, q, INVALID});
+    f.p.functions[f.main].blocks[0].successors = {e};
+
+    f.inst(Opcode::Store, INVALID, {q, py}, f.main, b1);
+    Id ld = f.value("ld");
+    Id sLd = f.inst(Opcode::Load, ld, {pbuf}, f.main, b1);
+    Id sRet = f.inst(Opcode::Return, INVALID, {}, f.main, b1);
+
+    for (SolverMode mode :
+         {SolverMode::GuardedSummary, SolverMode::InputStateTabulation}) {
+      Options opt = refined();
+      opt.solver_mode = mode;
+      opt.path_sensitive = true;
+      Analysis aa(f.p, opt);
+      auto qr = aa.pointsTo(ld, sLd, {}, Point::After);
+      CHECK(qr.reachable());
+      CHECK(qr.points_to.contains(x));
+      CHECK(qr.points_to.contains(y));
+      CHECK(!aa.mustAlias(pbuf, q, sRet, {}));
+    }
+  }
+
+  // Part C: Loading from a pointer that may hold both a memory object and a
+  // `Function` object must soundly produce Top in both backends (and
+  // Steensgaard must agree).
+  {
+    Fixture f;
+    Id target = f.object("target");
+    Id m = f.object("m", PointsToSet(target), true, ObjectKind::Global);
+    Id fn = f.p.addFunction("dummy");
+    f.p.addBlock(fn);
+    f.inst(Opcode::Return, INVALID, {}, fn, 0);
+    Object fobj;
+    fobj.name = "dummy_fn";
+    fobj.kind = ObjectKind::Function;
+    fobj.function = fn;
+    Id fobj_id = f.p.addObject(fobj);
+
+    Id pm = f.addr(m), pf = f.addr(fobj_id);
+    Id ptr = f.value("ptr"), ld = f.value("ld");
+    f.inst(Opcode::Join, ptr, {pm, pf}, f.main, 0);
+    Id sLd = f.inst(Opcode::Load, ld, {ptr}, f.main, 0);
+    f.inst(Opcode::Return, INVALID, {}, f.main, 0);
+
+    for (SolverMode mode :
+         {SolverMode::GuardedSummary, SolverMode::InputStateTabulation}) {
+      Options opt = refined();
+      opt.solver_mode = mode;
+      Analysis aa(f.p, opt);
+      auto qr = aa.pointsTo(ld, sLd, {}, Point::After);
+      CHECK(qr.reachable());
+      CHECK(qr.points_to.isTop());
+    }
+  }
+
+  // Part D: Mutual recursion A -> B -> A under `path_sensitive_interprocedural`
+  // must not leak frame-1's condition `cA == true` across B into frame-2 of A
+  // where `cA == false`.
+  {
+    Fixture f;
+    Id a = f.object("a"), b = f.object("b");
+    Id pa = f.addr(a), pb = f.addr(b);
+    Id fnA = f.p.addFunction("A");
+    Id fnB = f.p.addFunction("B");
+    Id a0 = f.p.addBlock(fnA), aTrue = f.p.addBlock(fnA),
+       aFalse = f.p.addBlock(fnA);
+    Id b0 = f.p.addBlock(fnB);
+
+    Id cA = f.p.addCondition();
+    f.p.functions[fnA].entry_kills_conditions.push_back(cA);
+
+    Id pA = f.value("pA", fnA), qA = f.value("qA", fnA);
+    f.p.functions[fnA].parameters = {pA};
+    f.inst(Opcode::Nop, INVALID, {}, fnA, a0);
+    f.p.functions[fnA].blocks[a0].successors = {{aTrue, {}, cA, true},
+                                                {aFalse, {}, cA, false}};
+
+    Id csAB = f.call(fnB, INVALID, {pA}, fnA, aTrue);
+    f.inst(Opcode::Return, INVALID, {}, fnA, aTrue);
+
+    f.inst(Opcode::Copy, qA, {pa}, fnA, aFalse);
+    Id sQuery = f.inst(Opcode::Return, INVALID, {}, fnA, aFalse);
+
+    Id pB = f.value("pB", fnB);
+    f.p.functions[fnB].parameters = {pB};
+    Instruction callBA;
+    callBA.opcode = Opcode::Call;
+    callBA.callee = fnA;
+    callBA.operands = {pB};
+    callBA.cond_subst.push_back({cA, INVALID, false});
+    Id csBA = f.p.append(fnB, b0, callBA);
+    f.inst(Opcode::Return, INVALID, {}, fnB, b0);
+
+    Instruction callMainA;
+    callMainA.opcode = Opcode::Call;
+    callMainA.callee = fnA;
+    callMainA.operands = {pa};
+    callMainA.cond_subst.push_back({cA, INVALID, true});
+    Id csMainA = f.p.append(f.main, 0, callMainA);
+    f.inst(Opcode::Return, INVALID, {}, f.main, 0);
+    (void)pb;
+
+    Options opt = refined();
+    opt.path_sensitive = true;
+    opt.path_sensitive_interprocedural = true;
+    Analysis aa(f.p, opt);
+    Context ctx{csMainA, csAB, csBA};
+    auto qr = aa.pointsTo(pA, sQuery, ctx);
+    CHECK(qr.reachable());
+    CHECK(qr.points_to == PointsToSet(a));
+    auto alFscs = aa.aliases(pA, sQuery, ctx);
+    CHECK(alFscs.reachable());
+    CHECK(std::find(alFscs.aliases.begin(), alFscs.aliases.end(), qA) !=
+          alFscs.aliases.end());
+    auto alFsci = aa.aliasesAllContexts(pA, sQuery);
+    CHECK(alFsci.reachable());
+    CHECK(std::find(alFsci.aliases.begin(), alFsci.aliases.end(), qA) !=
+          alFsci.aliases.end());
+  }
+
+  // Part E: Chained unaligned interior `Opcode::Field` arithmetic
+  // (`(s + 1) + 15 = s + 16`, `((s + 1) + 15) + 1 = s + 17`) must neither drop
+  // field `s+16` in Steensgaard/Tabulation/Guarded nor falsely report
+  // `mustAlias(s + 16, s + 17)`!
+  {
+    Fixture f;
+    Id x = f.object("x");
+    Id px = f.addr(x);
+    Object s0;
+    s0.name = "s0";
+    s0.kind = ObjectKind::Global;
+    s0.singleton = true;
+    s0.bytes = 8;
+    s0.size_bytes = 24;
+    s0.field_sensitive = true;
+    s0.initial = PointsToSet(NULL_OBJECT);
+    Id bid = f.p.addObject(s0);
+    Object f8 = s0;
+    f8.name = "s0+8";
+    f8.size_bytes = 8;
+    f.p.addFieldObject(bid, 8, f8);
+    Object f16 = s0;
+    f16.name = "s0+16";
+    f16.size_bytes = 8;
+    Id fid16 = f.p.addFieldObject(bid, 16, f16);
+
+    Id ps0 = f.addr(bid), pf16 = f.addr(fid16);
+    Id v_plus1 = f.value("v_plus1");
+    Id v_plus16 = f.value("v_plus16");
+    Id v_plus17 = f.value("v_plus17");
+    Instruction i1;
+    i1.opcode = Opcode::Field;
+    i1.result = v_plus1;
+    i1.operands = {ps0};
+    i1.field_offset = 1;
+    i1.field_known = true;
+    f.p.append(f.main, 0, i1);
+    Instruction i2;
+    i2.opcode = Opcode::Field;
+    i2.result = v_plus16;
+    i2.operands = {v_plus1};
+    i2.field_offset = 15;
+    i2.field_known = true;
+    f.p.append(f.main, 0, i2);
+    Instruction i3;
+    i3.opcode = Opcode::Field;
+    i3.result = v_plus17;
+    i3.operands = {v_plus16};
+    i3.field_offset = 1;
+    i3.field_known = true;
+    f.p.append(f.main, 0, i3);
+    f.inst(Opcode::Store, INVALID, {v_plus16, px}, f.main, 0);
+    Id ld = f.value("ld");
+    Id sLd = f.inst(Opcode::Load, ld, {pf16}, f.main, 0);
+    Id sRet = f.inst(Opcode::Return, INVALID, {}, f.main, 0);
+
+    for (SolverMode mode :
+         {SolverMode::GuardedSummary, SolverMode::InputStateTabulation}) {
+      Options opt = refined();
+      opt.solver_mode = mode;
+      opt.path_sensitive = true;
+      Analysis aa(f.p, opt);
+      auto qr = aa.pointsTo(ld, sLd, {}, Point::After);
+      CHECK(qr.reachable());
+      CHECK(qr.points_to.contains(x));
+      CHECK(!aa.mustAlias(v_plus16, v_plus17, sRet, {}));
+    }
+  }
+
+  // Part F: Path-pruned dead branch dereference precomputed during
+  // `runDovetailing()` must still report `QueryStatus::Unreachable` on
+  // `pointsToAllContexts` (not `Complete` + `Top` from `m_fsci_cache` hit).
+  {
+    Fixture f;
+    Id a = f.object("a"), slot = f.object("slot", PointsToSet(a), true);
+    Id pa = f.addr(a), pslot = f.addr(slot);
+    Id c = f.p.addCondition();
+    Id bT = f.p.addBlock(f.main), bDead = f.p.addBlock(f.main),
+       bExit = f.p.addBlock(f.main);
+    Id p = f.value("p"), x = f.value("x");
+    f.inst(Opcode::Copy, p, {pslot}, f.main, 0);
+    f.p.functions[f.main].blocks[0].successors = {{bT, {}, c, true},
+                                                  {bExit, {}, c, false}};
+    f.inst(Opcode::Nop, INVALID, {}, f.main, bT);
+    f.p.functions[f.main].blocks[bT].successors = {{bDead, {}, c, false},
+                                                   {bExit, {}, c, true}};
+    Id sDeadLoad = f.inst(Opcode::Load, x, {p}, f.main, bDead);
+    f.p.functions[f.main].blocks[bDead].successors = {{bExit, {}}};
+    f.inst(Opcode::Return, INVALID, {}, f.main, bExit);
+    (void)pa;
+
+    Options opt = refined();
+    opt.path_sensitive = true;
+    opt.path_sensitive_interprocedural = false;
+    Analysis aa(f.p, opt);
+    auto qFscs = aa.pointsTo(p, sDeadLoad, {}, Point::Before);
+    auto qFsci = aa.pointsToAllContexts(p, sDeadLoad, Point::Before);
+    CHECK(!qFscs.reachable());
+    CHECK(!qFsci.reachable());
+  }
+}
+
+void round5And6UnslicedIndirectCallPackedStoreBddBudgetAndNullAliasSoundness() {
+  // Part A: Disjoint-cluster indirect call in TabulationSolver and Hybrid mode:
+  // `main` invokes an indirect callee whose function pointer lives in cluster 1,
+  // followed by a load in a completely disjoint cluster 2. Cluster 2 must stay
+  // reachable and exact across GuardedSummary, Tabulation, and Hybrid modes.
+  {
+    Program p;
+    Object t1;
+    t1.name = "t1";
+    t1.kind = ObjectKind::Global;
+    t1.singleton = true;
+    t1.bytes = 8;
+    t1.initial = PointsToSet(NULL_OBJECT);
+    Id o_t1 = p.addObject(t1);
+
+    Object t2;
+    t2.name = "t2";
+    t2.kind = ObjectKind::Global;
+    t2.singleton = true;
+    t2.bytes = 8;
+    t2.initial = PointsToSet(NULL_OBJECT);
+    Id o_t2 = p.addObject(t2);
+
+    Object g2;
+    g2.name = "g2";
+    g2.kind = ObjectKind::Global;
+    g2.singleton = true;
+    g2.bytes = 8;
+    g2.initial = PointsToSet(o_t2);
+    Id o_g2 = p.addObject(g2);
+
+    Id fn_main = p.addFunction("main");
+    Id fn_callee = p.addFunction("callee");
+    p.entry = fn_main;
+
+    Object fo;
+    fo.name = "fn_callee";
+    fo.kind = ObjectKind::Function;
+    fo.singleton = false;
+    fo.function = fn_callee;
+    fo.initial = PointsToSet::top();
+    Id o_fn = p.addObject(fo);
+
+    Object gfn;
+    gfn.name = "g_fn";
+    gfn.kind = ObjectKind::Global;
+    gfn.singleton = true;
+    gfn.bytes = 8;
+    gfn.initial = PointsToSet(o_fn);
+    Id o_gfn = p.addObject(gfn);
+
+    Id cb = p.addBlock(fn_callee);
+    Id cv = p.addValue({"c.t1", fn_callee, false, {}});
+    Instruction c_addr;
+    c_addr.opcode = Opcode::Address;
+    c_addr.result = cv;
+    c_addr.object = o_t1;
+    p.append(fn_callee, cb, c_addr);
+    Instruction c_ret;
+    c_ret.opcode = Opcode::Return;
+    c_ret.operands = {cv};
+    p.append(fn_callee, cb, c_ret);
+
+    Id mb = p.addBlock(fn_main);
+    Id v_gfn = p.addValue({"gfn_p", fn_main, false, {}});
+    Id v_fp = p.addValue({"fp", fn_main, false, {}});
+    Id v_cr = p.addValue({"cr", fn_main, false, {}});
+    Id v_g2 = p.addValue({"g2_p", fn_main, false, {}});
+    Id v_q2 = p.addValue({"q2", fn_main, false, {}});
+
+    Instruction i_agfn;
+    i_agfn.opcode = Opcode::Address;
+    i_agfn.result = v_gfn;
+    i_agfn.object = o_gfn;
+    p.append(fn_main, mb, i_agfn);
+
+    Instruction i_lfp;
+    i_lfp.opcode = Opcode::Load;
+    i_lfp.result = v_fp;
+    i_lfp.operands = {v_gfn};
+    i_lfp.read_bytes = 8;
+    p.append(fn_main, mb, i_lfp);
+
+    Instruction i_call;
+    i_call.opcode = Opcode::Call;
+    i_call.indirect_target = v_fp;
+    i_call.result = v_cr;
+    p.append(fn_main, mb, i_call);
+
+    Instruction i_ag2;
+    i_ag2.opcode = Opcode::Address;
+    i_ag2.result = v_g2;
+    i_ag2.object = o_g2;
+    p.append(fn_main, mb, i_ag2);
+
+    Instruction i_lq2;
+    i_lq2.opcode = Opcode::Load;
+    i_lq2.result = v_q2;
+    i_lq2.operands = {v_g2};
+    i_lq2.read_bytes = 8;
+    Id s_lq2 = p.append(fn_main, mb, i_lq2);
+
+    Instruction i_ret;
+    i_ret.opcode = Opcode::Return;
+    i_ret.operands = {v_q2};
+    p.append(fn_main, mb, i_ret);
+    p.validate();
+
+    for (int mode = 0; mode < 3; ++mode) {
+      Options opt = refined();
+      if (mode == 0)
+        opt.solver_mode = SolverMode::GuardedSummary;
+      else if (mode == 1)
+        opt.solver_mode = SolverMode::InputStateTabulation;
+      else {
+        opt.solver_mode = SolverMode::GuardedSummary;
+        opt.hybrid_tabulation_max_cluster_size = 8;
+      }
+      Analysis aa(p, opt);
+      auto qr = aa.pointsTo(v_q2, s_lq2, {}, Point::After);
+      CHECK(qr.reachable());
+      CHECK(qr.points_to == PointsToSet(o_t2));
+      auto qf = aa.pointsToAllContexts(v_q2, s_lq2, Point::After);
+      CHECK(qf.reachable());
+      CHECK(qf.points_to == PointsToSet(o_t2));
+    }
+  }
+
+  // Part B: Cross-field pointer Store overlapping a sibling field (packed
+  // `<{ i32@0 (4B), i8*@4 (8B) }>` written with an 8-byte Store at offset 0)
+  // must widen field `+4` to Top across all solvers.
+  {
+    Program p;
+    Object a;
+    a.name = "a";
+    a.kind = ObjectKind::Global;
+    a.singleton = true;
+    a.bytes = 8;
+    a.initial = PointsToSet(NULL_OBJECT);
+    Id o_a = p.addObject(a);
+
+    Object b;
+    b.name = "b";
+    b.kind = ObjectKind::Global;
+    b.singleton = true;
+    b.bytes = 8;
+    b.initial = PointsToSet(NULL_OBJECT);
+    Id o_b = p.addObject(b);
+
+    Object f0;
+    f0.name = "packed.f0";
+    f0.kind = ObjectKind::Global;
+    f0.singleton = false;
+    f0.bytes = 0;
+    f0.size_bytes = 12;
+    f0.field_sensitive = true;
+    f0.initial = PointsToSet::top();
+    Id o_f0 = p.addObject(f0);
+
+    Object f4;
+    f4.name = "packed.f4";
+    f4.kind = ObjectKind::Global;
+    f4.singleton = true;
+    f4.bytes = 8;
+    f4.size_bytes = 8;
+    f4.field_sensitive = true;
+    f4.initial = PointsToSet(o_a);
+    Id o_f4 = p.addFieldObject(o_f0, 4, f4);
+
+    Id fn_main = p.addFunction("main");
+    p.entry = fn_main;
+    Id mb = p.addBlock(fn_main);
+    Id v_f0 = p.addValue({"pf0", fn_main, false, {}});
+    Id v_f4 = p.addValue({"pf4", fn_main, false, {}});
+    Id v_b = p.addValue({"pb", fn_main, false, {}});
+    Id v_ld = p.addValue({"ld", fn_main, false, {}});
+
+    Instruction i0;
+    i0.opcode = Opcode::Address;
+    i0.result = v_f0;
+    i0.object = o_f0;
+    p.append(fn_main, mb, i0);
+
+    Instruction i1;
+    i1.opcode = Opcode::Address;
+    i1.result = v_f4;
+    i1.object = o_f4;
+    p.append(fn_main, mb, i1);
+
+    Instruction i2;
+    i2.opcode = Opcode::Address;
+    i2.result = v_b;
+    i2.object = o_b;
+    p.append(fn_main, mb, i2);
+
+    Instruction i3;
+    i3.opcode = Opcode::Store;
+    i3.operands = {v_f0, v_b};
+    i3.write_bytes = 8; // spans [0, 8) -> partially overwrites f4 at [4, 12)!
+    p.append(fn_main, mb, i3);
+
+    Instruction i4;
+    i4.opcode = Opcode::Load;
+    i4.result = v_ld;
+    i4.operands = {v_f4};
+    i4.read_bytes = 8;
+    Id s_ld = p.append(fn_main, mb, i4);
+
+    Instruction i5;
+    i5.opcode = Opcode::Return;
+    i5.operands = {v_ld};
+    p.append(fn_main, mb, i5);
+    p.validate();
+
+    for (int mode = 0; mode < 4; ++mode) {
+      Options opt = refined();
+      if (mode == 0)
+        opt.solver_mode = SolverMode::GuardedSummary;
+      else if (mode == 1)
+        opt.solver_mode = SolverMode::InputStateTabulation;
+      else if (mode == 2) {
+        opt.solver_mode = SolverMode::GuardedSummary;
+        opt.enable_one_level_flow = true;
+      } else {
+        opt.solver_mode = SolverMode::GuardedSummary;
+        opt.eager_dovetail_summaries = true;
+      }
+      Analysis aa(p, opt);
+      auto qr = aa.pointsTo(v_ld, s_ld, {}, Point::After);
+      CHECK(qr.reachable());
+      CHECK(qr.points_to.isTop());
+    }
+  }
+
+  // Part C: Tiny ROBDD budget (`max_bdd_nodes = 4`) overflow with negated &
+  // compound conditions must soundly widen to TRUE and never prune feasible
+  // branches; and null-deref empty candidate summaries under `path_sensitive`
+  // must stay consistent in `aliasesAllContexts`.
+  {
+    Program p;
+    Object a;
+    a.name = "a";
+    a.kind = ObjectKind::Global;
+    a.singleton = true;
+    a.bytes = 8;
+    a.initial = PointsToSet(NULL_OBJECT);
+    Id o_a = p.addObject(a);
+
+    Object b;
+    b.name = "b";
+    b.kind = ObjectKind::Global;
+    b.singleton = true;
+    b.bytes = 8;
+    b.initial = PointsToSet(NULL_OBJECT);
+    Id o_b = p.addObject(b);
+
+    Id c0 = p.addCondition();
+    Id c1 = p.addCondition();
+    Id c2 = p.addCondition();
+    Id c_and = p.addCondAnd(c0, c1);
+    Id c_or = p.addCondOr(c_and, p.addCondNot(c2));
+
+    Id fn_main = p.addFunction("main");
+    p.entry = fn_main;
+    Id b0 = p.addBlock(fn_main);
+    Id b1 = p.addBlock(fn_main);
+    Id b2 = p.addBlock(fn_main);
+    Id b3 = p.addBlock(fn_main);
+
+    Object slot;
+    slot.name = "slot";
+    slot.kind = ObjectKind::Global;
+    slot.singleton = true;
+    slot.bytes = 8;
+    slot.initial = PointsToSet(o_a);
+    Id o_slot = p.addObject(slot);
+
+    Id v_a = p.addValue({"va", fn_main, false, {}});
+    Id v_b = p.addValue({"vb", fn_main, false, {}});
+    Id v_phi = p.addValue({"vphi", fn_main, false, {}});
+    Id v_null = p.addConstant(PointsToSet(NULL_OBJECT), "null");
+    Id v_pslot = p.addValue({"vpslot", fn_main, false, {}});
+    Id v_p = p.addValue({"vp", fn_main, false, {}});
+    Id v_bad = p.addValue({"vbad", fn_main, false, {}});
+
+    Instruction ia;
+    ia.opcode = Opcode::Address;
+    ia.result = v_a;
+    ia.object = o_a;
+    p.append(fn_main, b0, ia);
+    Instruction ib;
+    ib.opcode = Opcode::Address;
+    ib.result = v_b;
+    ib.object = o_b;
+    p.append(fn_main, b0, ib);
+    Instruction islot;
+    islot.opcode = Opcode::Address;
+    islot.result = v_pslot;
+    islot.object = o_slot;
+    p.append(fn_main, b0, islot);
+    // Assign v_p = &slot, then overwrite v_p = null so Steensgaard places
+    // v_bad = *v_p in v_a's cluster while flow-sensitively *v_p has an empty
+    // (non-path-pruned) backward summary.
+    Instruction ip1;
+    ip1.opcode = Opcode::Copy;
+    ip1.result = v_p;
+    ip1.operands = {v_pslot};
+    p.append(fn_main, b0, ip1);
+    Instruction ip2;
+    ip2.opcode = Opcode::Copy;
+    ip2.result = v_p;
+    ip2.operands = {v_null};
+    p.append(fn_main, b0, ip2);
+    Instruction ilnull;
+    ilnull.opcode = Opcode::Load;
+    ilnull.result = v_bad;
+    ilnull.operands = {v_p};
+    ilnull.read_bytes = 8;
+    p.append(fn_main, b0, ilnull);
+    p.functions[fn_main].blocks[b0].successors = {{b1, {}, c_or, true},
+                                                  {b2, {}, c_or, false}};
+    Instruction n1;
+    n1.opcode = Opcode::Nop;
+    p.append(fn_main, b1, n1);
+    p.functions[fn_main].blocks[b1].successors = {{b3, {{v_phi, v_a}}}};
+    Instruction n2;
+    n2.opcode = Opcode::Nop;
+    p.append(fn_main, b2, n2);
+    p.functions[fn_main].blocks[b2].successors = {{b3, {{v_phi, v_b}}}};
+    Instruction ir;
+    ir.opcode = Opcode::Return;
+    ir.operands = {v_phi};
+    Id s_ret = p.append(fn_main, b3, ir);
+    p.validate();
+
+    Options opt = refined();
+    opt.path_sensitive = true;
+    opt.max_bdd_nodes = 4; // Force immediate ROBDD budget exhaustion!
+    Analysis aa(p, opt);
+    auto qr = aa.pointsTo(v_phi, s_ret, {}, Point::Before);
+    CHECK(qr.reachable());
+    CHECK(qr.points_to.contains(o_a));
+    CHECK(qr.points_to.contains(o_b));
+    auto ar = aa.aliasesAllContexts(v_a, s_ret, Point::Before);
+    CHECK(ar.reachable());
+    CHECK(ar.may_alias_all ||
+          std::find(ar.aliases.begin(), ar.aliases.end(), v_bad) !=
+              ar.aliases.end());
+  }
+}
 } // namespace
 
 TEST(BootstrapEngineTest, StrongUpdates) { strongUpdates(); }
@@ -1861,4 +3045,38 @@ TEST(BootstrapEngineTest, DeadBranchPruneDoesNotFakeUnreachable) {
 }
 TEST(BootstrapEngineTest, InterproceduralUpwardPathSensitiveKillAndAliases) {
   interproceduralUpwardPathSensitiveKillAndAliases();
+}
+TEST(BootstrapEngineTest, SteensgaardNoNullBridge) {
+  steensgaardNoNullBridge();
+}
+TEST(BootstrapEngineTest, OneLevelFlowMemoryPrecision) {
+  oneLevelFlowMemoryPrecision();
+}
+TEST(BootstrapEngineTest, FieldAwareDovetailCyclicStruct) {
+  fieldAwareDovetailCyclicStruct();
+}
+TEST(BootstrapEngineTest, CompoundRobddSelectEdgePtrGuardsAndCallCondSubst) {
+  compoundRobddSelectEdgePtrGuardsAndCallCondSubst();
+}
+TEST(BootstrapEngineTest, PerPartitionAndersenRejectionAndHybridSolver) {
+  perPartitionAndersenRejectionAndHybridSolver();
+}
+TEST(BootstrapEngineTest, SelectivePrecomputationObjectQueriesAndMustAlias) {
+  selectivePrecomputationObjectQueriesAndMustAlias();
+}
+TEST(BootstrapEngineTest,
+     SteensgaardTopStorePreservesRhsAndNullAliasExcludesTop) {
+  steensgaardTopStorePreservesRhsAndNullAliasExcludesTop();
+}
+TEST(BootstrapEngineTest,
+     EdgePtrGuardPostDefAndInterprocAnchorAliasSoundness) {
+  edgePtrGuardPostDefAndInterprocAnchorAliasSoundness();
+}
+TEST(BootstrapEngineTest,
+     ArrayFoldingWraparoundInteriorStrongUpdateMutualRecAndLoadFuncSoundness) {
+  arrayFoldingWraparoundInteriorStrongUpdateMutualRecAndLoadFuncSoundness();
+}
+TEST(BootstrapEngineTest,
+     Round5And6UnslicedIndirectCallPackedStoreBddBudgetAndNullAliasSoundness) {
+  round5And6UnslicedIndirectCallPackedStoreBddBudgetAndNullAliasSoundness();
 }

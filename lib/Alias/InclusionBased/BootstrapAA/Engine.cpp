@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <numeric>
@@ -32,6 +33,8 @@ struct Analysis::Impl {
   std::vector<std::vector<Id>> cover;
   std::vector<std::unique_ptr<ClusterSolver>> solvers;
   std::vector<Statistics> merged_solver_stats;
+  std::map<Id, std::unique_ptr<ClusterSolver>> object_solvers;
+  std::map<Id, Statistics> merged_object_solver_stats;
   std::map<Id, std::pair<Id, bool>> sites;
 
   Impl(const Program &p, Options o) : program(p), options(o), index(program) {
@@ -45,7 +48,7 @@ struct Analysis::Impl {
     CoarseResult coarse = steensgaard(program);
     upper = coarse.upper;
     hierarchy = std::move(coarse.hierarchy);
-    index.populateCallers(program, upper);
+    index.populateCallers(program, upper, hierarchy);
     reachability = computeReachability(program, index, upper);
 
     stats.steensgaard_partitions = coarse.partitions.size();
@@ -108,14 +111,16 @@ struct Analysis::Impl {
             continue;
           }
           ++stats.one_level_flow_runs;
-          Sets olf = oneLevelFlow(program, index, partition, coarse.upper);
+          Slice olf_slice = relevant(program, index, coarse.upper, hierarchy,
+                                     reachability, partition, true);
+          Sets olf = oneLevelFlow(program, index, olf_slice, coarse.upper);
           auto sub = buildInverseCover(partition, olf);
           std::size_t sub_largest = 0;
           for (const auto &c : sub)
             sub_largest = std::max(sub_largest, c.size());
+          for (Id v : partition)
+            upper[v] = olf[v];
           if (sub_largest < partition.size()) {
-            for (Id v : partition)
-              upper[v] = olf[v];
             flow_refined.insert(flow_refined.end(), sub.begin(), sub.end());
           } else {
             flow_refined.push_back(partition);
@@ -135,6 +140,8 @@ struct Analysis::Impl {
                          });
 
       std::size_t threshold = options.andersen_threshold;
+      const long double rejectRatio =
+          static_cast<long double>(options.andersen_rejection_retention_ratio);
       for (const auto &partition : partitions) {
         const bool workLimitExceeded =
             options.max_andersen_work != 0 && !hierarchy.successors.empty() &&
@@ -146,7 +153,8 @@ struct Analysis::Impl {
              workLimitExceeded)) {
           ++stats.adaptive_cost_skips;
           cover.push_back(partition);
-          threshold = std::max(threshold, partition.size());
+          if (options.adaptive_global_threshold_escalation)
+            threshold = std::max(threshold, partition.size());
           continue;
         }
         if (partition.size() <= threshold) {
@@ -166,29 +174,38 @@ struct Analysis::Impl {
         if (!options.adaptive_andersen_threshold) {
           for (Id value : partition)
             upper[value] = refined[value];
-          cover.insert(cover.end(), refinedCover.begin(), refinedCover.end());
+          // Paper §4 p. 259: avoid replacing a partition with overlapping
+          // clusters when Andersen produces no reduction in max cluster size.
+          if (refinedLargest < partition.size()) {
+            cover.insert(cover.end(), refinedCover.begin(), refinedCover.end());
+          } else {
+            ++stats.adaptive_refinement_rejections;
+            cover.push_back(partition);
+          }
           continue;
         }
         const long double retainedFraction =
             partition.empty() ? 0.0L
                               : static_cast<long double>(refinedLargest) /
                                     static_cast<long double>(partition.size());
-        if (retainedFraction >= 0.75L) {
+        if (retainedFraction >= rejectRatio) {
           ++stats.adaptive_refinement_rejections;
           cover.push_back(partition);
-          threshold = std::max(threshold, partition.size());
+          if (options.adaptive_global_threshold_escalation)
+            threshold = std::max(threshold, partition.size());
         } else {
           for (Id value : partition)
             upper[value] = refined[value];
           cover.insert(cover.end(), refinedCover.begin(), refinedCover.end());
-          if (retainedFraction <= 0.5L)
+          if (options.adaptive_global_threshold_escalation &&
+              retainedFraction <= 0.5L)
             threshold = std::max<std::size_t>(1, threshold * 3 / 4);
         }
       }
       stats.effective_andersen_threshold = threshold;
     }
 
-    index.populateCallers(program, upper);
+    index.populateCallers(program, upper, hierarchy);
     call_graph = buildCallGraph(program, upper);
     reachability = computeReachability(program, index, upper);
     stats.call_graph_sccs = call_graph.scc_count;
@@ -232,15 +249,31 @@ struct Analysis::Impl {
     double milliseconds = 0.0;
   };
 
+  SolverMode chooseSolverMode(std::size_t cluster, std::size_t cluster_size,
+                              std::size_t slice_statements) const {
+    if (options.cluster_solver_selector)
+      return options.cluster_solver_selector(cluster, cluster_size,
+                                             slice_statements);
+    if (options.hybrid_tabulation_max_cluster_size > 0 &&
+        cluster_size <= options.hybrid_tabulation_max_cluster_size &&
+        (options.hybrid_tabulation_max_slice_statements == 0 ||
+         slice_statements <= options.hybrid_tabulation_max_slice_statements))
+      return SolverMode::InputStateTabulation;
+    return options.solver_mode;
+  }
+
   BuiltSolver buildSolver(std::size_t cluster) const {
     const auto started = std::chrono::steady_clock::now();
     BuiltSolver built;
     built.cluster = cluster;
     Slice slice = relevant(program, index, upper, hierarchy, reachability,
                            cover[cluster], options.enable_slicing);
-    if (options.solver_mode == SolverMode::InputStateTabulation) {
+    const SolverMode mode =
+        chooseSolverMode(cluster, cover[cluster].size(), slice.inst_list.size());
+    if (mode == SolverMode::InputStateTabulation) {
       built.solver = createTabulationSolver(program, index, upper, call_graph,
-                                            std::move(slice), options);
+                                            cover[cluster], std::move(slice),
+                                            options);
     } else {
       built.solver = createGuardedSummarySolver(
           program, index, upper, hierarchy, call_graph, reachability,
@@ -252,11 +285,7 @@ struct Analysis::Impl {
     return built;
   }
 
-  void syncSolverStatistics(std::size_t cluster) {
-    if (!solvers[cluster])
-      return;
-    const Statistics &cur = solvers[cluster]->statistics();
-    Statistics &prev = merged_solver_stats[cluster];
+  void mergeStatsDelta(Statistics &prev, const Statistics &cur) {
     auto addDelta = [](std::size_t &agg, std::size_t &old_val,
                        std::size_t new_val) {
       if (new_val > old_val) {
@@ -295,6 +324,13 @@ struct Analysis::Impl {
     addDelta(stats.path_infeasible_prunes, prev.path_infeasible_prunes,
              cur.path_infeasible_prunes);
     stats.bdd_nodes = std::max(stats.bdd_nodes, cur.bdd_nodes);
+  }
+
+  void syncSolverStatistics(std::size_t cluster) {
+    if (!solvers[cluster])
+      return;
+    mergeStatsDelta(merged_solver_stats[cluster],
+                    solvers[cluster]->statistics());
   }
 
   void ensureSolvers(const std::vector<std::size_t> &selected) {
@@ -372,9 +408,37 @@ struct Analysis::Impl {
     ensureSolvers(selected);
   }
 
-  void validateQueryArgs(Id value, Id site, const Context *context_path) const {
-    if (value >= program.values.size() || !sites.count(site))
-      throw std::invalid_argument("unknown query value or instruction");
+  void precomputeClusters(const std::vector<std::size_t> &cluster_indices) {
+    std::vector<std::size_t> selected;
+    selected.reserve(cluster_indices.size());
+    for (std::size_t c : cluster_indices) {
+      if (c >= cover.size())
+        throw std::invalid_argument("unknown cluster index");
+      selected.push_back(c);
+    }
+    std::sort(selected.begin(), selected.end());
+    selected.erase(std::unique(selected.begin(), selected.end()),
+                   selected.end());
+    ensureSolvers(selected);
+  }
+
+  void precomputeForValues(const std::vector<Id> &values) {
+    std::vector<std::size_t> selected;
+    for (Id v : values) {
+      if (v >= program.values.size())
+        throw std::invalid_argument("unknown query value");
+      auto cs = selectClusters(v);
+      selected.insert(selected.end(), cs.begin(), cs.end());
+    }
+    std::sort(selected.begin(), selected.end());
+    selected.erase(std::unique(selected.begin(), selected.end()),
+                   selected.end());
+    ensureSolvers(selected);
+  }
+
+  void validateSiteAndContext(Id site, const Context *context_path) const {
+    if (!sites.count(site))
+      throw std::invalid_argument("unknown query instruction");
     if (context_path) {
       for (Id callsite : *context_path) {
         auto it = sites.find(callsite);
@@ -382,6 +446,219 @@ struct Analysis::Impl {
           throw std::invalid_argument("context contains a non-call site");
       }
     }
+  }
+
+  void validateQueryArgs(Id value, Id site, const Context *context_path) const {
+    if (value >= program.values.size())
+      throw std::invalid_argument("unknown query value or instruction");
+    validateSiteAndContext(site, context_path);
+  }
+
+  ClusterSolver &ensureObjectSolver(Id object) {
+    auto it = object_solvers.find(object);
+    if (it != object_solvers.end())
+      return *it->second;
+    const Id ocomp = hierarchy.object_components[object];
+    std::vector<Id> cluster_vals;
+    auto appendCompVals = [&](Id comp) {
+      if (comp < hierarchy.values.size())
+        cluster_vals.insert(cluster_vals.end(), hierarchy.values[comp].begin(),
+                            hierarchy.values[comp].end());
+    };
+    if (hierarchy.cyclic[ocomp])
+      appendCompVals(ocomp);
+    for (Id succ : hierarchy.successors[ocomp])
+      appendCompVals(succ);
+    std::sort(cluster_vals.begin(), cluster_vals.end());
+    cluster_vals.erase(std::unique(cluster_vals.begin(), cluster_vals.end()),
+                       cluster_vals.end());
+    Slice slice = relevant(program, index, upper, hierarchy, reachability,
+                           cluster_vals, options.enable_slicing, {object});
+    std::unique_ptr<ClusterSolver> solver;
+    if (options.solver_mode == SolverMode::InputStateTabulation) {
+      solver = createTabulationSolver(program, index, upper, call_graph,
+                                      cluster_vals, std::move(slice), options);
+    } else {
+      solver = createGuardedSummarySolver(
+          program, index, upper, hierarchy, call_graph, reachability,
+          cluster_vals, std::move(slice), options);
+    }
+    auto [inserted, _] = object_solvers.emplace(object, std::move(solver));
+    merged_object_solver_stats[object] = {};
+    mergeStatsDelta(merged_object_solver_stats[object],
+                    inserted->second->statistics());
+    return *inserted->second;
+  }
+
+  QueryResult queryObject(Id object, Id site, const Context *context_path,
+                          Point point) {
+    if (object >= program.objects.size() || !isMemory(program.objects[object]))
+      throw std::invalid_argument("unknown or non-memory query object");
+    validateSiteAndContext(site, context_path);
+    ClusterSolver &solver = ensureObjectSolver(object);
+    QueryResult res = solver.queryObject(object, site, context_path, point);
+    mergeStatsDelta(merged_object_solver_stats[object], solver.statistics());
+    if (res.status == QueryStatus::ResourceLimit)
+      ++stats.fallback_queries;
+    return res;
+  }
+
+  AliasResult queryObjectAliases(Id object, Id site,
+                                 const Context *context_path, Point point) {
+    if (object >= program.objects.size() || !isMemory(program.objects[object]))
+      throw std::invalid_argument("unknown or non-memory query object");
+    validateSiteAndContext(site, context_path);
+    ClusterSolver &solver = ensureObjectSolver(object);
+    AliasResult res =
+        solver.queryObjectAliases(object, site, context_path, point);
+    mergeStatsDelta(merged_object_solver_stats[object], solver.statistics());
+    if (res.status == QueryStatus::ResourceLimit) {
+      ++stats.fallback_queries;
+      return res;
+    }
+    auto hasNonNullTarget = [](const PointsToSet &pts) -> bool {
+      if (pts.isTop())
+        return true;
+      for (Id o : pts.objects())
+        if (o != NULL_OBJECT)
+          return true;
+      return false;
+    };
+    if (res.reachable() && hierarchy.top_component != INVALID &&
+        hierarchy.top_component < hierarchy.values.size()) {
+      const QueryResult base =
+          solver.queryObject(object, site, context_path, point);
+      if (base.reachable() && hasNonNullTarget(base.points_to)) {
+        std::set<Id> merged(res.aliases.begin(), res.aliases.end());
+        const Id fn = index.by_site[site].function;
+        for (Id tv : hierarchy.values[hierarchy.top_component]) {
+          const Value &vinfo = program.values[tv];
+          if (!vinfo.constant && vinfo.function != INVALID &&
+              vinfo.function != fn)
+            continue;
+          merged.insert(tv);
+        }
+        res.aliases.assign(merged.begin(), merged.end());
+      }
+    }
+    return res;
+  }
+
+  bool mustAlias(Id lhs, Id rhs, Id site, const Context *context_path) {
+    validateQueryArgs(lhs, site, context_path);
+    validateQueryArgs(rhs, site, context_path);
+    QueryResult a = query(lhs, site, context_path, Point::Before);
+    if (a.status != QueryStatus::Complete)
+      return false;
+    if (program.values[lhs].constant && program.values[lhs].initial.isTop())
+      return false;
+    if (lhs == rhs)
+      return true;
+    QueryResult b = query(rhs, site, context_path, Point::Before);
+    if (b.status != QueryStatus::Complete)
+      return false;
+    if (program.values[rhs].constant && program.values[rhs].initial.isTop())
+      return false;
+    // Preserve `mustAlias => mayAlias`: strictly-NULL pointers have no
+    // dereferenceable memory object in common.
+    auto hasNonNull = [](const PointsToSet &pts) -> bool {
+      if (pts.isTop())
+        return true;
+      for (Id o : pts.objects())
+        if (o != NULL_OBJECT)
+          return true;
+      return false;
+    };
+    if (!hasNonNull(a.points_to) || !hasNonNull(b.points_to))
+      return false;
+    if (!a.points_to.isTop() && !b.points_to.isTop() &&
+        a.points_to.size() == 1 && a.points_to == b.points_to) {
+      const Id obj = *a.points_to.begin();
+      if (obj != NULL_OBJECT && obj < index.exact_address_singleton.size() &&
+          index.exact_address_singleton[obj])
+        return true;
+    }
+    // Direct SSA copy / constant-offset field identity: if both `lhs` and `rhs`
+    // trace inside `fn` through dominating single-def non-PHI Copy/Field chains
+    // to the exact same invariant non-constant SSA root + byte offset (e.g.,
+    // `q = bitcast p` on a non-singleton heap allocation), they must hold
+    // identical runtime addresses!
+    const InstLocation &qloc = index.by_site[site];
+    const Id fn = qloc.function;
+    const auto &fn_params = program.functions[fn].parameters;
+    auto isInvariantAtSite = [&](Id v) -> bool {
+      if (v == INVALID || v >= program.values.size())
+        return false;
+      const Value &vi = program.values[v];
+      if (vi.constant)
+        return false;
+      if (vi.function != fn || !index.phi_defs[v].empty())
+        return false;
+      const auto &defs = index.defining_sites[v];
+      if (defs.empty())
+        return std::find(fn_params.begin(), fn_params.end(), v) !=
+               fn_params.end();
+      if (defs.size() != 1)
+        return false;
+      const InstLocation &dloc = index.by_site[defs[0]];
+      if (dloc.function != fn || index.in_loop_block[fn][dloc.block])
+        return false;
+      return (dloc.block == qloc.block && dloc.index < qloc.index) ||
+             (dloc.block != qloc.block &&
+              index.blockDominates(fn, dloc.block, qloc.block));
+    };
+    auto resolveDirectSSARoot = [&](Id v, std::int64_t &off) -> Id {
+      off = 0;
+      std::set<Id> seen;
+      while (v != INVALID && seen.insert(v).second) {
+        if (!isInvariantAtSite(v))
+          return INVALID;
+        const auto &defs = index.defining_sites[v];
+        if (defs.size() != 1)
+          return v;
+        const Instruction &di = *index.by_site[defs[0]].inst;
+        if (di.opcode == Opcode::Copy && !di.operands.empty() &&
+            di.operands[0] != INVALID) {
+          v = di.operands[0];
+          continue;
+        }
+        if (di.opcode == Opcode::Field && di.field_known &&
+            di.field_array_stride == 0 && !di.operands.empty() &&
+            di.operands[0] != INVALID) {
+          const std::int64_t delta = di.field_offset;
+          if ((delta > 0 &&
+               off > std::numeric_limits<std::int64_t>::max() - delta) ||
+              (delta < 0 &&
+               off < std::numeric_limits<std::int64_t>::min() - delta))
+            return INVALID;
+          off += delta;
+          v = di.operands[0];
+          continue;
+        }
+        return v;
+      }
+      return INVALID;
+    };
+    std::int64_t off_l = 0, off_r = 0;
+    const Id root_l = resolveDirectSSARoot(lhs, off_l);
+    const Id root_r = resolveDirectSSARoot(rhs, off_r);
+    if (root_l != INVALID && root_l == root_r && off_l == off_r)
+      return true;
+
+    // Check shared cluster solver for symbolic must-alias (e.g., copy of a
+    // non-singleton heap pointer within the same cluster).
+    const std::vector<std::size_t> lhs_c = selectClusters(lhs);
+    const std::vector<std::size_t> rhs_c = selectClusters(rhs);
+    for (std::size_t c : lhs_c) {
+      if (std::binary_search(rhs_c.begin(), rhs_c.end(), c)) {
+        ensureSolvers({c});
+        const bool res = solvers[c]->mustAlias(lhs, rhs, site, context_path);
+        syncSolverStatistics(c);
+        if (res)
+          return true;
+      }
+    }
+    return false;
   }
 
   std::vector<std::size_t> selectClusters(Id value) const {
@@ -437,13 +714,30 @@ struct Analysis::Impl {
     }
     if (result.reachable() && hierarchy.top_component != INVALID &&
         hierarchy.top_component < hierarchy.values.size()) {
-      const Id fn = index.by_site[site].function;
-      for (Id tv : hierarchy.values[hierarchy.top_component]) {
-        const Value &vinfo = program.values[tv];
-        if (!vinfo.constant && vinfo.function != INVALID &&
-            vinfo.function != fn)
-          continue;
-        merged.insert(tv);
+      bool base_has_non_null = result.may_alias_all;
+      if (!base_has_non_null) {
+        const QueryResult base = query(value, site, context_path, point);
+        if (base.reachable()) {
+          if (base.points_to.isTop()) {
+            base_has_non_null = true;
+          } else {
+            for (Id o : base.points_to.objects())
+              if (o != NULL_OBJECT) {
+                base_has_non_null = true;
+                break;
+              }
+          }
+        }
+      }
+      if (base_has_non_null) {
+        const Id fn = index.by_site[site].function;
+        for (Id tv : hierarchy.values[hierarchy.top_component]) {
+          const Value &vinfo = program.values[tv];
+          if (!vinfo.constant && vinfo.function != INVALID &&
+              vinfo.function != fn)
+            continue;
+          merged.insert(tv);
+        }
       }
     }
     result.aliases.assign(merged.begin(), merged.end());
@@ -470,13 +764,63 @@ AliasResult Analysis::aliases(Id value, Id site, const Context &context,
 AliasResult Analysis::aliasesAllContexts(Id value, Id site, Point point) {
   return m_impl->queryAliases(value, site, nullptr, point);
 }
+QueryResult Analysis::objectPointsTo(Id object, Id site, const Context &context,
+                                     Point point) {
+  return m_impl->queryObject(object, site, &context, point);
+}
+QueryResult Analysis::objectPointsToAllContexts(Id object, Id site,
+                                                Point point) {
+  return m_impl->queryObject(object, site, nullptr, point);
+}
+AliasResult Analysis::objectAliases(Id object, Id site, const Context &context,
+                                    Point point) {
+  return m_impl->queryObjectAliases(object, site, &context, point);
+}
+AliasResult Analysis::objectAliasesAllContexts(Id object, Id site,
+                                               Point point) {
+  return m_impl->queryObjectAliases(object, site, nullptr, point);
+}
 void Analysis::precomputeAll() { m_impl->precomputeAll(); }
+void Analysis::precomputeForValues(const std::vector<Id> &values) {
+  m_impl->precomputeForValues(values);
+}
+void Analysis::precomputeClusters(
+    const std::vector<std::size_t> &cluster_indices) {
+  m_impl->precomputeClusters(cluster_indices);
+}
+std::vector<std::size_t> Analysis::clustersFor(Id value) const {
+  if (value >= m_impl->program.values.size())
+    throw std::invalid_argument("unknown query value");
+  return m_impl->selectClusters(value);
+}
 bool Analysis::mayAlias(Id lhs, Id rhs, Id site, const Context &context) {
   QueryResult a = pointsTo(lhs, site, context),
               b = pointsTo(rhs, site, context);
   if (!a.reachable() || !b.reachable())
     return true;
-  return a.points_to.intersects(b.points_to);
+  if (lhs == rhs)
+    return true;
+  if (a.points_to.isTop()) {
+    if (b.points_to.isTop())
+      return true;
+    for (Id o : b.points_to.objects())
+      if (o != NULL_OBJECT)
+        return true;
+    return false;
+  }
+  if (b.points_to.isTop()) {
+    for (Id o : a.points_to.objects())
+      if (o != NULL_OBJECT)
+        return true;
+    return false;
+  }
+  for (Id o : a.points_to.objects())
+    if (o != NULL_OBJECT && b.points_to.contains(o))
+      return true;
+  return false;
+}
+bool Analysis::mustAlias(Id lhs, Id rhs, Id site, const Context &context) {
+  return m_impl->mustAlias(lhs, rhs, site, &context);
 }
 const Statistics &Analysis::statistics() const { return m_impl->stats; }
 const std::vector<std::vector<Id>> &Analysis::clusters() const {

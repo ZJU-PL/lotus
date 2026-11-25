@@ -87,9 +87,19 @@ struct ProgramIndex {
   // Loop-membership per CFG block (for sound contradiction checks & ROBDD
   // quantification).
   std::vector<std::vector<bool>> in_loop_block; // [func][block]
+  // Immediate dominator per reachable CFG block (INVALID if unreachable).
+  std::vector<std::vector<Id>> idom; // [func][block]
+  // True if `obj` is a singleton cell with no unaligned sub-object interior
+  // pointers (safe for exact-address equality in mustAlias and `!=` guards).
+  std::vector<bool> exact_address_singleton;
+  // True if `obj` may be addressed at an unaligned/interior byte offset
+  // (independent of `singleton`, used to keep MemCopy alignment sound).
+  std::vector<bool> has_unaligned_interior;
 
   explicit ProgramIndex(const Program &program);
-  void populateCallers(const Program &program, const Sets &upper);
+  void populateCallers(const Program &program, const Sets &upper,
+                       const SteensgaardHierarchy &hierarchy);
+  bool blockDominates(Id func, Id dom_block, Id block) const;
 };
 
 struct CallGraphInfo {

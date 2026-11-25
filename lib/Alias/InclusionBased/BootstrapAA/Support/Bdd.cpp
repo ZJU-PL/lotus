@@ -11,6 +11,8 @@ constexpr std::uint8_t OP_AND = 1;
 constexpr std::uint8_t OP_OR = 2;
 constexpr std::uint8_t OP_NOT = 3;
 constexpr std::uint8_t OP_EXISTS = 4;
+constexpr std::uint8_t OP_RESTRICT_0 = 5;
+constexpr std::uint8_t OP_RESTRICT_1 = 6;
 } // namespace
 
 BddManager::BddManager(std::size_t max_nodes)
@@ -81,6 +83,8 @@ BddManager::NodeId BddManager::makeOr(NodeId a, NodeId b) {
 }
 
 BddManager::NodeId BddManager::applyAnd(NodeId a, NodeId b) {
+  if (m_budget_exceeded)
+    return TRUE_NODE;
   if (a == FALSE_NODE || b == FALSE_NODE)
     return FALSE_NODE;
   if (a == TRUE_NODE)
@@ -117,6 +121,8 @@ BddManager::NodeId BddManager::applyAnd(NodeId a, NodeId b) {
 }
 
 BddManager::NodeId BddManager::applyOr(NodeId a, NodeId b) {
+  if (m_budget_exceeded)
+    return TRUE_NODE;
   if (a == TRUE_NODE || b == TRUE_NODE)
     return TRUE_NODE;
   if (a == FALSE_NODE)
@@ -155,14 +161,25 @@ BddManager::NodeId BddManager::applyOr(NodeId a, NodeId b) {
 BddManager::NodeId BddManager::restrictVar(NodeId a, Id var, bool value) {
   if (a == FALSE_NODE || a == TRUE_NODE)
     return a;
+  if (m_budget_exceeded)
+    return TRUE_NODE;
   const Node n = m_nodes[a];
   if (n.var > var)
     return a;
   if (n.var == var)
     return value ? n.high : n.low;
+  OpKey key{value ? OP_RESTRICT_1 : OP_RESTRICT_0, a, var};
+  auto it = m_cache.find(key);
+  if (it != m_cache.end())
+    return it->second;
   const NodeId lo = restrictVar(n.low, var, value);
   const NodeId hi = restrictVar(n.high, var, value);
-  return mk(n.var, lo, hi);
+  if (m_budget_exceeded)
+    return TRUE_NODE;
+  const NodeId res = mk(n.var, lo, hi);
+  if (!m_budget_exceeded)
+    m_cache.emplace(key, res);
+  return m_budget_exceeded ? TRUE_NODE : res;
 }
 
 BddManager::NodeId BddManager::exists(NodeId a, Id var) {
@@ -199,6 +216,34 @@ BddManager::NodeId BddManager::existsAll(NodeId a,
       break;
   }
   return a;
+}
+
+BddManager::NodeId BddManager::substitute(NodeId f, Id var,
+                                          NodeId replacement) {
+  if (f == FALSE_NODE || f == TRUE_NODE || var == INVALID)
+    return f;
+  if (m_budget_exceeded)
+    return TRUE_NODE;
+  if (m_nodes[f].var > var)
+    return f;
+  if (replacement == TRUE_NODE) {
+    const NodeId r = restrictVar(f, var, true);
+    return m_budget_exceeded ? TRUE_NODE : r;
+  }
+  if (replacement == FALSE_NODE) {
+    const NodeId r = restrictVar(f, var, false);
+    return m_budget_exceeded ? TRUE_NODE : r;
+  }
+  const NodeId f1 = restrictVar(f, var, true);
+  const NodeId f0 = restrictVar(f, var, false);
+  if (m_budget_exceeded)
+    return TRUE_NODE;
+  if (f1 == f0)
+    return f1;
+  const NodeId neg_rep = makeNot(replacement);
+  const NodeId t_branch = makeAnd(replacement, f1);
+  const NodeId f_branch = makeAnd(neg_rep, f0);
+  return makeOr(t_branch, f_branch);
 }
 
 } // namespace detail

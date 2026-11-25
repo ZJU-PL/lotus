@@ -1,7 +1,9 @@
 #include "Alias/InclusionBased/BootstrapAA/Solver/GuardedSummarySolver.h"
 
 #include <algorithm>
+#include <deque>
 #include <limits>
+#include <numeric>
 #include <utility>
 
 namespace lotus {
@@ -33,12 +35,17 @@ GuardedSummarySolver::combineOffset(std::int64_t a, bool a_known,
                                     std::uint64_t a_stride, std::int64_t b,
                                     bool b_known,
                                     std::uint64_t b_stride) const {
-  const std::uint64_t stride = b_stride ? b_stride : a_stride;
+  const std::uint64_t stride =
+      (a_stride && b_stride) ? std::gcd(a_stride, b_stride)
+                             : (b_stride ? b_stride : a_stride);
   if (!a_known && a_stride == 0)
     return {0, false, 0};
   if (!b_known && b_stride == 0)
     return {0, false, 0};
   const bool known = a_known && b_known;
+  if ((b > 0 && a > std::numeric_limits<std::int64_t>::max() - b) ||
+      (b < 0 && a < std::numeric_limits<std::int64_t>::min() - b))
+    return {0, false, 0};
   const std::int64_t sum = a + b;
   if (sum == 0)
     return {0, known, stride};
@@ -88,34 +95,274 @@ GuardId GuardedSummarySolver::internGuard(std::vector<AtomId> atoms) {
   return id;
 }
 
+bool GuardedSummarySolver::isInvariantValueInFunc(Id val, Id func) const {
+  if (val == INVALID || val >= m_invariant_ssa.size() || !m_invariant_ssa[val])
+    return false;
+  const Value &vinfo = m_program.values[val];
+  return vinfo.constant || vinfo.function == func;
+}
+
 bool GuardedSummarySolver::atomsContradict(const GuardAtom &a,
                                            const GuardAtom &b) const {
-  if (a.site != b.site || a.call_suffix != b.call_suffix ||
-      a.context_insensitive || b.context_insensitive)
+  if (a.call_suffix != b.call_suffix || a.context_insensitive ||
+      b.context_insensitive)
     return false;
   // Only detect contradictions outside loops: a site inside a loop, or a
   // callee site invoked through any call site inside a loop, may execute
   // multiple times with different pointer targets under the same call suffix.
-  const InstLocation &loc = m_index.by_site[a.site];
-  if (m_index.in_loop_block[loc.function][loc.block])
+  const InstLocation &loc_a = m_index.by_site[a.site];
+  const InstLocation &loc_b = m_index.by_site[b.site];
+  if (loc_a.function != loc_b.function)
+    return false;
+  if (m_index.in_loop_block[loc_a.function][loc_a.block] ||
+      m_index.in_loop_block[loc_b.function][loc_b.block])
     return false;
   for (Id call_site : a.call_suffix) {
     const InstLocation &cloc = m_index.by_site[call_site];
     if (m_index.in_loop_block[cloc.function][cloc.block])
       return false;
   }
-  if (a.lhs == b.lhs && a.rhs == b.rhs && a.lhs_offset == b.lhs_offset &&
+  const bool same_site = (a.site == b.site && a.site_point == b.site_point);
+  const bool cross_site_ok =
+      !same_site && a.lhs_offset_known && b.lhs_offset_known &&
+      isInvariantValueInFunc(a.lhs, loc_a.function);
+  if (!same_site && !cross_site_ok)
+    return false;
+
+  if (a.lhs == b.lhs && a.lhs_offset == b.lhs_offset &&
       a.lhs_offset_known == b.lhs_offset_known &&
       a.lhs_stride == b.lhs_stride) {
-    if ((a.kind == GuardKind::PointsTo && b.kind == GuardKind::NotPointsTo) ||
-        (a.kind == GuardKind::NotPointsTo && b.kind == GuardKind::PointsTo))
-      return a.rhs < m_program.objects.size() &&
-             m_program.objects[a.rhs].singleton;
-    if ((a.kind == GuardKind::Alias && b.kind == GuardKind::NotAlias) ||
-        (a.kind == GuardKind::NotAlias && b.kind == GuardKind::Alias))
+    if (a.rhs == b.rhs) {
+      if ((a.kind == GuardKind::PointsTo &&
+           b.kind == GuardKind::NotPointsTo) ||
+          (a.kind == GuardKind::NotPointsTo && b.kind == GuardKind::PointsTo)) {
+        return a.rhs == NULL_OBJECT ||
+               (a.rhs < m_index.exact_address_singleton.size() &&
+                m_index.exact_address_singleton[a.rhs]);
+      }
+      if ((a.kind == GuardKind::Alias && b.kind == GuardKind::NotAlias) ||
+          (a.kind == GuardKind::NotAlias && b.kind == GuardKind::Alias)) {
+        const GuardAtom &alias_atom =
+            (a.kind == GuardKind::Alias) ? a : b;
+        const GuardAtom &not_alias_atom =
+            (a.kind == GuardKind::NotAlias) ? a : b;
+        // Abstract memory overlap (`for_ptr_cmp == false`) does not contradict
+        // exact pointer inequality (`for_ptr_cmp == true`) when interior byte
+        // pointers can overlap within the same abstract object.
+        if (!alias_atom.for_ptr_cmp && not_alias_atom.for_ptr_cmp)
+          return false;
+        return same_site || isInvariantValueInFunc(a.rhs, loc_a.function);
+      }
+    } else if (a.kind == GuardKind::PointsTo && b.kind == GuardKind::PointsTo &&
+               a.lhs_offset_known && a.lhs_stride == 0) {
+      // One fixed runtime pointer value cannot simultaneously point to two
+      // distinct abstract objects (e.g. NULL vs non-null, or two distinct
+      // concrete allocations / fields).
       return true;
+    }
+  }
+  // Symmetric Alias / NotAlias check (`s ~ u` vs `u !~ s`) when offsets are 0.
+  if (a.lhs_offset == 0 && b.lhs_offset == 0 && a.lhs_offset_known &&
+      b.lhs_offset_known && a.lhs_stride == 0 && b.lhs_stride == 0 &&
+      a.lhs == b.rhs && a.rhs == b.lhs) {
+    if ((a.kind == GuardKind::Alias && b.kind == GuardKind::NotAlias) ||
+        (a.kind == GuardKind::NotAlias && b.kind == GuardKind::Alias)) {
+      const GuardAtom &alias_atom = (a.kind == GuardKind::Alias) ? a : b;
+      const GuardAtom &not_alias_atom = (a.kind == GuardKind::NotAlias) ? a : b;
+      if (!alias_atom.for_ptr_cmp && not_alias_atom.for_ptr_cmp)
+        return false;
+      return same_site || (isInvariantValueInFunc(a.lhs, loc_a.function) &&
+                           isInvariantValueInFunc(a.rhs, loc_a.function));
+    }
   }
   return false;
+}
+
+GuardId GuardedSummarySolver::applyEdgePtrGuards(const Edge &edge,
+                                                 Id fallback_site,
+                                                 Point fallback_point,
+                                                 GuardId base,
+                                                 std::size_t target_depth) {
+  if (!m_options.path_sensitive || edge.ptr_guards.empty() ||
+      base == GUARD_FALSE)
+    return base;
+  GuardId res = base;
+  const auto isExactSingletonOrNull = [&](Id obj) -> bool {
+    return obj == NULL_OBJECT ||
+           (obj < m_index.exact_address_singleton.size() &&
+            m_index.exact_address_singleton[obj]);
+  };
+  auto bestFinalUpper = [&](Id val, Id site, Point pt) -> PointsToSet {
+    if (m_program.values[val].constant)
+      return m_program.values[val].initial;
+    if (val < m_slice.values.size() && m_slice.values[val]) {
+      const std::size_t vd =
+          dovetailDepthOfComp(m_hierarchy.value_components[val]);
+      const bool finalized_depth =
+          m_dovetailing_done ||
+          (m_has_completed_depth && vd <= m_completed_depth &&
+           vd < m_cyclic_pass1_depth);
+      if (finalized_depth) {
+        auto it = m_fsci_cache.find({val, site, pt});
+        if (it != m_fsci_cache.end() && !it->second.empty())
+          return it->second;
+      }
+    }
+    return valueOf(m_program, m_upper, val);
+  };
+
+  for (const EdgePtrGuard &eg : edge.ptr_guards) {
+    if (eg.lhs == INVALID || eg.rhs == INVALID ||
+        eg.lhs >= m_program.values.size())
+      continue;
+    const bool use_eg_site = (eg.site != INVALID);
+    const Id atom_site = use_eg_site ? eg.site : fallback_site;
+    const Point atom_point = use_eg_site ? Point::After : fallback_point;
+    if (atom_site == INVALID)
+      continue;
+
+    const bool is_alias_kind =
+        (eg.kind == EdgeGuardKind::Alias || eg.kind == EdgeGuardKind::NotAlias);
+    if (is_alias_kind && eg.rhs >= m_program.values.size())
+      continue;
+    if (!is_alias_kind && eg.rhs >= m_program.objects.size())
+      continue;
+
+    const PointsToSet upper_lhs = bestFinalUpper(eg.lhs, atom_site, atom_point);
+
+    // O(1) sound simplification against tightest finalized upper bound
+    // (finalized FSCI cache when available, otherwise whole-program `m_upper`):
+    // immediately refute provably-infeasible edges and drop provably-tautological
+    // pointer checks (such as non-null `malloc()` or initialized globals).
+    if (!is_alias_kind) {
+      if (eg.kind == EdgeGuardKind::PointsTo) {
+        if (!upper_lhs.empty() && !upper_lhs.contains(eg.rhs)) {
+          ++m_stats.guards_pruned;
+          ++m_stats.path_infeasible_prunes;
+          return GUARD_FALSE;
+        }
+        if (!upper_lhs.isTop() && upper_lhs.size() == 1 &&
+            upper_lhs.contains(eg.rhs) && isExactSingletonOrNull(eg.rhs))
+          continue;
+      } else { // NotPointsTo
+        if (!upper_lhs.isTop() && upper_lhs.size() == 1 &&
+            upper_lhs.contains(eg.rhs) && isExactSingletonOrNull(eg.rhs)) {
+          ++m_stats.guards_pruned;
+          ++m_stats.path_infeasible_prunes;
+          return GUARD_FALSE;
+        }
+        if (!upper_lhs.empty() && !upper_lhs.contains(eg.rhs))
+          continue;
+      }
+    } else {
+      const PointsToSet upper_rhs =
+          bestFinalUpper(eg.rhs, atom_site, atom_point);
+      const bool disjoint = !upper_lhs.empty() && !upper_rhs.empty() &&
+                            !upper_lhs.intersects(upper_rhs);
+      const bool must_eq =
+          !upper_lhs.isTop() && !upper_rhs.isTop() && upper_lhs.size() == 1 &&
+          upper_lhs == upper_rhs && isExactSingletonOrNull(*upper_lhs.begin());
+      if (eg.kind == EdgeGuardKind::Alias) {
+        if (disjoint) {
+          ++m_stats.guards_pruned;
+          ++m_stats.path_infeasible_prunes;
+          return GUARD_FALSE;
+        }
+        if (must_eq)
+          continue;
+      } else { // NotAlias
+        if (must_eq) {
+          ++m_stats.guards_pruned;
+          ++m_stats.path_infeasible_prunes;
+          return GUARD_FALSE;
+        }
+        if (disjoint)
+          continue;
+      }
+    }
+
+    // Never attach an atom referencing out-of-slice pointers: their defining
+    // statements are not in `m_slice.instructions`, so flow-sensitive
+    // re-evaluation inside this cluster would be unsound (and `bestFinalUpper`
+    // above already extracted everything provable from whole-program bounds).
+    const bool lhs_in_slice =
+        m_program.values[eg.lhs].constant ||
+        (eg.lhs < m_slice.values.size() && m_slice.values[eg.lhs]);
+    const bool rhs_in_slice =
+        !is_alias_kind || m_program.values[eg.rhs].constant ||
+        (eg.rhs < m_slice.values.size() && m_slice.values[eg.rhs]);
+    if (!lhs_in_slice || !rhs_in_slice)
+      continue;
+
+    // Preserve Algorithm 2 top-down dovetail stratification during dovetailing:
+    // do not attach an optional edge pointer guard on a higher-depth pointer
+    // while computing a lower-depth summary (which would invert top-down order).
+    if (!m_dovetailing_done) {
+      if (!m_program.values[eg.lhs].constant &&
+          dovetailDepthOfComp(m_hierarchy.value_components[eg.lhs]) >
+              target_depth)
+        continue;
+      if (is_alias_kind && !m_program.values[eg.rhs].constant &&
+          dovetailDepthOfComp(m_hierarchy.value_components[eg.rhs]) >
+              target_depth)
+        continue;
+    }
+
+    // During Pass 1 of cyclic dovetailing, negative guards at the active cyclic
+    // depth cannot be evaluated and only add churn.
+    if (m_cyclic_pass1_depth != std::numeric_limits<std::size_t>::max() &&
+        (eg.kind == EdgeGuardKind::NotPointsTo ||
+         eg.kind == EdgeGuardKind::NotAlias) &&
+        (isInActivePass1(eg.lhs) ||
+         (is_alias_kind && isInActivePass1(eg.rhs))))
+      continue;
+
+    GuardAtom atom;
+    atom.for_ptr_cmp = true;
+    atom.site = atom_site;
+    atom.site_point = atom_point;
+    atom.lhs = eg.lhs;
+    atom.rhs = eg.rhs;
+    switch (eg.kind) {
+    case EdgeGuardKind::PointsTo:
+      atom.kind = GuardKind::PointsTo;
+      break;
+    case EdgeGuardKind::NotPointsTo:
+      atom.kind = GuardKind::NotPointsTo;
+      break;
+    case EdgeGuardKind::Alias:
+      atom.kind = GuardKind::Alias;
+      break;
+    case EdgeGuardKind::NotAlias:
+      atom.kind = GuardKind::NotAlias;
+      break;
+    }
+
+    // Always check syntactic contradiction with existing atoms in `res`, but
+    // never let an optional edge pointer guard push `res` past `max_guard_atoms`
+    // (which would widen and erase core Def. 8 Store/Load guards!).
+    const auto &existing = m_guards[res];
+    bool contradicted = false;
+    for (AtomId eid : existing) {
+      if (atomsContradict(m_atoms[eid], atom)) {
+        ++m_stats.guards_pruned;
+        contradicted = true;
+        break;
+      }
+    }
+    if (contradicted) {
+      ++m_stats.path_infeasible_prunes;
+      return GUARD_FALSE;
+    }
+    if (existing.size() >= m_options.max_guard_atoms)
+      continue;
+    res = conjoinAtom(res, atom);
+    if (res == GUARD_FALSE) {
+      ++m_stats.path_infeasible_prunes;
+      return GUARD_FALSE;
+    }
+  }
+  return res;
 }
 
 GuardId GuardedSummarySolver::conjoinAtom(GuardId base, const GuardAtom &atom) {
@@ -217,9 +464,14 @@ void GuardedSummarySolver::computeFunctionModifications() {
             m_func_modifies_any[f] = true;
           } else {
             for (Id o : addr.objects()) {
-              if (isMemory(m_program.objects[o])) {
-                m_func_modifies[f].insert(o);
-                m_func_modifies_any[f] = true;
+              if (!isMemory(m_program.objects[o]))
+                continue;
+              m_func_modifies[f].insert(o);
+              m_func_modifies_any[f] = true;
+              if (inst.write_bytes != 0) {
+                for (Id fo : m_program.overlappingFields(o, inst.write_bytes))
+                  if (fo != o && isMemory(m_program.objects[fo]))
+                    m_func_modifies[f].insert(fo);
               }
             }
           }
@@ -392,6 +644,238 @@ void GuardedSummarySolver::computeFunctionConditionKills() {
     m_func_kills_conditions[f].assign(kills[f].begin(), kills[f].end());
 }
 
+void GuardedSummarySolver::computeInvariantSSAVals() {
+  const std::size_t nv = m_program.values.size();
+  m_invariant_ssa.assign(nv, false);
+  for (Id v = 0; v < nv; ++v) {
+    const Value &vinfo = m_program.values[v];
+    if (vinfo.constant) {
+      m_invariant_ssa[v] = true;
+      continue;
+    }
+    if (vinfo.function == INVALID || !m_index.phi_defs[v].empty())
+      continue;
+    const auto &defs = m_index.defining_sites[v];
+    if (defs.empty()) {
+      const auto &params = m_program.functions[vinfo.function].parameters;
+      if (std::find(params.begin(), params.end(), v) != params.end())
+        m_invariant_ssa[v] = true;
+    } else if (defs.size() == 1) {
+      const InstLocation &dloc = m_index.by_site[defs[0]];
+      if (dloc.function == vinfo.function &&
+          !m_index.in_loop_block[dloc.function][dloc.block])
+        m_invariant_ssa[v] = true;
+    }
+  }
+}
+
+// Compute slice-local dovetail dependency depths and cycles, combining
+// Steensgaard's points-to hierarchy edges with `Opcode::Field` dependencies
+// inside `m_slice` while keeping Steensgaard partitions strictly field-sensitive.
+void GuardedSummarySolver::computeDovetailHierarchy() {
+  const std::size_t nc = m_hierarchy.successors.size();
+  std::vector<std::vector<Id>> succ = m_hierarchy.successors;
+  std::vector<std::vector<Id>> pred = m_hierarchy.predecessors;
+  std::vector<bool> self_loop = m_hierarchy.cyclic;
+
+  for (Id site : m_slice.inst_list) {
+    const Instruction &inst = *m_index.by_site[site].inst;
+    if (inst.opcode != Opcode::Field || inst.result == INVALID ||
+        inst.operands.empty() || inst.operands[0] == INVALID)
+      continue;
+    const Id from = m_hierarchy.value_components[inst.operands[0]];
+    const Id to = m_hierarchy.value_components[inst.result];
+    if (from >= nc || to >= nc)
+      continue;
+    if (from == to) {
+      continue;
+    }
+    if (std::find(succ[from].begin(), succ[from].end(), to) ==
+        succ[from].end()) {
+      succ[from].push_back(to);
+      pred[to].push_back(from);
+    }
+  }
+
+  std::vector<Id> comp_scc;
+  Id scc_count = 0;
+  computeKosarajuSCCs(nc, succ, pred, comp_scc, scc_count);
+
+  std::vector<std::size_t> scc_size(scc_count, 0);
+  std::vector<bool> scc_cyclic(scc_count, false);
+  std::vector<std::vector<Id>> scc_succ(scc_count);
+  std::vector<std::vector<Id>> scc_pred(scc_count);
+  for (Id c = 0; c < nc; ++c) {
+    const Id from = comp_scc[c];
+    ++scc_size[from];
+    if (self_loop[c])
+      scc_cyclic[from] = true;
+    for (Id target : succ[c]) {
+      const Id to = comp_scc[target];
+      if (from == to) {
+        scc_cyclic[from] = true;
+      } else if (std::find(scc_succ[from].begin(), scc_succ[from].end(), to) ==
+                 scc_succ[from].end()) {
+        scc_succ[from].push_back(to);
+        scc_pred[to].push_back(from);
+      }
+    }
+  }
+  for (Id s = 0; s < scc_count; ++s)
+    if (scc_size[s] > 1)
+      scc_cyclic[s] = true;
+
+  std::vector<std::size_t> indegree(scc_count, 0);
+  std::vector<std::size_t> scc_depth(scc_count, 0);
+  std::deque<Id> work;
+  for (Id s = 0; s < scc_count; ++s) {
+    indegree[s] = scc_pred[s].size();
+    if (indegree[s] == 0)
+      work.push_back(s);
+  }
+  while (!work.empty()) {
+    const Id s = work.front();
+    work.pop_front();
+    for (Id next : scc_succ[s]) {
+      scc_depth[next] = std::max(scc_depth[next], scc_depth[s] + 1);
+      if (--indegree[next] == 0)
+        work.push_back(next);
+    }
+  }
+
+  m_dovetail_depth.resize(nc, 0);
+  m_dovetail_cyclic.resize(nc, false);
+  for (Id c = 0; c < nc; ++c) {
+    m_dovetail_depth[c] = scc_depth[comp_scc[c]];
+    m_dovetail_cyclic[c] = scc_cyclic[comp_scc[c]];
+  }
+}
+
+std::size_t GuardedSummarySolver::dovetailDepthOfComp(Id comp) const {
+  return comp < m_dovetail_depth.size() ? m_dovetail_depth[comp] : 0;
+}
+
+bool GuardedSummarySolver::dovetailCyclicOfComp(Id comp) const {
+  return comp < m_dovetail_cyclic.size() ? m_dovetail_cyclic[comp] : false;
+}
+
+bool GuardedSummarySolver::isInActivePass1(Id val) const {
+  if (m_cyclic_pass1_depth == std::numeric_limits<std::size_t>::max() ||
+      val == INVALID || m_program.values[val].constant)
+    return false;
+  return dovetailDepthOfComp(m_hierarchy.value_components[val]) >=
+         m_cyclic_pass1_depth;
+}
+
+BddManager::NodeId GuardedSummarySolver::evalCondNode(Id cond_id,
+                                                      bool polarity) {
+  if (!m_options.path_sensitive || cond_id == INVALID)
+    return BddManager::TRUE_NODE;
+  if (cond_id >= m_program.cond_nodes.size())
+    return m_bdd.literal(cond_id, polarity);
+  if (m_cond_bdd_cache.size() < m_program.cond_nodes.size())
+    m_cond_bdd_cache.assign(m_program.cond_nodes.size(),
+                            std::numeric_limits<BddManager::NodeId>::max());
+  BddManager::NodeId pos = m_cond_bdd_cache[cond_id];
+  if (pos == std::numeric_limits<BddManager::NodeId>::max()) {
+    const CondNode &node = m_program.cond_nodes[cond_id];
+    switch (node.op) {
+    case CondOp::Atom:
+      pos = m_bdd.literal(node.lhs, true);
+      break;
+    case CondOp::Not:
+      pos = m_bdd.makeNot(evalCondNode(node.lhs, true));
+      break;
+    case CondOp::And:
+      pos = m_bdd.makeAnd(evalCondNode(node.lhs, true),
+                          evalCondNode(node.rhs, true));
+      break;
+    case CondOp::Or:
+      pos = m_bdd.makeOr(evalCondNode(node.lhs, true),
+                         evalCondNode(node.rhs, true));
+      break;
+    }
+    m_cond_bdd_cache[cond_id] = pos;
+  }
+  return polarity ? pos : m_bdd.makeNot(pos);
+}
+
+BddManager::NodeId
+GuardedSummarySolver::applyCallCondSubst(Id callee,
+                                         const Instruction &call_inst,
+                                         BddManager::NodeId path) {
+  if (!m_options.path_sensitive || m_bdd.isTrue(path) || m_bdd.isFalse(path))
+    return path;
+  if (!m_options.path_sensitive_interprocedural)
+    return quantifyFuncEntryConditions(callee, path);
+
+  const auto &entry_kills = m_program.functions[callee].entry_kills_conditions;
+  if (call_inst.cond_subst.empty())
+    return quantifyFuncEntryConditions(callee, path);
+
+  const Id caller_fn = m_index.by_site[call_inst.id].function;
+  const bool self_recursive = (caller_fn == callee);
+
+  // Guard against variable collisions during sequential substitution if any
+  // caller expression references a callee condition ID (e.g., swapping params).
+  std::set<Id> callee_vars;
+  for (const auto &sub : call_inst.cond_subst)
+    if (sub.callee_cond != INVALID)
+      callee_vars.insert(sub.callee_cond);
+  auto condRefsAny = [&](Id cid, auto &&self_ref) -> bool {
+    if (cid == INVALID)
+      return false;
+    if (callee_vars.count(cid))
+      return true;
+    if (cid >= m_program.cond_nodes.size())
+      return false;
+    const CondNode &n = m_program.cond_nodes[cid];
+    if (n.op == CondOp::Atom)
+      return callee_vars.count(n.lhs) != 0;
+    if (n.op == CondOp::Not)
+      return self_ref(n.lhs, self_ref);
+    return self_ref(n.lhs, self_ref) || self_ref(n.rhs, self_ref);
+  };
+  bool any_collision = self_recursive;
+  if (!any_collision) {
+    for (const auto &sub : call_inst.cond_subst)
+      if (sub.caller_cond != INVALID && condRefsAny(sub.caller_cond, condRefsAny)) {
+        any_collision = true;
+        break;
+      }
+  }
+
+  std::vector<Id> substituted;
+  substituted.reserve(call_inst.cond_subst.size());
+  for (const auto &sub : call_inst.cond_subst) {
+    if (sub.callee_cond == INVALID)
+      continue;
+    if (any_collision && sub.caller_cond != INVALID) {
+      // Avoid sequential variable collision across recursive/swapping frames.
+      path = m_bdd.exists(path, sub.callee_cond);
+      substituted.push_back(sub.callee_cond);
+      continue;
+    }
+    const BddManager::NodeId rep =
+        (sub.caller_cond == INVALID)
+            ? (sub.polarity ? BddManager::TRUE_NODE : BddManager::FALSE_NODE)
+            : evalCondNode(sub.caller_cond, sub.polarity);
+    path = m_bdd.substitute(path, sub.callee_cond, rep);
+    substituted.push_back(sub.callee_cond);
+    if (m_bdd.isFalse(path))
+      return BddManager::FALSE_NODE;
+  }
+  for (Id cid : entry_kills) {
+    if (std::find(substituted.begin(), substituted.end(), cid) ==
+        substituted.end()) {
+      path = m_bdd.exists(path, cid);
+      if (m_bdd.isTrue(path) || m_bdd.isFalse(path))
+        break;
+    }
+  }
+  return path;
+}
+
 void GuardedSummarySolver::addKilledCond(KilledConds &dst, Id cid) const {
   if (!m_options.path_sensitive_interprocedural || dst.all || cid == INVALID)
     return;
@@ -499,7 +983,7 @@ PointsToSet GuardedSummarySolver::lookupPass1Fsci(Id val, Id site, Point pt) {
   if (m_program.values[val].constant)
     return m_program.values[val].initial;
   const std::size_t vdepth =
-      m_hierarchy.depth[m_hierarchy.value_components[val]];
+      dovetailDepthOfComp(m_hierarchy.value_components[val]);
   if (vdepth > m_cyclic_pass1_depth)
     return valueOf(m_program, m_upper, val);
   FsciKey k{val, site, pt};
@@ -524,7 +1008,7 @@ PointsToSet GuardedSummarySolver::fsciForSummary(Id val, Id site,
   if (m_program.values[val].constant)
     return m_program.values[val].initial;
   const Id comp = m_hierarchy.value_components[val];
-  const std::size_t vdepth = m_hierarchy.depth[comp];
+  const std::size_t vdepth = dovetailDepthOfComp(comp);
   if (m_cyclic_pass1_depth != std::numeric_limits<std::size_t>::max() &&
       vdepth >= m_cyclic_pass1_depth) {
     return lookupPass1Fsci(val, site, Point::Before);
@@ -539,14 +1023,23 @@ PointsToSet GuardedSummarySolver::fsciForSummary(Id val, Id site,
         ++m_stats.path_infeasible_prunes;
       return it->second;
     }
-    if (m_cyclic_pass1_depth == std::numeric_limits<std::size_t>::max() &&
-        !m_active_fsci.count(fkey) && m_active_fsci.size() < 8) {
-      bool pruned = false;
-      PointsToSet pts = computeFsci(val, site, Point::Before, nullptr, &pruned);
-      if (pts.empty() && pruned)
-        m_path_pruned_fsci.insert(fkey);
-      m_fsci_cache.emplace(fkey, pts);
-      return pts;
+    if (m_cyclic_pass1_depth == std::numeric_limits<std::size_t>::max()) {
+      if (!m_active_fsci.count(fkey) && m_active_fsci.size() < 8) {
+        const bool prev_hit = m_hit_active_fsci_cycle;
+        m_hit_active_fsci_cycle = false;
+        bool pruned = false;
+        PointsToSet pts =
+            computeFsci(val, site, Point::Before, nullptr, &pruned);
+        const bool this_hit = m_hit_active_fsci_cycle;
+        m_hit_active_fsci_cycle = prev_hit || this_hit;
+        if (!this_hit && !m_in_cyclic_pass2) {
+          if (pts.empty() && pruned)
+            m_path_pruned_fsci.insert(fkey);
+          m_fsci_cache.emplace(fkey, pts);
+        }
+        return pts;
+      }
+      m_hit_active_fsci_cycle = true;
     }
   }
   return valueOf(m_program, m_upper, val);
@@ -557,21 +1050,25 @@ bool GuardedSummarySolver::isSameOrHigherDepth(Id val,
   if (val == INVALID || m_program.values[val].constant)
     return false;
   const Id comp = m_hierarchy.value_components[val];
-  return m_hierarchy.depth[comp] >= target_depth;
+  return dovetailDepthOfComp(comp) >= target_depth;
 }
 
 PointsToSet GuardedSummarySolver::evalGuardPointer(Id val, Id site,
                                                    const Context *ctx,
                                                    bool for_negative_guard,
-                                                   bool &is_exact_upper) {
+                                                   bool &is_exact_upper,
+                                                   Point site_point) {
   is_exact_upper = true;
   if (val == INVALID)
     return PointsToSet::top();
   if (m_program.values[val].constant)
     return m_program.values[val].initial;
 
+  if (val >= m_slice.values.size() || !m_slice.values[val])
+    return valueOf(m_program, m_upper, val);
+
   const Id comp = m_hierarchy.value_components[val];
-  const std::size_t vdepth = m_hierarchy.depth[comp];
+  const std::size_t vdepth = dovetailDepthOfComp(comp);
 
   if (m_cyclic_pass1_depth != std::numeric_limits<std::size_t>::max() &&
       vdepth >= m_cyclic_pass1_depth) {
@@ -579,36 +1076,53 @@ PointsToSet GuardedSummarySolver::evalGuardPointer(Id val, Id site,
       is_exact_upper = false;
       return PointsToSet::top();
     }
-    return lookupPass1Fsci(val, site, Point::Before);
+    return lookupPass1Fsci(val, site, site_point);
   }
 
   if (ctx != nullptr) {
-    FscsKey key{val, site, Point::Before, *ctx};
+    FscsKey key{val, site, site_point, *ctx};
     auto cached = m_fscs_cache.find(key);
     if (cached != m_fscs_cache.end())
       return cached->second.reachable() ? cached->second.points_to
                                         : PointsToSet{};
     if (!m_active_fscs.count(key) && m_active_fscs.size() < 16) {
-      QueryResult r = computeFscs(val, site, *ctx, Point::Before);
+      QueryResult r = computeFscs(val, site, *ctx, site_point);
       if (r.status == QueryStatus::ResourceLimit)
         throw LimitReached{};
       return r.reachable() ? r.points_to : PointsToSet{};
     }
   }
 
-  FsciKey fkey{val, site, Point::Before};
+  FsciKey fkey{val, site, site_point};
   auto it = m_fsci_cache.find(fkey);
   if (it != m_fsci_cache.end()) {
     ++m_stats.fsci_cache_hits;
     return it->second;
   }
-  if (m_active_fsci.count(fkey)) {
+  if (m_active_fsci.count(fkey) || m_active_fsci.size() >= 8) {
+    m_hit_active_fsci_cycle = true;
     auto p1 = m_cyclic_pass1_fsci.find(fkey);
     if (p1 != m_cyclic_pass1_fsci.end())
       return p1->second;
     return valueOf(m_program, m_upper, val);
   }
-  return computeFsci(val, site, Point::Before);
+  const bool prev_hit = m_hit_active_fsci_cycle;
+  m_hit_active_fsci_cycle = false;
+  bool pruned = false;
+  PointsToSet pts = computeFsci(val, site, site_point, nullptr, &pruned);
+  const bool this_hit = m_hit_active_fsci_cycle;
+  m_hit_active_fsci_cycle = prev_hit || this_hit;
+  const bool can_cache =
+      !this_hit && !m_in_cyclic_pass2 &&
+      (m_dovetailing_done ||
+       (m_has_completed_depth && vdepth <= m_completed_depth &&
+        vdepth < m_cyclic_pass1_depth));
+  if (can_cache) {
+    if (pts.empty() && pruned)
+      m_path_pruned_fsci.insert(fkey);
+    m_fsci_cache.emplace(fkey, pts);
+  }
+  return pts;
 }
 
 bool GuardedSummarySolver::memoryIntersects(const PointsToSet &a,
@@ -649,8 +1163,8 @@ bool GuardedSummarySolver::isAtomSatisfiable(const GuardAtom &atom,
   const bool is_neg = (atom.kind == GuardKind::NotPointsTo ||
                        atom.kind == GuardKind::NotAlias);
   bool exact = true;
-  PointsToSet lhs_pts =
-      evalGuardPointer(atom.lhs, atom.site, eval_ctx, is_neg, exact);
+  PointsToSet lhs_pts = evalGuardPointer(atom.lhs, atom.site, eval_ctx, is_neg,
+                                         exact, atom.site_point);
   lhs_pts = applyOffset(lhs_pts, atom.lhs_offset, atom.lhs_offset_known,
                         atom.lhs_stride);
 
@@ -660,30 +1174,35 @@ bool GuardedSummarySolver::isAtomSatisfiable(const GuardAtom &atom,
   case GuardKind::NotPointsTo: {
     if (!exact)
       return true;
+    const bool singleton_ok =
+        atom.rhs == NULL_OBJECT ||
+        (atom.rhs < m_index.exact_address_singleton.size() &&
+         m_index.exact_address_singleton[atom.rhs]);
     const bool must_be_obj = !lhs_pts.isTop() && lhs_pts.size() == 1 &&
-                             lhs_pts.contains(atom.rhs) &&
-                             atom.rhs < m_program.objects.size() &&
-                             m_program.objects[atom.rhs].singleton;
+                             lhs_pts.contains(atom.rhs) && singleton_ok;
     return !must_be_obj;
   }
   case GuardKind::Alias: {
     bool exact_r = true;
-    const PointsToSet rhs_pts =
-        evalGuardPointer(atom.rhs, atom.site, eval_ctx, false, exact_r);
-    return memoryIntersects(lhs_pts, rhs_pts);
+    const PointsToSet rhs_pts = evalGuardPointer(
+        atom.rhs, atom.site, eval_ctx, false, exact_r, atom.site_point);
+    return atom.for_ptr_cmp ? lhs_pts.intersects(rhs_pts)
+                            : memoryIntersects(lhs_pts, rhs_pts);
   }
   case GuardKind::NotAlias: {
     if (!exact)
       return true;
     bool exact_r = true;
-    const PointsToSet rhs_pts =
-        evalGuardPointer(atom.rhs, atom.site, eval_ctx, true, exact_r);
+    const PointsToSet rhs_pts = evalGuardPointer(
+        atom.rhs, atom.site, eval_ctx, true, exact_r, atom.site_point);
     if (!exact_r)
       return true;
     const bool must_alias_singleton =
         !lhs_pts.isTop() && !rhs_pts.isTop() && lhs_pts.size() == 1 &&
-        lhs_pts == rhs_pts && *lhs_pts.begin() < m_program.objects.size() &&
-        m_program.objects[*lhs_pts.begin()].singleton;
+        lhs_pts == rhs_pts &&
+        ((*lhs_pts.begin() == NULL_OBJECT && atom.for_ptr_cmp) ||
+         (*lhs_pts.begin() < m_index.exact_address_singleton.size() &&
+          m_index.exact_address_singleton[*lhs_pts.begin()]));
     return !must_alias_singleton;
   }
   }

@@ -126,7 +126,9 @@ enum class GuardKind : std::uint8_t {
 struct GuardAtom {
   std::vector<Id> call_suffix;
   bool context_insensitive = false;
+  bool for_ptr_cmp = false;
   Id site = INVALID;
+  Point site_point = Point::Before;
   GuardKind kind = GuardKind::PointsTo;
   Id lhs = INVALID;
   Id rhs = INVALID; // Object ID for PointsTo/NotPointsTo; Value ID for Alias/NotAlias
@@ -135,16 +137,20 @@ struct GuardAtom {
   std::uint64_t lhs_stride = 0;
 
   bool operator==(const GuardAtom &o) const {
-    return std::tie(call_suffix, context_insensitive, site, kind, lhs, rhs,
-                    lhs_offset, lhs_offset_known, lhs_stride) ==
-           std::tie(o.call_suffix, o.context_insensitive, o.site, o.kind, o.lhs,
-                    o.rhs, o.lhs_offset, o.lhs_offset_known, o.lhs_stride);
+    return std::tie(call_suffix, context_insensitive, for_ptr_cmp, site,
+                    site_point, kind, lhs, rhs, lhs_offset, lhs_offset_known,
+                    lhs_stride) ==
+           std::tie(o.call_suffix, o.context_insensitive, o.for_ptr_cmp, o.site,
+                    o.site_point, o.kind, o.lhs, o.rhs, o.lhs_offset,
+                    o.lhs_offset_known, o.lhs_stride);
   }
   bool operator<(const GuardAtom &o) const {
-    return std::tie(call_suffix, context_insensitive, site, kind, lhs, rhs,
-                    lhs_offset, lhs_offset_known, lhs_stride) <
-           std::tie(o.call_suffix, o.context_insensitive, o.site, o.kind, o.lhs,
-                    o.rhs, o.lhs_offset, o.lhs_offset_known, o.lhs_stride);
+    return std::tie(call_suffix, context_insensitive, for_ptr_cmp, site,
+                    site_point, kind, lhs, rhs, lhs_offset, lhs_offset_known,
+                    lhs_stride) <
+           std::tie(o.call_suffix, o.context_insensitive, o.for_ptr_cmp, o.site,
+                    o.site_point, o.kind, o.lhs, o.rhs, o.lhs_offset,
+                    o.lhs_offset_known, o.lhs_stride);
   }
 };
 
@@ -175,7 +181,7 @@ struct SummaryEntry {
   SummaryEntry(Expr s, GuardId g = GUARD_TRUE,
                BddManager::NodeId p = BddManager::TRUE_NODE,
                KilledConds k = {})
-      : source(std::move(s)), guard(g), path(p), killed(std::move(k)) {}
+      : source(s), guard(g), path(p), killed(std::move(k)) {}
   bool operator==(const SummaryEntry &o) const {
     return source == o.source && guard == o.guard && path == o.path &&
            killed == o.killed;
@@ -242,6 +248,12 @@ public:
                     Point point) override;
   AliasResult queryAliases(Id value, Id site, const Context *context_path,
                            Point point) override;
+  QueryResult queryObject(Id object, Id site, const Context *context_path,
+                          Point point) override;
+  AliasResult queryObjectAliases(Id object, Id site,
+                                 const Context *context_path,
+                                 Point point) override;
+  bool mustAlias(Id lhs, Id rhs, Id site, const Context *context_path) override;
   const Statistics &statistics() const override { return m_stats; }
 
 private:
@@ -287,12 +299,24 @@ private:
   AtomId internAtom(GuardAtom atom);
   GuardId internGuard(std::vector<AtomId> atoms);
   bool atomsContradict(const GuardAtom &a, const GuardAtom &b) const;
+  bool isInvariantValueInFunc(Id val, Id func) const;
   GuardId conjoinAtom(GuardId base, const GuardAtom &atom);
   GuardId conjoinGuards(GuardId a, GuardId b);
   GuardId prependCallSite(GuardId g, Id call_site);
+  GuardId applyEdgePtrGuards(const Edge &edge, Id fallback_site,
+                             Point fallback_point, GuardId base,
+                             std::size_t target_depth);
   bool guardSubsumes(GuardId weaker, GuardId stronger) const;
   void computeFunctionModifications();
   void computeFunctionConditionKills();
+  void computeInvariantSSAVals();
+  void computeDovetailHierarchy();
+  BddManager::NodeId evalCondNode(Id cond_id, bool polarity);
+  BddManager::NodeId applyCallCondSubst(Id callee, const Instruction &call_inst,
+                                        BddManager::NodeId path);
+  std::size_t dovetailDepthOfComp(Id comp) const;
+  bool dovetailCyclicOfComp(Id comp) const;
+  bool isInActivePass1(Id val) const;
   void addKilledCond(KilledConds &dst, Id cid) const;
   void addKilledConds(KilledConds &dst, const std::vector<Id> &cids) const;
   void mergeKilledConds(KilledConds &dst, const KilledConds &src) const;
@@ -312,7 +336,8 @@ private:
   PointsToSet fsciForSummary(Id val, Id site, std::size_t target_depth);
   bool isSameOrHigherDepth(Id val, std::size_t target_depth) const;
   PointsToSet evalGuardPointer(Id val, Id site, const Context *ctx,
-                               bool for_negative_guard, bool &is_exact_upper);
+                               bool for_negative_guard, bool &is_exact_upper,
+                               Point site_point = Point::Before);
   bool memoryIntersects(const PointsToSet &a, const PointsToSet &b) const;
   bool isAtomSatisfiable(const GuardAtom &atom, const Context *ctx);
   bool isGuardSatisfiable(GuardId g, const Context *ctx);
@@ -343,23 +368,35 @@ private:
   std::size_t depthOfSummaryKey(const SummaryKey &key) const;
   const std::vector<SummaryEntry> &computeSummary(const SummaryKey &root_key);
   // Algorithm 3 Step 1: backward summary splicing returning both concrete
-  // points-to set and entry-level anchors A.
+  // points-to set and entry-level anchors A (for Val or Mem expressions).
+  PointsToSet computeFsciExpr(const Expr &target, Id site, Point point,
+                              std::set<Expr> *entry_anchors = nullptr,
+                              bool *path_pruned_out = nullptr);
   PointsToSet computeFsci(Id val, Id site, Point point,
                           std::set<Expr> *entry_anchors = nullptr,
                           bool *path_pruned_out = nullptr);
   bool validateContext(Id site, const Context &ctx);
   bool isPathReachable(Id site, Point point, const Context *ctx);
+  QueryResult computeFscsExpr(const Expr &target, Id site, const Context &ctx,
+                              Point point,
+                              std::set<Expr> *entry_anchors = nullptr);
   QueryResult computeFscs(Id val, Id site, const Context &ctx, Point point,
                           std::set<Expr> *entry_anchors = nullptr);
   // Algorithm 3 Step 2: forward summary propagation from entry anchors A to Q.
   void propagateForwardAnchorsFsci(const std::set<Expr> &anchors, Id target_fn,
                                    Id site, Point point,
                                    const std::vector<Id> &candidates,
-                                   std::set<Id> &out_aliases);
+                                   std::set<Id> &out_aliases,
+                                   bool &exact_complete);
   void propagateForwardAnchorsFscs(const std::set<Expr> &anchors,
                                    const Context &ctx, Id site, Point point,
                                    const std::vector<Id> &candidates,
-                                   std::set<Id> &out_aliases);
+                                   std::set<Id> &out_aliases,
+                                   bool &exact_complete);
+  AliasResult finishAliasQuery(const QueryResult &base,
+                               const std::set<Expr> &entry_anchors, Id self_val,
+                               Id site, const Context *context_path,
+                               Point point);
   void precomputeDepthSummaries(std::size_t depth);
   void computeFlowSensitiveReachability();
   void runDovetailing();
@@ -385,6 +422,10 @@ private:
   std::vector<bool> m_func_modifies_any;
   std::vector<std::vector<Id>> m_func_kills_conditions;
   std::vector<bool> m_fs_reachable_function;
+  std::vector<bool> m_invariant_ssa;
+  std::vector<std::size_t> m_dovetail_depth;
+  std::vector<bool> m_dovetail_cyclic;
+  std::vector<BddManager::NodeId> m_cond_bdd_cache;
   std::int64_t m_max_offset_span = 0;
 
   std::map<SummaryKey, std::vector<SummaryEntry>> m_summaries;
@@ -400,6 +441,9 @@ private:
 
   std::size_t m_completed_depth = 0;
   bool m_has_completed_depth = false;
+  bool m_dovetailing_done = false;
+  bool m_in_cyclic_pass2 = false;
+  bool m_hit_active_fsci_cycle = false;
   std::size_t m_cyclic_pass1_depth = std::numeric_limits<std::size_t>::max();
   std::set<FsciKey> m_pass1_keys;
   std::vector<FsciKey> m_pass1_pending_keys;

@@ -49,9 +49,29 @@ public:
   LLVMAliasResult aliasesAllContexts(const llvm::Value &value,
                                      const llvm::Instruction &site,
                                      Point point = Point::Before);
+  QueryResult objectPointsTo(Id object, const llvm::Instruction &site,
+                             const CallContext &context = {},
+                             Point point = Point::Before);
+  QueryResult objectPointsToAllContexts(Id object,
+                                        const llvm::Instruction &site,
+                                        Point point = Point::Before);
+  LLVMAliasResult objectAliases(Id object, const llvm::Instruction &site,
+                                const CallContext &context = {},
+                                Point point = Point::Before);
+  LLVMAliasResult objectAliasesAllContexts(Id object,
+                                           const llvm::Instruction &site,
+                                           Point point = Point::Before);
   void precomputeAll();
+  // Application-driven selective cluster exploration (§1, p. 250): solve only
+  // the clusters containing any pointer in `targets` (e.g., lock pointers).
+  void precomputeForValues(const std::vector<const llvm::Value *> &targets);
+  std::vector<std::size_t> clustersFor(const llvm::Value &value) const;
+  std::vector<std::vector<const llvm::Value *>> clusters() const;
   bool mayAlias(const llvm::Value &lhs, const llvm::Value &rhs,
                 const llvm::Instruction &site, const CallContext &context = {});
+  bool mustAlias(const llvm::Value &lhs, const llvm::Value &rhs,
+                 const llvm::Instruction &site,
+                 const CallContext &context = {});
 
   // UNKNOWN and NULL_OBJECT have no LLVM allocation site. A function object
   // maps to its Function, a global to its GlobalVariable, and storage to its

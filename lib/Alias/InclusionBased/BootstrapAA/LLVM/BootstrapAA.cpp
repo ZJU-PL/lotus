@@ -1,7 +1,10 @@
 #include "Alias/InclusionBased/BootstrapAA/BootstrapAA.h"
 
 #include <algorithm>
+#include <deque>
+#include <limits>
 #include <map>
+#include <numeric>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -257,10 +260,26 @@ struct BootstrapAA::Impl {
              std::tie(o.func, o.pred, o.lhs, o.rhs);
     }
   };
+  struct ParamCondInfo {
+    Id cid = INVALID;
+    unsigned arg_no = 0;
+    bool is_bool_arg = false;
+    unsigned pred = 0;
+    bool arg_is_lhs = true;
+    const llvm::Constant *const_rhs = nullptr;
+  };
   std::map<PredKey, Id> icmp_conditions;
   std::unordered_map<const llvm::Value *, Id> value_conditions;
   std::unordered_map<const llvm::Instruction *, std::vector<Id>>
       inst_kills_conditions;
+  std::unordered_map<const llvm::Function *, std::vector<ParamCondInfo>>
+      param_conds;
+  std::unordered_map<const llvm::CallBase *,
+                     std::vector<Instruction::CondSubst>>
+      call_cond_substs;
+  std::unordered_map<const llvm::GlobalVariable *,
+                     std::set<const llvm::Function *>>
+      global_mutating_funcs;
   bool module_has_ctors = false;
 
   Impl(const llvm::Module &m, const llvm::Function *entry, Options options)
@@ -439,18 +458,36 @@ struct BootstrapAA::Impl {
     for (const llvm::GlobalAlias &alias : module.aliases())
       valueId(alias);
 
-    // Pre-assign boolean condition IDs for conditional branches (for optional
-    // ROBDD path sensitivity, Kahlon §3 p. 258).
+    // Pre-assign boolean condition IDs for conditional branches, switches, and
+    // pointer selects (for optional ROBDD path sensitivity, Kahlon §3 p. 258).
     for (const llvm::Function &function : module) {
       if (function.isDeclaration())
         continue;
       for (const llvm::BasicBlock &block : function) {
-        const auto *br =
-            llvm::dyn_cast<llvm::BranchInst>(block.getTerminator());
-        if (br && br->isConditional())
-          (void)resolveBranchCondition(function, *br->getCondition());
+        for (const llvm::Instruction &inst : block) {
+          if (const auto *sel = llvm::dyn_cast<llvm::SelectInst>(&inst)) {
+            if (sel->getType()->isPointerTy())
+              (void)resolveBranchCondition(function, *sel->getCondition(), sel);
+          }
+        }
+        const llvm::Instruction *term = block.getTerminator();
+        if (const auto *br = llvm::dyn_cast<llvm::BranchInst>(term)) {
+          if (br->isConditional())
+            (void)resolveBranchCondition(function, *br->getCondition(), br);
+        } else if (const auto *sw = llvm::dyn_cast<llvm::SwitchInst>(term)) {
+          if (sw->getNumCases() <= 16) {
+            for (const auto &c : sw->cases())
+              (void)resolveSwitchCaseCondition(function, *sw->getCondition(),
+                                               c.getCaseValue(), sw);
+          }
+        }
       }
     }
+
+    // Populate call-site formal-to-actual condition substitutions for general
+    // interprocedural ROBDD path sensitivity across multi-call-site & recursive
+    // functions.
+    populateCallCondSubsts();
 
     for (const llvm::Function &function : module) {
       valueId(function);
@@ -477,23 +514,71 @@ struct BootstrapAA::Impl {
 
     for (const llvm::Function &function : module) {
       for (const llvm::BasicBlock &block : function) {
-        const auto *br =
-            llvm::dyn_cast<llvm::BranchInst>(block.getTerminator());
+        const llvm::Instruction *term = block.getTerminator();
+        const auto *br = llvm::dyn_cast<llvm::BranchInst>(term);
+        const auto *sw = llvm::dyn_cast<llvm::SwitchInst>(term);
         Id br_cond_var = INVALID;
         bool br_cond_pol = true;
         if (br && br->isConditional())
           std::tie(br_cond_var, br_cond_pol) =
-              resolveBranchCondition(function, *br->getCondition());
+              resolveBranchCondition(function, *br->getCondition(), br);
 
-        const unsigned num_succ = block.getTerminator()->getNumSuccessors();
+        std::vector<Id> sw_case_conds;
+        if (sw && sw->getNumCases() <= 16) {
+          sw_case_conds.reserve(sw->getNumCases());
+          for (const auto &c : sw->cases())
+            sw_case_conds.push_back(resolveSwitchCaseCondition(
+                function, *sw->getCondition(), c.getCaseValue(), sw));
+        }
+
+        const unsigned num_succ = term->getNumSuccessors();
+        const Id term_site =
+            sites.count(term) ? sites.at(term) : INVALID;
         for (unsigned sidx = 0; sidx < num_succ; ++sidx) {
-          const llvm::BasicBlock *successor =
-              block.getTerminator()->getSuccessor(sidx);
+          const llvm::BasicBlock *successor = term->getSuccessor(sidx);
           Edge edge;
           edge.target = blocks.at(successor);
-          if (br && br->isConditional() && br_cond_var != INVALID) {
-            edge.cond_var = br_cond_var;
-            edge.cond_polarity = (sidx == 0) ? br_cond_pol : !br_cond_pol;
+          if (br && br->isConditional()) {
+            if (br_cond_var != INVALID) {
+              edge.cond_var = br_cond_var;
+              edge.cond_polarity = (sidx == 0) ? br_cond_pol : !br_cond_pol;
+            }
+            extractEdgePtrGuards(*br->getCondition(), sidx == 0, term_site,
+                                 edge.ptr_guards);
+          } else if (sw && sw->getNumCases() <= 16 && !sw_case_conds.empty()) {
+            if (sidx == 0) {
+              // Default edge: none of the explicit cases matched.
+              Id def_cond = INVALID;
+              for (Id cc : sw_case_conds) {
+                if (cc == INVALID) {
+                  def_cond = INVALID;
+                  break;
+                }
+                Id neg = program.addCondNot(cc);
+                def_cond = (def_cond == INVALID)
+                               ? neg
+                               : program.addCondAnd(def_cond, neg);
+              }
+              edge.cond_var = def_cond;
+              edge.cond_polarity = true;
+            } else {
+              const std::size_t cidx = sidx - 1;
+              if (cidx < sw_case_conds.size() &&
+                  sw_case_conds[cidx] != INVALID) {
+                Id case_cond = sw_case_conds[cidx];
+                // For compact switches (<= 8 cases), encode pairwise mutual
+                // exclusion so `case 0` directly refutes `x == 1` in ROBDDs.
+                if (sw_case_conds.size() <= 8) {
+                  for (std::size_t j = 0; j < sw_case_conds.size(); ++j) {
+                    if (j != cidx && sw_case_conds[j] != INVALID)
+                      case_cond = program.addCondAnd(
+                          case_cond, program.addCondNot(sw_case_conds[j]));
+                  }
+                }
+                edge.cond_var = case_cond;
+                edge.cond_polarity = true;
+              }
+            }
           }
           for (const llvm::Instruction &instruction : *successor) {
             const auto *phi = llvm::dyn_cast<llvm::PHINode>(&instruction);
@@ -610,6 +695,55 @@ struct BootstrapAA::Impl {
     field_objects[{&allocation, 0}] = id;
   }
 
+  void joinFoldedLeaf(Id base, std::uint64_t offset, const PointsToSet &pts) {
+    const std::uint64_t folded = program.foldOffset(base, offset);
+    const PointsToSet target_field = program.resolveField(base, folded, true);
+    if (target_field.isTop()) {
+      if (base < program.fields_of_base.size()) {
+        for (auto [foff, fid] : program.fields_of_base[base])
+          if (fid >= 2 && fid < program.objects.size() &&
+              program.objects[fid].bytes > 0)
+            program.objects[fid].initial.join(pts);
+      }
+      return;
+    }
+    for (Id fid : target_field.objects())
+      if (fid >= 2 && fid < program.objects.size() &&
+          program.objects[fid].bytes > 0)
+        program.objects[fid].initial.join(pts);
+  }
+
+  void fillAggregateType(Id base, llvm::Type *ty, std::uint64_t offset,
+                         const PointsToSet &leaf_pts,
+                         const llvm::DataLayout &layout) {
+    if (!ty)
+      return;
+    if (ty->isPointerTy()) {
+      joinFoldedLeaf(base, offset, leaf_pts);
+      return;
+    }
+    if (auto *st = llvm::dyn_cast<llvm::StructType>(ty)) {
+      if (!st->isSized())
+        return;
+      const llvm::StructLayout *sl = layout.getStructLayout(st);
+      for (unsigned i = 0; i < st->getNumElements(); ++i)
+        fillAggregateType(base, st->getElementType(i),
+                          offset + sl->getElementOffset(i), leaf_pts, layout);
+      return;
+    }
+    if (auto *at = llvm::dyn_cast<llvm::ArrayType>(ty)) {
+      if (at->getNumElements() == 0)
+        return;
+      llvm::Type *elem = at->getElementType();
+      if (!elem->isSized() || layout.getTypeAllocSize(elem) == 0)
+        return;
+      // Every element of `at` folds identically onto element 0 under
+      // `program.foldOffset`.
+      fillAggregateType(base, elem, offset, leaf_pts, layout);
+      return;
+    }
+  }
+
   void populateConstantAggregate(Id base, const llvm::Constant *c,
                                  std::uint64_t offset,
                                  const llvm::DataLayout &layout) {
@@ -617,25 +751,17 @@ struct BootstrapAA::Impl {
       return;
     llvm::Type *ty = c->getType();
     if (ty->isPointerTy()) {
-      const std::uint64_t folded = program.foldOffset(base, offset);
-      const PointsToSet target_field = program.resolveField(base, folded, true);
-      const PointsToSet pts = constantPoints(*c);
-      for (Id fid : target_field.objects())
-        if (fid >= 2 && fid < program.objects.size() &&
-            program.objects[fid].bytes > 0)
-          program.objects[fid].initial.join(pts);
+      joinFoldedLeaf(base, offset, constantPoints(*c));
       return;
     }
     if (llvm::isa<llvm::ConstantAggregateZero>(c)) {
       const PointsToSet null_or_top =
           null_may_be_valid ? PointsToSet::top() : PointsToSet(NULL_OBJECT);
-      const std::uint64_t span =
-          ty->isSized() ? layout.getTypeAllocSize(ty) : 0;
-      for (auto [foff, fid] : program.fields_of_base[base]) {
-        if (program.objects[fid].bytes > 0 && foff >= offset &&
-            (span == 0 || foff < offset + span))
-          program.objects[fid].initial.join(null_or_top);
-      }
+      fillAggregateType(base, ty, offset, null_or_top, layout);
+      return;
+    }
+    if (llvm::isa<llvm::UndefValue>(c)) {
+      fillAggregateType(base, ty, offset, PointsToSet::top(), layout);
       return;
     }
     if (const auto *cs = llvm::dyn_cast<llvm::ConstantStruct>(c)) {
@@ -654,12 +780,397 @@ struct BootstrapAA::Impl {
                                   offset + i * stride, layout);
       return;
     }
+    if (llvm::isa<llvm::ConstantDataSequential>(c))
+      return;
+    std::set<llvm::Type *> seen;
+    if (containsPointerType(ty, seen))
+      fillAggregateType(base, ty, offset, PointsToSet::top(), layout);
   }
 
-  // Canonicalize a branch condition i1 Value into (cond_var, polarity).
-  std::pair<Id, bool> resolveBranchCondition(const llvm::Function &function,
-                                             const llvm::Value &cond) {
+  bool isNonEscapingDirectGlobal(const llvm::GlobalVariable *gv) const {
+    if (!gv)
+      return false;
+    if (gv->isConstant())
+      return true;
+    if (module_has_ctors || !gv->hasLocalLinkage() ||
+        gv->isExternallyInitialized())
+      return false;
+    for (const llvm::User *u : gv->users()) {
+      if (const auto *ld = llvm::dyn_cast<llvm::LoadInst>(u)) {
+        if (ld->getPointerOperand() != gv || ld->isVolatile())
+          return false;
+      } else if (const auto *st = llvm::dyn_cast<llvm::StoreInst>(u)) {
+        if (st->getPointerOperand() != gv || st->getValueOperand() == gv ||
+            st->isVolatile())
+          return false;
+      } else {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  const std::set<const llvm::Function *> &
+  getGlobalMutatingFuncs(const llvm::GlobalVariable *gv) {
+    auto it = global_mutating_funcs.find(gv);
+    if (it != global_mutating_funcs.end())
+      return it->second;
+    std::set<const llvm::Function *> writers;
+    for (const llvm::User *u : gv->users()) {
+      if (const auto *st = llvm::dyn_cast<llvm::StoreInst>(u))
+        writers.insert(st->getFunction());
+    }
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (const llvm::Function &fn : module) {
+        if (fn.isDeclaration() || writers.count(&fn))
+          continue;
+        bool writes_gv = false;
+        for (const llvm::BasicBlock &bb : fn) {
+          for (const llvm::Instruction &inst : bb) {
+            const auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst);
+            if (!cb || !writesMemory(*cb))
+              continue;
+            const llvm::Function *callee = directCallee(*cb);
+            if (!callee || callee->isDeclaration() || writers.count(callee)) {
+              writes_gv = true;
+              break;
+            }
+          }
+          if (writes_gv)
+            break;
+        }
+        if (writes_gv) {
+          writers.insert(&fn);
+          changed = true;
+        }
+      }
+    }
+    return global_mutating_funcs.emplace(gv, std::move(writers)).first->second;
+  }
+
+  bool instMayClobberGlobal(const llvm::Instruction &inst,
+                            const llvm::GlobalVariable *gv,
+                            const std::set<const llvm::Function *> &writers) {
+    if (const auto *st = llvm::dyn_cast<llvm::StoreInst>(&inst))
+      return st->getPointerOperand() == gv;
+    if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+      if (!writesMemory(*cb))
+        return false;
+      const llvm::Function *callee = directCallee(*cb);
+      return !callee || callee->isDeclaration() || writers.count(callee);
+    }
+    return false;
+  }
+
+  // Sound CFG check: verifies that `ld` dominates `use_inst` inside the same
+  // function AND no path from `ld` to `use_inst` executes a store or call that
+  // may mutate `gv`. If false, `ld` may hold a stale value of `gv` and MUST NOT
+  // be canonicalized to the live global `gv`.
+  bool isGlobalLoadFreshAt(const llvm::LoadInst *ld,
+                           const llvm::Instruction *use_inst,
+                           const llvm::GlobalVariable *gv) {
+    if (!ld || !use_inst || !gv)
+      return false;
+    if (gv->isConstant())
+      return true;
+    const llvm::Function *fn = use_inst->getFunction();
+    if (ld->getFunction() != fn)
+      return false;
+    const auto &writers = getGlobalMutatingFuncs(gv);
+    if (writers.empty())
+      return true;
+
+    const llvm::BasicBlock *entry_bb = &fn->getEntryBlock();
+    const llvm::BasicBlock *use_bb = use_inst->getParent();
+    for (const llvm::Instruction *cur = use_inst->getPrevNode(); cur != nullptr;
+         cur = cur->getPrevNode()) {
+      if (cur == ld)
+        return true;
+      if (instMayClobberGlobal(*cur, gv, writers))
+        return false;
+    }
+    if (use_bb == entry_bb)
+      return false;
+
+    std::deque<const llvm::BasicBlock *> work;
+    std::set<const llvm::BasicBlock *> visited;
+    for (const llvm::BasicBlock *pred : llvm::predecessors(use_bb)) {
+      if (visited.insert(pred).second)
+        work.push_back(pred);
+    }
+    while (!work.empty()) {
+      const llvm::BasicBlock *bb = work.front();
+      work.pop_front();
+      bool found_ld = false;
+      for (auto it = bb->rbegin(); it != bb->rend(); ++it) {
+        const llvm::Instruction *cur = &*it;
+        if (cur == ld) {
+          found_ld = true;
+          break;
+        }
+        if (instMayClobberGlobal(*cur, gv, writers))
+          return false;
+      }
+      if (found_ld)
+        continue;
+      if (bb == entry_bb)
+        return false;
+      for (const llvm::BasicBlock *pred : llvm::predecessors(bb)) {
+        if (visited.insert(pred).second)
+          work.push_back(pred);
+      }
+    }
+    return true;
+  }
+
+  // Verify no instruction on any path from `fn`'s entry to `use_inst` may
+  // mutate `gv` (used when a caller's global load is forwarded via an Argument).
+  bool isGlobalUnmodifiedBefore(const llvm::Instruction *use_inst,
+                                const llvm::GlobalVariable *gv) {
+    if (!use_inst || !gv || gv->isConstant())
+      return true;
+    const auto &writers = getGlobalMutatingFuncs(gv);
+    if (writers.empty())
+      return true;
+    const llvm::Function *fn = use_inst->getFunction();
+    const llvm::BasicBlock *use_bb = use_inst->getParent();
+    for (const llvm::Instruction *cur = use_inst->getPrevNode(); cur != nullptr;
+         cur = cur->getPrevNode()) {
+      if (instMayClobberGlobal(*cur, gv, writers))
+        return false;
+    }
+    std::deque<const llvm::BasicBlock *> work;
+    std::set<const llvm::BasicBlock *> visited;
+    for (const llvm::BasicBlock *pred : llvm::predecessors(use_bb)) {
+      if (visited.insert(pred).second)
+        work.push_back(pred);
+    }
+    while (!work.empty()) {
+      const llvm::BasicBlock *bb = work.front();
+      work.pop_front();
+      for (const llvm::Instruction &cur : *bb) {
+        if (instMayClobberGlobal(cur, gv, writers))
+          return false;
+      }
+      for (const llvm::BasicBlock *pred : llvm::predecessors(bb)) {
+        if (visited.insert(pred).second)
+          work.push_back(pred);
+      }
+    }
+    (void)fn;
+    return true;
+  }
+
+  void recordKill(const llvm::Instruction *inst, Id cid) {
+    if (!inst || cid == INVALID)
+      return;
+    auto &vec = inst_kills_conditions[inst];
+    if (std::find(vec.begin(), vec.end(), cid) == vec.end())
+      vec.push_back(cid);
+  }
+
+  void recordEntryKill(const llvm::Function *fn, Id cid) {
+    if (!fn || cid == INVALID)
+      return;
+    auto fit = functions.find(fn);
+    if (fit == functions.end())
+      return;
+    auto &vec = program.functions[fit->second].entry_kills_conditions;
+    if (std::find(vec.begin(), vec.end(), cid) == vec.end())
+      vec.push_back(cid);
+  }
+
+  void recordGlobalCond(Id cid) {
+    if (cid == INVALID)
+      return;
+    auto &vec = program.global_conditions;
+    if (std::find(vec.begin(), vec.end(), cid) == vec.end())
+      vec.push_back(cid);
+  }
+
+  void recordParamCond(const llvm::Function *fn, ParamCondInfo info) {
+    if (!fn || info.cid == INVALID)
+      return;
+    auto &vec = param_conds[fn];
+    for (const auto &e : vec)
+      if (e.cid == info.cid)
+        return;
+    vec.push_back(info);
+  }
+
+  const llvm::Value *
+  canonicalizeOperand(const llvm::Value *v, const llvm::Instruction *use_inst,
+                      std::vector<const llvm::Instruction *> &kill_sites,
+                      std::vector<const llvm::Function *> &entry_kill_fns,
+                      bool &is_mutable_global) {
+    const llvm::Value *cur_v = v;
+    const llvm::Instruction *cur_use = use_inst;
+    std::vector<const llvm::Instruction *> intermediate_uses;
+    std::set<const llvm::Value *> visited;
+    while (cur_v && visited.insert(cur_v).second) {
+      if (const auto *arg = llvm::dyn_cast<llvm::Argument>(cur_v)) {
+        const llvm::Function *parent = arg->getParent();
+        auto fit = functions.find(parent);
+        if (!parent || parent->isDeclaration() || fit == functions.end() ||
+            fit->second == program.entry || recursive[fit->second] ||
+            parent->hasAddressTaken() || arg->hasByValAttr())
+          break;
+        const llvm::Value *shared_actual = nullptr;
+        const llvm::CallBase *single_call = nullptr;
+        std::vector<const llvm::CallBase *> all_calls;
+        bool ok = true;
+        for (const llvm::User *u : parent->users()) {
+          const auto *cb = llvm::dyn_cast<llvm::CallBase>(u);
+          if (!cb || directCallee(*cb) != parent ||
+              arg->getArgNo() >= cb->arg_size()) {
+            ok = false;
+            break;
+          }
+          all_calls.push_back(cb);
+          const llvm::Value *act = cb->getArgOperand(arg->getArgNo());
+          if (!shared_actual) {
+            shared_actual = act;
+            single_call = cb;
+          } else if (shared_actual != act) {
+            ok = false;
+            break;
+          }
+        }
+        if (!ok || !shared_actual)
+          break;
+        // If forwarding a mutable global load across multiple call sites, only
+        // follow single-call chains (multi-call freshness requires checking
+        // every call site individually).
+        if (all_calls.size() == 1) {
+          intermediate_uses.push_back(cur_use);
+          cur_use = single_call;
+        } else {
+          cur_use = nullptr;
+        }
+        cur_v = shared_actual;
+        continue;
+      }
+      if (const auto *ld = llvm::dyn_cast<llvm::LoadInst>(cur_v);
+          ld && !ld->isVolatile()) {
+        if (const auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(
+                ld->getPointerOperand()->stripPointerCasts())) {
+          if (isNonEscapingDirectGlobal(gv)) {
+            bool fresh = gv->isConstant();
+            if (!fresh && cur_use != nullptr &&
+                isGlobalLoadFreshAt(ld, cur_use, gv)) {
+              fresh = true;
+              for (const llvm::Instruction *iu : intermediate_uses) {
+                if (!isGlobalUnmodifiedBefore(iu, gv)) {
+                  fresh = false;
+                  break;
+                }
+              }
+            }
+            if (fresh) {
+              for (const llvm::User *u : gv->users()) {
+                if (const auto *st = llvm::dyn_cast<llvm::StoreInst>(u)) {
+                  kill_sites.push_back(st);
+                  is_mutable_global = true;
+                }
+              }
+              cur_v = gv;
+              break;
+            }
+          }
+        }
+      }
+      break;
+    }
+    if (const auto *ci = llvm::dyn_cast<llvm::Instruction>(cur_v))
+      kill_sites.push_back(ci);
+    else if (const auto *arg = llvm::dyn_cast<llvm::Argument>(cur_v))
+      entry_kill_fns.push_back(arg->getParent());
+    return cur_v;
+  }
+
+  Id internAtomicICmp(llvm::CmpInst::Predicate pred, const llvm::Value *lhs_raw,
+                      const llvm::Value *rhs_raw,
+                      const llvm::Instruction *use_inst, bool &polarity) {
+    std::vector<const llvm::Instruction *> kills;
+    std::vector<const llvm::Function *> entry_kills;
+    bool is_mutable_global = false;
+    const llvm::Value *lhs =
+        canonicalizeOperand(lhs_raw, use_inst, kills, entry_kills,
+                            is_mutable_global);
+    const llvm::Value *rhs =
+        canonicalizeOperand(rhs_raw, use_inst, kills, entry_kills,
+                            is_mutable_global);
+    switch (pred) {
+    case llvm::CmpInst::ICMP_NE:
+    case llvm::CmpInst::ICMP_SGE:
+    case llvm::CmpInst::ICMP_SGT:
+    case llvm::CmpInst::ICMP_UGE:
+    case llvm::CmpInst::ICMP_UGT:
+      pred = llvm::CmpInst::getInversePredicate(pred);
+      polarity = !polarity;
+      break;
+    default:
+      break;
+    }
+    if (pred == llvm::CmpInst::ICMP_EQ && rhs < lhs)
+      std::swap(lhs, rhs);
+    PredKey pk{nullptr, static_cast<unsigned>(pred), lhs, rhs};
+    auto it = icmp_conditions.find(pk);
+    Id cid = INVALID;
+    if (it != icmp_conditions.end()) {
+      cid = it->second;
+    } else {
+      cid = program.addCondition();
+      icmp_conditions.emplace(pk, cid);
+    }
+    for (const llvm::Instruction *ki : kills)
+      recordKill(ki, cid);
+    for (const llvm::Function *kf : entry_kills)
+      recordEntryKill(kf, cid);
+    if (is_mutable_global)
+      recordGlobalCond(cid);
+    // Record formal-argument parameter predicates for call-site substitution
+    // (skip `byval` arguments whose callee address is a fresh stack copy).
+    if (const auto *arg = llvm::dyn_cast<llvm::Argument>(lhs)) {
+      if (!arg->hasByValAttr()) {
+        if (const auto *c = llvm::dyn_cast<llvm::Constant>(rhs))
+          recordParamCond(arg->getParent(),
+                          {cid, arg->getArgNo(), false,
+                           static_cast<unsigned>(pred), true, c});
+      }
+    } else if (const auto *arg = llvm::dyn_cast<llvm::Argument>(rhs)) {
+      if (!arg->hasByValAttr()) {
+        if (const auto *c = llvm::dyn_cast<llvm::Constant>(lhs))
+          recordParamCond(arg->getParent(),
+                          {cid, arg->getArgNo(), false,
+                           static_cast<unsigned>(pred), false, c});
+      }
+    }
+    return cid;
+  }
+
+  Id resolveSwitchCaseCondition(const llvm::Function &function,
+                                const llvm::Value &switch_val,
+                                const llvm::ConstantInt *case_val,
+                                const llvm::Instruction *use_inst) {
     (void)function;
+    if (!case_val)
+      return INVALID;
+    bool pol = true;
+    return internAtomicICmp(llvm::CmpInst::ICMP_EQ, &switch_val, case_val,
+                            use_inst, pol);
+  }
+
+  // Canonicalize a branch/select i1 condition into a (CondNode ID, polarity)
+  // pair, supporting compound boolean operators (`xor`, `and`, `or`, `select`),
+  // normalized `icmp` predicates, and fresh-verified non-escaping globals.
+  std::pair<Id, bool>
+  resolveBranchCondition(const llvm::Function &function,
+                         const llvm::Value &cond,
+                         const llvm::Instruction *use_inst,
+                         unsigned depth = 0) {
     bool polarity = true;
     const llvm::Value *cur = &cond;
     while (const auto *bin = llvm::dyn_cast<llvm::BinaryOperator>(cur)) {
@@ -686,172 +1197,90 @@ struct BootstrapAA::Impl {
     if (llvm::isa<llvm::ConstantInt>(cur))
       return {INVALID, true};
 
-    auto recordKill = [&](const llvm::Instruction *inst, Id cid) {
-      if (!inst || cid == INVALID)
-        return;
-      auto &vec = inst_kills_conditions[inst];
-      if (std::find(vec.begin(), vec.end(), cid) == vec.end())
-        vec.push_back(cid);
+    auto applyPol = [&](std::pair<Id, bool> p) -> Id {
+      if (p.first == INVALID)
+        return INVALID;
+      return p.second ? p.first : program.addCondNot(p.first);
     };
 
-    auto recordEntryKill = [&](const llvm::Function *fn, Id cid) {
-      if (!fn || cid == INVALID)
-        return;
-      auto fit = functions.find(fn);
-      if (fit == functions.end())
-        return;
-      auto &vec = program.functions[fit->second].entry_kills_conditions;
-      if (std::find(vec.begin(), vec.end(), cid) == vec.end())
-        vec.push_back(cid);
-    };
-
-    auto recordGlobalCond = [&](Id cid) {
-      if (cid == INVALID)
-        return;
-      auto &vec = program.global_conditions;
-      if (std::find(vec.begin(), vec.end(), cid) == vec.end())
-        vec.push_back(cid);
-    };
-
-    // Sound cross-function operand canonicalization for interprocedural ROBDD
-    // path sensitivity:
-    //  1. Unique actual argument passed by all direct call sites to a
-    //     non-recursive, address-not-taken function.
-    //  2. Direct load from a non-escaping constant or local-linkage global
-    //     variable (recording all direct stores to that global as condition
-    //     kills and marking mutable globals for callback soundness).
-    auto isNonEscapingDirectGlobal = [&](const llvm::GlobalVariable *gv) {
-      if (!gv)
-        return false;
-      if (gv->isConstant())
-        return true;
-      if (module_has_ctors || !gv->hasLocalLinkage())
-        return false;
-      for (const llvm::User *u : gv->users()) {
-        if (const auto *ld = llvm::dyn_cast<llvm::LoadInst>(u)) {
-          if (ld->getPointerOperand() != gv)
-            return false;
-        } else if (const auto *st = llvm::dyn_cast<llvm::StoreInst>(u)) {
-          if (st->getPointerOperand() != gv)
-            return false;
-        } else {
-          return false;
-        }
-      }
-      return true;
-    };
-
-    auto canonicalizeOperand =
-        [&](const llvm::Value *v,
-            std::vector<const llvm::Instruction *> &kill_sites,
-            std::vector<const llvm::Function *> &entry_kill_fns,
-            bool &is_mutable_global) -> const llvm::Value * {
-      const llvm::Value *cur_v = v;
-      std::set<const llvm::Value *> visited;
-      while (cur_v && visited.insert(cur_v).second) {
-        if (const auto *arg = llvm::dyn_cast<llvm::Argument>(cur_v)) {
-          const llvm::Function *parent = arg->getParent();
-          auto fit = functions.find(parent);
-          if (!parent || parent->isDeclaration() || fit == functions.end() ||
-              recursive[fit->second] || parent->hasAddressTaken())
-            break;
-          const llvm::Value *shared_actual = nullptr;
-          bool ok = true;
-          for (const llvm::User *u : parent->users()) {
-            const auto *cb = llvm::dyn_cast<llvm::CallBase>(u);
-            if (!cb || directCallee(*cb) != parent ||
-                arg->getArgNo() >= cb->arg_size()) {
-              ok = false;
-              break;
-            }
-            const llvm::Value *act = cb->getArgOperand(arg->getArgNo());
-            if (!shared_actual)
-              shared_actual = act;
-            else if (shared_actual != act) {
-              ok = false;
-              break;
-            }
-          }
-          if (!ok || !shared_actual)
-            break;
-          cur_v = shared_actual;
-          continue;
-        }
-        if (const auto *ld = llvm::dyn_cast<llvm::LoadInst>(cur_v)) {
-          if (const auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(
-                  ld->getPointerOperand()->stripPointerCasts())) {
-            if (isNonEscapingDirectGlobal(gv)) {
-              for (const llvm::User *u : gv->users()) {
-                if (const auto *st = llvm::dyn_cast<llvm::StoreInst>(u)) {
-                  kill_sites.push_back(st);
-                  is_mutable_global = true;
-                }
-              }
-              cur_v = gv;
-              break;
-            }
+    if (depth < 8) {
+      if (const auto *bin = llvm::dyn_cast<llvm::BinaryOperator>(cur)) {
+        if (bin->getType()->isIntegerTy(1) &&
+            (bin->getOpcode() == llvm::Instruction::And ||
+             bin->getOpcode() == llvm::Instruction::Or)) {
+          auto l =
+              resolveBranchCondition(function, *bin->getOperand(0), use_inst,
+                                     depth + 1);
+          auto r =
+              resolveBranchCondition(function, *bin->getOperand(1), use_inst,
+                                     depth + 1);
+          const Id ln = applyPol(l);
+          const Id rn = applyPol(r);
+          if (ln != INVALID && rn != INVALID) {
+            const Id combined = (bin->getOpcode() == llvm::Instruction::And)
+                                    ? program.addCondAnd(ln, rn)
+                                    : program.addCondOr(ln, rn);
+            return {combined, polarity};
           }
         }
-        break;
+      } else if (const auto *sel = llvm::dyn_cast<llvm::SelectInst>(cur)) {
+        if (sel->getType()->isIntegerTy(1)) {
+          const auto *tc =
+              llvm::dyn_cast<llvm::ConstantInt>(sel->getTrueValue());
+          const auto *fc =
+              llvm::dyn_cast<llvm::ConstantInt>(sel->getFalseValue());
+          if (tc && tc->isOne()) {
+            // select c, true, b  ===  c || b
+            const Id cn = applyPol(resolveBranchCondition(
+                function, *sel->getCondition(), use_inst, depth + 1));
+            const Id bn = applyPol(resolveBranchCondition(
+                function, *sel->getFalseValue(), use_inst, depth + 1));
+            if (cn != INVALID && bn != INVALID)
+              return {program.addCondOr(cn, bn), polarity};
+          } else if (fc && fc->isZero()) {
+            // select c, b, false ===  c && b
+            const Id cn = applyPol(resolveBranchCondition(
+                function, *sel->getCondition(), use_inst, depth + 1));
+            const Id bn = applyPol(resolveBranchCondition(
+                function, *sel->getTrueValue(), use_inst, depth + 1));
+            if (cn != INVALID && bn != INVALID)
+              return {program.addCondAnd(cn, bn), polarity};
+          } else if (tc && tc->isZero()) {
+            // select c, false, b === !c && b
+            auto cp = resolveBranchCondition(function, *sel->getCondition(),
+                                             use_inst, depth + 1);
+            cp.second = !cp.second;
+            const Id cn = applyPol(cp);
+            const Id bn = applyPol(resolveBranchCondition(
+                function, *sel->getFalseValue(), use_inst, depth + 1));
+            if (cn != INVALID && bn != INVALID)
+              return {program.addCondAnd(cn, bn), polarity};
+          } else if (fc && fc->isOne()) {
+            // select c, b, true  === !c || b
+            auto cp = resolveBranchCondition(function, *sel->getCondition(),
+                                             use_inst, depth + 1);
+            cp.second = !cp.second;
+            const Id cn = applyPol(cp);
+            const Id bn = applyPol(resolveBranchCondition(
+                function, *sel->getTrueValue(), use_inst, depth + 1));
+            if (cn != INVALID && bn != INVALID)
+              return {program.addCondOr(cn, bn), polarity};
+          }
+        }
       }
-      if (const auto *ci = llvm::dyn_cast<llvm::Instruction>(cur_v))
-        kill_sites.push_back(ci);
-      else if (const auto *arg = llvm::dyn_cast<llvm::Argument>(cur_v))
-        entry_kill_fns.push_back(arg->getParent());
-      return cur_v;
-    };
+    }
 
     if (const auto *icmp = llvm::dyn_cast<llvm::ICmpInst>(cur)) {
-      llvm::CmpInst::Predicate pred = icmp->getPredicate();
-      std::vector<const llvm::Instruction *> kills;
-      std::vector<const llvm::Function *> entry_kills;
-      bool is_mutable_global = false;
-      const llvm::Value *lhs = canonicalizeOperand(
-          icmp->getOperand(0), kills, entry_kills, is_mutable_global);
-      const llvm::Value *rhs = canonicalizeOperand(
-          icmp->getOperand(1), kills, entry_kills, is_mutable_global);
-      // Normalize inverted predicates (ne -> !eq, sge -> !slt, etc.) so
-      // `if (x == 0)` and `if (x != 0)` share one boolean variable!
-      switch (pred) {
-      case llvm::CmpInst::ICMP_NE:
-      case llvm::CmpInst::ICMP_SGE:
-      case llvm::CmpInst::ICMP_SGT:
-      case llvm::CmpInst::ICMP_UGE:
-      case llvm::CmpInst::ICMP_UGT:
-        pred = llvm::CmpInst::getInversePredicate(pred);
-        polarity = !polarity;
-        break;
-      default:
-        break;
-      }
-      if (pred == llvm::CmpInst::ICMP_EQ && rhs < lhs)
-        std::swap(lhs, rhs);
-      // Canonicalized llvm::Value pointers are module-unique per Instruction /
-      // Argument / GlobalVariable / Constant, so module-global PredKey
-      // matching unifies caller and callee comparisons over shared values.
-      PredKey pk{nullptr, static_cast<unsigned>(pred), lhs, rhs};
-      auto it = icmp_conditions.find(pk);
-      Id cid = INVALID;
-      if (it != icmp_conditions.end()) {
-        cid = it->second;
-      } else {
-        cid = program.addCondition();
-        icmp_conditions.emplace(pk, cid);
-      }
-      for (const llvm::Instruction *ki : kills)
-        recordKill(ki, cid);
-      for (const llvm::Function *kf : entry_kills)
-        recordEntryKill(kf, cid);
-      if (is_mutable_global)
-        recordGlobalCond(cid);
+      const Id cid = internAtomicICmp(icmp->getPredicate(), icmp->getOperand(0),
+                                      icmp->getOperand(1), use_inst, polarity);
       return {cid, polarity};
     }
 
     std::vector<const llvm::Instruction *> kills;
     std::vector<const llvm::Function *> entry_kills;
     bool is_mutable_global = false;
-    const llvm::Value *canon_cur =
-        canonicalizeOperand(cur, kills, entry_kills, is_mutable_global);
+    const llvm::Value *canon_cur = canonicalizeOperand(
+        cur, use_inst, kills, entry_kills, is_mutable_global);
     auto it = value_conditions.find(canon_cur);
     Id cid = INVALID;
     if (it != value_conditions.end()) {
@@ -866,7 +1295,153 @@ struct BootstrapAA::Impl {
       recordEntryKill(kf, cid);
     if (is_mutable_global)
       recordGlobalCond(cid);
+    if (const auto *arg = llvm::dyn_cast<llvm::Argument>(canon_cur))
+      recordParamCond(arg->getParent(),
+                      {cid, arg->getArgNo(), true, 0, true, nullptr});
     return {cid, polarity};
+  }
+
+  void extractEdgePtrGuards(const llvm::Value &cond, bool taken_true,
+                            Id branch_site,
+                            std::vector<EdgePtrGuard> &out) {
+    bool pol = taken_true;
+    const llvm::Value *cur = &cond;
+    while (const auto *bin = llvm::dyn_cast<llvm::BinaryOperator>(cur)) {
+      if (bin->getOpcode() == llvm::Instruction::Xor) {
+        if (const auto *ci =
+                llvm::dyn_cast<llvm::ConstantInt>(bin->getOperand(1))) {
+          if (ci->isOne()) {
+            pol = !pol;
+            cur = bin->getOperand(0);
+            continue;
+          }
+        }
+        if (const auto *ci =
+                llvm::dyn_cast<llvm::ConstantInt>(bin->getOperand(0))) {
+          if (ci->isOne()) {
+            pol = !pol;
+            cur = bin->getOperand(1);
+            continue;
+          }
+        }
+      }
+      break;
+    }
+    const auto *icmp = llvm::dyn_cast<llvm::ICmpInst>(cur);
+    if (!icmp)
+      return;
+    const auto pred = icmp->getPredicate();
+    if (pred != llvm::CmpInst::ICMP_EQ && pred != llvm::CmpInst::ICMP_NE)
+      return;
+    const llvm::Value *lhs = icmp->getOperand(0);
+    const llvm::Value *rhs = icmp->getOperand(1);
+    if (!lhs->getType()->isPointerTy() || !rhs->getType()->isPointerTy())
+      return;
+    const bool is_eq = (pred == llvm::CmpInst::ICMP_EQ) ? pol : !pol;
+    auto singleConstObj = [&](const llvm::Value *v) -> Id {
+      const auto *c = llvm::dyn_cast<llvm::Constant>(v);
+      if (!c)
+        return INVALID;
+      const PointsToSet pts = constantPoints(*c);
+      if (pts.isTop() || pts.size() != 1)
+        return INVALID;
+      return *pts.begin();
+    };
+    const Id lobj = singleConstObj(lhs);
+    const Id robj = singleConstObj(rhs);
+    if (lobj == INVALID && robj != INVALID) {
+      const Id lval = valueId(*lhs);
+      if (lval != INVALID)
+        out.push_back({is_eq ? EdgeGuardKind::PointsTo
+                             : EdgeGuardKind::NotPointsTo,
+                       lval, robj, branch_site});
+    } else if (robj == INVALID && lobj != INVALID) {
+      const Id rval = valueId(*rhs);
+      if (rval != INVALID)
+        out.push_back({is_eq ? EdgeGuardKind::PointsTo
+                             : EdgeGuardKind::NotPointsTo,
+                       rval, lobj, branch_site});
+    } else if (lobj == INVALID && robj == INVALID) {
+      const Id lval = valueId(*lhs);
+      const Id rval = valueId(*rhs);
+      if (lval != INVALID && rval != INVALID && lval != rval)
+        out.push_back({is_eq ? EdgeGuardKind::Alias : EdgeGuardKind::NotAlias,
+                       lval, rval, branch_site});
+    }
+  }
+
+  void populateCallCondSubsts() {
+    for (const llvm::Function &fn : module) {
+      if (fn.isDeclaration())
+        continue;
+      for (const llvm::BasicBlock &bb : fn) {
+        for (const llvm::Instruction &inst : bb) {
+          const auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst);
+          if (!cb)
+            continue;
+          const llvm::Function *callee = directCallee(*cb);
+          if (!callee || callee->isDeclaration())
+            continue;
+          auto pit = param_conds.find(callee);
+          if (pit == param_conds.end() || pit->second.empty())
+            continue;
+          auto &subs = call_cond_substs[cb];
+          for (const ParamCondInfo &pc : pit->second) {
+            if (pc.arg_no >= cb->arg_size())
+              continue;
+            const llvm::Value *actual = cb->getArgOperand(pc.arg_no);
+            if (pc.is_bool_arg) {
+              if (const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(actual)) {
+                if (ci->getBitWidth() == 1)
+                  subs.push_back({pc.cid, INVALID, !ci->isZero()});
+              } else if (actual->getType()->isIntegerTy(1)) {
+                std::vector<const llvm::Instruction *> dummy_k;
+                std::vector<const llvm::Function *> dummy_ek;
+                bool dummy_g = false;
+                const llvm::Value *canon_act = canonicalizeOperand(
+                    actual, cb, dummy_k, dummy_ek, dummy_g);
+                auto vit = value_conditions.find(canon_act);
+                if (vit != value_conditions.end())
+                  subs.push_back({pc.cid, vit->second, true});
+              }
+              continue;
+            }
+            const auto pred = static_cast<llvm::CmpInst::Predicate>(pc.pred);
+            if (const auto *act_ci =
+                    llvm::dyn_cast<llvm::ConstantInt>(actual)) {
+              if (const auto *rhs_ci =
+                      llvm::dyn_cast_or_null<llvm::ConstantInt>(pc.const_rhs)) {
+                if (act_ci->getBitWidth() == rhs_ci->getBitWidth()) {
+                  const bool val =
+                      pc.arg_is_lhs
+                          ? llvm::ICmpInst::compare(act_ci->getValue(),
+                                                    rhs_ci->getValue(), pred)
+                          : llvm::ICmpInst::compare(rhs_ci->getValue(),
+                                                    act_ci->getValue(), pred);
+                  subs.push_back({pc.cid, INVALID, val});
+                }
+              }
+              continue;
+            }
+            if (!pc.const_rhs || actual->getType() != pc.const_rhs->getType())
+              continue;
+            // Non-constant actual: match against existing caller condition.
+            std::vector<const llvm::Instruction *> dummy_k;
+            std::vector<const llvm::Function *> dummy_ek;
+            bool dummy_g = false;
+            const llvm::Value *canon_act =
+                canonicalizeOperand(actual, cb, dummy_k, dummy_ek, dummy_g);
+            const llvm::Value *qlhs = pc.arg_is_lhs ? canon_act : pc.const_rhs;
+            const llvm::Value *qrhs = pc.arg_is_lhs ? pc.const_rhs : canon_act;
+            if (pred == llvm::CmpInst::ICMP_EQ && qrhs < qlhs)
+              std::swap(qlhs, qrhs);
+            auto iit = icmp_conditions.find({nullptr, pc.pred, qlhs, qrhs});
+            if (iit != icmp_conditions.end())
+              subs.push_back({pc.cid, iit->second, true});
+          }
+        }
+      }
+    }
   }
 
   Id addObject(const llvm::Value &allocation, Object object) {
@@ -878,8 +1453,9 @@ struct BootstrapAA::Impl {
 
   Id nullValue() {
     if (null_value == INVALID)
-      null_value =
-          program.addConstant(PointsToSet(NULL_OBJECT), "<null-value>");
+      null_value = program.addConstant(
+          null_may_be_valid ? PointsToSet::top() : PointsToSet(NULL_OBJECT),
+          "<null-value>");
     return null_value;
   }
 
@@ -926,27 +1502,60 @@ struct BootstrapAA::Impl {
       return {ap_off.getSExtValue(), true, 0};
 
     std::int64_t const_delta = 0;
+    bool delta_valid = true;
     std::uint64_t var_stride = 0;
+    auto addDelta = [&](std::int64_t step) {
+      if (!delta_valid)
+        return;
+      if ((step > 0 &&
+           const_delta > std::numeric_limits<std::int64_t>::max() - step) ||
+          (step < 0 &&
+           const_delta < std::numeric_limits<std::int64_t>::min() - step)) {
+        delta_valid = false;
+        return;
+      }
+      const_delta += step;
+    };
     for (auto gti = llvm::gep_type_begin(gep), gte = llvm::gep_type_end(gep);
          gti != gte; ++gti) {
       llvm::Value *idx = gti.getOperand();
       if (llvm::StructType *st = gti.getStructTypeOrNull()) {
         if (const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(idx)) {
           const llvm::StructLayout *sl = layout.getStructLayout(st);
-          const_delta +=
-              static_cast<std::int64_t>(sl->getElementOffset(ci->getZExtValue()));
+          const std::uint64_t elem_off =
+              sl->getElementOffset(ci->getZExtValue());
+          if (elem_off > static_cast<std::uint64_t>(
+                             std::numeric_limits<std::int64_t>::max()))
+            delta_valid = false;
+          else
+            addDelta(static_cast<std::int64_t>(elem_off));
         }
       } else {
         llvm::Type *elem = gti.getIndexedType();
         const std::uint64_t stride =
             elem && elem->isSized() ? layout.getTypeAllocSize(elem) : 0;
         if (const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(idx)) {
-          const_delta += ci->getSExtValue() * static_cast<std::int64_t>(stride);
+          if (stride > static_cast<std::uint64_t>(
+                           std::numeric_limits<std::int64_t>::max())) {
+            delta_valid = false;
+          } else {
+            const std::int64_t s = static_cast<std::int64_t>(stride);
+            const std::int64_t k = ci->getSExtValue();
+            if (s != 0 &&
+                (k > std::numeric_limits<std::int64_t>::max() / s ||
+                 k < std::numeric_limits<std::int64_t>::min() / s))
+              delta_valid = false;
+            else
+              addDelta(k * s);
+          }
         } else if (stride > 0) {
-          var_stride = stride;
+          var_stride =
+              (var_stride == 0) ? stride : std::gcd(var_stride, stride);
         }
       }
     }
+    if (!delta_valid)
+      return {0, false, 0};
     return {const_delta, false, var_stride};
   }
 
@@ -976,8 +1585,36 @@ struct BootstrapAA::Impl {
             result = PointsToSet::top();
           } else {
             result = PointsToSet{};
-            for (Id obj : base_pts.objects())
-              result.join(program.resolveField(obj, delta, known, stride));
+            for (Id obj : base_pts.objects()) {
+              const PointsToSet resolved =
+                  program.resolveField(obj, delta, known, stride);
+              result.join(resolved);
+              // Mark any object reached at a non-exact interior byte offset.
+              if ((delta != 0 || !known) && !resolved.isTop() && obj >= 2 &&
+                  obj < program.objects.size()) {
+                const Id b = program.baseOf(obj);
+                if (!program.objects[b].field_sensitive) {
+                  program.objects[obj].has_interior_pointer = true;
+                } else if (known) {
+                  const std::int64_t ts =
+                      static_cast<std::int64_t>(program.objects[obj].offset) +
+                      delta;
+                  if (ts >= 0) {
+                    const std::uint64_t folded =
+                        program.foldOffset(b, static_cast<std::uint64_t>(ts));
+                    for (Id ro : resolved.objects())
+                      if (ro >= 2 && ro < program.objects.size() &&
+                          (resolved.size() > 1 ||
+                           program.objects[ro].offset != folded))
+                        program.objects[ro].has_interior_pointer = true;
+                  }
+                } else {
+                  for (Id ro : resolved.objects())
+                    if (ro >= 2 && ro < program.objects.size())
+                      program.objects[ro].has_interior_pointer = true;
+                }
+              }
+            }
           }
         }
       }
@@ -1071,12 +1708,45 @@ struct BootstrapAA::Impl {
           (gep->isInBounds() || gep->hasAllZeroIndices())) {
         const auto *gep_op = llvm::cast<llvm::GEPOperator>(gep);
         auto [delta, known, stride] = analyzeGEP(*gep_op);
+        const llvm::Value *base_ptr = gep->getPointerOperand();
+        // Fold consecutive constant-offset `inbounds` GEP / BitCast chains
+        // inside the same function (e.g., clang -O0 lowering of `s.arr[i].f`)
+        // so forward solvers (`Steensgaard`, `OLF`, `Andersen`, `Tabulation`)
+        // match `GuardedSummary`'s symbolic offset accumulation without losing
+        // sub-array bounds precision.
+        if (known && stride == 0) {
+          std::set<const llvm::Value *> seen_chain{gep};
+          while (base_ptr && seen_chain.insert(base_ptr).second) {
+            if (const auto *bc = llvm::dyn_cast<llvm::BitCastInst>(base_ptr)) {
+              if (bc->getFunction() != &function)
+                break;
+              base_ptr = bc->getOperand(0);
+              continue;
+            }
+            const auto *prev_gep =
+                llvm::dyn_cast<llvm::GetElementPtrInst>(base_ptr);
+            if (!prev_gep || prev_gep->getFunction() != &function ||
+                !(prev_gep->isInBounds() || prev_gep->hasAllZeroIndices()))
+              break;
+            auto [pdelta, pknown, pstride] =
+                analyzeGEP(*llvm::cast<llvm::GEPOperator>(prev_gep));
+            if (!pknown || pstride != 0)
+              break;
+            if ((pdelta > 0 &&
+                 delta > std::numeric_limits<std::int64_t>::max() - pdelta) ||
+                (pdelta < 0 &&
+                 delta < std::numeric_limits<std::int64_t>::min() - pdelta))
+              break;
+            delta += pdelta;
+            base_ptr = prev_gep->getPointerOperand();
+          }
+        }
         if (known && delta == 0 && stride == 0) {
           i.opcode = Opcode::Copy;
-          i.operands = {valueId(*gep->getPointerOperand())};
+          i.operands = {valueId(*base_ptr)};
         } else {
           i.opcode = Opcode::Field;
-          i.operands = {valueId(*gep->getPointerOperand())};
+          i.operands = {valueId(*base_ptr)};
           i.field_offset = delta;
           i.field_known = known;
           i.field_array_stride = stride;
@@ -1088,6 +1758,8 @@ struct BootstrapAA::Impl {
         i.opcode = Opcode::Join;
         i.operands = {valueId(*select->getTrueValue()),
                       valueId(*select->getFalseValue())};
+        std::tie(i.select_cond_var, i.select_cond_polarity) =
+            resolveBranchCondition(function, *select->getCondition(), select);
       }
     } else if (llvm::isa<llvm::PHINode>(instruction)) {
       i.opcode = Opcode::Nop; // Simultaneous assignments are on incoming edges.
@@ -1117,7 +1789,7 @@ struct BootstrapAA::Impl {
     } else if (const auto *call =
                    llvm::dyn_cast<llvm::CallBase>(&instruction)) {
       const AllocationModel allocation = allocationModel(*call);
-      if (allocation.kind != AllocationKind::None) {
+      if (allocation.kind != AllocationKind::None && i.result != INVALID) {
         if (null_may_be_valid ||
             call->getType()->getPointerAddressSpace() != 0) {
           i.opcode = Opcode::Unknown;
@@ -1132,10 +1804,26 @@ struct BootstrapAA::Impl {
         i.opcode = Opcode::Nop;
       } else {
         const llvm::Function *callee = directCallee(*call);
-        if (returnsInteriorPointer(callee) && call->arg_size() != 0 &&
+        if (i.result != INVALID && returnsInteriorPointer(callee) &&
+            call->arg_size() != 0 &&
             call->getArgOperand(0)->getType()->isPointerTy()) {
+          Value tv;
+          tv.name = nameOf(instruction) + ".interior";
+          tv.function = functions.at(&function);
+          const Id tmp = program.addValue(std::move(tv));
+          if (value_to_llvm.size() <= tmp)
+            value_to_llvm.resize(tmp + 1, nullptr);
+          Instruction field_inst;
+          field_inst.opcode = Opcode::Field;
+          field_inst.result = tmp;
+          field_inst.operands = {valueId(*call->getArgOperand(0))};
+          field_inst.field_known = false;
+          field_inst.field_offset = 0;
+          field_inst.field_array_stride = 0;
+          program.append(functions.at(&function), blocks.at(&block),
+                         field_inst);
           i.opcode = Opcode::Join;
-          i.operands = {valueId(*call->getArgOperand(0)), nullValue()};
+          i.operands = {tmp, nullValue()};
           sites.emplace(&instruction, program.append(functions.at(&function),
                                                      blocks.at(&block), i));
           return;
@@ -1153,6 +1841,9 @@ struct BootstrapAA::Impl {
             i.indirect_target = valueId(*call->getCalledOperand());
           for (const llvm::Use &argument : call->args())
             i.operands.push_back(valueId(*argument));
+          auto csit = call_cond_substs.find(call);
+          if (csit != call_cond_substs.end())
+            i.cond_subst = csit->second;
           i.opaque_alternative = llvm::isa<llvm::InvokeInst>(call) ||
                                  llvm::isa<llvm::CallBrInst>(call);
         }
@@ -1262,12 +1953,80 @@ BootstrapAA::aliasesAllContexts(const llvm::Value &value,
       m_impl->queryValue(value), m_impl->querySite(site), point));
 }
 
+QueryResult BootstrapAA::objectPointsTo(Id object,
+                                        const llvm::Instruction &site,
+                                        const CallContext &context,
+                                        Point point) {
+  return m_impl->analysis->objectPointsTo(object, m_impl->querySite(site),
+                                          m_impl->context(context), point);
+}
+
+QueryResult BootstrapAA::objectPointsToAllContexts(
+    Id object, const llvm::Instruction &site, Point point) {
+  return m_impl->analysis->objectPointsToAllContexts(
+      object, m_impl->querySite(site), point);
+}
+
+BootstrapAA::LLVMAliasResult
+BootstrapAA::objectAliases(Id object, const llvm::Instruction &site,
+                           const CallContext &context, Point point) {
+  return m_impl->translateAliases(m_impl->analysis->objectAliases(
+      object, m_impl->querySite(site), m_impl->context(context), point));
+}
+
+BootstrapAA::LLVMAliasResult
+BootstrapAA::objectAliasesAllContexts(Id object, const llvm::Instruction &site,
+                                      Point point) {
+  return m_impl->translateAliases(m_impl->analysis->objectAliasesAllContexts(
+      object, m_impl->querySite(site), point));
+}
+
 void BootstrapAA::precomputeAll() { m_impl->analysis->precomputeAll(); }
+
+void BootstrapAA::precomputeForValues(
+    const std::vector<const llvm::Value *> &targets) {
+  std::vector<Id> ids;
+  ids.reserve(targets.size());
+  for (const llvm::Value *v : targets) {
+    if (!v)
+      throw std::invalid_argument("BootstrapAA: null value in precompute");
+    ids.push_back(m_impl->queryValue(*v));
+  }
+  m_impl->analysis->precomputeForValues(ids);
+}
+
+std::vector<std::size_t>
+BootstrapAA::clustersFor(const llvm::Value &value) const {
+  return m_impl->analysis->clustersFor(m_impl->queryValue(value));
+}
+
+std::vector<std::vector<const llvm::Value *>> BootstrapAA::clusters() const {
+  const auto &raw = m_impl->analysis->clusters();
+  std::vector<std::vector<const llvm::Value *>> out;
+  out.reserve(raw.size());
+  for (const auto &c : raw) {
+    std::vector<const llvm::Value *> vals;
+    vals.reserve(c.size());
+    for (Id id : c)
+      if (id < m_impl->value_to_llvm.size() && m_impl->value_to_llvm[id])
+        vals.push_back(m_impl->value_to_llvm[id]);
+    out.push_back(std::move(vals));
+  }
+  return out;
+}
 
 bool BootstrapAA::mayAlias(const llvm::Value &lhs, const llvm::Value &rhs,
                            const llvm::Instruction &site,
                            const CallContext &context) {
   return m_impl->analysis->mayAlias(
+      m_impl->queryValue(lhs), m_impl->queryValue(rhs), m_impl->querySite(site),
+      m_impl->context(context));
+}
+
+bool BootstrapAA::mustAlias(const llvm::Value &lhs, const llvm::Value &rhs,
+                            const llvm::Instruction &site,
+                            const CallContext &context) {
+  return m_impl->analysis->mustAlias(
       m_impl->queryValue(lhs), m_impl->queryValue(rhs), m_impl->querySite(site),
       m_impl->context(context));
 }

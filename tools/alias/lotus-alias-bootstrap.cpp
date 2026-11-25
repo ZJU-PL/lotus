@@ -47,6 +47,16 @@ llvm::cl::opt<bool> AdaptiveThreshold(
     "adaptive-threshold", llvm::cl::init(true),
     llvm::cl::desc("Adapt the Andersen threshold from observed refinement"),
     llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<bool> AdaptiveGlobalEscalation(
+    "adaptive-global-escalation", llvm::cl::init(false),
+    llvm::cl::desc("Escalate threshold globally upon a rejected partition "
+                   "(false = per-partition rejection only)"),
+    llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<unsigned> HybridTabulationMaxCluster(
+    "hybrid-tabulation-max-cluster", llvm::cl::init(0),
+    llvm::cl::desc("Hybrid mode: use tabulation solver for clusters of size <= N "
+                   "(0 disables)"),
+    llvm::cl::cat(BootstrapCategory));
 llvm::cl::opt<bool> OneLevelFlow(
     "one-level-flow", llvm::cl::init(false),
     llvm::cl::desc("Enable Das (2000) one-level-flow cascade stage between "
@@ -129,6 +139,8 @@ int main(int argc, char **argv) {
     }
     options.andersen_threshold = Threshold;
     options.adaptive_andersen_threshold = AdaptiveThreshold;
+    options.adaptive_global_threshold_escalation = AdaptiveGlobalEscalation;
+    options.hybrid_tabulation_max_cluster_size = HybridTabulationMaxCluster;
     options.enable_one_level_flow = OneLevelFlow;
     options.path_sensitive = PathSensitive || PathSensitiveInterproc;
     options.path_sensitive_interprocedural = PathSensitiveInterproc;
@@ -192,6 +204,8 @@ int main(int argc, char **argv) {
               afirst = false;
               av->printAsOperand(llvm::outs(), false);
             }
+            if (aliasRes.status == lotus::bootstrap::QueryStatus::ResourceLimit)
+              limited = true;
             if (aliasRes.may_alias_all)
               llvm::outs() << (afirst ? "*" : ", *");
             llvm::outs() << '}';

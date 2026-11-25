@@ -25,7 +25,8 @@ bool touches(const Program & /*program*/, const Slice &slice,
 Slice relevant(const Program &program, const ProgramIndex &index,
                const Sets &upper, const SteensgaardHierarchy &hierarchy,
                const ReachabilityInfo &reachability,
-               const std::vector<Id> &seeds, bool enabled) {
+               const std::vector<Id> &seeds, bool enabled,
+               const std::vector<Id> &seed_objects) {
   Slice result;
   result.values.assign(program.values.size(), !enabled);
   result.objects.assign(program.objects.size(), !enabled);
@@ -54,14 +55,26 @@ Slice relevant(const Program &program, const ProgramIndex &index,
   // Map hierarchy component -> store/havoc/memcopy sites whose address is in
   // that component, plus top-address sites.
   std::vector<std::vector<Id>> stores_by_comp(hierarchy.successors.size());
+  std::vector<std::vector<Id>> stores_by_obj(program.objects.size());
   std::vector<Id> top_stores;
   for (Id site : index.store_sites) {
     const Instruction &i = *index.by_site[site].inst;
     const Id addr = i.operands[0];
-    if (addr == INVALID || valueOf(program, upper, addr).isTop())
+    if (addr == INVALID || valueOf(program, upper, addr).isTop()) {
       top_stores.push_back(site);
-    else
+    } else {
       stores_by_comp[hierarchy.value_components[addr]].push_back(site);
+      if (i.write_bytes != 0) {
+        const PointsToSet pts = valueOf(program, upper, addr);
+        for (Id o : pts.objects()) {
+          if (!isMemory(program.objects[o]))
+            continue;
+          for (Id fo : program.overlappingFields(o, i.write_bytes))
+            if (fo != o && isMemory(program.objects[fo]))
+              stores_by_obj[fo].push_back(site);
+        }
+      }
+    }
   }
   std::vector<std::vector<Id>> havocs_by_comp(hierarchy.successors.size());
   std::vector<std::vector<Id>> havocs_by_obj(program.objects.size());
@@ -144,6 +157,16 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     markHigherComponent(hierarchy.value_components[value]);
   };
 
+  std::vector<bool> fn_relevant_propagated(program.functions.size(), false);
+  std::deque<Id> fn_work;
+  auto markFuncRelevant = [&](Id f) {
+    if (f < program.functions.size() && !fn_relevant_propagated[f]) {
+      fn_relevant_propagated[f] = true;
+      result.relevant_functions[f] = true;
+      fn_work.push_back(f);
+    }
+  };
+
   bool activated_top_memory_ops = false;
   auto needObject = [&](Id object) {
     if (object < 2 || object >= program.objects.size() ||
@@ -157,8 +180,10 @@ Slice relevant(const Program &program, const ProgramIndex &index,
       relevantHigher[ocomp] = true;
       higher_work.push_back(ocomp);
     }
-    for (Id alloc_site : allocs_by_base[program.baseOf(object)])
+    for (Id alloc_site : allocs_by_base[program.baseOf(object)]) {
       markInst(alloc_site);
+      markFuncRelevant(index.by_site[alloc_site].function);
+    }
   };
 
   auto needMemory = [&](const PointsToSet &set) {
@@ -181,7 +206,15 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     markInst(site);
     needValue(i.operands[0]);
     needValue(i.operands[1]);
-    needMemory(valueOf(program, upper, i.operands[0]));
+    const PointsToSet pts = valueOf(program, upper, i.operands[0]);
+    needMemory(pts);
+    if (i.write_bytes != 0 && !pts.isTop()) {
+      for (Id o : pts.objects())
+        if (isMemory(program.objects[o]))
+          for (Id fo : program.overlappingFields(o, i.write_bytes))
+            if (fo != o)
+              needObject(fo);
+    }
   };
 
   auto processHavoc = [&](Id site) {
@@ -260,16 +293,8 @@ Slice relevant(const Program &program, const ProgramIndex &index,
 
   for (Id v : seeds)
     needValue(v);
-
-  std::vector<bool> fn_relevant_propagated(program.functions.size(), false);
-  std::deque<Id> fn_work;
-  auto markFuncRelevant = [&](Id f) {
-    if (f < program.functions.size() && !fn_relevant_propagated[f]) {
-      fn_relevant_propagated[f] = true;
-      result.relevant_functions[f] = true;
-      fn_work.push_back(f);
-    }
-  };
+  for (Id o : seed_objects)
+    needObject(o);
 
   while (!value_work.empty() || !object_work.empty() || !higher_work.empty() ||
          !fn_work.empty()) {
@@ -388,6 +413,10 @@ Slice relevant(const Program &program, const ProgramIndex &index,
           markFuncRelevant(index.by_site[site].function);
           needValue(ci.indirect_target);
         }
+      }
+      for (Id site : stores_by_obj[obj]) {
+        processStore(site);
+        markFuncRelevant(index.by_site[site].function);
       }
       for (Id site : havocs_by_obj[obj]) {
         processHavoc(site);

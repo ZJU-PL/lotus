@@ -52,8 +52,14 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
       for (Id o : slice.object_list)
         store_one(o, rhs, bytes);
     } else {
-      for (Id o : address.objects())
+      for (Id o : address.objects()) {
         store_one(o, rhs, bytes);
+        if (bytes != 0 && isMemory(program.objects[o])) {
+          for (Id fo : program.overlappingFields(o, bytes))
+            if (fo != o)
+              store_one(fo, PointsToSet::top(), 0);
+        }
+      }
     }
   };
 
@@ -133,33 +139,38 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
               if (!slice.objects[fd])
                 continue;
               const Object &fd_info = program.objects[fd];
-              const std::int64_t rel =
-                  static_cast<std::int64_t>(fd_info.offset) -
-                  static_cast<std::int64_t>(program.objects[od].offset);
-              const bool full_cover =
-                  i.write_bytes != 0 && rel >= 0 && fd_info.bytes > 0 &&
-                  static_cast<std::uint64_t>(rel) + fd_info.bytes <=
-                      i.write_bytes;
-              if (src_pts.isTop() || !full_cover) {
+              std::vector<std::int64_t> rels;
+              const bool dst_unaligned =
+                  od < index.has_unaligned_interior.size() &&
+                  index.has_unaligned_interior[od];
+              if (src_pts.isTop() || dst_unaligned ||
+                  !program.memCopyRelativeOffsets(od, fd, i.write_bytes,
+                                                  rels)) {
                 changed |= memory[fd].join(PointsToSet::top());
                 continue;
               }
               for (Id os : src_pts.objects()) {
-                if (!isMemory(program.objects[os])) {
+                if (!isMemory(program.objects[os]) ||
+                    (os < index.has_unaligned_interior.size() &&
+                     index.has_unaligned_interior[os])) {
                   changed |= memory[fd].join(PointsToSet::top());
                   continue;
                 }
-                const PointsToSet fs_pts = program.resolveField(os, rel, true);
-                if (fs_pts.isTop() || fs_pts.empty()) {
-                  changed |= memory[fd].join(PointsToSet::top());
-                  continue;
-                }
-                for (Id fs : fs_pts.objects()) {
-                  const Object &fs_info = program.objects[fs];
-                  if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes)
+                for (std::int64_t rel : rels) {
+                  const PointsToSet fs_pts =
+                      program.resolveField(os, rel, true);
+                  if (fs_pts.isTop() || fs_pts.empty()) {
                     changed |= memory[fd].join(PointsToSet::top());
-                  else
-                    changed |= memory[fd].join(memory[fs]);
+                    continue;
+                  }
+                  for (Id fs : fs_pts.objects()) {
+                    const Object &fs_info = program.objects[fs];
+                    if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes ||
+                        !slice.objects[fs])
+                      changed |= memory[fd].join(PointsToSet::top());
+                    else
+                      changed |= memory[fd].join(memory[fs]);
+                  }
                 }
               }
             }

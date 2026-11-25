@@ -20,12 +20,20 @@ public:
   virtual AliasResult queryAliases(Id value, Id site,
                                    const Context *context_path,
                                    Point point) = 0;
+  virtual QueryResult queryObject(Id object, Id site,
+                                  const Context *context_path, Point point) = 0;
+  virtual AliasResult queryObjectAliases(Id object, Id site,
+                                         const Context *context_path,
+                                         Point point) = 0;
+  virtual bool mustAlias(Id lhs, Id rhs, Id site,
+                         const Context *context_path) = 0;
   virtual const Statistics &statistics() const = 0;
 };
 
 std::unique_ptr<ClusterSolver> createTabulationSolver(
     const Program &program, const ProgramIndex &index, const Sets &upper,
-    const CallGraphInfo &call_graph, Slice slice, const Options &options);
+    const CallGraphInfo &call_graph, std::vector<Id> cluster_values,
+    Slice slice, const Options &options);
 
 std::unique_ptr<ClusterSolver> createGuardedSummarySolver(
     const Program &program, const ProgramIndex &index, const Sets &upper,

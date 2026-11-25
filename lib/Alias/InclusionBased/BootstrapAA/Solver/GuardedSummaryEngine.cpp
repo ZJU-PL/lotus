@@ -17,13 +17,13 @@ GuardedSummarySolver::depthOfSummaryKey(const SummaryKey &key) const {
   if (key.kind == SummaryKind::ExitMem || key.target.kind == ExprKind::Mem) {
     const Id comp = m_hierarchy.object_components[key.target.id];
     if (!m_hierarchy.successors[comp].empty()) {
-      std::size_t d = m_hierarchy.depth[comp] + 1;
+      std::size_t d = 0;
       for (Id succ : m_hierarchy.successors[comp])
-        d = std::max(d, m_hierarchy.depth[succ]);
+        d = std::max(d, dovetailDepthOfComp(succ));
       return d;
     }
-    return m_hierarchy.cyclic[comp] ? m_hierarchy.depth[comp]
-                                    : m_hierarchy.depth[comp] + 1;
+    return dovetailCyclicOfComp(comp) ? dovetailDepthOfComp(comp)
+                                      : dovetailDepthOfComp(comp) + 1;
   }
   if (key.kind == SummaryKind::ExitReturn) {
     std::size_t d = 0;
@@ -31,16 +31,16 @@ GuardedSummarySolver::depthOfSummaryKey(const SummaryKey &key) const {
       const Instruction &ri = *m_index.by_site[ret_site].inst;
       if (!ri.operands.empty() && ri.operands[0] != INVALID)
         d = std::max(
-            d, m_hierarchy.depth[m_hierarchy.value_components[ri.operands[0]]]);
+            d, dovetailDepthOfComp(m_hierarchy.value_components[ri.operands[0]]));
     }
     return d;
   }
   if (key.target.kind == ExprKind::Val && key.target.id != INVALID)
-    return m_hierarchy.depth[m_hierarchy.value_components[key.target.id]];
+    return dovetailDepthOfComp(m_hierarchy.value_components[key.target.id]);
   if (key.target.kind == ExprKind::Deref && key.target.id != INVALID) {
     const Id comp = m_hierarchy.value_components[key.target.id];
-    return m_hierarchy.cyclic[comp] ? m_hierarchy.depth[comp]
-                                    : m_hierarchy.depth[comp] + 1;
+    return dovetailCyclicOfComp(comp) ? dovetailDepthOfComp(comp)
+                                      : dovetailDepthOfComp(comp) + 1;
   }
   return 0;
 }
@@ -79,13 +79,15 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
           }
         }
       }
-      // Entry-block SSA dominance: a single-def, non-PHI value defined in the
-      // entry block (block 0) dominates every other block in the function.
+      // Dominator-based SSA canonicalization: a single-def, non-PHI local SSA
+      // value defined in a block that strictly dominates `qloc.block` has the
+      // identical backward summary at `qloc` as at `(defs[0], Point::After)`.
       if (latest_def == INVALID && !m_options.path_sensitive &&
           defs.size() == 1 && m_index.phi_defs[root_key.target.id].empty()) {
         const InstLocation &dloc = m_index.by_site[defs[0]];
-        if (dloc.function == qloc.function && dloc.block == 0 &&
-            qloc.block != 0 && m_reachability.reachable_site[defs[0]])
+        if (dloc.function == qloc.function && dloc.block != qloc.block &&
+            m_reachability.reachable_site[defs[0]] &&
+            m_index.blockDominates(qloc.function, dloc.block, qloc.block))
           latest_def = defs[0];
       }
       if (latest_def != INVALID) {
@@ -205,18 +207,20 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
   auto addSummaryEntry = [&](const SummaryKey &owner, SummaryEntry entry) {
     if (top_saturated.count(owner))
       return;
-    // Strip function-scoped formal-argument conditions when exporting
-    // ExitReturn/ExitMem summaries across the function's entry boundary.
-    // LocalPoint summaries keep the function's own argument conditions intact
-    // so upward caller splicing can correlate them at call sites before
-    // crossing the caller's entry boundary.
+    // Record function-scoped formal-argument conditions in `entry.killed` so
+    // caller paths carrying colliding recursive vars are quantified. Under
+    // `path_sensitive_interprocedural`, keep those conditions in `entry.path`
+    // so `applyCallCondSubst()` substitutes (or quantifies) them at each call
+    // site with the caller's actual arguments!
     if (owner.kind != SummaryKind::LocalPoint) {
-      entry.path = quantifyFuncEntryConditions(owner.function, entry.path);
-      if (m_options.path_sensitive_interprocedural &&
-          owner.function < m_program.functions.size())
-        addKilledConds(
-            entry.killed,
-            m_program.functions[owner.function].entry_kills_conditions);
+      if (m_options.path_sensitive_interprocedural) {
+        if (owner.function < m_program.functions.size())
+          addKilledConds(
+              entry.killed,
+              m_program.functions[owner.function].entry_kills_conditions);
+      } else {
+        entry.path = quantifyFuncEntryConditions(owner.function, entry.path);
+      }
     }
     if (!m_options.path_sensitive_interprocedural) {
       entry.path = BddManager::TRUE_NODE;
@@ -285,9 +289,13 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
             m_options.path_sensitive_interprocedural
                 ? applyKilledToPath(w.call_path, entry.killed)
                 : quantifyFuncConditions(w.callee, w.call_path);
+        const BddManager::NodeId callee_sub_p =
+            m_options.path_sensitive_interprocedural
+                ? applyCallCondSubst(w.callee, ci, entry.path)
+                : BddManager::TRUE_NODE;
         BddManager::NodeId combined_p =
             m_options.path_sensitive_interprocedural
-                ? m_bdd.makeAnd(caller_before_p, entry.path)
+                ? m_bdd.makeAnd(caller_before_p, callee_sub_p)
                 : caller_before_p;
         if (combined_g == GUARD_FALSE || m_bdd.isFalse(combined_p)) {
           if (m_bdd.isFalse(combined_p))
@@ -325,9 +333,13 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
             m_options.path_sensitive_interprocedural
                 ? applyKilledToPath(call_path, ce.killed)
                 : quantifyFuncConditions(callee, call_path);
+        const BddManager::NodeId callee_sub_p =
+            m_options.path_sensitive_interprocedural
+                ? applyCallCondSubst(callee, ci, ce.path)
+                : BddManager::TRUE_NODE;
         BddManager::NodeId combined_p =
             m_options.path_sensitive_interprocedural
-                ? m_bdd.makeAnd(caller_before_p, ce.path)
+                ? m_bdd.makeAnd(caller_before_p, callee_sub_p)
                 : caller_before_p;
         if (combined_g == GUARD_FALSE || m_bdd.isFalse(combined_p)) {
           if (m_bdd.isFalse(combined_p))
@@ -360,9 +372,13 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
             m_options.path_sensitive_interprocedural
                 ? applyKilledToPath(call_path, ce.killed)
                 : quantifyFuncConditions(callee, call_path);
+        const BddManager::NodeId callee_sub_p =
+            m_options.path_sensitive_interprocedural
+                ? applyCallCondSubst(callee, ci, ce.path)
+                : BddManager::TRUE_NODE;
         BddManager::NodeId combined_p =
             m_options.path_sensitive_interprocedural
-                ? m_bdd.makeAnd(caller_before_p, ce.path)
+                ? m_bdd.makeAnd(caller_before_p, callee_sub_p)
                 : caller_before_p;
         if (combined_g == GUARD_FALSE || m_bdd.isFalse(combined_p)) {
           if (m_bdd.isFalse(combined_p))
@@ -725,7 +741,7 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
       BddManager::NodeId next_path = cur_p;
       if (m_options.path_sensitive && edge.cond_var != INVALID) {
         const BddManager::NodeId lit =
-            m_bdd.literal(edge.cond_var, edge.cond_polarity);
+            evalCondNode(edge.cond_var, edge.cond_polarity);
         next_path = m_bdd.makeAnd(next_path, lit);
         if (m_bdd.isFalse(next_path)) {
           ++m_stats.path_infeasible_prunes;
@@ -735,10 +751,17 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
 
       const Id pred_site =
           pb.instructions.empty() ? INVALID : pb.instructions.back().id;
+      const Id guard_site =
+          pred_site != INVALID ? pred_site : block_insts[0].id;
+      const Point guard_point =
+          pred_site != INVALID ? Point::After : Point::Before;
+      const GuardId next_guard = applyEdgePtrGuards(
+          edge, guard_site, guard_point, cur_g, target_depth);
+      if (next_guard == GUARD_FALSE)
+        continue;
       std::vector<SummaryEntry> after_phi;
-      applyPhiBackward(edge, cur_q, cur_g, next_path, target_depth,
-                       pred_site != INVALID ? pred_site : block_insts[0].id,
-                       after_phi);
+      applyPhiBackward(edge, cur_q, next_guard, next_path, target_depth,
+                       guard_site, after_phi);
 
       for (const SummaryEntry &pe : after_phi) {
         if (pb.instructions.empty()) {
@@ -805,18 +828,25 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
                 if (m_options.path_sensitive && pedge.cond_var != INVALID) {
                   ppath = m_bdd.makeAnd(
                       ppath,
-                      m_bdd.literal(pedge.cond_var, pedge.cond_polarity));
+                      evalCondNode(pedge.cond_var, pedge.cond_polarity));
                   if (m_bdd.isFalse(ppath)) {
                     ++m_stats.path_infeasible_prunes;
                     continue;
                   }
                 }
+                const bool p_empty = ppblock.instructions.empty();
+                const Id pguard_site = p_empty
+                                           ? item.pos.site
+                                           : ppblock.instructions.back().id;
+                const Point pguard_point =
+                    p_empty ? Point::Before : Point::After;
+                const GuardId pguard = applyEdgePtrGuards(
+                    pedge, pguard_site, pguard_point, cg, target_depth);
+                if (pguard == GUARD_FALSE)
+                  continue;
                 std::vector<SummaryEntry> pphi;
-                applyPhiBackward(pedge, cq, cg, ppath, target_depth,
-                                 ppblock.instructions.empty()
-                                     ? item.pos.site
-                                     : ppblock.instructions.back().id,
-                                 pphi);
+                applyPhiBackward(pedge, cq, pguard, ppath, target_depth,
+                                 pguard_site, pphi);
                 for (const SummaryEntry &ppe : pphi) {
                   if (!ppblock.instructions.empty()) {
                     enqueue(item.owner,
@@ -855,6 +885,185 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
 // to `entry` (computing both resolved PointsToSet and entry-level anchor set A,
 // carrying ROBDD path constraints upward when `path_sensitive_interprocedural`
 // is enabled).
+PointsToSet GuardedSummarySolver::computeFsciExpr(
+    const Expr &target, Id site, Point point, std::set<Expr> *entry_anchors,
+    bool *path_pruned_out) {
+  if (path_pruned_out)
+    *path_pruned_out = false;
+  if (!m_reachability.reachable_site[site])
+    return PointsToSet{};
+  const Id start_fn = m_index.by_site[site].function;
+  if (!m_fs_reachable_function[start_fn])
+    return PointsToSet{};
+
+  ++m_stats.fsci_queries;
+
+  const bool track_inter_path = m_options.path_sensitive_interprocedural;
+  bool pruned_any_path = false;
+  PointsToSet result;
+  std::deque<std::tuple<Id, Expr, BddManager::NodeId>> processing;
+  std::map<std::pair<Id, Expr>, std::vector<BddManager::NodeId>> processed;
+
+  auto pushFrontier = [&](Id fn, const Expr &e, BddManager::NodeId p) {
+    if (m_bdd.isFalse(p)) {
+      pruned_any_path = true;
+      ++m_stats.path_infeasible_prunes;
+      return;
+    }
+    if (!track_inter_path)
+      p = BddManager::TRUE_NODE;
+    if (fn == m_program.entry) {
+      if (entry_anchors)
+        entry_anchors->insert(e);
+      evaluateAtEntry(e, result);
+      if (e.isTerminal())
+        return;
+    } else if (e.isTerminal() && m_bdd.isTrue(p)) {
+      if (entry_anchors)
+        entry_anchors->insert(e);
+      evaluateAtEntry(e, result);
+      return;
+    }
+    auto &seen = processed[{fn, e}];
+    for (BddManager::NodeId sp : seen)
+      if (m_bdd.isTrue(sp) || sp == p)
+        return;
+    if (seen.size() >= m_options.max_guards_per_state) {
+      p = BddManager::TRUE_NODE;
+      ++m_stats.guards_widened;
+      for (BddManager::NodeId sp : seen)
+        if (m_bdd.isTrue(sp))
+          return;
+    }
+    if (m_bdd.isTrue(p))
+      seen.clear();
+    seen.push_back(p);
+    processing.emplace_back(fn, e, p);
+  };
+
+  SummaryKey local_key{start_fn, SummaryKind::LocalPoint, target, site, point};
+  const std::size_t prunes_before = m_stats.path_infeasible_prunes;
+  const auto local_entries = computeSummary(local_key);
+  if (m_stats.path_infeasible_prunes > prunes_before)
+    pruned_any_path = true;
+  for (const SummaryEntry &se : local_entries) {
+    if (!isGuardSatisfiable(se.guard, nullptr)) {
+      if (m_options.path_sensitive)
+        pruned_any_path = true;
+      continue;
+    }
+    pushFrontier(start_fn, se.source, se.path);
+  }
+
+  while (!processing.empty()) {
+    auto [h, q, cur_path] = std::move(processing.front());
+    processing.pop_front();
+    tick();
+
+    for (Id call_site : m_index.incoming_calls[h]) {
+      if (!m_reachability.reachable_site[call_site])
+        continue;
+      const InstLocation &cloc = m_index.by_site[call_site];
+      const Id g = cloc.function;
+      if (!m_fs_reachable_function[g])
+        continue;
+      const Instruction &ci = *cloc.inst;
+
+      if (ci.callee == INVALID && ci.indirect_target != INVALID) {
+        bool exact = true;
+        const PointsToSet tpts = evalGuardPointer(ci.indirect_target, call_site,
+                                                  nullptr, false, exact);
+        const Targets ct = callees(m_program, ci, tpts);
+        if (!ct.functions.count(h))
+          continue;
+      }
+
+      const BddManager::NodeId sub_path =
+          track_inter_path ? applyCallCondSubst(h, ci, cur_path)
+                           : BddManager::TRUE_NODE;
+      if (m_bdd.isFalse(sub_path)) {
+        pruned_any_path = true;
+        ++m_stats.path_infeasible_prunes;
+        continue;
+      }
+
+      if (q.isTerminal()) {
+        if (!track_inter_path || m_bdd.isTrue(sub_path)) {
+          if (entry_anchors)
+            entry_anchors->insert(q);
+          evaluateAtEntry(q, result);
+          continue;
+        }
+        SummaryKey pk{g, SummaryKind::LocalPoint, Expr::makeNull(), call_site,
+                      Point::Before};
+        const auto path_entries = computeSummary(pk);
+        for (const SummaryEntry &se : path_entries) {
+          if (!isGuardSatisfiable(se.guard, nullptr))
+            continue;
+          const BddManager::NodeId lifted =
+              applyKilledToPath(sub_path, se.killed);
+          const BddManager::NodeId combined_p = m_bdd.makeAnd(lifted, se.path);
+          pushFrontier(g, q, combined_p);
+        }
+        continue;
+      }
+
+      std::vector<SummaryEntry> caller_exprs;
+      substituteCalleeExpr(h, ci, q, 0, true, 0, GUARD_TRUE, sub_path,
+                           caller_exprs);
+      for (const SummaryEntry &ce : caller_exprs) {
+        if (ce.source.isTerminal()) {
+          if (track_inter_path && !m_bdd.isTrue(sub_path)) {
+            SummaryKey pk{g, SummaryKind::LocalPoint, Expr::makeNull(),
+                          call_site, Point::Before};
+            const auto path_entries = computeSummary(pk);
+            for (const SummaryEntry &se : path_entries) {
+              if (!isGuardSatisfiable(se.guard, nullptr))
+                continue;
+              const BddManager::NodeId lifted =
+                  applyKilledToPath(sub_path, se.killed);
+              pushFrontier(g, ce.source, m_bdd.makeAnd(lifted, se.path));
+            }
+          } else {
+            if (entry_anchors)
+              entry_anchors->insert(ce.source);
+            evaluateAtEntry(ce.source, result);
+          }
+          continue;
+        }
+        // Algorithm 3 line 11 (`Retain`): if `g` cannot modify `Mem(obj)` and
+        // no interprocedural path condition needs checking inside `g`, skip!
+        if (ce.source.kind == ExprKind::Mem &&
+            !canFunctionModifyObj(g, ce.source.id) &&
+            (!track_inter_path || m_bdd.isTrue(sub_path))) {
+          ++m_stats.skipped_functions;
+          pushFrontier(g, ce.source, sub_path);
+          continue;
+        }
+        SummaryKey ck{g, SummaryKind::LocalPoint, ce.source, call_site,
+                      Point::Before};
+        const auto caller_entries = computeSummary(ck);
+        for (const SummaryEntry &se : caller_entries) {
+          if (!isGuardSatisfiable(se.guard, nullptr))
+            continue;
+          const BddManager::NodeId combined_p =
+              track_inter_path
+                  ? m_bdd.makeAnd(applyKilledToPath(sub_path, se.killed),
+                                  se.path)
+                  : BddManager::TRUE_NODE;
+          pushFrontier(g, se.source, combined_p);
+        }
+      }
+    }
+  }
+
+  if (path_pruned_out)
+    *path_pruned_out = result.empty() && pruned_any_path &&
+                       m_options.path_sensitive &&
+                       !isPathReachable(site, point, nullptr);
+  return result;
+}
+
 PointsToSet GuardedSummarySolver::computeFsci(Id val, Id site, Point point,
                                               std::set<Expr> *entry_anchors,
                                               bool *path_pruned_out) {
@@ -890,162 +1099,9 @@ PointsToSet GuardedSummarySolver::computeFsci(Id val, Id site, Point point,
                                     : valueOf(m_program, m_upper, val);
   }
   m_active_fsci.insert(fkey);
-  ++m_stats.fsci_queries;
-
-  const bool track_inter_path = m_options.path_sensitive_interprocedural;
-  bool pruned_any_path = false;
-  PointsToSet result;
-  std::deque<std::tuple<Id, Expr, BddManager::NodeId>> processing;
-  std::map<std::pair<Id, Expr>, std::vector<BddManager::NodeId>> processed;
-
-  auto pushFrontier = [&](Id fn, const Expr &e, BddManager::NodeId p) {
-    if (m_bdd.isFalse(p)) {
-      pruned_any_path = true;
-      ++m_stats.path_infeasible_prunes;
-      return;
-    }
-    if (!track_inter_path)
-      p = BddManager::TRUE_NODE;
-    // Crossing `fn`'s entry upward into callers: existentially quantify
-    // conditions scoped to a single activation of `fn` (e.g. `fn`'s own
-    // formal arguments) AFTER intra-`fn` path correlation has completed.
-    p = quantifyFuncEntryConditions(fn, p);
-    if (fn == m_program.entry) {
-      if (entry_anchors)
-        entry_anchors->insert(e);
-      evaluateAtEntry(e, result);
-      if (e.isTerminal())
-        return;
-    } else if (e.isTerminal() && m_bdd.isTrue(p)) {
-      if (entry_anchors)
-        entry_anchors->insert(e);
-      evaluateAtEntry(e, result);
-      return;
-    }
-    auto &seen = processed[{fn, e}];
-    for (BddManager::NodeId sp : seen)
-      if (m_bdd.isTrue(sp) || sp == p)
-        return;
-    if (seen.size() >= m_options.max_guards_per_state) {
-      p = BddManager::TRUE_NODE;
-      ++m_stats.guards_widened;
-      for (BddManager::NodeId sp : seen)
-        if (m_bdd.isTrue(sp))
-          return;
-    }
-    if (m_bdd.isTrue(p))
-      seen.clear();
-    seen.push_back(p);
-    processing.emplace_back(fn, e, p);
-  };
-
-  SummaryKey local_key{start_fn, SummaryKind::LocalPoint, Expr::makeVal(val),
-                       site, point};
-  const std::size_t prunes_before = m_stats.path_infeasible_prunes;
-  const auto local_entries = computeSummary(local_key);
-  if (m_stats.path_infeasible_prunes > prunes_before)
-    pruned_any_path = true;
-  for (const SummaryEntry &se : local_entries) {
-    if (!isGuardSatisfiable(se.guard, nullptr))
-      continue;
-    pushFrontier(start_fn, se.source, se.path);
-  }
-
-  while (!processing.empty()) {
-    auto [h, q, cur_path] = std::move(processing.front());
-    processing.pop_front();
-    tick();
-
-    for (Id call_site : m_index.incoming_calls[h]) {
-      if (!m_reachability.reachable_site[call_site])
-        continue;
-      const InstLocation &cloc = m_index.by_site[call_site];
-      const Id g = cloc.function;
-      if (!m_fs_reachable_function[g])
-        continue;
-      const Instruction &ci = *cloc.inst;
-
-      if (ci.callee == INVALID && ci.indirect_target != INVALID) {
-        bool exact = true;
-        const PointsToSet tpts = evalGuardPointer(ci.indirect_target, call_site,
-                                                  nullptr, false, exact);
-        const Targets ct = callees(m_program, ci, tpts);
-        if (!ct.functions.count(h))
-          continue;
-      }
-
-      if (q.isTerminal()) {
-        // Only reached when `track_inter_path && !m_bdd.isTrue(cur_path)`:
-        // quantify conditions killed along caller `g`'s path before conjoining
-        // with `g`'s path condition to `call_site`.
-        SummaryKey pk{g, SummaryKind::LocalPoint, Expr::makeNull(), call_site,
-                      Point::Before};
-        const auto path_entries = computeSummary(pk);
-        for (const SummaryEntry &se : path_entries) {
-          if (!isGuardSatisfiable(se.guard, nullptr))
-            continue;
-          const BddManager::NodeId lifted =
-              applyKilledToPath(cur_path, se.killed);
-          const BddManager::NodeId combined_p = m_bdd.makeAnd(lifted, se.path);
-          pushFrontier(g, q, combined_p);
-        }
-        continue;
-      }
-
-      std::vector<SummaryEntry> caller_exprs;
-      substituteCalleeExpr(h, ci, q, 0, true, 0, GUARD_TRUE, cur_path,
-                           caller_exprs);
-      for (const SummaryEntry &ce : caller_exprs) {
-        if (ce.source.isTerminal()) {
-          if (track_inter_path && !m_bdd.isTrue(cur_path)) {
-            SummaryKey pk{g, SummaryKind::LocalPoint, Expr::makeNull(),
-                          call_site, Point::Before};
-            const auto path_entries = computeSummary(pk);
-            for (const SummaryEntry &se : path_entries) {
-              if (!isGuardSatisfiable(se.guard, nullptr))
-                continue;
-              const BddManager::NodeId lifted =
-                  applyKilledToPath(cur_path, se.killed);
-              pushFrontier(g, ce.source, m_bdd.makeAnd(lifted, se.path));
-            }
-          } else {
-            if (entry_anchors)
-              entry_anchors->insert(ce.source);
-            evaluateAtEntry(ce.source, result);
-          }
-          continue;
-        }
-        // Algorithm 3 line 11 (`Retain`): if `g` cannot modify `Mem(obj)` and
-        // no interprocedural path condition needs checking inside `g`, skip!
-        if (ce.source.kind == ExprKind::Mem &&
-            !canFunctionModifyObj(g, ce.source.id) &&
-            (!track_inter_path || m_bdd.isTrue(cur_path))) {
-          ++m_stats.skipped_functions;
-          pushFrontier(g, ce.source, cur_path);
-          continue;
-        }
-        SummaryKey ck{g, SummaryKind::LocalPoint, ce.source, call_site,
-                      Point::Before};
-        const auto caller_entries = computeSummary(ck);
-        for (const SummaryEntry &se : caller_entries) {
-          if (!isGuardSatisfiable(se.guard, nullptr))
-            continue;
-          const BddManager::NodeId combined_p =
-              track_inter_path
-                  ? m_bdd.makeAnd(applyKilledToPath(cur_path, se.killed),
-                                  se.path)
-                  : BddManager::TRUE_NODE;
-          pushFrontier(g, se.source, combined_p);
-        }
-      }
-    }
-  }
-
+  PointsToSet result = computeFsciExpr(Expr::makeVal(val), site, point,
+                                       entry_anchors, path_pruned_out);
   m_active_fsci.erase(fkey);
-  if (path_pruned_out)
-    *path_pruned_out = result.empty() && pruned_any_path &&
-                       m_options.path_sensitive &&
-                       !isPathReachable(site, point, nullptr);
   return result;
 }
 
@@ -1099,7 +1155,7 @@ bool GuardedSummarySolver::isPathReachable(Id site, Point point,
         continue;
       if (!m_options.path_sensitive_interprocedural)
         return true;
-      frontier.insert(quantifyFuncEntryConditions(leaf_fn, se.path));
+      frontier.insert(se.path);
     }
     if (frontier.empty())
       return false;
@@ -1109,21 +1165,28 @@ bool GuardedSummarySolver::isPathReachable(Id site, Point point,
       tick();
       const Id call_site = (*ctx)[step - 1];
       prefix.pop_back();
-      const Id caller_fn = m_index.by_site[call_site].function;
+      const InstLocation &cloc = m_index.by_site[call_site];
+      const Id caller_fn = cloc.function;
+      const Id callee_fn = (step == ctx->size())
+                               ? leaf_fn
+                               : m_index.by_site[(*ctx)[step]].function;
+      const Instruction &ci = *cloc.inst;
       SummaryKey cpk{caller_fn, SummaryKind::LocalPoint, Expr::makeNull(),
                      call_site, Point::Before};
       const auto call_entries = computeSummary(cpk);
       std::set<BddManager::NodeId> next_frontier;
       for (BddManager::NodeId cur_path : frontier) {
+        const BddManager::NodeId sub_p =
+            applyCallCondSubst(callee_fn, ci, cur_path);
+        if (m_bdd.isFalse(sub_p))
+          continue;
         for (const SummaryEntry &se : call_entries) {
           if (!isGuardSatisfiable(se.guard, &prefix))
             continue;
-          const BddManager::NodeId lifted =
-              applyKilledToPath(cur_path, se.killed);
+          const BddManager::NodeId lifted = applyKilledToPath(sub_p, se.killed);
           const BddManager::NodeId combined = m_bdd.makeAnd(lifted, se.path);
           if (!m_bdd.isFalse(combined))
-            next_frontier.insert(
-                quantifyFuncEntryConditions(caller_fn, combined));
+            next_frontier.insert(combined);
         }
       }
       frontier = std::move(next_frontier);
@@ -1143,7 +1206,6 @@ bool GuardedSummarySolver::isPathReachable(Id site, Point point,
       return false;
     if (!m_options.path_sensitive_interprocedural)
       return true;
-    p = quantifyFuncEntryConditions(fn, p);
     if (fn == m_program.entry)
       return true;
     auto &seen = processed[fn];
@@ -1188,14 +1250,16 @@ bool GuardedSummarySolver::isPathReachable(Id site, Point point,
         if (!ct.functions.count(h))
           continue;
       }
+      const BddManager::NodeId sub_p = applyCallCondSubst(h, ci, cur_path);
+      if (m_bdd.isFalse(sub_p))
+        continue;
       SummaryKey cpk{g, SummaryKind::LocalPoint, Expr::makeNull(), call_site,
                      Point::Before};
       const auto call_entries = computeSummary(cpk);
       for (const SummaryEntry &se : call_entries) {
         if (!isGuardSatisfiable(se.guard, nullptr))
           continue;
-        const BddManager::NodeId lifted =
-            applyKilledToPath(cur_path, se.killed);
+        const BddManager::NodeId lifted = applyKilledToPath(sub_p, se.killed);
         if (pushNode(g, m_bdd.makeAnd(lifted, se.path)))
           return true;
       }
@@ -1208,6 +1272,162 @@ bool GuardedSummarySolver::isPathReachable(Id site, Point point,
 // anchors A by splicing summaries along exact context `ctx = [c_1, ..., c_k]`,
 // carrying ROBDD path formulas `con_b` upward when interprocedural path
 // sensitivity is enabled.
+QueryResult GuardedSummarySolver::computeFscsExpr(
+    const Expr &target, Id site, const Context &ctx, Point point,
+    std::set<Expr> *entry_anchors) {
+  if (!validateContext(site, ctx))
+    return {{}, QueryStatus::Unreachable};
+
+  const bool track_inter_path = m_options.path_sensitive_interprocedural;
+  bool pruned_any_path = false;
+  PointsToSet result;
+  std::set<std::pair<Expr, BddManager::NodeId>> frontier;
+
+  auto insertFrontier = [&](std::set<std::pair<Expr, BddManager::NodeId>> &dst,
+                            const Expr &e, BddManager::NodeId p,
+                            bool at_entry) {
+    if (m_bdd.isFalse(p)) {
+      pruned_any_path = true;
+      ++m_stats.path_infeasible_prunes;
+      return;
+    }
+    if (!track_inter_path)
+      p = BddManager::TRUE_NODE;
+    if (e.isTerminal() && (at_entry || m_bdd.isTrue(p))) {
+      if (entry_anchors)
+        entry_anchors->insert(e);
+      evaluateAtEntry(e, result);
+      return;
+    }
+    dst.emplace(e, p);
+  };
+
+  const Id leaf_fn = m_index.by_site[site].function;
+  SummaryKey local_key{leaf_fn, SummaryKind::LocalPoint, target, site, point};
+  const std::size_t prunes_before = m_stats.path_infeasible_prunes;
+  const auto local_entries = computeSummary(local_key);
+  if (m_stats.path_infeasible_prunes > prunes_before)
+    pruned_any_path = true;
+  for (const SummaryEntry &se : local_entries) {
+    if (!isGuardSatisfiable(se.guard, &ctx)) {
+      if (m_options.path_sensitive)
+        pruned_any_path = true;
+      continue;
+    }
+    insertFrontier(frontier, se.source, se.path, ctx.empty());
+  }
+
+  Context prefix = ctx;
+  for (std::size_t step = ctx.size(); step > 0 && !frontier.empty(); --step) {
+    tick();
+    const Id call_site = ctx[step - 1];
+    prefix.pop_back();
+    const InstLocation &cloc = m_index.by_site[call_site];
+    const Id caller_fn = cloc.function;
+    const Id callee_fn = (step == ctx.size())
+                             ? leaf_fn
+                             : m_index.by_site[ctx[step]].function;
+    const Instruction &ci = *cloc.inst;
+    const bool next_at_entry = (step == 1);
+
+    std::set<std::pair<Expr, BddManager::NodeId>> next_frontier;
+    for (const auto &[q, cur_path] : frontier) {
+      const BddManager::NodeId sub_path =
+          track_inter_path ? applyCallCondSubst(callee_fn, ci, cur_path)
+                           : BddManager::TRUE_NODE;
+      if (m_bdd.isFalse(sub_path)) {
+        pruned_any_path = true;
+        ++m_stats.path_infeasible_prunes;
+        continue;
+      }
+
+      if (q.isTerminal()) {
+        if (!track_inter_path || m_bdd.isTrue(sub_path)) {
+          if (entry_anchors)
+            entry_anchors->insert(q);
+          evaluateAtEntry(q, result);
+          continue;
+        }
+        SummaryKey pk{caller_fn, SummaryKind::LocalPoint, Expr::makeNull(),
+                      call_site, Point::Before};
+        const auto path_entries = computeSummary(pk);
+        for (const SummaryEntry &se : path_entries) {
+          if (!isGuardSatisfiable(se.guard, &prefix))
+            continue;
+          const BddManager::NodeId lifted =
+              applyKilledToPath(sub_path, se.killed);
+          insertFrontier(next_frontier, q, m_bdd.makeAnd(lifted, se.path),
+                         next_at_entry);
+        }
+        continue;
+      }
+
+      std::vector<SummaryEntry> caller_exprs;
+      substituteCalleeExpr(callee_fn, ci, q, 0, true, 0, GUARD_TRUE, sub_path,
+                           caller_exprs);
+      for (const SummaryEntry &ce : caller_exprs) {
+        if (ce.source.isTerminal()) {
+          if (track_inter_path && !m_bdd.isTrue(sub_path)) {
+            SummaryKey pk{caller_fn, SummaryKind::LocalPoint, Expr::makeNull(),
+                          call_site, Point::Before};
+            const auto path_entries = computeSummary(pk);
+            for (const SummaryEntry &se : path_entries) {
+              if (!isGuardSatisfiable(se.guard, &prefix))
+                continue;
+              const BddManager::NodeId lifted =
+                  applyKilledToPath(sub_path, se.killed);
+              insertFrontier(next_frontier, ce.source,
+                             m_bdd.makeAnd(lifted, se.path), next_at_entry);
+            }
+          } else {
+            if (entry_anchors)
+              entry_anchors->insert(ce.source);
+            evaluateAtEntry(ce.source, result);
+          }
+          continue;
+        }
+        if (ce.source.kind == ExprKind::Mem &&
+            !canFunctionModifyObj(caller_fn, ce.source.id) &&
+            (!track_inter_path || m_bdd.isTrue(sub_path))) {
+          ++m_stats.skipped_functions;
+          next_frontier.emplace(ce.source, sub_path);
+          continue;
+        }
+        SummaryKey ck{caller_fn, SummaryKind::LocalPoint, ce.source, call_site,
+                      Point::Before};
+        const auto caller_entries = computeSummary(ck);
+        for (const SummaryEntry &se : caller_entries) {
+          if (!isGuardSatisfiable(se.guard, &prefix))
+            continue;
+          const BddManager::NodeId combined_p =
+              track_inter_path
+                  ? m_bdd.makeAnd(applyKilledToPath(sub_path, se.killed),
+                                  se.path)
+                  : BddManager::TRUE_NODE;
+          insertFrontier(next_frontier, se.source, combined_p, next_at_entry);
+        }
+      }
+    }
+    frontier = std::move(next_frontier);
+  }
+
+  for (const auto &[q, cur_path] : frontier) {
+    if (m_bdd.isFalse(cur_path))
+      continue;
+    if (entry_anchors)
+      entry_anchors->insert(q);
+    evaluateAtEntry(q, result);
+  }
+
+  if (result.empty()) {
+    if (m_options.path_sensitive && pruned_any_path &&
+        !isPathReachable(site, point, &ctx))
+      return {{}, QueryStatus::Unreachable};
+    result = PointsToSet::top();
+  }
+  return {std::move(result), QueryStatus::Complete};
+}
+
 QueryResult GuardedSummarySolver::computeFscs(Id val, Id site,
                                               const Context &ctx, Point point,
                                               std::set<Expr> *entry_anchors) {
@@ -1239,144 +1459,9 @@ QueryResult GuardedSummarySolver::computeFscs(Id val, Id site,
   }
 
   m_active_fscs.insert(key);
-  const bool track_inter_path = m_options.path_sensitive_interprocedural;
-  bool pruned_any_path = false;
-  PointsToSet result;
-  std::set<std::pair<Expr, BddManager::NodeId>> frontier;
-
-  auto insertFrontier = [&](std::set<std::pair<Expr, BddManager::NodeId>> &dst,
-                            Id fn, const Expr &e, BddManager::NodeId p,
-                            bool at_entry) {
-    if (m_bdd.isFalse(p)) {
-      pruned_any_path = true;
-      ++m_stats.path_infeasible_prunes;
-      return;
-    }
-    if (!track_inter_path)
-      p = BddManager::TRUE_NODE;
-    p = quantifyFuncEntryConditions(fn, p);
-    if (e.isTerminal() && (at_entry || m_bdd.isTrue(p))) {
-      if (entry_anchors)
-        entry_anchors->insert(e);
-      evaluateAtEntry(e, result);
-      return;
-    }
-    dst.emplace(e, p);
-  };
-
-  const Id leaf_fn = m_index.by_site[site].function;
-  SummaryKey local_key{leaf_fn, SummaryKind::LocalPoint, Expr::makeVal(val),
-                       site, point};
-  const std::size_t prunes_before = m_stats.path_infeasible_prunes;
-  const auto local_entries = computeSummary(local_key);
-  if (m_stats.path_infeasible_prunes > prunes_before)
-    pruned_any_path = true;
-  for (const SummaryEntry &se : local_entries) {
-    if (!isGuardSatisfiable(se.guard, &ctx))
-      continue;
-    insertFrontier(frontier, leaf_fn, se.source, se.path, ctx.empty());
-  }
-
-  Context prefix = ctx;
-  for (std::size_t step = ctx.size(); step > 0 && !frontier.empty(); --step) {
-    tick();
-    const Id call_site = ctx[step - 1];
-    prefix.pop_back();
-    const InstLocation &cloc = m_index.by_site[call_site];
-    const Id caller_fn = cloc.function;
-    const Id callee_fn = (step == ctx.size())
-                             ? leaf_fn
-                             : m_index.by_site[ctx[step]].function;
-    const Instruction &ci = *cloc.inst;
-    const bool next_at_entry = (step == 1);
-
-    std::set<std::pair<Expr, BddManager::NodeId>> next_frontier;
-    for (const auto &[q, cur_path] : frontier) {
-      if (q.isTerminal()) {
-        SummaryKey pk{caller_fn, SummaryKind::LocalPoint, Expr::makeNull(),
-                      call_site, Point::Before};
-        const auto path_entries = computeSummary(pk);
-        for (const SummaryEntry &se : path_entries) {
-          if (!isGuardSatisfiable(se.guard, &prefix))
-            continue;
-          const BddManager::NodeId lifted =
-              applyKilledToPath(cur_path, se.killed);
-          insertFrontier(next_frontier, caller_fn, q,
-                         m_bdd.makeAnd(lifted, se.path), next_at_entry);
-        }
-        continue;
-      }
-
-      std::vector<SummaryEntry> caller_exprs;
-      substituteCalleeExpr(callee_fn, ci, q, 0, true, 0, GUARD_TRUE, cur_path,
-                           caller_exprs);
-      for (const SummaryEntry &ce : caller_exprs) {
-        if (ce.source.isTerminal()) {
-          if (track_inter_path && !m_bdd.isTrue(cur_path)) {
-            SummaryKey pk{caller_fn, SummaryKind::LocalPoint, Expr::makeNull(),
-                          call_site, Point::Before};
-            const auto path_entries = computeSummary(pk);
-            for (const SummaryEntry &se : path_entries) {
-              if (!isGuardSatisfiable(se.guard, &prefix))
-                continue;
-              const BddManager::NodeId lifted =
-                  applyKilledToPath(cur_path, se.killed);
-              insertFrontier(next_frontier, caller_fn, ce.source,
-                             m_bdd.makeAnd(lifted, se.path), next_at_entry);
-            }
-          } else {
-            if (entry_anchors)
-              entry_anchors->insert(ce.source);
-            evaluateAtEntry(ce.source, result);
-          }
-          continue;
-        }
-        if (ce.source.kind == ExprKind::Mem &&
-            !canFunctionModifyObj(caller_fn, ce.source.id) &&
-            (!track_inter_path || m_bdd.isTrue(cur_path))) {
-          ++m_stats.skipped_functions;
-          next_frontier.emplace(ce.source, cur_path);
-          continue;
-        }
-        SummaryKey ck{caller_fn, SummaryKind::LocalPoint, ce.source, call_site,
-                      Point::Before};
-        const auto caller_entries = computeSummary(ck);
-        for (const SummaryEntry &se : caller_entries) {
-          if (!isGuardSatisfiable(se.guard, &prefix))
-            continue;
-          const BddManager::NodeId combined_p =
-              track_inter_path
-                  ? m_bdd.makeAnd(applyKilledToPath(cur_path, se.killed),
-                                  se.path)
-                  : BddManager::TRUE_NODE;
-          insertFrontier(next_frontier, caller_fn, se.source, combined_p,
-                         next_at_entry);
-        }
-      }
-    }
-    frontier = std::move(next_frontier);
-  }
-
-  for (const auto &[q, cur_path] : frontier) {
-    if (m_bdd.isFalse(cur_path))
-      continue;
-    if (entry_anchors)
-      entry_anchors->insert(q);
-    evaluateAtEntry(q, result);
-  }
-
+  QueryResult qr =
+      computeFscsExpr(Expr::makeVal(val), site, ctx, point, entry_anchors);
   m_active_fscs.erase(key);
-
-  if (result.empty()) {
-    if (m_options.path_sensitive && pruned_any_path &&
-        !isPathReachable(site, point, &ctx)) {
-      QueryResult qr{{}, QueryStatus::Unreachable};
-      m_fscs_cache.emplace(std::move(key), qr);
-      return qr;
-    }
-    result = PointsToSet::top();
-  }
-  QueryResult qr{std::move(result), QueryStatus::Complete};
   m_fscs_cache.emplace(std::move(key), qr);
   return qr;
 }
@@ -1386,7 +1471,9 @@ QueryResult GuardedSummarySolver::computeFscs(Id val, Id site,
 // `(target_fn, site, point)` to compute the alias set `Q` directly.
 void GuardedSummarySolver::propagateForwardAnchorsFsci(
     const std::set<Expr> &anchors, Id target_fn, Id site, Point point,
-    const std::vector<Id> &candidates, std::set<Id> &out_aliases) {
+    const std::vector<Id> &candidates, std::set<Id> &out_aliases,
+    bool &exact_complete) {
+  exact_complete = true;
   if (anchors.empty())
     return;
 
@@ -1397,6 +1484,29 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
   PointsToSet anchor_objs;
   for (const Expr &a : anchors)
     evaluateAtEntry(a, anchor_objs);
+
+  // Restrict forward call-graph traversal strictly to functions that can reach
+  // `target_fn` (avoids exploring unrelated branches of the call graph!).
+  std::vector<bool> can_reach_target(m_program.functions.size(), false);
+  {
+    std::deque<Id> bq{target_fn};
+    can_reach_target[target_fn] = true;
+    while (!bq.empty()) {
+      const Id cur = bq.front();
+      bq.pop_front();
+      for (Id cs : m_index.incoming_calls[cur]) {
+        if (!m_reachability.reachable_site[cs])
+          continue;
+        const Id caller = m_index.by_site[cs].function;
+        if (m_fs_reachable_function[caller] && !can_reach_target[caller]) {
+          can_reach_target[caller] = true;
+          bq.push_back(caller);
+        }
+      }
+    }
+  }
+  if (!can_reach_target[m_program.entry])
+    return;
 
   using FrontierMap = std::map<Expr, std::vector<BddManager::NodeId>>;
   auto addToFrontier = [&](FrontierMap &map, const Expr &e,
@@ -1421,8 +1531,13 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
     return true;
   };
 
+  auto hasSymbolicOffsetOrDeref = [](const Expr &e) -> bool {
+    return e.kind == ExprKind::Deref || e.val_offset != 0 ||
+           !e.val_offset_known || e.val_stride != 0;
+  };
+
   auto matchSummaryForward =
-      [&](const SummaryEntry &se, const FrontierMap &frontier,
+      [&](const SummaryEntry &se, const FrontierMap &frontier, bool at_entry,
           std::vector<BddManager::NodeId> &out_paths) {
         auto consider = [&](BddManager::NodeId fp) {
           const BddManager::NodeId joined =
@@ -1449,7 +1564,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
           return;
         }
         if (se.source.kind == ExprKind::Addr &&
-            anchor_objs.contains(se.source.id)) {
+            se.source.id != NULL_OBJECT && anchor_objs.contains(se.source.id)) {
           if (!track_inter_path) {
             out_paths.push_back(BddManager::TRUE_NODE);
           } else {
@@ -1461,20 +1576,28 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
                   consider(fp);
             }
           }
-        } else if (se.source.kind == ExprKind::Null &&
-                   anchor_objs.contains(NULL_OBJECT)) {
-          if (!track_inter_path) {
-            out_paths.push_back(BddManager::TRUE_NODE);
-          } else {
-            for (const auto &[fe, fps] : frontier) {
-              PointsToSet fo;
-              evaluateAtEntry(fe, fo);
-              if (fo.contains(NULL_OBJECT))
-                for (BddManager::NodeId fp : fps)
-                  consider(fp);
+        } else if (at_entry && !se.source.isTerminal()) {
+          PointsToSet src_pts;
+          evaluateAtEntry(se.source, src_pts);
+          if (memoryIntersects(src_pts, anchor_objs)) {
+            if (!track_inter_path) {
+              out_paths.push_back(BddManager::TRUE_NODE);
+            } else {
+              for (const auto &[fe, fps] : frontier) {
+                PointsToSet fo;
+                evaluateAtEntry(fe, fo);
+                if (memoryIntersects(src_pts, fo))
+                  for (BddManager::NodeId fp : fps)
+                    consider(fp);
+              }
             }
           }
         }
+        if (out_paths.empty() &&
+            (hasSymbolicOffsetOrDeref(se.source) ||
+             (se.source.kind == ExprKind::Mem &&
+              m_program.objects[se.source.id].kind != ObjectKind::Global)))
+          exact_complete = false;
       };
 
   std::map<Id, FrontierMap> fwd_processed;
@@ -1482,16 +1605,33 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
   FrontierMap entry_map;
   for (const Expr &a : anchors)
     addToFrontier(entry_map, a, BddManager::TRUE_NODE);
+  if (!anchor_objs.isTop()) {
+    for (Id o : anchor_objs.objects())
+      if (o != NULL_OBJECT)
+        addToFrontier(entry_map, Expr::makeAddr(o), BddManager::TRUE_NODE);
+  }
+  // Seed global memory cells and entry parameters whose initial values
+  // intersect `anchor_objs` so forward propagation catches aliases originating
+  // from unmodified globals or entry arguments without backward fallback.
+  for (Id o : m_slice.object_list) {
+    if (m_program.objects[o].kind == ObjectKind::Global &&
+        memoryIntersects(m_program.objects[o].initial, anchor_objs))
+      addToFrontier(entry_map, Expr::makeMem(o), BddManager::TRUE_NODE);
+  }
+  for (Id ep : m_program.functions[m_program.entry].parameters) {
+    if (ep != INVALID && m_slice.values[ep])
+      addToFrontier(entry_map, Expr::makeVal(ep), BddManager::TRUE_NODE);
+  }
   fwd_processed[m_program.entry] = entry_map;
   fwd_work.emplace_back(m_program.entry, std::move(entry_map));
 
-  // Build reachable call sites per function restricted to FS-reachable funcs.
+  // Build reachable call sites per function restricted to `can_reach_target`.
   std::map<Id, std::vector<Id>> outgoing_calls;
   for (Id call_site : m_index.call_sites) {
     if (!m_reachability.reachable_site[call_site])
       continue;
     const Id caller = m_index.by_site[call_site].function;
-    if (m_fs_reachable_function[caller])
+    if (can_reach_target[caller])
       outgoing_calls[caller].push_back(call_site);
   }
 
@@ -1504,6 +1644,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
     auto oit = outgoing_calls.find(h);
     if (oit == outgoing_calls.end())
       continue;
+    const bool h_at_entry = (h == m_program.entry);
     for (Id call_site : oit->second) {
       const Instruction &ci = *m_index.by_site[call_site].inst;
       Targets targets;
@@ -1529,17 +1670,24 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
       };
 
       for (Id callee : targets.functions) {
-        if (m_program.functions[callee].external ||
-            !m_fs_reachable_function[callee])
+        if (m_program.functions[callee].external || !can_reach_target[callee])
           continue;
 
         FrontierMap callee_in;
+        auto pushCallee = [&](const Expr &e, BddManager::NodeId p) {
+          if (track_inter_path) {
+            p = quantifyFuncEntryConditions(callee, p);
+            if (m_call_graph.scc_recursive[m_call_graph.function_scc[callee]])
+              p = quantifyFuncConditions(callee, p);
+          }
+          addToFrontier(callee_in, e, p);
+        };
         // 1. Terminal anchors always propagate into reachable callees.
         for (const auto &[e, fps] : cur_map) {
           if (!e.isTerminal())
             continue;
           if (!track_inter_path) {
-            addToFrontier(callee_in, e, BddManager::TRUE_NODE);
+            pushCallee(e, BddManager::TRUE_NODE);
           } else {
             for (const SummaryEntry &se : getCallPathEntries()) {
               if (!isGuardSatisfiable(se.guard, nullptr))
@@ -1547,7 +1695,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
               for (BddManager::NodeId fp : fps) {
                 const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
                 if (!m_bdd.isFalse(j))
-                  addToFrontier(callee_in, e, applyKilledToPath(j, se.killed));
+                  pushCallee(e, applyKilledToPath(j, se.killed));
               }
             }
           }
@@ -1564,10 +1712,10 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
           if (actual == INVALID)
             continue;
           if (m_program.values[actual].constant) {
-            if (m_program.values[actual].initial.intersects(anchor_objs)) {
+            if (memoryIntersects(m_program.values[actual].initial,
+                                 anchor_objs)) {
               if (!track_inter_path) {
-                addToFrontier(callee_in, Expr::makeVal(param),
-                              BddManager::TRUE_NODE);
+                pushCallee(Expr::makeVal(param), BddManager::TRUE_NODE);
               } else {
                 for (const SummaryEntry &se : getCallPathEntries()) {
                   if (!isGuardSatisfiable(se.guard, nullptr))
@@ -1575,13 +1723,13 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
                   for (const auto &[fe, fps] : cur_map) {
                     PointsToSet fo;
                     evaluateAtEntry(fe, fo);
-                    if (!fo.intersects(m_program.values[actual].initial))
+                    if (!memoryIntersects(fo, m_program.values[actual].initial))
                       continue;
                     for (BddManager::NodeId fp : fps) {
                       const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
                       if (!m_bdd.isFalse(j))
-                        addToFrontier(callee_in, Expr::makeVal(param),
-                                      applyKilledToPath(j, se.killed));
+                        pushCallee(Expr::makeVal(param),
+                                   applyKilledToPath(j, se.killed));
                     }
                   }
                 }
@@ -1596,9 +1744,9 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
             if (!isGuardSatisfiable(se.guard, nullptr))
               continue;
             std::vector<BddManager::NodeId> matched;
-            matchSummaryForward(se, cur_map, matched);
+            matchSummaryForward(se, cur_map, h_at_entry, matched);
             for (BddManager::NodeId mp : matched)
-              addToFrontier(callee_in, Expr::makeVal(param), mp);
+              pushCallee(Expr::makeVal(param), mp);
           }
         }
 
@@ -1607,7 +1755,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
           if (e.kind == ExprKind::Mem && !canFunctionModifyObj(h, e.id)) {
             ++m_stats.skipped_functions;
             if (!track_inter_path) {
-              addToFrontier(callee_in, e, BddManager::TRUE_NODE);
+              pushCallee(e, BddManager::TRUE_NODE);
             } else {
               for (const SummaryEntry &se : getCallPathEntries()) {
                 if (!isGuardSatisfiable(se.guard, nullptr))
@@ -1615,8 +1763,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
                 for (BddManager::NodeId fp : fps) {
                   const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
                   if (!m_bdd.isFalse(j))
-                    addToFrontier(callee_in, e,
-                                  applyKilledToPath(j, se.killed));
+                    pushCallee(e, applyKilledToPath(j, se.killed));
                 }
               }
             }
@@ -1633,9 +1780,9 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
               if (!isGuardSatisfiable(se.guard, nullptr))
                 continue;
               std::vector<BddManager::NodeId> matched;
-              matchSummaryForward(se, cur_map, matched);
+              matchSummaryForward(se, cur_map, h_at_entry, matched);
               for (BddManager::NodeId mp : matched)
-                addToFrontier(callee_in, Expr::makeMem(obj), mp);
+                pushCallee(Expr::makeMem(obj), mp);
             }
           }
         }
@@ -1657,20 +1804,23 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
   if (fit == fwd_processed.end())
     return;
   const FrontierMap &target_frontier = fit->second;
+  const bool target_at_entry = (target_fn == m_program.entry);
   for (Id cand : candidates) {
     if (m_program.values[cand].constant) {
-      if (m_program.values[cand].initial.intersects(anchor_objs))
+      if (memoryIntersects(m_program.values[cand].initial, anchor_objs))
         out_aliases.insert(cand);
       continue;
     }
     SummaryKey ck{target_fn, SummaryKind::LocalPoint, Expr::makeVal(cand), site,
                   point};
     const auto entries = computeSummary(ck);
+    if (entries.empty())
+      exact_complete = false;
     for (const SummaryEntry &se : entries) {
       if (!isGuardSatisfiable(se.guard, nullptr))
         continue;
       std::vector<BddManager::NodeId> matched;
-      matchSummaryForward(se, target_frontier, matched);
+      matchSummaryForward(se, target_frontier, target_at_entry, matched);
       if (!matched.empty()) {
         out_aliases.insert(cand);
         break;
@@ -1683,7 +1833,9 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
 // set `A` along exact call sequence `ctx = [c_1, ..., c_k]` to compute `Q`.
 void GuardedSummarySolver::propagateForwardAnchorsFscs(
     const std::set<Expr> &anchors, const Context &ctx, Id site, Point point,
-    const std::vector<Id> &candidates, std::set<Id> &out_aliases) {
+    const std::vector<Id> &candidates, std::set<Id> &out_aliases,
+    bool &exact_complete) {
+  exact_complete = true;
   if (anchors.empty())
     return;
 
@@ -1715,8 +1867,13 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
     vec.push_back(p);
   };
 
+  auto hasSymbolicOffsetOrDeref = [](const Expr &e) -> bool {
+    return e.kind == ExprKind::Deref || e.val_offset != 0 ||
+           !e.val_offset_known || e.val_stride != 0;
+  };
+
   auto matchSummaryForward =
-      [&](const SummaryEntry &se, const FrontierMap &frontier,
+      [&](const SummaryEntry &se, const FrontierMap &frontier, bool at_entry,
           std::vector<BddManager::NodeId> &out_paths) {
         auto consider = [&](BddManager::NodeId fp) {
           const BddManager::NodeId joined =
@@ -1743,7 +1900,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
           return;
         }
         if (se.source.kind == ExprKind::Addr &&
-            anchor_objs.contains(se.source.id)) {
+            se.source.id != NULL_OBJECT && anchor_objs.contains(se.source.id)) {
           if (!track_inter_path) {
             out_paths.push_back(BddManager::TRUE_NODE);
           } else {
@@ -1755,25 +1912,47 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
                   consider(fp);
             }
           }
-        } else if (se.source.kind == ExprKind::Null &&
-                   anchor_objs.contains(NULL_OBJECT)) {
-          if (!track_inter_path) {
-            out_paths.push_back(BddManager::TRUE_NODE);
-          } else {
-            for (const auto &[fe, fps] : frontier) {
-              PointsToSet fo;
-              evaluateAtEntry(fe, fo);
-              if (fo.contains(NULL_OBJECT))
-                for (BddManager::NodeId fp : fps)
-                  consider(fp);
+        } else if (at_entry && !se.source.isTerminal()) {
+          PointsToSet src_pts;
+          evaluateAtEntry(se.source, src_pts);
+          if (memoryIntersects(src_pts, anchor_objs)) {
+            if (!track_inter_path) {
+              out_paths.push_back(BddManager::TRUE_NODE);
+            } else {
+              for (const auto &[fe, fps] : frontier) {
+                PointsToSet fo;
+                evaluateAtEntry(fe, fo);
+                if (memoryIntersects(src_pts, fo))
+                  for (BddManager::NodeId fp : fps)
+                    consider(fp);
+              }
             }
           }
         }
+        if (out_paths.empty() &&
+            (hasSymbolicOffsetOrDeref(se.source) ||
+             (se.source.kind == ExprKind::Mem &&
+              m_program.objects[se.source.id].kind != ObjectKind::Global)))
+          exact_complete = false;
       };
 
   FrontierMap frontier;
   for (const Expr &a : anchors)
     addToFrontier(frontier, a, BddManager::TRUE_NODE);
+  if (!anchor_objs.isTop()) {
+    for (Id o : anchor_objs.objects())
+      if (o != NULL_OBJECT)
+        addToFrontier(frontier, Expr::makeAddr(o), BddManager::TRUE_NODE);
+  }
+  for (Id o : m_slice.object_list) {
+    if (m_program.objects[o].kind == ObjectKind::Global &&
+        memoryIntersects(m_program.objects[o].initial, anchor_objs))
+      addToFrontier(frontier, Expr::makeMem(o), BddManager::TRUE_NODE);
+  }
+  for (Id ep : m_program.functions[m_program.entry].parameters) {
+    if (ep != INVALID && m_slice.values[ep])
+      addToFrontier(frontier, Expr::makeVal(ep), BddManager::TRUE_NODE);
+  }
   Context prefix;
   prefix.reserve(ctx.size());
   const Id leaf_fn = m_index.by_site[site].function;
@@ -1787,6 +1966,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
                              ? m_index.by_site[ctx[step + 1]].function
                              : leaf_fn;
     const Instruction &ci = *cloc.inst;
+    const bool step_at_entry = (step == 0);
 
     std::vector<SummaryEntry> call_path_entries;
     bool computed_call_path = false;
@@ -1801,11 +1981,19 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
     };
 
     FrontierMap next_frontier;
+    auto pushNext = [&](const Expr &e, BddManager::NodeId p) {
+      if (track_inter_path) {
+        p = quantifyFuncEntryConditions(callee_fn, p);
+        if (m_call_graph.scc_recursive[m_call_graph.function_scc[callee_fn]])
+          p = quantifyFuncConditions(callee_fn, p);
+      }
+      addToFrontier(next_frontier, e, p);
+    };
     for (const auto &[e, fps] : frontier) {
       if (!e.isTerminal())
         continue;
       if (!track_inter_path) {
-        addToFrontier(next_frontier, e, BddManager::TRUE_NODE);
+        pushNext(e, BddManager::TRUE_NODE);
       } else {
         for (const SummaryEntry &se : getCallPathEntries()) {
           if (!isGuardSatisfiable(se.guard, &prefix))
@@ -1813,7 +2001,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
           for (BddManager::NodeId fp : fps) {
             const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
             if (!m_bdd.isFalse(j))
-              addToFrontier(next_frontier, e, applyKilledToPath(j, se.killed));
+              pushNext(e, applyKilledToPath(j, se.killed));
           }
         }
       }
@@ -1828,10 +2016,9 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
       if (actual == INVALID)
         continue;
       if (m_program.values[actual].constant) {
-        if (m_program.values[actual].initial.intersects(anchor_objs)) {
+        if (memoryIntersects(m_program.values[actual].initial, anchor_objs)) {
           if (!track_inter_path) {
-            addToFrontier(next_frontier, Expr::makeVal(param),
-                          BddManager::TRUE_NODE);
+            pushNext(Expr::makeVal(param), BddManager::TRUE_NODE);
           } else {
             for (const SummaryEntry &se : getCallPathEntries()) {
               if (!isGuardSatisfiable(se.guard, &prefix))
@@ -1839,13 +2026,13 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
               for (const auto &[fe, fps] : frontier) {
                 PointsToSet fo;
                 evaluateAtEntry(fe, fo);
-                if (!fo.intersects(m_program.values[actual].initial))
+                if (!memoryIntersects(fo, m_program.values[actual].initial))
                   continue;
                 for (BddManager::NodeId fp : fps) {
                   const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
                   if (!m_bdd.isFalse(j))
-                    addToFrontier(next_frontier, Expr::makeVal(param),
-                                  applyKilledToPath(j, se.killed));
+                    pushNext(Expr::makeVal(param),
+                             applyKilledToPath(j, se.killed));
                 }
               }
             }
@@ -1860,9 +2047,9 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
         if (!isGuardSatisfiable(se.guard, &prefix))
           continue;
         std::vector<BddManager::NodeId> matched;
-        matchSummaryForward(se, frontier, matched);
+        matchSummaryForward(se, frontier, step_at_entry, matched);
         for (BddManager::NodeId mp : matched)
-          addToFrontier(next_frontier, Expr::makeVal(param), mp);
+          pushNext(Expr::makeVal(param), mp);
       }
     }
 
@@ -1870,7 +2057,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
       if (e.kind == ExprKind::Mem && !canFunctionModifyObj(caller_fn, e.id)) {
         ++m_stats.skipped_functions;
         if (!track_inter_path) {
-          addToFrontier(next_frontier, e, BddManager::TRUE_NODE);
+          pushNext(e, BddManager::TRUE_NODE);
         } else {
           for (const SummaryEntry &se : getCallPathEntries()) {
             if (!isGuardSatisfiable(se.guard, &prefix))
@@ -1878,8 +2065,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
             for (BddManager::NodeId fp : fps) {
               const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
               if (!m_bdd.isFalse(j))
-                addToFrontier(next_frontier, e,
-                              applyKilledToPath(j, se.killed));
+                pushNext(e, applyKilledToPath(j, se.killed));
             }
           }
         }
@@ -1896,9 +2082,9 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
           if (!isGuardSatisfiable(se.guard, &prefix))
             continue;
           std::vector<BddManager::NodeId> matched;
-          matchSummaryForward(se, frontier, matched);
+          matchSummaryForward(se, frontier, step_at_entry, matched);
           for (BddManager::NodeId mp : matched)
-            addToFrontier(next_frontier, Expr::makeMem(obj), mp);
+            pushNext(Expr::makeMem(obj), mp);
         }
       }
     }
@@ -1907,20 +2093,23 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
     prefix.push_back(call_site);
   }
 
+  const bool leaf_at_entry = ctx.empty();
   for (Id cand : candidates) {
     if (m_program.values[cand].constant) {
-      if (m_program.values[cand].initial.intersects(anchor_objs))
+      if (memoryIntersects(m_program.values[cand].initial, anchor_objs))
         out_aliases.insert(cand);
       continue;
     }
     SummaryKey ck{leaf_fn, SummaryKind::LocalPoint, Expr::makeVal(cand), site,
                   point};
     const auto entries = computeSummary(ck);
+    if (entries.empty())
+      exact_complete = false;
     for (const SummaryEntry &se : entries) {
       if (!isGuardSatisfiable(se.guard, &ctx))
         continue;
       std::vector<BddManager::NodeId> matched;
-      matchSummaryForward(se, frontier, matched);
+      matchSummaryForward(se, frontier, leaf_at_entry, matched);
       if (!matched.empty()) {
         out_aliases.insert(cand);
         break;
@@ -2006,19 +2195,20 @@ void GuardedSummarySolver::computeFlowSensitiveReachability() {
 }
 
 // Algorithm 2 (Kahlon PLDI '08, p. 255): Top-down dovetailing of summary
-// computation and FSCI points-to computation in increasing Steensgaard depth.
+// computation and FSCI points-to computation in increasing Steensgaard + Field
+// dependency depth.
 void GuardedSummarySolver::runDovetailing() {
   std::map<std::size_t, std::vector<FsciKey>> derefs_by_depth;
   std::set<std::size_t> all_depths;
   for (Id v : m_slice.value_list)
-    all_depths.insert(m_hierarchy.depth[m_hierarchy.value_components[v]]);
+    all_depths.insert(dovetailDepthOfComp(m_hierarchy.value_components[v]));
 
   auto recordFsciSite = [&](Id val, Id site, Point pt) {
     if (val == INVALID || m_program.values[val].constant ||
         !m_reachability.reachable_site[site])
       return;
     const Id comp = m_hierarchy.value_components[val];
-    const std::size_t d = m_hierarchy.depth[comp];
+    const std::size_t d = dovetailDepthOfComp(comp);
     all_depths.insert(d);
     derefs_by_depth[d].emplace_back(val, site, pt);
   };
@@ -2029,7 +2219,7 @@ void GuardedSummarySolver::runDovetailing() {
     case Opcode::Load:
       recordFsciSite(i.operands[0], site, Point::Before);
       if (i.result != INVALID &&
-          m_hierarchy.cyclic[m_hierarchy.value_components[i.result]])
+          dovetailCyclicOfComp(m_hierarchy.value_components[i.result]))
         recordFsciSite(i.result, site, Point::After);
       break;
     case Opcode::Store:
@@ -2047,11 +2237,38 @@ void GuardedSummarySolver::runDovetailing() {
       if (i.callee == INVALID && i.indirect_target != INVALID)
         recordFsciSite(i.indirect_target, site, Point::Before);
       if (i.result != INVALID &&
-          m_hierarchy.cyclic[m_hierarchy.value_components[i.result]])
+          dovetailCyclicOfComp(m_hierarchy.value_components[i.result]))
         recordFsciSite(i.result, site, Point::After);
       break;
     default:
       break;
+    }
+  }
+
+  // Under path sensitivity, also record in-slice edge pointer-guard operands
+  // so their FSCI sets are precomputed in top-down dovetail order.
+  if (m_options.path_sensitive) {
+    for (Id f = 0; f < m_program.functions.size(); ++f) {
+      const Function &func = m_program.functions[f];
+      if (func.external || !m_reachability.reachable_function[f])
+        continue;
+      for (const Block &block : func.blocks) {
+        const Id fallback =
+            block.instructions.empty() ? INVALID : block.instructions.back().id;
+        for (const Edge &edge : block.successors) {
+          for (const EdgePtrGuard &eg : edge.ptr_guards) {
+            const Id gsite = eg.site != INVALID ? eg.site : fallback;
+            if (gsite == INVALID)
+              continue;
+            if (eg.lhs < m_slice.values.size() && m_slice.values[eg.lhs])
+              recordFsciSite(eg.lhs, gsite, Point::After);
+            if ((eg.kind == EdgeGuardKind::Alias ||
+                 eg.kind == EdgeGuardKind::NotAlias) &&
+                eg.rhs < m_slice.values.size() && m_slice.values[eg.rhs])
+              recordFsciSite(eg.rhs, gsite, Point::After);
+          }
+        }
+      }
     }
   }
 
@@ -2072,7 +2289,7 @@ void GuardedSummarySolver::runDovetailing() {
 
     bool has_cyclic = false;
     for (const auto &[val, site, pt] : keys)
-      if (m_hierarchy.cyclic[m_hierarchy.value_components[val]])
+      if (dovetailCyclicOfComp(m_hierarchy.value_components[val]))
         has_cyclic = true;
 
     if (!has_cyclic) {
@@ -2133,6 +2350,7 @@ void GuardedSummarySolver::runDovetailing() {
 
       // Pass 2: Precision tightening against converged Pass-1 sound sets.
       m_cyclic_pass1_depth = std::numeric_limits<std::size_t>::max();
+      m_in_cyclic_pass2 = true;
       m_completed_depth = d;
       m_has_completed_depth = true;
       clearDepthSummaries();
@@ -2147,6 +2365,7 @@ void GuardedSummarySolver::runDovetailing() {
           m_path_pruned_fsci.erase(k);
         tightened[k] = std::move(pts);
       }
+      m_in_cyclic_pass2 = false;
       bool any_tightened = false;
       for (auto &[k, v] : tightened) {
         if (m_fsci_cache[k] != v)
@@ -2163,6 +2382,7 @@ void GuardedSummarySolver::runDovetailing() {
     m_has_completed_depth = true;
   }
 
+  m_dovetailing_done = true;
   computeFlowSensitiveReachability();
 }
 
@@ -2197,6 +2417,8 @@ GuardedSummarySolver::GuardedSummarySolver(
 
   computeFunctionModifications();
   computeFunctionConditionKills();
+  computeInvariantSSAVals();
+  computeDovetailHierarchy();
 
   try {
     if (m_options.max_contexts == 0 || m_options.max_steps == 0)
@@ -2226,6 +2448,7 @@ QueryResult GuardedSummarySolver::query(Id value, Id site,
     if (it != m_fsci_cache.end() && !m_options.path_sensitive_interprocedural) {
       ++m_stats.fsci_cache_hits;
       pts = it->second;
+      path_pruned = (m_path_pruned_fsci.count(fkey) != 0);
     } else {
       pts = computeFsci(value, site, point, nullptr, &path_pruned);
       if (!path_pruned || !pts.empty())
@@ -2245,9 +2468,138 @@ QueryResult GuardedSummarySolver::query(Id value, Id site,
   }
 }
 
+AliasResult GuardedSummarySolver::finishAliasQuery(
+    const QueryResult &base, const std::set<Expr> &entry_anchors, Id self_val,
+    Id site, const Context *context_path, Point point) {
+  AliasResult out;
+  out.status = base.status;
+  if (!base.reachable())
+    return out;
+  if (base.status == QueryStatus::ResourceLimit) {
+    out.may_alias_all = true;
+    return out;
+  }
+
+  const InstLocation &qloc = m_index.by_site[site];
+  const Id fn = qloc.function;
+  const Function &func = m_program.functions[fn];
+  // Compute backward CFG reachability strictly before `qloc.block` so local
+  // variables whose definitions can never reach `(site, point)` are skipped
+  // instead of spawning dead SummaryKeys.
+  std::vector<bool> can_reach_strict(func.blocks.size(), false);
+  {
+    std::deque<Id> bq;
+    for (const auto &[pblock, eidx] : m_index.pred_edges[fn][qloc.block]) {
+      (void)eidx;
+      if (!can_reach_strict[pblock]) {
+        can_reach_strict[pblock] = true;
+        bq.push_back(pblock);
+      }
+    }
+    while (!bq.empty()) {
+      const Id cur = bq.front();
+      bq.pop_front();
+      for (const auto &[pblock, eidx] : m_index.pred_edges[fn][cur]) {
+        (void)eidx;
+        if (!can_reach_strict[pblock]) {
+          can_reach_strict[pblock] = true;
+          bq.push_back(pblock);
+        }
+      }
+    }
+  }
+  auto isLocalDefReachable = [&](Id cand) -> bool {
+    if (cand == self_val || m_program.values[cand].constant)
+      return true;
+    for (Id param : func.parameters)
+      if (param == cand)
+        return true;
+    for (Id dsite : m_index.defining_sites[cand]) {
+      const InstLocation &dloc = m_index.by_site[dsite];
+      if (dloc.function != fn)
+        continue;
+      if (can_reach_strict[dloc.block])
+        return true;
+      if (dloc.block == qloc.block &&
+          (dloc.index < qloc.index ||
+           (dloc.index == qloc.index && point == Point::After)))
+        return true;
+    }
+    for (const auto &[pf, pedge] : m_index.phi_defs[cand]) {
+      if (pf != fn)
+        continue;
+      const Id target =
+          func.blocks[pedge.first].successors[pedge.second].target;
+      if (target == qloc.block || can_reach_strict[target])
+        return true;
+    }
+    return false;
+  };
+
+  std::vector<Id> in_scope;
+  for (Id cand : m_cluster_values) {
+    if (cand >= m_program.values.size())
+      continue;
+    const Value &vinfo = m_program.values[cand];
+    if (!vinfo.constant && vinfo.function != INVALID && vinfo.function != fn)
+      continue;
+    if (!isLocalDefReachable(cand))
+      continue;
+    if (cand != self_val && !base.points_to.isTop() &&
+        !memoryIntersects(valueOf(m_program, m_upper, cand), base.points_to))
+      continue;
+    in_scope.push_back(cand);
+  }
+
+  if (base.points_to.isTop()) {
+    out.may_alias_all = true;
+    out.aliases = std::move(in_scope);
+    return out;
+  }
+
+  std::set<Id> alias_set;
+  if (self_val != INVALID)
+    alias_set.insert(self_val);
+
+  if (!memoryIntersects(base.points_to, base.points_to)) {
+    // Strictly NULL_OBJECT points-to set: no dereferenceable memory aliases.
+    out.aliases.assign(alias_set.begin(), alias_set.end());
+    return out;
+  }
+
+  // Algorithm 3 Step 2: forward summary propagation from entry anchors A -> Q.
+  bool exact_complete = true;
+  if (context_path != nullptr) {
+    propagateForwardAnchorsFscs(entry_anchors, *context_path, site, point,
+                                in_scope, alias_set, exact_complete);
+  } else {
+    propagateForwardAnchorsFsci(entry_anchors, fn, site, point, in_scope,
+                                alias_set, exact_complete);
+  }
+
+  // Only fall back to pairwise backward queries when forward propagation
+  // encountered an unmatched symbolic offset or dereference expression.
+  if (!exact_complete) {
+    for (Id cand : in_scope) {
+      if (alias_set.count(cand))
+        continue;
+      QueryResult cq = query(cand, site, context_path, point);
+      if (cq.status == QueryStatus::ResourceLimit) {
+        out.status = QueryStatus::ResourceLimit;
+        out.may_alias_all = true;
+        return out;
+      }
+      if (cq.reachable() && memoryIntersects(cq.points_to, base.points_to))
+        alias_set.insert(cand);
+    }
+  }
+
+  out.aliases.assign(alias_set.begin(), alias_set.end());
+  return out;
+}
+
 // Algorithm 3 (Steps 1 & 2) and Section 3 (p. 258): compute entry anchors A
-// backwards, then propagate forward to Q along summaries, combined soundly
-// with concrete points-to intersection for offset/field/top aliases.
+// backwards, then propagate forward to Q along summaries.
 AliasResult GuardedSummarySolver::queryAliases(Id value, Id site,
                                                const Context *context_path,
                                                Point point) {
@@ -2277,69 +2629,144 @@ AliasResult GuardedSummarySolver::queryAliases(Id value, Id site,
       }
       base = {std::move(pts), QueryStatus::Complete};
     }
-
-    out.status = base.status;
-    if (!base.reachable())
-      return out;
-    if (base.status == QueryStatus::ResourceLimit) {
-      out.may_alias_all = true;
-      return out;
-    }
-
-    std::vector<Id> in_scope;
-    for (Id cand : m_cluster_values) {
-      if (cand >= m_program.values.size())
-        continue;
-      const Value &vinfo = m_program.values[cand];
-      if (!vinfo.constant && vinfo.function != INVALID && vinfo.function != fn)
-        continue;
-      if (cand != value && !base.points_to.isTop() &&
-          !valueOf(m_program, m_upper, cand).intersects(base.points_to))
-        continue;
-      in_scope.push_back(cand);
-    }
-
-    if (base.points_to.isTop()) {
-      out.may_alias_all = true;
-      out.aliases = std::move(in_scope);
-      return out;
-    }
-
-    std::set<Id> alias_set;
-    alias_set.insert(value);
-
-    // Algorithm 3 Step 2: forward summary propagation from entry anchors A -> Q.
-    if (context_path != nullptr) {
-      propagateForwardAnchorsFscs(entry_anchors, *context_path, site, point,
-                                  in_scope, alias_set);
-    } else {
-      propagateForwardAnchorsFsci(entry_anchors, fn, site, point, in_scope,
-                                  alias_set);
-    }
-
-    // Complete soundly for any candidate reaching concrete objects in
-    // `base.points_to` via field offsets or symbolic dereferences not matched
-    // syntactically by `entry_anchors`.
-    for (Id cand : in_scope) {
-      if (alias_set.count(cand))
-        continue;
-      QueryResult cq = query(cand, site, context_path, point);
-      if (cq.status == QueryStatus::ResourceLimit) {
-        out.status = QueryStatus::ResourceLimit;
-        out.may_alias_all = true;
-        return out;
-      }
-      if (cq.reachable() && cq.points_to.intersects(base.points_to))
-        alias_set.insert(cand);
-    }
-
-    out.aliases.assign(alias_set.begin(), alias_set.end());
-    return out;
+    return finishAliasQuery(base, entry_anchors, value, site, context_path,
+                            point);
   } catch (const LimitReached &) {
     m_failed = true;
     out.status = QueryStatus::ResourceLimit;
     out.may_alias_all = true;
     return out;
+  }
+}
+
+QueryResult GuardedSummarySolver::queryObject(Id object, Id site,
+                                              const Context *context_path,
+                                              Point point) {
+  if (m_failed)
+    return {PointsToSet::top(), QueryStatus::ResourceLimit};
+  try {
+    if (context_path != nullptr)
+      return computeFscsExpr(Expr::makeMem(object), site, *context_path, point);
+    const Id fn = m_index.by_site[site].function;
+    if (!m_reachability.reachable_site[site] || !m_fs_reachable_function[fn])
+      return {{}, QueryStatus::Unreachable};
+    bool path_pruned = false;
+    PointsToSet pts = computeFsciExpr(Expr::makeMem(object), site, point,
+                                      nullptr, &path_pruned);
+    if (pts.empty()) {
+      if (m_options.path_sensitive && path_pruned)
+        return {{}, QueryStatus::Unreachable};
+      pts = PointsToSet::top();
+    }
+    return {std::move(pts), QueryStatus::Complete};
+  } catch (const LimitReached &) {
+    m_failed = true;
+    return {PointsToSet::top(), QueryStatus::ResourceLimit};
+  }
+}
+
+AliasResult GuardedSummarySolver::queryObjectAliases(
+    Id object, Id site, const Context *context_path, Point point) {
+  AliasResult out;
+  if (m_failed) {
+    out.status = QueryStatus::ResourceLimit;
+    out.may_alias_all = true;
+    return out;
+  }
+  try {
+    const Id fn = m_index.by_site[site].function;
+    std::set<Expr> entry_anchors;
+    QueryResult base;
+    if (context_path != nullptr) {
+      base = computeFscsExpr(Expr::makeMem(object), site, *context_path, point,
+                             &entry_anchors);
+    } else {
+      if (!m_reachability.reachable_site[site] || !m_fs_reachable_function[fn])
+        return out;
+      bool path_pruned = false;
+      PointsToSet pts = computeFsciExpr(Expr::makeMem(object), site, point,
+                                        &entry_anchors, &path_pruned);
+      if (pts.empty()) {
+        if (m_options.path_sensitive && path_pruned)
+          return out;
+        pts = PointsToSet::top();
+      }
+      base = {std::move(pts), QueryStatus::Complete};
+    }
+    return finishAliasQuery(base, entry_anchors, INVALID, site, context_path,
+                            point);
+  } catch (const LimitReached &) {
+    m_failed = true;
+    out.status = QueryStatus::ResourceLimit;
+    out.may_alias_all = true;
+    return out;
+  }
+}
+
+bool GuardedSummarySolver::mustAlias(Id lhs, Id rhs, Id site,
+                                     const Context *context_path) {
+  if (m_failed)
+    return false;
+  try {
+    QueryResult a = query(lhs, site, context_path, Point::Before);
+    if (a.status != QueryStatus::Complete)
+      return false;
+    if (m_program.values[lhs].constant && m_program.values[lhs].initial.isTop())
+      return false;
+    if (lhs == rhs)
+      return true;
+    QueryResult b = query(rhs, site, context_path, Point::Before);
+    if (b.status != QueryStatus::Complete)
+      return false;
+    if (m_program.values[rhs].constant && m_program.values[rhs].initial.isTop())
+      return false;
+    if (!memoryIntersects(a.points_to, b.points_to))
+      return false;
+    if (!a.points_to.isTop() && !b.points_to.isTop() &&
+        a.points_to.size() == 1 && a.points_to == b.points_to) {
+      const Id obj = *a.points_to.begin();
+      if (obj != NULL_OBJECT && obj < m_index.exact_address_singleton.size() &&
+          m_index.exact_address_singleton[obj])
+        return true;
+    }
+    // Symbolic must-alias: if both `lhs` and `rhs` reduce inside `fn` to a
+    // single satisfiable unconditional summary pointing to the exact same
+    // invariant SSA value + known offset (e.g., `q = p` on a non-singleton
+    // heap pointer), they must hold identical runtime addresses at `site`.
+    const Id fn = m_index.by_site[site].function;
+    auto uniqueInvariantSource = [&](Id v, Expr &out_src) -> bool {
+      if (v == INVALID)
+        return false;
+      if (m_program.values[v].constant)
+        return false;
+      SummaryKey sk{fn, SummaryKind::LocalPoint, Expr::makeVal(v), site,
+                    Point::Before};
+      const auto entries = computeSummary(sk);
+      bool found = false;
+      for (const SummaryEntry &se : entries) {
+        if (!isGuardSatisfiable(se.guard, context_path))
+          continue;
+        if (se.source.kind != ExprKind::Val || !se.source.val_offset_known ||
+            se.source.val_stride != 0 ||
+            !isInvariantValueInFunc(se.source.id, fn))
+          return false;
+        if (!found) {
+          out_src = se.source;
+          found = true;
+        } else if (!(out_src == se.source)) {
+          return false;
+        }
+      }
+      return found;
+    };
+    Expr s_lhs, s_rhs;
+    if (uniqueInvariantSource(lhs, s_lhs) && uniqueInvariantSource(rhs, s_rhs) &&
+        s_lhs == s_rhs)
+      return true;
+    return false;
+  } catch (const LimitReached &) {
+    m_failed = true;
+    return false;
   }
 }
 

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -116,6 +117,7 @@ struct Object {
   // flattened fields). 0 means unspecified / indivisible.
   std::uint64_t size_bytes = 0;
   bool field_sensitive = false;
+  bool has_interior_pointer = false;
   std::vector<ArrayRegion> array_regions;
 };
 
@@ -169,16 +171,55 @@ struct Instruction {
   // stepping backwards across loop backedges or global flag writes).
   Id defines_condition = INVALID;
   std::vector<Id> kills_conditions;
+  // Optional path-sensitivity condition for 2-operand Opcode::Join (SelectInst):
+  // operands[0] is taken when cond == polarity; operands[1] when negated.
+  Id select_cond_var = INVALID;
+  bool select_cond_polarity = true;
+  // Optional interprocedural formal-to-actual condition substitution for
+  // Opcode::Call: maps a callee parameter-scoped condition atom ID to either a
+  // constant boolean (caller_cond == INVALID) or a caller CondNode expression.
+  struct CondSubst {
+    Id callee_cond = INVALID;
+    Id caller_cond = INVALID;
+    bool polarity = true;
+  };
+  std::vector<CondSubst> cond_subst = {};
+};
+
+enum class EdgeGuardKind : std::uint8_t {
+  PointsTo,
+  NotPointsTo,
+  Alias,
+  NotAlias
+};
+
+// Pointer-comparison branch guard on a CFG edge (e.g., `if (p == &a)`,
+// `if (p != NULL)`, `if (p == q)`), bridging path sensitivity with Definition 8
+// pointer constraints.
+struct EdgePtrGuard {
+  EdgeGuardKind kind = EdgeGuardKind::PointsTo;
+  Id lhs = INVALID;
+  Id rhs = INVALID; // Object ID for PointsTo/NotPointsTo; Value ID for Alias/NotAlias
+  Id site = INVALID;
 };
 
 struct Edge {
   Id target = INVALID;
   // All assignments on an edge are simultaneous (LLVM PHI semantics).
-  std::vector<std::pair<Id, Id>> phi;
+  std::vector<std::pair<Id, Id>> phi = {};
   // Optional path-sensitivity branch condition (Section 3, p. 258):
-  // cond_var == INVALID means unconditional edge.
+  // cond_var == INVALID means unconditional edge. References Program::cond_nodes.
   Id cond_var = INVALID;
   bool cond_polarity = true;
+  // Optional pointer-level branch guards on this edge.
+  std::vector<EdgePtrGuard> ptr_guards = {};
+};
+
+enum class CondOp : std::uint8_t { Atom, Not, And, Or };
+struct CondNode {
+  CondOp op = CondOp::Atom;
+  Id lhs = INVALID;
+  Id rhs = INVALID;
 };
 
 struct Block {
@@ -211,7 +252,10 @@ struct Program {
   // for flattened field-sensitive aggregates (including base itself at offset
   // 0).
   std::vector<std::vector<std::pair<std::uint64_t, Id>>> fields_of_base;
-  // Number of boolean path-condition variables used for path sensitivity.
+  // Boolean condition expression table (atoms + compound Not/And/Or formulas)
+  // used for ROBDD path sensitivity (Section 3, p. 258).
+  std::vector<CondNode> cond_nodes;
+  // Number of condition nodes (equal to cond_nodes.size()).
   Id condition_count = 0;
   // Condition variables backed by mutable global storage (quantified across
   // opaque or memory-writing external calls).
@@ -225,6 +269,9 @@ struct Program {
   Id addBlock(Id function);
   Id append(Id function, Id block, Instruction instruction);
   Id addCondition();
+  Id addCondNot(Id operand);
+  Id addCondAnd(Id lhs, Id rhs);
+  Id addCondOr(Id lhs, Id rhs);
 
   // Field-resolution helpers.
   Id baseOf(Id object) const;
@@ -236,6 +283,11 @@ struct Program {
   // overlap [offset(object), offset(object) + bytes). bytes == 0 means entire
   // object / all fields of base.
   std::vector<Id> overlappingFields(Id object, std::uint64_t bytes) const;
+  // For a MemCopy of `write_bytes` into `od`, compute every exact relative
+  // source byte offset that writes into overlapping field `fd`. Returns false
+  // if any overlapping write is partial or ambiguous (caller must emit Top).
+  bool memCopyRelativeOffsets(Id od, Id fd, std::uint64_t write_bytes,
+                              std::vector<std::int64_t> &rels) const;
   void validate() const;
 
 private:
@@ -257,6 +309,13 @@ struct Options {
   SolverMode solver_mode = SolverMode::GuardedSummary;
   std::size_t andersen_threshold = 60;
   bool adaptive_andersen_threshold = true;
+  // When true (default), rejecting a large high-overlap partition escalates the
+  // threshold globally; when false, rejection is strictly per-partition so
+  // smaller partitions with low overlap still undergo Andersen refinement.
+  bool adaptive_global_threshold_escalation = true;
+  // Reject Andersen split on a partition if largest_cluster / partition_size
+  // meets or exceeds this retention ratio (paper §4 p. 259 overlap criterion).
+  double andersen_rejection_retention_ratio = 0.75;
   // Zero disables this adaptive preprocessing cost guard.
   std::size_t max_andersen_partition_size = 4096;
   // Estimated partition-size x hierarchy-node budget; zero is unlimited.
@@ -264,6 +323,16 @@ struct Options {
   // Optional Das (2000) one-level-flow intermediate cascade stage between
   // Steensgaard partitioning and Andersen clustering (paper §4, p. 258).
   bool enable_one_level_flow = false;
+  // Optional hybrid per-cluster solver selection (paper §1, p. 250):
+  // when > 0, clusters of size <= hybrid_tabulation_max_cluster_size (and, if
+  // hybrid_tabulation_max_slice_statements > 0, slice statements <= that bound)
+  // use InputStateTabulation while remaining clusters use solver_mode.
+  std::size_t hybrid_tabulation_max_cluster_size = 0;
+  std::size_t hybrid_tabulation_max_slice_statements = 0;
+  // Optional custom per-cluster solver selector callback:
+  // (cluster_index, cluster_size, slice_statements) -> SolverMode.
+  std::function<SolverMode(std::size_t, std::size_t, std::size_t)>
+      cluster_solver_selector;
   // Optional ROBDD-based path sensitivity for summary tuples (paper §3, p. 258).
   bool path_sensitive = false;
   bool path_sensitive_interprocedural = false;
@@ -388,10 +457,30 @@ public:
                       Point point = Point::Before);
   AliasResult aliasesAllContexts(Id value, Id site,
                                  Point point = Point::Before);
+  // Direct queries over addressable memory pointer objects (`Mem(object)`),
+  // matching C pointer variables in Kahlon PLDI '08 (e.g., Fig. 5 `a, b, c, d`).
+  QueryResult objectPointsTo(Id object, Id site, const Context &context = {},
+                             Point point = Point::Before);
+  QueryResult objectPointsToAllContexts(Id object, Id site,
+                                        Point point = Point::Before);
+  AliasResult objectAliases(Id object, Id site, const Context &context = {},
+                            Point point = Point::Before);
+  AliasResult objectAliasesAllContexts(Id object, Id site,
+                                       Point point = Point::Before);
   // Eagerly construct every cluster solver, using configured parallelism.
   void precomputeAll();
-  // Conservative query helper. Unreachable is not used to prove disjointness.
+  // Selective application-driven cluster exploration (§1, p. 250): eagerly
+  // build only the cluster solvers covering `values` or `cluster_indices`.
+  void precomputeForValues(const std::vector<Id> &values);
+  void precomputeClusters(const std::vector<std::size_t> &cluster_indices);
+  std::vector<std::size_t> clustersFor(Id value) const;
+  // Conservative may-alias query helper (consistent with non-null object
+  // aliasing; unreachable is not used to prove disjointness).
   bool mayAlias(Id lhs, Id rhs, Id site, const Context &context = {});
+  // Sound must-alias query helper (§1, p. 250): returns true only when lhs and
+  // rhs are proven to hold the exact same address on all paths reaching
+  // (site, context).
+  bool mustAlias(Id lhs, Id rhs, Id site, const Context &context = {});
   const Statistics &statistics() const;
   const std::vector<std::vector<Id>> &clusters() const;
   const SteensgaardHierarchy &hierarchy() const;

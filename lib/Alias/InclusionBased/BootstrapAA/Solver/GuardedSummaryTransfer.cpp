@@ -20,19 +20,39 @@ void GuardedSummarySolver::materializeDeref(const Expr &deref, Id site,
   if (site_point == Point::After && deref.id != INVALID &&
       !m_program.values[deref.id].constant) {
     FsciKey akey{deref.id, site, Point::After};
-    if (m_cyclic_pass1_depth != std::numeric_limits<std::size_t>::max() &&
-        m_hierarchy.depth[m_hierarchy.value_components[deref.id]] >=
-            m_cyclic_pass1_depth) {
+    if (isInActivePass1(deref.id)) {
       raw_pts = lookupPass1Fsci(deref.id, site, Point::After);
     } else {
       auto it = m_fsci_cache.find(akey);
       if (it != m_fsci_cache.end()) {
+        if (it->second.empty() && m_path_pruned_fsci.count(akey))
+          ++m_stats.path_infeasible_prunes;
         raw_pts = it->second;
-      } else if (!m_active_fsci.count(akey)) {
-        raw_pts = computeFsci(deref.id, site, Point::After);
-        m_fsci_cache.emplace(akey, raw_pts);
+      } else if (!m_active_fsci.count(akey) && m_active_fsci.size() < 8) {
+        const bool prev_hit = m_hit_active_fsci_cycle;
+        m_hit_active_fsci_cycle = false;
+        bool pruned = false;
+        raw_pts = computeFsci(deref.id, site, Point::After, nullptr, &pruned);
+        const bool this_hit = m_hit_active_fsci_cycle;
+        m_hit_active_fsci_cycle = prev_hit || this_hit;
+        const std::size_t vdepth =
+            dovetailDepthOfComp(m_hierarchy.value_components[deref.id]);
+        const bool can_cache =
+            !this_hit && !m_in_cyclic_pass2 &&
+            (m_dovetailing_done ||
+             (m_has_completed_depth && vdepth <= m_completed_depth &&
+              vdepth < m_cyclic_pass1_depth));
+        if (can_cache) {
+          if (raw_pts.empty() && pruned)
+            m_path_pruned_fsci.insert(akey);
+          m_fsci_cache.emplace(akey, raw_pts);
+        }
       } else {
-        raw_pts = fsciForSummary(deref.id, site, target_depth);
+        m_hit_active_fsci_cycle = true;
+        auto p1 = m_cyclic_pass1_fsci.find(akey);
+        raw_pts = (p1 != m_cyclic_pass1_fsci.end())
+                      ? p1->second
+                      : valueOf(m_program, m_upper, deref.id);
       }
     }
   } else {
@@ -221,42 +241,65 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
   }
 
   case Opcode::Copy:
-  case Opcode::Join:
+  case Opcode::Join: {
+    const bool select_guarded = m_options.path_sensitive &&
+                                inst.opcode == Opcode::Join &&
+                                inst.select_cond_var != INVALID &&
+                                inst.operands.size() == 2;
+    auto operandPath = [&](std::size_t idx) -> BddManager::NodeId {
+      if (!select_guarded)
+        return path;
+      const bool pol =
+          (idx == 0) ? inst.select_cond_polarity : !inst.select_cond_polarity;
+      const BddManager::NodeId bp =
+          m_bdd.makeAnd(path, evalCondNode(inst.select_cond_var, pol));
+      if (m_bdd.isFalse(bp))
+        ++m_stats.path_infeasible_prunes;
+      return bp;
+    };
     if (q.kind == ExprKind::Val && q.id == inst.result) {
-      for (Id op : inst.operands) {
+      for (std::size_t oi = 0; oi < inst.operands.size(); ++oi) {
+        const BddManager::NodeId bp = operandPath(oi);
+        if (m_bdd.isFalse(bp))
+          continue;
+        const Id op = inst.operands[oi];
         if (op == INVALID)
-          out.push_back({Expr::makeTop(), guard, path});
+          out.push_back({Expr::makeTop(), guard, bp});
         else if (m_program.values[op].constant)
           emitPointsToSources(m_program.values[op].initial, q.val_offset,
-                              q.val_offset_known, q.val_stride, guard, path,
-                              out);
+                              q.val_offset_known, q.val_stride, guard, bp, out);
         else
           out.push_back({Expr::makeVal(op, q.val_offset, q.val_offset_known,
                                        q.val_stride),
-                         guard, path});
+                         guard, bp});
       }
       return;
     }
     if (q.kind == ExprKind::Deref && q.id == inst.result) {
-      for (Id op : inst.operands) {
+      for (std::size_t oi = 0; oi < inst.operands.size(); ++oi) {
+        const BddManager::NodeId bp = operandPath(oi);
+        if (m_bdd.isFalse(bp))
+          continue;
+        const Id op = inst.operands[oi];
         if (op == INVALID)
-          out.push_back({Expr::makeTop(), guard, path});
+          out.push_back({Expr::makeTop(), guard, bp});
         else if (m_program.values[op].constant) {
           Expr d = q;
           d.id = op;
-          materializeDeref(d, inst.id, target_depth, guard, path, out);
+          materializeDeref(d, inst.id, target_depth, guard, bp, out);
         } else {
           out.push_back({Expr::makeDeref(op, q.deref_offset,
                                          q.deref_offset_known, q.deref_stride,
                                          q.val_offset, q.val_offset_known,
                                          q.val_stride, q.read_bytes),
-                         guard, path});
+                         guard, bp});
         }
       }
       return;
     }
     out.push_back({q, guard, path});
     return;
+  }
 
   case Opcode::Field:
     if (q.kind == ExprKind::Val && q.id == inst.result) {
@@ -360,6 +403,7 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
       }
       if (has_compatible_mem) {
         if (compatible_count == 1 && !isSameOrHigherDepth(addr, target_depth) &&
+            !isInActivePass1(addr) &&
             (pts.size() == 1 ||
              (pts.size() == 2 && pts.contains(NULL_OBJECT)))) {
           out.push_back({Expr::makeMem(single_obj, q.val_offset,
@@ -390,15 +434,50 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
     const Id t = inst.operands[1];
     if (q.kind == ExprKind::Mem) {
       const PointsToSet pt_u = fsciForSummary(u, inst.id, target_depth);
-      if (!pt_u.contains(q.id)) {
+      const bool direct_hit = pt_u.contains(q.id);
+      std::vector<Id> overlap_bases;
+      if (inst.write_bytes != 0 && !pt_u.isTop()) {
+        for (Id o : pt_u.objects()) {
+          if (o == q.id || !isMemory(m_program.objects[o]))
+            continue;
+          for (Id fo : m_program.overlappingFields(o, inst.write_bytes)) {
+            if (fo == q.id) {
+              overlap_bases.push_back(o);
+              break;
+            }
+          }
+        }
+      }
+      if (!direct_hit && overlap_bases.empty()) {
+        out.push_back({q, guard, path});
+        return;
+      }
+      const bool const_u = (u != INVALID && m_program.values[u].constant);
+      for (Id ob : overlap_bases) {
+        GuardId og = guard;
+        if (!const_u) {
+          GuardAtom atom;
+          atom.site = inst.id;
+          atom.kind = GuardKind::PointsTo;
+          atom.lhs = u;
+          atom.rhs = ob;
+          og = conjoinAtom(guard, atom);
+        }
+        if (og != GUARD_FALSE)
+          out.push_back({Expr::makeTop(), og, path});
+      }
+      if (!direct_hit) {
         out.push_back({q, guard, path});
         return;
       }
       const Object &info = m_program.objects[q.id];
-      const bool same_depth = isSameOrHigherDepth(u, target_depth);
-      const bool const_u = (u != INVALID && m_program.values[u].constant);
+      const bool exact_singleton =
+          q.id < m_index.exact_address_singleton.size() &&
+          m_index.exact_address_singleton[q.id];
+      const bool same_depth =
+          isSameOrHigherDepth(u, target_depth) || isInActivePass1(u);
       const bool must_point = !same_depth && !pt_u.isTop() && pt_u.size() == 1 &&
-                              pt_u.contains(q.id) && info.singleton;
+                              pt_u.contains(q.id) && exact_singleton;
 
       // Branch 1: u -> q.id (Algorithm 4 line 24)
       GuardId taken_g = guard;
@@ -430,7 +509,7 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
       // Branch 2: u -/-> q.id (Algorithm 4 line 26)
       if (!must_point) {
         GuardId not_taken_g = guard;
-        if (!const_u && info.singleton) {
+        if (!const_u && exact_singleton) {
           GuardAtom atom;
           atom.site = inst.id;
           atom.kind = GuardKind::NotPointsTo;
@@ -451,16 +530,34 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
       const PointsToSet pt_s =
           applyOffset(fsciForSummary(q.id, inst.id, target_depth),
                       q.deref_offset, q.deref_offset_known, q.deref_stride);
+      bool cross_overlap = false;
+      if (inst.write_bytes != 0 && !pt_u.isTop() && !pt_s.isTop()) {
+        for (Id o : pt_u.objects()) {
+          if (!isMemory(m_program.objects[o]))
+            continue;
+          for (Id fo : m_program.overlappingFields(o, inst.write_bytes)) {
+            if (fo != o && pt_s.contains(fo)) {
+              cross_overlap = true;
+              break;
+            }
+          }
+          if (cross_overlap)
+            break;
+        }
+      }
+      if (cross_overlap)
+        out.push_back({Expr::makeTop(), guard, path});
       if (!memoryIntersects(pt_s, pt_u)) {
         out.push_back({q, guard, path});
         return;
       }
       const bool same_depth = isSameOrHigherDepth(u, target_depth) ||
-                              isSameOrHigherDepth(q.id, target_depth);
+                              isSameOrHigherDepth(q.id, target_depth) ||
+                              isInActivePass1(u) || isInActivePass1(q.id);
       const bool must_alias =
           !same_depth && !pt_s.isTop() && !pt_u.isTop() && pt_s.size() == 1 &&
-          pt_s == pt_u && *pt_s.begin() < m_program.objects.size() &&
-          m_program.objects[*pt_s.begin()].singleton;
+          pt_s == pt_u && *pt_s.begin() < m_index.exact_address_singleton.size() &&
+          m_index.exact_address_singleton[*pt_s.begin()];
 
       // Detect Algorithm 4 lines 10-19 direct-variable assignment `r = t`
       // (constant address `u = &r_obj`) so we emit sharper `s -> r` / `s -/-> r`
@@ -606,9 +703,13 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
         return;
       }
       const Object &fd_info = m_program.objects[q.id];
-      const bool same_depth = isSameOrHigherDepth(dst, target_depth);
+      const bool fd_exact_singleton =
+          q.id < m_index.exact_address_singleton.size() &&
+          m_index.exact_address_singleton[q.id];
+      const bool same_depth =
+          isSameOrHigherDepth(dst, target_depth) || isInActivePass1(dst);
       const bool must_overwrite = !same_depth && pt_dst.size() == 1 &&
-                                  overlap_count == 1 && fd_info.singleton;
+                                  overlap_count == 1 && fd_exact_singleton;
 
       for (Id od : pt_dst.objects()) {
         const auto fields = m_program.overlappingFields(od, inst.write_bytes);
@@ -625,13 +726,13 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
           if (g == GUARD_FALSE)
             continue;
         }
-        const std::int64_t rel =
-            static_cast<std::int64_t>(fd_info.offset) -
-            static_cast<std::int64_t>(m_program.objects[od].offset);
-        const bool full_cover =
-            inst.write_bytes != 0 && rel >= 0 && fd_info.bytes > 0 &&
-            static_cast<std::uint64_t>(rel) + fd_info.bytes <= inst.write_bytes;
-        if (pt_src.isTop() || !full_cover) {
+        std::vector<std::int64_t> rels;
+        const bool dst_unaligned =
+            od < m_index.has_unaligned_interior.size() &&
+            m_index.has_unaligned_interior[od];
+        if (pt_src.isTop() || dst_unaligned ||
+            !m_program.memCopyRelativeOffsets(od, q.id, inst.write_bytes,
+                                              rels)) {
           out.push_back({Expr::makeTop(), g, path});
           continue;
         }
@@ -649,26 +750,34 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
             if (sg == GUARD_FALSE)
               continue;
           }
-          const PointsToSet fs_pts = m_program.resolveField(os, rel, true);
-          if (fs_pts.isTop() || fs_pts.empty()) {
+          if (!isMemory(m_program.objects[os]) ||
+              (os < m_index.has_unaligned_interior.size() &&
+               m_index.has_unaligned_interior[os])) {
             out.push_back({Expr::makeTop(), sg, path});
             continue;
           }
-          for (Id fs : fs_pts.objects()) {
-            const Object &fs_info = m_program.objects[fs];
-            if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes)
+          for (std::int64_t rel : rels) {
+            const PointsToSet fs_pts = m_program.resolveField(os, rel, true);
+            if (fs_pts.isTop() || fs_pts.empty()) {
               out.push_back({Expr::makeTop(), sg, path});
-            else
-              out.push_back({Expr::makeMem(fs, q.val_offset, q.val_offset_known,
-                                           q.val_stride),
-                             sg, path});
+              continue;
+            }
+            for (Id fs : fs_pts.objects()) {
+              const Object &fs_info = m_program.objects[fs];
+              if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes)
+                out.push_back({Expr::makeTop(), sg, path});
+              else
+                out.push_back({Expr::makeMem(fs, q.val_offset,
+                                             q.val_offset_known, q.val_stride),
+                               sg, path});
+            }
           }
         }
       }
       if (!must_overwrite) {
         GuardId ng = guard;
         if (overlap_count == 1 && !m_program.values[dst].constant &&
-            fd_info.singleton) {
+            fd_exact_singleton) {
           GuardAtom atom;
           atom.site = inst.id;
           atom.kind = GuardKind::NotPointsTo;
@@ -718,7 +827,8 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
         return;
       }
       const bool must_hit = !isSameOrHigherDepth(u, target_depth) &&
-                            pt_u.size() == 1 && hit_count == 1;
+                            !isInActivePass1(u) && pt_u.size() == 1 &&
+                            hit_count == 1;
       GuardId tg = guard;
       if (!must_hit && hit_count == 1 && !m_program.values[u].constant) {
         GuardAtom atom;
@@ -733,7 +843,8 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
       if (!must_hit) {
         GuardId ng = guard;
         if (hit_count == 1 && !m_program.values[u].constant &&
-            m_program.objects[q.id].singleton) {
+            q.id < m_index.exact_address_singleton.size() &&
+            m_index.exact_address_singleton[q.id]) {
           GuardAtom atom;
           atom.site = inst.id;
           atom.kind = GuardKind::NotPointsTo;

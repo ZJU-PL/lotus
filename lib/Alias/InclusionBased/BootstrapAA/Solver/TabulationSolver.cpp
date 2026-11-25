@@ -74,6 +74,7 @@ class TabulationSolver final : public ClusterSolver {
   const ProgramIndex &m_index;
   const Sets &m_upper;
   const CallGraphInfo &m_call_graph;
+  std::vector<Id> m_cluster_values;
   const Slice m_slice;
   const Options &m_options;
   Statistics m_stats;
@@ -134,6 +135,9 @@ class TabulationSolver final : public ClusterSolver {
     return id;
   }
   PointsToSet eval(const State &state, Id value) const {
+    if (value != INVALID && !m_program.values[value].constant &&
+        !m_slice.values[value])
+      return valueOf(m_program, m_upper, value);
     return valueOf(m_program, state.values, value);
   }
   void writeObject(State &state, Id object, const PointsToSet &rhs,
@@ -145,7 +149,8 @@ class TabulationSolver final : public ClusterSolver {
     if (!isMemory(info))
       return;
     const bool strong =
-        strong_allowed && info.singleton &&
+        strong_allowed && object < m_index.exact_address_singleton.size() &&
+        m_index.exact_address_singleton[object] &&
         (bytes == 0 || (info.bytes != 0 && bytes == info.bytes));
     if (bytes != 0 && (info.bytes == 0 || info.bytes != bytes))
       state.memory[object] = PointsToSet::top();
@@ -164,8 +169,14 @@ class TabulationSolver final : public ClusterSolver {
       return;
     }
     const bool single = allow_strong && address.size() == 1;
-    for (Id object : address.objects())
+    for (Id object : address.objects()) {
       writeObject(state, object, rhs, bytes, single);
+      if (bytes != 0 && isMemory(m_program.objects[object])) {
+        for (Id fo : m_program.overlappingFields(object, bytes))
+          if (fo != object)
+            writeObject(state, fo, PointsToSet::top(), 0, false);
+      }
+    }
   }
   State external(const Instruction &instruction, State state,
                  bool writes) const {
@@ -283,12 +294,28 @@ class TabulationSolver final : public ClusterSolver {
           }
       }
       break;
-    case Opcode::Store:
-      if (touches(m_program, m_slice,
-                  valueOf(m_program, m_upper, i.operands[0])))
+    case Opcode::Store: {
+      const PointsToSet upper_addr =
+          valueOf(m_program, m_upper, i.operands[0]);
+      bool store_touches = touches(m_program, m_slice, upper_addr);
+      if (!store_touches && i.write_bytes != 0 && !upper_addr.isTop()) {
+        for (Id o : upper_addr.objects()) {
+          if (!isMemory(m_program.objects[o]))
+            continue;
+          for (Id fo : m_program.overlappingFields(o, i.write_bytes))
+            if (fo >= 2 && fo < m_slice.objects.size() && m_slice.objects[fo]) {
+              store_touches = true;
+              break;
+            }
+          if (store_touches)
+            break;
+        }
+      }
+      if (store_touches)
         write(state, eval(state, i.operands[0]), eval(state, i.operands[1]),
               i.write_bytes, true);
       return state;
+    }
     case Opcode::MemCopy: {
       const PointsToSet dst_pts = eval(state, i.operands[0]);
       const PointsToSet src_pts = eval(state, i.operands[1]);
@@ -306,36 +333,43 @@ class TabulationSolver final : public ClusterSolver {
           if (!m_slice.objects[fd])
             continue;
           const Object &fd_info = m_program.objects[fd];
-          const std::int64_t rel =
-              static_cast<std::int64_t>(fd_info.offset) -
-              static_cast<std::int64_t>(m_program.objects[od].offset);
-          const bool full_cover =
-              i.write_bytes != 0 && rel >= 0 && fd_info.bytes > 0 &&
-              static_cast<std::uint64_t>(rel) + fd_info.bytes <= i.write_bytes;
-          if (src_pts.isTop() || !full_cover) {
+          std::vector<std::int64_t> rels;
+          const bool dst_unaligned =
+              od < m_index.has_unaligned_interior.size() &&
+              m_index.has_unaligned_interior[od];
+          if (src_pts.isTop() || dst_unaligned ||
+              !m_program.memCopyRelativeOffsets(od, fd, i.write_bytes, rels)) {
             state.memory[fd] = PointsToSet::top();
             continue;
           }
           PointsToSet copied;
           for (Id os : src_pts.objects()) {
-            if (!isMemory(m_program.objects[os])) {
+            if (!isMemory(m_program.objects[os]) ||
+                (os < m_index.has_unaligned_interior.size() &&
+                 m_index.has_unaligned_interior[os])) {
               copied = PointsToSet::top();
               break;
             }
-            const PointsToSet fs_pts = m_program.resolveField(os, rel, true);
-            if (fs_pts.isTop() || fs_pts.empty()) {
-              copied = PointsToSet::top();
-              break;
-            }
-            for (Id fs : fs_pts.objects()) {
-              const Object &fs_info = m_program.objects[fs];
-              if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes)
+            for (std::int64_t rel : rels) {
+              const PointsToSet fs_pts = m_program.resolveField(os, rel, true);
+              if (fs_pts.isTop() || fs_pts.empty()) {
                 copied = PointsToSet::top();
-              else
-                copied.join(prev_memory[fs]);
+                break;
+              }
+              for (Id fs : fs_pts.objects()) {
+                const Object &fs_info = m_program.objects[fs];
+                if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes ||
+                    !m_slice.objects[fs])
+                  copied = PointsToSet::top();
+                else
+                  copied.join(prev_memory[fs]);
+              }
             }
+            if (copied.isTop())
+              break;
           }
-          if (single_dst && fd_info.singleton)
+          if (single_dst && fd < m_index.exact_address_singleton.size() &&
+              m_index.exact_address_singleton[fd])
             state.memory[fd] = std::move(copied);
           else
             state.memory[fd].join(copied);
@@ -427,10 +461,11 @@ class TabulationSolver final : public ClusterSolver {
 public:
   TabulationSolver(const Program &program, const ProgramIndex &index,
                    const Sets &upper, const CallGraphInfo &call_graph,
-                   Slice slice, const Options &options)
+                   std::vector<Id> cluster_values, Slice slice,
+                   const Options &options)
       : m_program(program), m_index(index), m_upper(upper),
-        m_call_graph(call_graph), m_slice(std::move(slice)),
-        m_options(options) {
+        m_call_graph(call_graph), m_cluster_values(std::move(cluster_values)),
+        m_slice(std::move(slice)), m_options(options) {
     m_stats.call_graph_sccs = m_call_graph.scc_count;
     m_stats.recursive_call_graph_sccs = m_call_graph.recursive_scc_count;
     m_stats.slice_values = m_slice.value_list.size();
@@ -466,10 +501,30 @@ public:
     }
   }
 
-  QueryResult query(Id value, Id site, const Context *context_path,
-                    Point point) override {
-    if (m_failed)
-      return {PointsToSet::top(), QueryStatus::ResourceLimit};
+  static bool memoryIntersects(const PointsToSet &a, const PointsToSet &b) {
+    if (a.empty() || b.empty())
+      return false;
+    if (a.isTop()) {
+      if (b.isTop())
+        return true;
+      for (Id o : b.objects())
+        if (o != NULL_OBJECT)
+          return true;
+      return false;
+    }
+    if (b.isTop()) {
+      for (Id o : a.objects())
+        if (o != NULL_OBJECT)
+          return true;
+      return false;
+    }
+    for (Id o : a.objects())
+      if (o != NULL_OBJECT && b.contains(o))
+        return true;
+    return false;
+  }
+
+  std::set<std::size_t> collectActiveContexts(const Context *context_path) const {
     std::set<std::size_t> active{0};
     if (context_path) {
       for (Id callsite : *context_path) {
@@ -492,6 +547,14 @@ public:
               work.push_back(callee);
       }
     }
+    return active;
+  }
+
+  QueryResult query(Id value, Id site, const Context *context_path,
+                    Point point) override {
+    if (m_failed)
+      return {PointsToSet::top(), QueryStatus::ResourceLimit};
+    std::set<std::size_t> active = collectActiveContexts(context_path);
     QueryResult result;
     for (std::size_t id : active) {
       auto found = m_records[id]->snapshots.find(site);
@@ -508,10 +571,30 @@ public:
     return result;
   }
 
-  AliasResult queryAliases(Id value, Id site, const Context *context_path,
-                           Point point) override {
+  QueryResult queryObject(Id object, Id site, const Context *context_path,
+                          Point point) override {
+    if (m_failed)
+      return {PointsToSet::top(), QueryStatus::ResourceLimit};
+    std::set<std::size_t> active = collectActiveContexts(context_path);
+    QueryResult result;
+    for (std::size_t id : active) {
+      auto found = m_records[id]->snapshots.find(site);
+      if (found == m_records[id]->snapshots.end())
+        continue;
+      const State &state =
+          point == Point::Before ? found->second.first : found->second.second;
+      if (!state.reachable)
+        continue;
+      result.status = QueryStatus::Complete;
+      const PointsToSet &set = state.memory[object];
+      result.points_to.join(set.empty() ? PointsToSet::top() : set);
+    }
+    return result;
+  }
+
+  AliasResult aliasesFromBase(const QueryResult &base, Id self_val, Id site,
+                              const Context *context_path, Point point) {
     AliasResult out;
-    QueryResult base = query(value, site, context_path, point);
     out.status = base.status;
     if (!base.reachable())
       return out;
@@ -522,19 +605,58 @@ public:
     if (base.points_to.isTop())
       out.may_alias_all = true;
     const Id fn = m_index.by_site[site].function;
-    for (Id cand : m_slice.value_list) {
+    for (Id cand : m_cluster_values) {
       const Value &vinfo = m_program.values[cand];
       if (!vinfo.constant && vinfo.function != INVALID && vinfo.function != fn)
         continue;
-      if (cand == value || out.may_alias_all) {
+      if (cand == self_val || out.may_alias_all) {
         out.aliases.push_back(cand);
         continue;
       }
       QueryResult cq = query(cand, site, context_path, point);
-      if (cq.reachable() && cq.points_to.intersects(base.points_to))
+      if (cq.reachable() && memoryIntersects(cq.points_to, base.points_to))
         out.aliases.push_back(cand);
     }
     return out;
+  }
+
+  AliasResult queryAliases(Id value, Id site, const Context *context_path,
+                           Point point) override {
+    return aliasesFromBase(query(value, site, context_path, point), value, site,
+                           context_path, point);
+  }
+
+  AliasResult queryObjectAliases(Id object, Id site,
+                                 const Context *context_path,
+                                 Point point) override {
+    return aliasesFromBase(queryObject(object, site, context_path, point),
+                           INVALID, site, context_path, point);
+  }
+
+  bool mustAlias(Id lhs, Id rhs, Id site,
+                 const Context *context_path) override {
+    QueryResult a = query(lhs, site, context_path, Point::Before);
+    if (a.status != QueryStatus::Complete)
+      return false;
+    if (m_program.values[lhs].constant && m_program.values[lhs].initial.isTop())
+      return false;
+    if (lhs == rhs)
+      return true;
+    QueryResult b = query(rhs, site, context_path, Point::Before);
+    if (b.status != QueryStatus::Complete)
+      return false;
+    if (m_program.values[rhs].constant && m_program.values[rhs].initial.isTop())
+      return false;
+    if (!memoryIntersects(a.points_to, b.points_to))
+      return false;
+    if (!a.points_to.isTop() && !b.points_to.isTop() &&
+        a.points_to.size() == 1 && a.points_to == b.points_to) {
+      const Id obj = *a.points_to.begin();
+      return obj != NULL_OBJECT &&
+             obj < m_index.exact_address_singleton.size() &&
+             m_index.exact_address_singleton[obj];
+    }
+    return false;
   }
 
   const Statistics &statistics() const override { return m_stats; }
@@ -544,8 +666,10 @@ public:
 
 std::unique_ptr<ClusterSolver> createTabulationSolver(
     const Program &program, const ProgramIndex &index, const Sets &upper,
-    const CallGraphInfo &call_graph, Slice slice, const Options &options) {
+    const CallGraphInfo &call_graph, std::vector<Id> cluster_values,
+    Slice slice, const Options &options) {
   return std::make_unique<TabulationSolver>(program, index, upper, call_graph,
+                                            std::move(cluster_values),
                                             std::move(slice), options);
 }
 

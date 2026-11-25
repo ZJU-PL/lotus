@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <limits>
 #include <vector>
 
 namespace lotus {
@@ -92,6 +93,7 @@ ProgramIndex::ProgramIndex(const Program &program) {
   pred_edges.resize(program.functions.size());
   incoming_calls.resize(program.functions.size());
   in_loop_block.resize(program.functions.size());
+  idom.resize(program.functions.size());
 
   for (Id f = 0; f < program.functions.size(); ++f) {
     const Function &func = program.functions[f];
@@ -157,11 +159,89 @@ ProgramIndex::ProgramIndex(const Program &program) {
               in_loop_block[f][b] = true;
         }
       }
+
+      // Compute immediate dominators via Cooper-Harvey-Kennedy iterative RPO.
+      const std::size_t nb = func.blocks.size();
+      idom[f].assign(nb, INVALID);
+      std::vector<bool> vis(nb, false);
+      std::vector<Id> postorder;
+      postorder.reserve(nb);
+      {
+        std::vector<std::pair<Id, std::size_t>> dfs{{0, 0}};
+        vis[0] = true;
+        while (!dfs.empty()) {
+          auto &[node, next] = dfs.back();
+          if (next < cfg_succ[node].size()) {
+            const Id s = cfg_succ[node][next++];
+            if (!vis[s]) {
+              vis[s] = true;
+              dfs.emplace_back(s, 0);
+            }
+            continue;
+          }
+          postorder.push_back(node);
+          dfs.pop_back();
+        }
+      }
+      std::vector<Id> rpo(postorder.rbegin(), postorder.rend());
+      std::vector<std::size_t> rpo_idx(nb, nb);
+      for (std::size_t i = 0; i < rpo.size(); ++i)
+        rpo_idx[rpo[i]] = i;
+      auto intersect = [&](Id b1, Id b2) -> Id {
+        Id f1 = b1;
+        Id f2 = b2;
+        while (f1 != f2) {
+          while (rpo_idx[f1] > rpo_idx[f2])
+            f1 = idom[f][f1];
+          while (rpo_idx[f2] > rpo_idx[f1])
+            f2 = idom[f][f2];
+        }
+        return f1;
+      };
+      idom[f][0] = 0;
+      bool dom_changed = true;
+      while (dom_changed) {
+        dom_changed = false;
+        for (std::size_t i = 1; i < rpo.size(); ++i) {
+          const Id b = rpo[i];
+          Id new_idom = INVALID;
+          for (Id p : cfg_pred[b]) {
+            if (idom[f][p] == INVALID)
+              continue;
+            new_idom = (new_idom == INVALID) ? p : intersect(p, new_idom);
+          }
+          if (new_idom != INVALID && idom[f][b] != new_idom) {
+            idom[f][b] = new_idom;
+            dom_changed = true;
+          }
+        }
+      }
     }
   }
 }
 
-void ProgramIndex::populateCallers(const Program &program, const Sets &upper) {
+bool ProgramIndex::blockDominates(Id func, Id dom_block, Id block) const {
+  if (func >= idom.size() || dom_block >= idom[func].size() ||
+      block >= idom[func].size())
+    return false;
+  if (idom[func][block] == INVALID)
+    return false;
+  Id cur = block;
+  while (cur != INVALID) {
+    if (cur == dom_block)
+      return true;
+    if (cur == 0)
+      return false;
+    const Id next = idom[func][cur];
+    if (next == cur)
+      return false;
+    cur = next;
+  }
+  return false;
+}
+
+void ProgramIndex::populateCallers(const Program &program, const Sets &upper,
+                                   const SteensgaardHierarchy &hierarchy) {
   for (auto &list : incoming_calls)
     list.clear();
   for (Id site : call_sites) {
@@ -171,6 +251,110 @@ void ProgramIndex::populateCallers(const Program &program, const Sets &upper) {
     for (Id callee : targets.functions)
       incoming_calls[callee].push_back(site);
   }
+
+  // Compute exact-address singletons: any singleton object that can receive an
+  // unaligned interior byte pointer or variable/non-exact offset (via
+  // ConstantExpr GEP or Opcode::Field) may have two distinct runtime addresses
+  // sharing the same abstract object ID, so exact-address equality (`mustAlias`,
+  // `p != q`, strong updates) must not assume identical byte offsets.
+  exact_address_singleton.assign(program.objects.size(), false);
+  has_unaligned_interior.assign(program.objects.size(), false);
+  for (Id o = 0; o < program.objects.size(); ++o) {
+    has_unaligned_interior[o] = program.objects[o].has_interior_pointer;
+    exact_address_singleton[o] =
+        program.objects[o].singleton && !program.objects[o].has_interior_pointer;
+  }
+
+  auto markNonExact = [&](Id ro) {
+    if (ro >= 2 && ro < exact_address_singleton.size()) {
+      exact_address_singleton[ro] = false;
+      has_unaligned_interior[ro] = true;
+    }
+  };
+
+  auto applyFieldNonExact = [&](Id obj, const Instruction &inst) {
+    if (obj < 2 || obj >= program.objects.size())
+      return;
+    const PointsToSet resolved = program.resolveField(
+        obj, inst.field_offset, inst.field_known, inst.field_array_stride);
+    if (resolved.isTop())
+      return;
+    const Id base = program.baseOf(obj);
+    const Object &binfo = program.objects[base];
+    if (!binfo.field_sensitive || base >= program.fields_of_base.size() ||
+        program.fields_of_base[base].empty()) {
+      markNonExact(obj);
+      return;
+    }
+    if (!inst.field_known) {
+      // Any variable-offset Field inside an aggregate may reach interior bytes,
+      // distinct folded array elements, or one-past-the-end addresses.
+      for (Id ro : resolved.objects()) {
+        if (ro >= 2 && ro < exact_address_singleton.size()) {
+          exact_address_singleton[ro] = false;
+          // Only mark `has_unaligned_interior` if the stride is absent or not
+          // aligned to the field's byte alignment (preserves aligned array
+          // MemCopy precision).
+          const std::uint64_t align = program.objects[ro].bytes;
+          const bool off_aligned =
+              inst.field_offset == 0 ||
+              (align > 0 &&
+               align <= static_cast<std::uint64_t>(
+                            std::numeric_limits<std::int64_t>::max()) &&
+               (inst.field_offset % static_cast<std::int64_t>(align)) == 0);
+          if (inst.field_array_stride == 0 || align == 0 ||
+              (inst.field_array_stride % align) != 0 || !off_aligned)
+            has_unaligned_interior[ro] = true;
+        }
+      }
+      return;
+    }
+    const std::uint64_t cur_off = program.objects[obj].offset;
+    if (cur_off > static_cast<std::uint64_t>(
+                      std::numeric_limits<std::int64_t>::max()))
+      return;
+    const std::int64_t cur_s = static_cast<std::int64_t>(cur_off);
+    if ((inst.field_offset > 0 &&
+         cur_s > std::numeric_limits<std::int64_t>::max() - inst.field_offset) ||
+        (inst.field_offset < 0 &&
+         cur_s < std::numeric_limits<std::int64_t>::min() - inst.field_offset))
+      return;
+    const std::int64_t ts = cur_s + inst.field_offset;
+    if (ts < 0)
+      return;
+    const std::uint64_t folded =
+        program.foldOffset(base, static_cast<std::uint64_t>(ts));
+    for (Id ro : resolved.objects()) {
+      if (ro >= 2 && ro < exact_address_singleton.size() &&
+          (resolved.size() > 1 || program.objects[ro].offset != folded)) {
+        exact_address_singleton[ro] = false;
+        if (program.objects[ro].offset != folded)
+          has_unaligned_interior[ro] = true;
+      }
+    }
+  };
+
+  forInstructions(program, [&](Id, const Instruction &inst) {
+    if (inst.opcode != Opcode::Field || inst.operands.empty() ||
+        (inst.field_known && inst.field_offset == 0 &&
+         inst.field_array_stride == 0))
+      return;
+    const PointsToSet base_pts = valueOf(program, upper, inst.operands[0]);
+    if (base_pts.isTop()) {
+      for (Id o = 2; o < program.objects.size(); ++o) {
+        if (!exact_address_singleton[o] && has_unaligned_interior[o])
+          continue;
+        if (hierarchy.top_component != INVALID &&
+            o < hierarchy.object_components.size() &&
+            hierarchy.object_components[o] != hierarchy.top_component)
+          continue;
+        applyFieldNonExact(o, inst);
+      }
+      return;
+    }
+    for (Id obj : base_pts.objects())
+      applyFieldNonExact(obj, inst);
+  });
 }
 
 CallGraphInfo buildCallGraph(const Program &program, const Sets &upper) {

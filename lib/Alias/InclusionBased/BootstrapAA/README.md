@@ -17,18 +17,18 @@ differential validation.
 
 | Paper mechanism | Implementation |
 | --- | --- |
-| Steensgaard partitioning, §2.1 | Direct target unification (`Preprocessing/Steensgaard.cpp`) with per-node nullability (avoiding a single global `NULL` unification bridge), unification-based indirect call resolution, field-sensitive `Field`/`MemCopy`/`Havoc` propagation, Kosaraju SCC cycle collapse, and retained `SteensgaardHierarchy` DAG/depth/cyclic metadata. Distinct partitions are preserved even when a `top` pointer (such as `main`'s `argv`) is present. |
-| Optional Das (2000) one-level-flow cascade, §4 | Optional intermediate `oneLevelFlow()` refinement stage (`Preprocessing/OneLevelFlow.cpp`, `Options::enable_one_level_flow`, `--one-level-flow`) bridging Steensgaard partitions and sparse Andersen refinement. |
-| Relevant variables & statements (`V_P`, `St_P`), Algorithm 1 | Worklist-based backward closure (`Preprocessing/RelevantSlice.cpp`) computing both relevant values/objects (`V_P`) and the explicit relevant statement slice (`St_P`, `Slice::inst_list`, `Slice::relevant_functions`) using hierarchy ancestors and cyclic components without pulling unrelated indirect calls into every cluster. |
-| Thresholded sparse Andersen refinement, §2.1 & Theorem 7 | Sparse `St_P`-restricted inclusion solver (`Preprocessing/AndersenRefinement.cpp`) triggered on partitions exceeding `andersen_threshold` (default 60), forming an overlapping inverse points-to cluster cover (Theorem 7) with deterministic adaptive threshold tuning and size/work guards. |
-| Guarded summary tuples, Definition 8 | Interned 4-atom guard language (`Solver/GuardedSummaryState.cpp`: `PointsTo`, `NotPointsTo`, `Alias`, `NotAlias` with call-site suffixes for context qualification), non-loop contradiction pruning, subsumption/back-subsumption, Top-absorption, and sound budget widening (`max_guard_atoms`, `max_guards_per_state`). |
-| Top-down Steensgaard-depth dovetailing, Algorithm 2 | `GuardedSummarySolver::runDovetailing()` (`Solver/GuardedSummaryEngine.cpp`) interleaves summary computation and FSCI points-to resolution in increasing Steensgaard hierarchy depth, with optional literal eager per-depth summary precomputation in reverse-topological SCC order (`Options::eager_dovetail_summaries`, `--eager-dovetail`, Algorithm 2 lines 2 & 8). Cyclic depths run a monotone Pass-1 least fixpoint (with dynamic extra-key discovery and sound `m_upper` cap fallback) followed by a Pass-2 precision-tightening pass against the converged Pass-1 sound sets, and a final flow-sensitive indirect-call reachability pass tightens FSCI reachability (`pointsToAllContexts`/`aliasesAllContexts`). |
-| Backward tuple transfer, Algorithm 4 | `transferBackward()` (`Solver/GuardedSummaryTransfer.cpp`) filters statements against `St_P` (Algorithm 4 line 2), transfers symbolic expressions (`Val`, `Mem`, `Deref` (`*s`), `Addr`, `Null`, `Top`) across all opcodes and simultaneous incoming PHI assignments, emitting `s -> r` / `s -/-> r` for direct-target assignments (lines 14–17), `u -> q` / `u -/-> q` for `Mem` (lines 24–26), and `s ~ u` / `s !~ u` for indirect `*s` vs `*u` (lines 32–34). |
-| Reverse-topological SCC summary computation, Algorithm 5 | `computeSummary()` (`Solver/GuardedSummaryEngine.cpp`) builds summaries bottom-up across the call-graph SCC condensation, runs a deduplicated waiter fixpoint inside recursive SCCs, uses straight-line intra-block fast backward walks + exact intra-block SSA canonicalization, and skips functions whose `St_P`-restricted modification set (`m_func_modifies`) cannot touch the tracked location (`skipped_functions`). |
-| FSCI & FSCS points-to / direct alias queries, Algorithm 3 & §3 | `computeFsci()` / `computeFscs()` compute backward entry anchors `A` (with Algorithm 3's `Retain` fast-path and flow-sensitive indirect-call reachability); `propagateForwardAnchorsFsci()` / `propagateForwardAnchorsFscs()` implement Algorithm 3 Step 2 forward summary propagation from `A` to `Q` for `aliases()` / `aliasesAllContexts()`. |
-| Optional ROBDD path sensitivity, §3 | Dependency-free canonical ROBDD manager (`Support/Bdd.h`, `Support/Bdd.cpp`) tracking branch condition formulas `con_b` across intraprocedural and interprocedural paths (both downward into summaries and upward across callers in `computeFsci()`/`computeFscs()` via `path_sensitive_interprocedural`), with cross-function LLVM predicate canonicalization for shared formal arguments and non-escaping local globals, sound existential quantification on condition redefinitions/kills (`defines_condition`, `kills_conditions`, `entry_kills_conditions`, `global_conditions`), and node-budget widening (`max_bdd_nodes`). |
+| Steensgaard partitioning, §2.1 | Single-pass static target unification plus compact dynamic fixpoint (`Preprocessing/Steensgaard.cpp`) with per-node nullability (`isNullOnlyConstant` avoids any global `NULL` unification bridge), unification-based indirect call resolution, field-sensitive `Field`/`MemCopy`/`Havoc` propagation, Kosaraju SCC cycle collapse, and retained `SteensgaardHierarchy` DAG/depth/cyclic metadata. Distinct partitions are preserved even when a `top` pointer (such as `main`'s `argv`) is present. |
+| Optional Das (2000) one-level-flow cascade, §4 | Genuine static-worklist directional one-level-flow solver over both SSA values and memory slots (`Preprocessing/OneLevelFlow.cpp`, `Options::enable_one_level_flow`, `--one-level-flow`) bridging Steensgaard partitions and sparse Andersen refinement. |
+| Relevant variables & statements (`V_P`, `St_P`), Algorithm 1 | Worklist-based backward closure (`Preprocessing/RelevantSlice.cpp`) computing both relevant values/objects (`V_P`) and the explicit relevant statement slice (`St_P`, `Slice::inst_list`, `Slice::relevant_functions`, including `seed_objects` for direct memory-object queries and allocation-site function relevance) using hierarchy ancestors and cyclic components without pulling unrelated indirect calls into every cluster. |
+| Thresholded sparse Andersen refinement, §2.1 & Theorem 7 | Sparse `St_P`-restricted inclusion solver (`Preprocessing/AndersenRefinement.cpp`) triggered on partitions exceeding `andersen_threshold` (default 60), forming an overlapping inverse points-to cluster cover (Theorem 7) with per-partition zero-reduction / retention-ratio rejection, optional global threshold escalation (`adaptive_global_threshold_escalation`), and size/work guards. |
+| Guarded summary tuples, Definition 8 | Interned 4-atom guard language (`Solver/GuardedSummaryState.cpp`: `PointsTo`, `NotPointsTo`, `Alias`, `NotAlias` with call-site suffixes for context qualification), invariant-SSA cross-site and non-loop contradiction pruning, `EdgePtrGuard` pointer-comparison edge guards, subsumption/back-subsumption, Top-absorption, and sound budget widening (`max_guard_atoms`, `max_guards_per_state`). |
+| Top-down Steensgaard-depth dovetailing, Algorithm 2 | `GuardedSummarySolver::runDovetailing()` (`Solver/GuardedSummaryEngine.cpp`) computes slice-local field-aware dovetail SCC depths (`computeDovetailHierarchy`) and interleaves summary computation with FSCI points-to resolution in increasing dependency depth, with optional literal eager per-depth summary precomputation in reverse-topological SCC order (`Options::eager_dovetail_summaries`, `--eager-dovetail`, Algorithm 2 lines 2 & 8). Cyclic depths run a monotone Pass-1 least fixpoint (disabling Pass-1 strong-update collapse and using dynamic extra-key discovery with sound `m_upper` cap fallback) followed by a Pass-2 precision-tightening pass against converged Pass-1 sound sets, and a final flow-sensitive indirect-call reachability pass tightens FSCI reachability (`pointsToAllContexts`/`aliasesAllContexts`). |
+| Backward tuple transfer, Algorithm 4 | `transferBackward()` (`Solver/GuardedSummaryTransfer.cpp`) filters statements against `St_P` (Algorithm 4 line 2), transfers symbolic expressions (`Val`, `Mem`, `Deref` (`*s`), `Addr`, `Null`, `Top`) across all opcodes (including path-sensitive `SelectInst` `Opcode::Join`) and simultaneous incoming PHI assignments, emitting `s -> r` / `s -/-> r` for direct-target assignments (lines 14–17), `u -> q` / `u -/-> q` for `Mem` (lines 24–26), and `s ~ u` / `s !~ u` for indirect `*s` vs `*u` (lines 32–34). |
+| Reverse-topological SCC summary computation, Algorithm 5 | `computeSummary()` (`Solver/GuardedSummaryEngine.cpp`) builds summaries bottom-up across the call-graph SCC condensation, runs a deduplicated waiter fixpoint inside recursive SCCs, uses straight-line intra-block fast backward walks + dominator-based SSA canonicalization, and skips functions whose `St_P`-restricted modification set (`m_func_modifies`) cannot touch the tracked location (`skipped_functions`). |
+| FSCI & FSCS points-to, direct memory-object, must-alias & alias queries, Algorithm 3 & §3 | `computeFsci()` / `computeFscs()` compute backward entry anchors `A` (with Algorithm 3's `Retain` fast-path and flow-sensitive indirect-call reachability); `propagateForwardAnchorsFsci()` / `propagateForwardAnchorsFscs()` implement Algorithm 3 Step 2 forward summary propagation from `A` to `Q` (with call-graph reachability pruning, exactness tracking, and live-definition scoping) for `aliases()` / `aliasesAllContexts()`, plus direct memory-object queries (`objectPointsTo*`, `objectAliases*`) and `mustAlias()`. |
+| Optional ROBDD path sensitivity, §3 | Dependency-free canonical ROBDD manager (`Support/Bdd.h`, `Support/Bdd.cpp` with `substitute`) tracking compound boolean branch formulas (`Atom`/`Not`/`And`/`Or`), `SwitchInst` cases, pointer `SelectInst`, and pointer-comparison `EdgePtrGuard`s across intraprocedural and interprocedural paths (both downward into summaries and upward across callers in `computeFsci()`/`computeFscs()` via `path_sensitive_interprocedural` with per-call-site formal-to-actual `cond_subst`), CFG freshness verification (`isGlobalLoadFreshAt`) for non-escaping local globals, sound existential quantification on condition redefinitions/kills (`defines_condition`, `kills_conditions`, `entry_kills_conditions`, `global_conditions`), and node-budget widening (`max_bdd_nodes`). |
 | Field sensitivity, heap objects, function pointers, Remark 1 | LLVM 14 adapter (`LLVM/BootstrapAA.cpp`) recursively flattens structs and folds arrays via `ArrayRegion` metadata, models constant aggregate global initializers, infers heap struct layouts from unique allocation-site bitcasts, models `Opcode::Field` GEPs and `Opcode::MemCopy` transfers, and performs byte-range `Havoc` invalidation on non-pointer stores/atomics. |
-| Parallel per-cluster execution, §4 | Missing clusters required by a query (or all clusters under `precomputeAll()`) are dispatched largest-first across a bounded `std::thread` worker pool with isolated solver state and deterministic statistics aggregation (`Engine.cpp`). |
+| Parallel, selective & hybrid per-cluster execution, §4 | Missing clusters required by a query (or requested subsets via `precomputeForValues`/`precomputeClusters`, or all clusters via `precomputeAll()`) are dispatched largest-first across a bounded `std::thread` worker pool with optional hybrid per-cluster solver selection (`hybrid_tabulation_max_cluster_size`, `cluster_solver_selector`), isolated solver state, and deterministic statistics aggregation (`Engine.cpp`). |
 
 ### Reference backend
 
@@ -130,12 +130,17 @@ QueryResult contextual = analysis.pointsTo(callee_value, callee_location, path);
 // Explicitly context-insensitive (FSCI) query across all reachable activations.
 QueryResult joined = analysis.pointsToAllContexts(callee_value, callee_location);
 
-// Direct alias sets at (location, Point::Before) (Algorithm 3 Step 2).
+// Direct alias sets at (location, Point::Before) (Algorithm 3 Step 2),
+// direct memory-object queries, and must-alias checks:
 LLVMAliasResult alias_set = analysis.aliases(value, location);
 LLVMAliasResult fsci_aliases = analysis.aliasesAllContexts(value, location);
-
-// Look up a flattened struct field's abstract object ID by byte offset.
 Id field_id = analysis.fieldObjectId(alloca_inst, /*byte_offset=*/8);
+QueryResult obj_pts = analysis.objectPointsTo(field_id, location);
+bool must = analysis.mustAlias(lhs_val, rhs_val, location);
+// Optional: selectively precompute only clusters needed for a set of values,
+// or eagerly build every cluster solver using configured parallelism.
+analysis.precomputeForValues({&value});
+analysis.precomputeAll();
 
 if (result.status == QueryStatus::ResourceLimit) {
   // result.points_to is top, never an incomplete/under-approximated set.
@@ -249,7 +254,8 @@ Key CLI flags:
   `fsci-queries`, `summary-tuples`, `guard-atoms`, `guards-pruned`,
   `guards-widened`, `skipped-functions`, `path-prunes`, `bdd-nodes`,
   `one-level-flow-runs`, etc.) on `stderr`.
-- `--adaptive-threshold=false`, `--parallel-clusters=false`,
+- `--adaptive-threshold=false`, `--adaptive-global-escalation`,
+  `--hybrid-tabulation-max-cluster=N`, `--parallel-clusters=false`,
   `--max-andersen-partition=N`, `--max-andersen-work=N`,
   `--precompute-clusters`, `--max-contexts=N`, `--max-steps=N`, `--threads=N`.
 
@@ -258,22 +264,35 @@ required a `ResourceLimit` fallback.
 
 ## Validation
 
-- **Unit & regression tests**: 80/80 CTest cases pass (49 `BootstrapEngineTest`
+- **Unit & regression tests**: 98/98 CTest cases pass (59 `BootstrapEngineTest`
   tests covering Figures 2–5, Definition 8, Algorithms 1–5, FSCS guards,
   caller-loop guard contradiction soundness, `*s` alias & direct-target guards,
-  multi-depth & eager Algorithm 2 dovetailing, flow-sensitive indirect-call
-  reachability for FSCI, Algorithm 3 backward-`A` + forward-`Q` interprocedural
-  aliases, ROBDD intraprocedural/interprocedural downward & upward/loop path
-  sensitivity, empty-block guard/path preservation, dead-branch reachability
-  soundness, one-level flow, cyclic linked lists, and 200-program slicing +
-  150-program cross-backend differential fuzzing; 30 `BootstrapAATest` LLVM 14
-  tests covering struct/array flattening, `MemCopy` (including non-zero-offset
-  and partial-field invalidation), unknown-length `memset` slicing, `calloc`
-  null initialization, sub-array `inbounds` GEP and escaping heap-cast
-  soundness, partial byte overwrites, heap struct inference, function pointers
-  in structs, `main(argv)` partitioning, LLVM intraprocedural & interprocedural
-  ROBDD branch pruning and argument/global kill soundness, caller-loop callee
-  guards, `aliases()`, and `fieldObjectId()`; plus `bootstrap_aa_cli_smoke`).
+  Steensgaard no-NULL-bridge partitioning and Pass-1 top-store isolation,
+  memory-aware Das one-level-flow,
+  field-aware cyclic struct dovetailing, multi-depth & eager Algorithm 2
+  dovetailing, flow-sensitive indirect-call reachability for FSCI, Algorithm 3
+  backward-`A` + forward-`Q` interprocedural aliases, compound ROBDD
+  (`Not`/`And`/`Or`) + `Select` + `EdgePtrGuard` + per-call-site `cond_subst`
+  intraprocedural/interprocedural downward & upward/loop path sensitivity,
+  per-partition Andersen rejection, hybrid per-cluster solver selection,
+  selective cluster precomputation, direct memory-object queries
+  (`objectPointsTo*`, `objectAliases*`), `mustAlias()`, consistent non-null
+  alias semantics (including excluding `top` from null-only alias queries),
+  empty-block guard/path preservation, dead-branch reachability
+  soundness, cyclic linked lists, and 200-program slicing + 150-program
+  cross-backend differential fuzzing; 38 `BootstrapAATest` LLVM 14 tests
+  covering struct/array flattening, `MemCopy` (including non-zero-offset and
+  partial-field invalidation), unknown-length `memset` slicing, `calloc` null
+  initialization, sub-array `inbounds` GEP and escaping heap-cast soundness,
+  stale global-load path-sensitivity soundness, `NULL`-store non-bridging,
+  `SwitchInst`/compound-boolean/`SelectInst`/`EdgePtrGuard` lowering,
+  interior/one-past-the-end pointer comparison and `mustAlias` soundness,
+  multi-call-site `cond_subst`, partial byte overwrites, heap struct inference,
+  function pointers in structs, `main(argv)` partitioning, LLVM intraprocedural
+  & interprocedural ROBDD branch pruning and argument/global kill soundness,
+  caller-loop callee guards, `aliases()`, `objectPointsTo*()`, `mustAlias()`,
+  `precomputeForValues()`, hybrid mode, and `fieldObjectId()`; plus
+  `bootstrap_aa_cli_smoke`).
 - **Real LLVM IR differential audit**: Evaluated `lotus-alias-bootstrap
   --all-contexts` across all 62 regression IR benchmarks under
   `tests/regress/Alias/**/*.ll` (including `PTA/*.ll`, `spec-equake.ll`,
@@ -282,15 +301,12 @@ required a `ResourceLimit` fallback.
     **0 unsound results**, **61/62 byte-for-byte identical** (only
     `PTA/spec-mesa.ll` [8 coarser] is a slightly coarser sound superset).
   - `--eager-dovetail` vs default `guarded`: **62/62 byte-for-byte identical**.
-  - `--one-level-flow`, `--path-sensitive`, and
-    `--path-sensitive --path-sensitive-interproc`: **62/62 exit 0** with 0
-    unsound results.
-  - `--print-aliases` across all 62 files: **61/62 exit 0** at default
-    `max_contexts=4096` (`spec-equake.ll` triggers a sound `ResourceLimit`
-    fallback under all-pairs `--all-contexts --print-aliases` on its 292-value
-    cluster).
+  - `--one-level-flow`, `--path-sensitive`,
+    `--path-sensitive --path-sensitive-interproc`,
+    `--hybrid-tabulation-max-cluster=16`, and `--print-aliases`: **62/62 exit 0**
+    with 0 fallbacks and 0 unsound results.
 - **Strict warnings & sanitizers**:
-  - `CanaryBootstrapCore` + `EngineTest.cpp` (all 45 tests) compile cleanly with
+  - `CanaryBootstrapCore` + `EngineTest.cpp` (all 59 tests) compile cleanly with
     `clang++ -std=c++17 -Wall -Wextra -Wpedantic -Werror` and pass under both
     `-fsanitize=address,undefined` (ASan/UBSan) and `-fsanitize=thread` (TSan).
   - `LLVM/BootstrapAA.cpp`, `lotus-alias-bootstrap.cpp`, and `BootstrapAATest.cpp`

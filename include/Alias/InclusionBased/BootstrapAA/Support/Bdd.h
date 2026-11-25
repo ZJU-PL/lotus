@@ -42,6 +42,9 @@ public:
   NodeId exists(NodeId a, Id var);
   // Existentially quantify a set of variables.
   NodeId existsAll(NodeId a, const std::vector<Id> &vars);
+  // Functional composition / substitution f[var := replacement].
+  // Used for interprocedural formal-to-actual condition substitution at calls.
+  NodeId substitute(NodeId f, Id var, NodeId replacement);
 
   std::size_t nodeCount() const { return m_nodes.size(); }
   bool budgetExceeded() const { return m_budget_exceeded; }
