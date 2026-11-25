@@ -617,16 +617,34 @@ void parallelPrecompute() {
 }
 void limitsAndValidation() {
   Fixture f;
-  Id a = f.object("a"), pa = f.addr(a), end = f.inst(Opcode::Return);
+  Id a = f.object("a"), b = f.object("b"), pa = f.addr(a), pb = f.addr(b);
+  Id unk = f.value("unk");
+  f.p.functions[f.main].parameters = {unk};
+  Id end = f.inst(Opcode::Return);
   Options zero = refined();
   zero.max_contexts = 0;
   Analysis aa(f.p, zero);
-  CHECK(aa.pointsTo(pa, end).status == QueryStatus::ResourceLimit);
-  CHECK(aa.pointsTo(pa, end).points_to.isTop());
+  // ResourceLimit gracefully falls back to sound upper bound (`{a}` for `pa`,
+  // `Top` for `unk`), preserving non-aliasing between disjoint upper bounds.
+  auto q_pa = aa.pointsTo(pa, end);
+  CHECK(q_pa.status == QueryStatus::ResourceLimit);
+  CHECK(q_pa.points_to == pts({a}));
+  auto q_unk = aa.pointsTo(unk, end);
+  CHECK(q_unk.status == QueryStatus::ResourceLimit);
+  CHECK(q_unk.points_to.isTop());
+  CHECK(!aa.mayAlias(pa, pb, end));
+  auto al_pa = aa.aliases(pa, end);
+  CHECK(al_pa.status == QueryStatus::ResourceLimit);
+  CHECK(!al_pa.may_alias_all);
+  CHECK(std::find(al_pa.aliases.begin(), al_pa.aliases.end(), pa) !=
+        al_pa.aliases.end());
+  CHECK(std::find(al_pa.aliases.begin(), al_pa.aliases.end(), pb) ==
+        al_pa.aliases.end());
   zero.max_contexts = 10;
   zero.max_steps = 0;
   Analysis steps(f.p, zero);
   CHECK(steps.pointsTo(pa, end).status == QueryStatus::ResourceLimit);
+  CHECK(steps.pointsTo(pa, end).points_to == pts({a}));
   bool threw = false;
   try {
     aa.pointsTo(INVALID, end);

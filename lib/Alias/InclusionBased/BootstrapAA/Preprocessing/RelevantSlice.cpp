@@ -20,13 +20,133 @@ bool touches(const Program & /*program*/, const Slice &slice,
   return false;
 }
 
+SliceIndex buildSliceIndex(const Program &program, const ProgramIndex &index,
+                           const Sets &upper,
+                           const SteensgaardHierarchy &hierarchy,
+                           const ReachabilityInfo &reachability) {
+  SliceIndex si;
+  si.stores_by_comp.resize(hierarchy.successors.size());
+  si.stores_by_obj.resize(program.objects.size());
+  for (Id site : index.store_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    const Id addr = i.operands[0];
+    if (addr == INVALID || valueOf(program, upper, addr).isTop()) {
+      si.top_stores.push_back(site);
+    } else {
+      si.stores_by_comp[hierarchy.value_components[addr]].push_back(site);
+      if (i.write_bytes != 0) {
+        const PointsToSet pts = valueOf(program, upper, addr);
+        for (Id o : pts.objects()) {
+          if (!isMemory(program.objects[o]))
+            continue;
+          for (Id fo : program.overlappingFields(o, i.write_bytes))
+            if (fo != o && isMemory(program.objects[fo]))
+              si.stores_by_obj[fo].push_back(site);
+        }
+      }
+    }
+  }
+
+  si.havocs_by_comp.resize(hierarchy.successors.size());
+  si.havocs_by_obj.resize(program.objects.size());
+  for (Id site : index.havoc_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    if (i.operands.empty() || i.operands[0] == INVALID ||
+        valueOf(program, upper, i.operands[0]).isTop()) {
+      si.top_havocs.push_back(site);
+    } else {
+      si.havocs_by_comp[hierarchy.value_components[i.operands[0]]].push_back(
+          site);
+      const PointsToSet pts = valueOf(program, upper, i.operands[0]);
+      for (Id o : pts.objects()) {
+        if (!isMemory(program.objects[o]))
+          continue;
+        for (Id fo : program.overlappingFields(o, i.write_bytes))
+          if (isMemory(program.objects[fo]))
+            si.havocs_by_obj[fo].push_back(site);
+      }
+    }
+  }
+
+  si.memcopies_by_comp.resize(hierarchy.successors.size());
+  si.memcopies_by_obj.resize(program.objects.size());
+  for (Id site : index.memcopy_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    const Id dst = i.operands[0];
+    if (dst == INVALID || valueOf(program, upper, dst).isTop()) {
+      si.top_memcopies.push_back(site);
+    } else {
+      si.memcopies_by_comp[hierarchy.value_components[dst]].push_back(site);
+      const PointsToSet pts = valueOf(program, upper, dst);
+      for (Id o : pts.objects()) {
+        if (!isMemory(program.objects[o]))
+          continue;
+        for (Id fo : program.overlappingFields(o, i.write_bytes))
+          if (isMemory(program.objects[fo]))
+            si.memcopies_by_obj[fo].push_back(site);
+      }
+    }
+  }
+
+  si.allocs_by_base.resize(program.objects.size());
+  for (Id site : index.allocate_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    if (i.object < program.objects.size())
+      si.allocs_by_base[program.baseOf(i.object)].push_back(site);
+  }
+
+  bool any_addr_taken_non_returning = false;
+  for (Id f = 0; f < program.functions.size(); ++f) {
+    if (program.functions[f].address_taken) {
+      si.addr_taken_funcs.push_back(f);
+      if (!reachability.may_return[f])
+        any_addr_taken_non_returning = true;
+    }
+  }
+
+  for (Id site : index.call_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    bool writes_ext = false;
+    bool has_non_returning = false;
+    if (i.callee != INVALID) {
+      writes_ext =
+          (i.opaque_alternative && i.writes_memory) ||
+          (program.functions[i.callee].external && i.writes_memory &&
+           program.functions[i.callee].writes_memory);
+      has_non_returning = !reachability.may_return[i.callee];
+    } else {
+      const PointsToSet tgt = valueOf(program, upper, i.indirect_target);
+      if (tgt.isTop()) {
+        writes_ext = i.writes_memory;
+        has_non_returning = any_addr_taken_non_returning;
+      } else {
+        const Targets targets = callees(program, i, tgt);
+        writes_ext = targets.opaque && i.writes_memory;
+        for (Id callee : targets.functions) {
+          if (program.functions[callee].external && i.writes_memory &&
+              program.functions[callee].writes_memory)
+            writes_ext = true;
+          if (!reachability.may_return[callee])
+            has_non_returning = true;
+        }
+      }
+    }
+    if (writes_ext)
+      si.memory_writing_calls.push_back(site);
+    if (has_non_returning)
+      si.non_returning_calls.push_back(site);
+  }
+  return si;
+}
+
 // Algorithm 1 (Kahlon PLDI '08, p. 253): worklist-based backward closure
 // computing both V_P (relevant values/objects) and St_P (relevant statements).
 Slice relevant(const Program &program, const ProgramIndex &index,
                const Sets &upper, const SteensgaardHierarchy &hierarchy,
                const ReachabilityInfo &reachability,
                const std::vector<Id> &seeds, bool enabled,
-               const std::vector<Id> &seed_objects) {
+               const std::vector<Id> &seed_objects,
+               const SliceIndex *prebuilt) {
   Slice result;
   result.values.assign(program.values.size(), !enabled);
   result.objects.assign(program.objects.size(), !enabled);
@@ -47,81 +167,18 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     return result;
   }
 
+  SliceIndex local_si;
+  if (!prebuilt) {
+    local_si = buildSliceIndex(program, index, upper, hierarchy, reachability);
+    prebuilt = &local_si;
+  }
+  const SliceIndex &si = *prebuilt;
+
   std::vector<bool> relevantHigher(hierarchy.successors.size(), false);
+  std::vector<bool> higherExpanded(hierarchy.successors.size(), false);
   std::deque<Id> value_work;
   std::deque<Id> object_work;
   std::deque<Id> higher_work;
-
-  // Map hierarchy component -> store/havoc/memcopy sites whose address is in
-  // that component, plus top-address sites.
-  std::vector<std::vector<Id>> stores_by_comp(hierarchy.successors.size());
-  std::vector<std::vector<Id>> stores_by_obj(program.objects.size());
-  std::vector<Id> top_stores;
-  for (Id site : index.store_sites) {
-    const Instruction &i = *index.by_site[site].inst;
-    const Id addr = i.operands[0];
-    if (addr == INVALID || valueOf(program, upper, addr).isTop()) {
-      top_stores.push_back(site);
-    } else {
-      stores_by_comp[hierarchy.value_components[addr]].push_back(site);
-      if (i.write_bytes != 0) {
-        const PointsToSet pts = valueOf(program, upper, addr);
-        for (Id o : pts.objects()) {
-          if (!isMemory(program.objects[o]))
-            continue;
-          for (Id fo : program.overlappingFields(o, i.write_bytes))
-            if (fo != o && isMemory(program.objects[fo]))
-              stores_by_obj[fo].push_back(site);
-        }
-      }
-    }
-  }
-  std::vector<std::vector<Id>> havocs_by_comp(hierarchy.successors.size());
-  std::vector<std::vector<Id>> havocs_by_obj(program.objects.size());
-  std::vector<Id> top_havocs;
-  for (Id site : index.havoc_sites) {
-    const Instruction &i = *index.by_site[site].inst;
-    if (i.operands.empty() || i.operands[0] == INVALID ||
-        valueOf(program, upper, i.operands[0]).isTop()) {
-      top_havocs.push_back(site);
-    } else {
-      havocs_by_comp[hierarchy.value_components[i.operands[0]]].push_back(site);
-      const PointsToSet pts = valueOf(program, upper, i.operands[0]);
-      for (Id o : pts.objects()) {
-        if (!isMemory(program.objects[o]))
-          continue;
-        for (Id fo : program.overlappingFields(o, i.write_bytes))
-          if (isMemory(program.objects[fo]))
-            havocs_by_obj[fo].push_back(site);
-      }
-    }
-  }
-  std::vector<std::vector<Id>> memcopies_by_comp(hierarchy.successors.size());
-  std::vector<std::vector<Id>> memcopies_by_obj(program.objects.size());
-  std::vector<Id> top_memcopies;
-  for (Id site : index.memcopy_sites) {
-    const Instruction &i = *index.by_site[site].inst;
-    const Id dst = i.operands[0];
-    if (dst == INVALID || valueOf(program, upper, dst).isTop()) {
-      top_memcopies.push_back(site);
-    } else {
-      memcopies_by_comp[hierarchy.value_components[dst]].push_back(site);
-      const PointsToSet pts = valueOf(program, upper, dst);
-      for (Id o : pts.objects()) {
-        if (!isMemory(program.objects[o]))
-          continue;
-        for (Id fo : program.overlappingFields(o, i.write_bytes))
-          if (isMemory(program.objects[fo]))
-            memcopies_by_obj[fo].push_back(site);
-      }
-    }
-  }
-  std::vector<std::vector<Id>> allocs_by_base(program.objects.size());
-  for (Id site : index.allocate_sites) {
-    const Instruction &i = *index.by_site[site].inst;
-    if (i.object < program.objects.size())
-      allocs_by_base[program.baseOf(i.object)].push_back(site);
-  }
 
   bool has_top_read = false;
   std::vector<bool> referenced_obj_seen(program.objects.size(), false);
@@ -150,6 +207,9 @@ Slice relevant(const Program &program, const ProgramIndex &index,
   };
 
   auto markHigherComponent = [&](Id comp) {
+    if (higherExpanded[comp])
+      return;
+    higherExpanded[comp] = true;
     std::vector<Id> stack(hierarchy.predecessors[comp].begin(),
                           hierarchy.predecessors[comp].end());
     if (hierarchy.cyclic[comp])
@@ -161,8 +221,11 @@ Slice relevant(const Program &program, const ProgramIndex &index,
         continue;
       relevantHigher[current] = true;
       higher_work.push_back(current);
-      stack.insert(stack.end(), hierarchy.predecessors[current].begin(),
-                   hierarchy.predecessors[current].end());
+      if (!higherExpanded[current]) {
+        higherExpanded[current] = true;
+        stack.insert(stack.end(), hierarchy.predecessors[current].begin(),
+                     hierarchy.predecessors[current].end());
+      }
     }
   };
 
@@ -207,7 +270,7 @@ Slice relevant(const Program &program, const ProgramIndex &index,
       relevantHigher[ocomp] = true;
       higher_work.push_back(ocomp);
     }
-    for (Id alloc_site : allocs_by_base[program.baseOf(object)]) {
+    for (Id alloc_site : si.allocs_by_base[program.baseOf(object)]) {
       markInst(alloc_site);
       markFuncRelevant(index.by_site[alloc_site].function);
     }
@@ -307,27 +370,7 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     }
   };
 
-  std::vector<Id> memory_writing_calls;
-  std::vector<Id> non_returning_calls;
-  for (Id site : index.call_sites) {
-    const Instruction &i = *index.by_site[site].inst;
-    const Targets targets =
-        callees(program, i, valueOf(program, upper, i.indirect_target));
-    bool writes_ext = targets.opaque && i.writes_memory;
-    bool has_non_returning = false;
-    for (Id callee : targets.functions) {
-      if (program.functions[callee].external && i.writes_memory &&
-          program.functions[callee].writes_memory)
-        writes_ext = true;
-      if (!reachability.may_return[callee])
-        has_non_returning = true;
-    }
-    if (writes_ext)
-      memory_writing_calls.push_back(site);
-    if (has_non_returning)
-      non_returning_calls.push_back(site);
-  }
-  for (Id site : non_returning_calls) {
+  for (Id site : si.non_returning_calls) {
     const Instruction &i = *index.by_site[site].inst;
     if (i.indirect_target != INVALID) {
       markInst(site);
@@ -339,6 +382,17 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     needValue(v);
   for (Id o : seed_objects)
     needObject(o);
+
+  bool processed_all_addr_taken_returns = false;
+  auto pullCalleeReturns = [&](Id f) {
+    markFuncRelevant(f);
+    for (Id ret_site : index.return_sites[f]) {
+      const Instruction &ret = *index.by_site[ret_site].inst;
+      markInst(ret_site);
+      if (!ret.operands.empty())
+        needValue(ret.operands[0]);
+    }
+  };
 
   while (!value_work.empty() || !object_work.empty() || !higher_work.empty() ||
          !fn_work.empty() || !pending_top_read_objs.empty()) {
@@ -369,15 +423,20 @@ Slice relevant(const Program &program, const ProgramIndex &index,
           break;
         case Opcode::Call: {
           needValue(i.indirect_target);
-          const Targets targets =
-              callees(program, i, valueOf(program, upper, i.indirect_target));
-          for (Id f : targets.functions) {
-            markFuncRelevant(f);
-            for (Id ret_site : index.return_sites[f]) {
-              const Instruction &ret = *index.by_site[ret_site].inst;
-              markInst(ret_site);
-              if (!ret.operands.empty())
-                needValue(ret.operands[0]);
+          if (i.callee != INVALID) {
+            pullCalleeReturns(i.callee);
+          } else {
+            const PointsToSet tgt = valueOf(program, upper, i.indirect_target);
+            if (tgt.isTop()) {
+              if (!processed_all_addr_taken_returns) {
+                processed_all_addr_taken_returns = true;
+                for (Id f : si.addr_taken_funcs)
+                  pullCalleeReturns(f);
+              }
+            } else {
+              const Targets targets = callees(program, i, tgt);
+              for (Id f : targets.functions)
+                pullCalleeReturns(f);
             }
           }
           break;
@@ -419,15 +478,15 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     while (!higher_work.empty()) {
       const Id comp = higher_work.front();
       higher_work.pop_front();
-      for (Id site : stores_by_comp[comp]) {
+      for (Id site : si.stores_by_comp[comp]) {
         processStore(site);
         markFuncRelevant(index.by_site[site].function);
       }
-      for (Id site : havocs_by_comp[comp]) {
+      for (Id site : si.havocs_by_comp[comp]) {
         processHavoc(site);
         markFuncRelevant(index.by_site[site].function);
       }
-      for (Id site : memcopies_by_comp[comp]) {
+      for (Id site : si.memcopies_by_comp[comp]) {
         processMemCopy(site);
         markFuncRelevant(index.by_site[site].function);
       }
@@ -438,34 +497,34 @@ Slice relevant(const Program &program, const ProgramIndex &index,
       object_work.pop_front();
       if (!activated_top_memory_ops) {
         activated_top_memory_ops = true;
-        for (Id site : top_stores) {
+        for (Id site : si.top_stores) {
           processStore(site);
           markFuncRelevant(index.by_site[site].function);
         }
-        for (Id site : top_havocs) {
+        for (Id site : si.top_havocs) {
           processHavoc(site);
           markFuncRelevant(index.by_site[site].function);
         }
-        for (Id site : top_memcopies) {
+        for (Id site : si.top_memcopies) {
           processMemCopy(site);
           markFuncRelevant(index.by_site[site].function);
         }
-        for (Id site : memory_writing_calls) {
+        for (Id site : si.memory_writing_calls) {
           const Instruction &ci = *index.by_site[site].inst;
           markInst(site);
           markFuncRelevant(index.by_site[site].function);
           needValue(ci.indirect_target);
         }
       }
-      for (Id site : stores_by_obj[obj]) {
+      for (Id site : si.stores_by_obj[obj]) {
         processStore(site);
         markFuncRelevant(index.by_site[site].function);
       }
-      for (Id site : havocs_by_obj[obj]) {
+      for (Id site : si.havocs_by_obj[obj]) {
         processHavoc(site);
         markFuncRelevant(index.by_site[site].function);
       }
-      for (Id site : memcopies_by_obj[obj]) {
+      for (Id site : si.memcopies_by_obj[obj]) {
         processMemCopy(site);
         markFuncRelevant(index.by_site[site].function);
       }

@@ -667,6 +667,76 @@ void GuardedSummarySolver::computeFunctionConditionKills() {
     m_func_kills_conditions[f].assign(kills[f].begin(), kills[f].end());
 }
 
+void GuardedSummarySolver::computeCallSkipInfo() {
+  m_call_skip_info.clear();
+  std::vector<Id> all_addr_taken_killed_vec;
+  if (m_options.path_sensitive) {
+    std::set<Id> all_addr_taken_killed;
+    for (Id f = 0; f < m_program.functions.size(); ++f) {
+      if (m_program.functions[f].address_taken &&
+          f < m_func_kills_conditions.size()) {
+        for (Id cid : m_func_kills_conditions[f])
+          all_addr_taken_killed.insert(cid);
+      }
+    }
+    all_addr_taken_killed_vec.assign(all_addr_taken_killed.begin(),
+                                     all_addr_taken_killed.end());
+  }
+
+  for (Id site : m_index.call_sites) {
+    const Instruction &inst = *m_index.by_site[site].inst;
+    CallSkipInfo info;
+    if (inst.callee != INVALID) {
+      info.may_return =
+          inst.opaque_alternative || m_reachability.may_return[inst.callee];
+      if (inst.opaque_alternative && inst.writes_memory)
+        info.kills_global = true;
+      if (m_program.functions[inst.callee].external) {
+        if (inst.writes_memory && m_program.functions[inst.callee].writes_memory)
+          info.kills_global = true;
+      } else if (m_options.path_sensitive &&
+                 inst.callee < m_func_kills_conditions.size()) {
+        info.killed_conds = m_func_kills_conditions[inst.callee];
+      }
+    } else {
+      const PointsToSet tgt = valueOf(m_program, m_upper, inst.indirect_target);
+      if (tgt.isTop()) {
+        info.may_return = true; // opaque_target is always true on Top
+        info.kills_global = inst.writes_memory;
+        if (m_options.path_sensitive)
+          info.killed_conds = all_addr_taken_killed_vec;
+      } else {
+        const Targets coarse_targets = callees(m_program, inst, tgt);
+        info.may_return = coarse_targets.opaque;
+        if (coarse_targets.opaque && inst.writes_memory)
+          info.kills_global = true;
+        std::set<Id> kc;
+        for (Id c : coarse_targets.functions) {
+          info.may_return |= m_reachability.may_return[c];
+          if (m_program.functions[c].external) {
+            if (inst.writes_memory && m_program.functions[c].writes_memory)
+              info.kills_global = true;
+          } else if (m_options.path_sensitive &&
+                     c < m_func_kills_conditions.size()) {
+            kc.insert(m_func_kills_conditions[c].begin(),
+                      m_func_kills_conditions[c].end());
+          }
+        }
+        if (m_options.path_sensitive && !kc.empty())
+          info.killed_conds.assign(kc.begin(), kc.end());
+      }
+    }
+    m_call_skip_info.emplace(site, std::move(info));
+  }
+}
+
+const GuardedSummarySolver::CallSkipInfo &
+GuardedSummarySolver::callSkip(Id site) const {
+  static const CallSkipInfo empty_info;
+  auto it = m_call_skip_info.find(site);
+  return it != m_call_skip_info.end() ? it->second : empty_info;
+}
+
 void GuardedSummarySolver::computeInvariantSSAVals() {
   const std::size_t nv = m_program.values.size();
   m_invariant_ssa.assign(nv, false);

@@ -1,5 +1,7 @@
 #include "Alias/InclusionBased/BootstrapAA/Preprocessing/Partitioning.h"
 
+#include <map>
+#include <set>
 #include <vector>
 
 namespace lotus {
@@ -36,6 +38,15 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
 
   bool changed = false;
   auto eval = [&](Id value) { return valueOf(program, values, value); };
+  std::vector<Id> addr_taken_funcs;
+  for (Id f = 0; f < program.functions.size(); ++f)
+    if (program.functions[f].address_taken)
+      addr_taken_funcs.push_back(f);
+
+  std::map<std::uint64_t, PointsToSet> top_store_accum;
+  std::map<std::uint64_t, PointsToSet> top_store_flushed;
+  std::set<std::uint64_t> top_store_incompat_done;
+
   auto store_one = [&](Id o, const PointsToSet &rhs, std::uint64_t bytes) {
     if (o < 2 || o >= slice.objects.size() || !slice.objects[o] ||
         !isMemory(program.objects[o]))
@@ -55,9 +66,21 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
     if (address.empty())
       return;
     if (address.isTop()) {
-      for (Id o : slice.object_list)
-        store_one(o, rhs, bytes);
+      if (!noop_havoc && bytes != 0 &&
+          top_store_incompat_done.insert(bytes).second) {
+        for (Id o : slice.object_list) {
+          if (o < 2 || !isMemory(program.objects[o]))
+            continue;
+          const Object &info = program.objects[o];
+          if (info.bytes == 0 || info.bytes != bytes)
+            changed |= memory[o].join(PointsToSet::top());
+        }
+      }
+      if (!rhs.empty())
+        top_store_accum[bytes].join(rhs);
     } else {
+      if (noop_havoc && rhs.empty())
+        return;
       for (Id o : address.objects()) {
         store_one(o, rhs, bytes);
         if (!noop_havoc && bytes != 0 && isMemory(program.objects[o])) {
@@ -65,6 +88,20 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
             if (fo != o)
               store_one(fo, PointsToSet::top(), 0);
         }
+      }
+    }
+  };
+  auto flushTopStores = [&]() {
+    for (const auto &[bytes, accum] : top_store_accum) {
+      PointsToSet &flushed = top_store_flushed[bytes];
+      if (!flushed.join(accum))
+        continue;
+      for (Id o : slice.object_list) {
+        if (o < 2 || !isMemory(program.objects[o]))
+          continue;
+        const Object &info = program.objects[o];
+        if (bytes == 0 || (info.bytes != 0 && info.bytes == bytes))
+          changed |= memory[o].join(flushed);
       }
     }
   };
@@ -227,13 +264,7 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
           changed |= returns[f].join(eval(i.operands[0]));
         break;
       case Opcode::Call: {
-        const Targets targets = callees(program, i, eval(i.indirect_target));
-        if (targets.opaque && !noop_havoc) {
-          rhs = PointsToSet::top();
-          if (i.writes_memory)
-            store(PointsToSet::top(), PointsToSet::top());
-        }
-        for (Id callee_id : targets.functions) {
+        auto handleCallee = [&](Id callee_id) {
           const Function &callee = program.functions[callee_id];
           if (callee.external) {
             if (!noop_havoc) {
@@ -250,6 +281,34 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
             }
             rhs.join(returns[callee_id]);
           }
+        };
+        if (i.callee != INVALID) {
+          if (i.opaque_alternative && !noop_havoc) {
+            rhs = PointsToSet::top();
+            if (i.writes_memory)
+              store(PointsToSet::top(), PointsToSet::top());
+          }
+          handleCallee(i.callee);
+        } else {
+          const PointsToSet tgt_pts = eval(i.indirect_target);
+          if (tgt_pts.isTop()) {
+            if (!noop_havoc) {
+              rhs = PointsToSet::top();
+              if (i.writes_memory)
+                store(PointsToSet::top(), PointsToSet::top());
+            }
+            for (Id callee_id : addr_taken_funcs)
+              handleCallee(callee_id);
+          } else {
+            const Targets targets = callees(program, i, tgt_pts);
+            if (targets.opaque && !noop_havoc) {
+              rhs = PointsToSet::top();
+              if (i.writes_memory)
+                store(PointsToSet::top(), PointsToSet::top());
+            }
+            for (Id callee_id : targets.functions)
+              handleCallee(callee_id);
+          }
         }
         break;
       }
@@ -259,6 +318,7 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
       if (defines)
         changed |= values[i.result].join(rhs);
     }
+    flushTopStores();
     for (const PhiEdge &phi : relevant_phis)
       changed |= values[phi.dst].join(eval(phi.src));
   } while (changed);

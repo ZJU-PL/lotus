@@ -473,15 +473,6 @@ bool isPlacementNewCall(const llvm::CallBase &call) {
          name == "_ZnajPv";
 }
 
-std::string nameOf(const llvm::Value &value) {
-  if (value.hasName())
-    return value.getName().str();
-  std::string result;
-  llvm::raw_string_ostream out(result);
-  value.printAsOperand(out, false);
-  return out.str();
-}
-
 // Flattened scalar leaf field descriptor (Kahlon PLDI '08 Remark 1).
 struct FieldSpec {
   std::uint64_t offset = 0;
@@ -712,7 +703,62 @@ struct BootstrapAA::Impl {
   const llvm::Function *entry_fn = nullptr;
   HavocPolicy havoc_policy = HavocPolicy::Noop;
   lotus::alias::AliasSpecManager spec_mgr;
+  std::unordered_map<const llvm::Value *, unsigned> local_slots;
+  std::unordered_map<const llvm::Value *, unsigned> global_slots;
+  std::unordered_map<const llvm::Value *, std::string> const_name_cache;
+  std::size_t next_const_name = 0;
   Program program;
+
+  void initValueSlots() {
+    unsigned g_next = 0;
+    for (const llvm::GlobalVariable &gv : module.globals())
+      if (!gv.hasName())
+        global_slots.emplace(&gv, g_next++);
+    for (const llvm::Function &fn : module) {
+      if (!fn.hasName())
+        global_slots.emplace(&fn, g_next++);
+      if (fn.isDeclaration())
+        continue;
+      unsigned l_next = 0;
+      for (const llvm::Argument &arg : fn.args())
+        if (!arg.hasName())
+          local_slots.emplace(&arg, l_next++);
+      for (const llvm::BasicBlock &bb : fn) {
+        if (!bb.hasName())
+          local_slots.emplace(&bb, l_next++);
+        for (const llvm::Instruction &inst : bb)
+          if (!inst.getType()->isVoidTy() && !inst.hasName())
+            local_slots.emplace(&inst, l_next++);
+      }
+    }
+    for (const llvm::GlobalAlias &ga : module.aliases())
+      if (!ga.hasName())
+        global_slots.emplace(&ga, g_next++);
+  }
+
+  std::string nameOf(const llvm::Value &value) {
+    if (value.hasName())
+      return value.getName().str();
+    if (auto it = local_slots.find(&value); it != local_slots.end())
+      return "%" + std::to_string(it->second);
+    if (auto it = global_slots.find(&value); it != global_slots.end())
+      return "@" + std::to_string(it->second);
+    if (llvm::isa<llvm::ConstantPointerNull>(&value))
+      return "null";
+    if (llvm::isa<llvm::PoisonValue>(&value))
+      return "poison";
+    if (llvm::isa<llvm::UndefValue>(&value))
+      return "undef";
+    if (const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(&value)) {
+      if (ci->getBitWidth() <= 64)
+        return std::to_string(ci->getSExtValue());
+    }
+    if (auto it = const_name_cache.find(&value); it != const_name_cache.end())
+      return it->second;
+    std::string result = "<const#" + std::to_string(next_const_name++) + ">";
+    const_name_cache.emplace(&value, result);
+    return result;
+  }
   std::unique_ptr<Analysis> analysis;
   std::unordered_map<const llvm::Value *, Id> values;
   std::vector<const llvm::Value *> value_to_llvm;
@@ -1105,6 +1151,7 @@ struct BootstrapAA::Impl {
           "BootstrapAA: supply a defined entry function (default: main)");
     entry_fn = entry;
     spec_mgr.initialize(module);
+    initValueSlots();
 
     for (const llvm::Function &function : module) {
       null_may_be_valid |=
@@ -2455,39 +2502,121 @@ struct BootstrapAA::Impl {
   }
 
   void computeRecursion() {
-    std::vector<std::set<Id>> graph(program.functions.size());
-    for (const llvm::Function *ctor : parsed_ctors)
-      graph[program.entry].insert(functions.at(ctor));
-    for (const llvm::Function &function : module)
-      for (const llvm::BasicBlock &block : function)
-        for (const llvm::Instruction &instruction : block)
+    const std::size_t nf = program.functions.size();
+    const Id indirect_hub = static_cast<Id>(nf);
+    std::vector<std::vector<Id>> adj(nf + 1);
+    std::vector<bool> self_edge(nf, false);
+
+    // Connect the virtual indirect-call hub to every defined address-taken
+    // function once (O(F) edges instead of O(IndirectCalls * F)).
+    for (Id f = 0; f < nf; ++f) {
+      if (!program.functions[f].external && program.functions[f].address_taken)
+        adj[indirect_hub].push_back(f);
+    }
+
+    for (const llvm::Function *ctor : parsed_ctors) {
+      const Id cid = functions.at(ctor);
+      adj[program.entry].push_back(cid);
+      if (cid == program.entry)
+        self_edge[program.entry] = true;
+    }
+
+    for (const llvm::Function &function : module) {
+      if (function.isDeclaration())
+        continue;
+      const Id fid = functions.at(&function);
+      bool has_indirect = false;
+      for (const llvm::BasicBlock &block : function) {
+        for (const llvm::Instruction &instruction : block) {
           if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
             if (const llvm::Function *callee = directCallee(*call)) {
-              if (!callee->isDeclaration())
-                graph[functions.at(&function)].insert(functions.at(callee));
-            } else {
-              for (const llvm::Function &candidate : module)
-                if (!candidate.isDeclaration() &&
-                    candidate.hasAddressTaken(nullptr, false, true, false))
-                  graph[functions.at(&function)].insert(
-                      functions.at(&candidate));
+              if (!callee->isDeclaration()) {
+                const Id cid = functions.at(callee);
+                adj[fid].push_back(cid);
+                if (cid == fid)
+                  self_edge[fid] = true;
+              }
+            } else if (!call->isInlineAsm()) {
+              has_indirect = true;
             }
           }
-    recursive.assign(graph.size(), false);
-    for (Id f = 0; f < graph.size(); ++f) {
-      std::vector<Id> work(graph[f].begin(), graph[f].end());
-      std::set<Id> seen;
-      while (!work.empty()) {
-        Id current = work.back();
-        work.pop_back();
-        if (current == f) {
-          recursive[f] = true;
-          break;
         }
-        if (seen.insert(current).second)
-          work.insert(work.end(), graph[current].begin(), graph[current].end());
+      }
+      if (has_indirect)
+        adj[fid].push_back(indirect_hub);
+    }
+
+    // Deduplicate adjacency lists.
+    for (auto &edges : adj) {
+      std::sort(edges.begin(), edges.end());
+      edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+    }
+
+    // Linear-time iterative Tarjan SCC over nf + 1 nodes: a function is
+    // recursive iff it has a direct self-edge or belongs to an SCC with >1
+    // function/hub node.
+    const std::size_t n = nf + 1;
+    std::vector<int> index_of(n, -1);
+    std::vector<int> lowlink(n, 0);
+    std::vector<bool> on_stack(n, false);
+    std::vector<Id> tarjan_stack;
+    std::vector<Id> comp_of(n, INVALID);
+    std::vector<std::size_t> comp_size;
+    int next_index = 0;
+
+    struct Frame {
+      Id v;
+      std::size_t ei;
+    };
+    std::vector<Frame> call_stack;
+    for (Id start = 0; start < n; ++start) {
+      if (index_of[start] != -1)
+        continue;
+      index_of[start] = lowlink[start] = next_index++;
+      tarjan_stack.push_back(start);
+      on_stack[start] = true;
+      call_stack.push_back({start, 0});
+      while (!call_stack.empty()) {
+        Frame &fr = call_stack.back();
+        const Id v = fr.v;
+        if (fr.ei < adj[v].size()) {
+          const Id w = adj[v][fr.ei++];
+          if (index_of[w] == -1) {
+            index_of[w] = lowlink[w] = next_index++;
+            tarjan_stack.push_back(w);
+            on_stack[w] = true;
+            call_stack.push_back({w, 0});
+          } else if (on_stack[w]) {
+            lowlink[v] = std::min(lowlink[v], index_of[w]);
+          }
+        } else {
+          if (lowlink[v] == index_of[v]) {
+            const Id cid = static_cast<Id>(comp_size.size());
+            std::size_t sz = 0;
+            while (true) {
+              const Id w = tarjan_stack.back();
+              tarjan_stack.pop_back();
+              on_stack[w] = false;
+              comp_of[w] = cid;
+              ++sz;
+              if (w == v)
+                break;
+            }
+            comp_size.push_back(sz);
+          }
+          call_stack.pop_back();
+          if (!call_stack.empty()) {
+            const Id p = call_stack.back().v;
+            lowlink[p] = std::min(lowlink[p], lowlink[v]);
+          }
+        }
       }
     }
+
+    recursive.assign(nf, false);
+    for (Id f = 0; f < nf; ++f)
+      recursive[f] = self_edge[f] ||
+                     (comp_of[f] != INVALID && comp_size[comp_of[f]] > 1);
   }
 
   // Analyze GEP indices into (constant_byte_offset, all_const, array_stride).

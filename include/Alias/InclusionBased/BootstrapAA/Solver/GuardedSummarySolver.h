@@ -9,6 +9,8 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -226,6 +228,52 @@ struct CfgPos {
   }
 };
 
+inline std::size_t hashCombine(std::size_t h, std::size_t v) noexcept {
+  return h ^ (v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+}
+
+struct ExprHash {
+  std::size_t operator()(const Expr &e) const noexcept {
+    std::size_t h = static_cast<std::size_t>(e.kind);
+    h = hashCombine(h, static_cast<std::size_t>(e.id));
+    h = hashCombine(h, static_cast<std::size_t>(e.val_offset));
+    h = hashCombine(h, static_cast<std::size_t>(e.val_offset_known));
+    h = hashCombine(h, static_cast<std::size_t>(e.val_stride));
+    h = hashCombine(h, static_cast<std::size_t>(e.deref_offset));
+    h = hashCombine(h, static_cast<std::size_t>(e.deref_offset_known));
+    h = hashCombine(h, static_cast<std::size_t>(e.deref_stride));
+    h = hashCombine(h, static_cast<std::size_t>(e.read_bytes));
+    return h;
+  }
+};
+
+struct SummaryKeyHash {
+  std::size_t operator()(const SummaryKey &k) const noexcept {
+    std::size_t h = static_cast<std::size_t>(k.function);
+    h = hashCombine(h, static_cast<std::size_t>(k.kind));
+    h = hashCombine(h, ExprHash{}(k.target));
+    h = hashCombine(h, static_cast<std::size_t>(k.site));
+    h = hashCombine(h, static_cast<std::size_t>(k.point));
+    return h;
+  }
+};
+
+struct CfgPosHash {
+  std::size_t operator()(const CfgPos &p) const noexcept {
+    return hashCombine(static_cast<std::size_t>(p.site),
+                       static_cast<std::size_t>(p.point));
+  }
+};
+
+struct FsciKeyHash {
+  std::size_t operator()(const std::tuple<Id, Id, Point> &k) const noexcept {
+    std::size_t h = static_cast<std::size_t>(std::get<0>(k));
+    h = hashCombine(h, static_cast<std::size_t>(std::get<1>(k)));
+    h = hashCombine(h, static_cast<std::size_t>(std::get<2>(k)));
+    return h;
+  }
+};
+
 // Guarded backward update-sequence solver faithfully implementing Kahlon
 // (PLDI '08) Section 3:
 //  - Definition 8: guarded summary tuples (p, loc, q, c_1 ∧ ... ∧ c_k[, con_b])
@@ -315,6 +363,7 @@ private:
   bool guardSubsumes(GuardId weaker, GuardId stronger) const;
   void computeFunctionModifications();
   void computeFunctionConditionKills();
+  void computeCallSkipInfo();
   void computeInvariantSSAVals();
   void computeDovetailHierarchy();
   BddManager::NodeId evalCondNode(Id cond_id, bool polarity);
@@ -435,9 +484,17 @@ private:
   std::vector<std::vector<AtomId>> m_guards;
   std::map<std::vector<AtomId>, GuardId> m_guard_ids;
 
+  struct CallSkipInfo {
+    bool may_return = false;
+    bool kills_global = false;
+    std::vector<Id> killed_conds;
+  };
+  const CallSkipInfo &callSkip(Id site) const;
+
   Sets m_func_modifies;
   std::vector<bool> m_func_modifies_any;
   std::vector<std::vector<Id>> m_func_kills_conditions;
+  std::unordered_map<Id, CallSkipInfo> m_call_skip_info;
   std::vector<bool> m_fs_reachable_function;
   std::vector<bool> m_invariant_ssa;
   std::vector<std::size_t> m_dovetail_depth;
@@ -445,17 +502,18 @@ private:
   std::vector<BddManager::NodeId> m_cond_bdd_cache;
   std::int64_t m_max_offset_span = 0;
 
-  std::map<SummaryKey, std::vector<SummaryEntry>> m_summaries;
-  std::set<SummaryKey> m_finalized;
-  std::set<SummaryKey> m_path_pruned_summaries;
-  std::set<SummaryKey> m_pass_created_summaries;
+  std::unordered_map<SummaryKey, std::vector<SummaryEntry>, SummaryKeyHash>
+      m_summaries;
+  std::unordered_set<SummaryKey, SummaryKeyHash> m_finalized;
+  std::unordered_set<SummaryKey, SummaryKeyHash> m_path_pruned_summaries;
+  std::unordered_set<SummaryKey, SummaryKeyHash> m_pass_created_summaries;
 
-  std::map<FsciKey, PointsToSet> m_fsci_cache;
-  std::set<FsciKey> m_path_pruned_fsci;
-  std::map<FsciKey, PointsToSet> m_cyclic_pass1_fsci;
+  std::unordered_map<FsciKey, PointsToSet, FsciKeyHash> m_fsci_cache;
+  std::unordered_set<FsciKey, FsciKeyHash> m_path_pruned_fsci;
+  std::unordered_map<FsciKey, PointsToSet, FsciKeyHash> m_cyclic_pass1_fsci;
   std::map<FscsKey, QueryResult> m_fscs_cache;
   std::set<FscsKey> m_active_fscs;
-  std::set<FsciKey> m_active_fsci;
+  std::unordered_set<FsciKey, FsciKeyHash> m_active_fsci;
 
   std::size_t m_completed_depth = 0;
   bool m_has_completed_depth = false;
@@ -463,10 +521,10 @@ private:
   bool m_in_cyclic_pass2 = false;
   bool m_hit_active_fsci_cycle = false;
   std::size_t m_cyclic_pass1_depth = std::numeric_limits<std::size_t>::max();
-  std::set<FsciKey> m_pass1_keys;
+  std::unordered_set<FsciKey, FsciKeyHash> m_pass1_keys;
   std::vector<FsciKey> m_pass1_pending_keys;
   std::size_t m_pass1_extra_added = 0;
-  std::set<SummaryKey> m_counted_keys;
+  std::unordered_set<SummaryKey, SummaryKeyHash> m_counted_keys;
   std::size_t m_steps = 0;
   std::size_t m_context_budget_used = 0;
   bool m_failed = false;

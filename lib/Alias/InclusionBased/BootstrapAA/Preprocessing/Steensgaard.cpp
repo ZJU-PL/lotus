@@ -22,6 +22,7 @@ class Unification {
     Id target = INVALID;
     bool top = false;
     bool nullable = false;
+    std::uint32_t obj_gen = 0;
     std::vector<Id> objects;
     std::vector<std::size_t> watchers;
   };
@@ -32,11 +33,12 @@ class Unification {
 public:
   Id node(bool top = false) {
     Id id = nextId(m_nodes.size(), "unification node");
-    m_nodes.push_back({id, 0, INVALID, top, false, {}, {}});
+    m_nodes.push_back({id, 0, INVALID, top, false, 0, {}, {}});
     return id;
   }
   void addObject(Id id, Id obj) { m_nodes[find(id)].objects.push_back(obj); }
   const std::vector<Id> &objects(Id id) { return m_nodes[find(id)].objects; }
+  std::uint32_t objGen(Id id) { return m_nodes[find(id)].obj_gen; }
   void initWorklist(std::size_t count) {
     m_queued.assign(count, false);
     m_ready.clear();
@@ -135,8 +137,10 @@ public:
         ++m_nodes[a].rank;
       m_nodes[a].top |= m_nodes[b].top;
       m_nodes[a].nullable |= m_nodes[b].nullable;
-      if (m_nodes[a].objects.size() < m_nodes[b].objects.size())
+      if (m_nodes[a].objects.size() < m_nodes[b].objects.size()) {
         m_nodes[a].objects.swap(m_nodes[b].objects);
+        ++m_nodes[a].obj_gen;
+      }
       m_nodes[a].objects.insert(m_nodes[a].objects.end(),
                                 m_nodes[b].objects.begin(),
                                 m_nodes[b].objects.end());
@@ -227,11 +231,39 @@ CoarseResult steensgaard(const Program &program, HavocPolicy havoc_policy) {
     if (parameter != INVALID)
       graph.merge(value_targets[parameter], top);
 
+  bool havoc_all_done = false;
   auto havoc_all = [&]() {
+    if (havoc_all_done)
+      return;
+    havoc_all_done = true;
     for (Id o = 0; o < program.objects.size(); ++o)
       if (isMemory(program.objects[o]))
         graph.merge(graph.target(object_nodes[o]), top);
   };
+  std::map<std::uint64_t, Id> top_store_hubs;
+  auto getTopStoreHub = [&](std::uint64_t write_bytes) -> Id {
+    auto it = top_store_hubs.find(write_bytes);
+    if (it != top_store_hubs.end())
+      return it->second;
+    const Id hub = graph.node();
+    for (Id o = 0; o < program.objects.size(); ++o) {
+      if (!isMemory(program.objects[o]))
+        continue;
+      if (write_bytes != 0 && (program.objects[o].bytes == 0 ||
+                               program.objects[o].bytes != write_bytes)) {
+        if (!noop_havoc)
+          graph.merge(graph.target(object_nodes[o]), top);
+      } else {
+        graph.merge(hub, graph.target(object_nodes[o]));
+      }
+    }
+    top_store_hubs.emplace(write_bytes, hub);
+    return hub;
+  };
+  std::vector<Id> addr_taken_funcs;
+  for (Id f = 0; f < program.functions.size(); ++f)
+    if (program.functions[f].address_taken)
+      addr_taken_funcs.push_back(f);
 
   auto accessMatches = [&](Id address, std::uint64_t bytes,
                            bool is_load) -> bool {
@@ -395,6 +427,12 @@ CoarseResult steensgaard(const Program &program, HavocPolicy havoc_policy) {
       }
     }
 
+    struct ObjCursor {
+      Id root = INVALID;
+      std::uint32_t gen = 0;
+      std::size_t seen = 0;
+    };
+    std::vector<ObjCursor> cursors(dynamic_insts.size());
     std::vector<Id> objs_copy;
     std::vector<Id> src_objs_copy;
     while (graph.hasReady()) {
@@ -408,7 +446,14 @@ CoarseResult steensgaard(const Program &program, HavocPolicy havoc_policy) {
         } else {
           if (graph.nullable(base_root))
             graph.markNullable(value_target(i.result));
-          objs_copy = graph.objects(base_root);
+          const std::uint32_t cur_gen = graph.objGen(base_root);
+          const auto &raw_objs = graph.objects(base_root);
+          ObjCursor &cur = cursors[idx];
+          const std::size_t start =
+              (cur.root == base_root && cur.gen == cur_gen) ? cur.seen : 0;
+          objs_copy.assign(raw_objs.begin() + static_cast<std::ptrdiff_t>(start),
+                           raw_objs.end());
+          cur = {base_root, cur_gen, raw_objs.size()};
           for (Id obj : objs_copy) {
             PointsToSet resolved = program.resolveField(
                 obj, i.field_offset, i.field_known, i.field_array_stride);
@@ -481,16 +526,7 @@ CoarseResult steensgaard(const Program &program, HavocPolicy havoc_policy) {
       case Opcode::Store: {
         const Id address = value_target(i.operands[0]);
         if (graph.top(address)) {
-          for (Id o = 0; o < program.objects.size(); ++o)
-            if (isMemory(program.objects[o])) {
-              if (i.write_bytes != 0 && (program.objects[o].bytes == 0 ||
-                                         program.objects[o].bytes != i.write_bytes)) {
-                if (!noop_havoc)
-                  graph.merge(graph.target(object_nodes[o]), top);
-              } else {
-                mergeFromValue(graph.target(object_nodes[o]), i.operands[1]);
-              }
-            }
+          mergeFromValue(getTopStoreHub(i.write_bytes), i.operands[1]);
         } else if (i.write_bytes != 0) {
           if (accessMatches(address, i.write_bytes, /*is_load=*/false))
             mergeFromValue(graph.target(address), i.operands[1]);
@@ -611,12 +647,19 @@ CoarseResult steensgaard(const Program &program, HavocPolicy havoc_policy) {
         targets.opaque = i.opaque_alternative;
         if (i.indirect_target == INVALID ||
             graph.top(value_target(i.indirect_target))) {
-          for (Id f = 0; f < program.functions.size(); ++f)
-            if (program.functions[f].address_taken)
-              targets.functions.insert(f);
+          for (Id f : addr_taken_funcs)
+            targets.functions.insert(f);
           targets.opaque = true;
         } else {
-          objs_copy = graph.objects(value_target(i.indirect_target));
+          const Id tgt_root = value_target(i.indirect_target);
+          const std::uint32_t cur_gen = graph.objGen(tgt_root);
+          const auto &raw_objs = graph.objects(tgt_root);
+          ObjCursor &cur = cursors[idx];
+          const std::size_t start =
+              (cur.root == tgt_root && cur.gen == cur_gen) ? cur.seen : 0;
+          objs_copy.assign(raw_objs.begin() + static_cast<std::ptrdiff_t>(start),
+                           raw_objs.end());
+          cur = {tgt_root, cur_gen, raw_objs.size()};
           for (Id obj : objs_copy) {
             if (program.objects[obj].kind == ObjectKind::Function)
               targets.functions.insert(program.objects[obj].function);
@@ -736,6 +779,21 @@ CoarseResult steensgaard(const Program &program, HavocPolicy havoc_policy) {
       result.upper[v] = objects_in_component[hierarchy.value_components[v]];
       if (graph.nullable(target))
         result.upper[v].insert(NULL_OBJECT);
+    }
+  }
+
+  result.object_upper.resize(program.objects.size());
+  for (Id o = 0; o < program.objects.size(); ++o) {
+    const Id tgt = graph.existingTarget(object_nodes[o]);
+    if (tgt == INVALID) {
+      result.object_upper[o] = program.objects[o].initial;
+    } else if (graph.top(tgt)) {
+      result.object_upper[o] = PointsToSet::top();
+    } else {
+      const Id tcomp = component[rootNumber.at(graph.find(tgt))];
+      result.object_upper[o] = objects_in_component[tcomp];
+      if (graph.nullable(tgt))
+        result.object_upper[o].insert(NULL_OBJECT);
     }
   }
 

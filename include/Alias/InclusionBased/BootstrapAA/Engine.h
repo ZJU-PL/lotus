@@ -439,7 +439,9 @@ struct Options {
   bool parallel_clusters = true;
   // Zero selects hardware_concurrency. Values above one enable parallel work.
   std::size_t parallelism = 0;
-  // Resource exhaustion yields top plus an explicit status, never partial sets.
+  // Resource exhaustion gracefully falls back to the sound flow-insensitive
+  // upper bound (Steensgaard/OLF/Andersen, or top if unknown) with an explicit
+  // ResourceLimit status, never unsound partial sets.
   std::size_t max_contexts = 4096;
   std::size_t max_steps = 1000000;
   bool enable_slicing = true; // Useful for differential testing.

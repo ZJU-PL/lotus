@@ -105,13 +105,29 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
   const std::size_t sum_prunes_before = m_stats.path_infeasible_prunes;
   const Id root_scc = m_call_graph.function_scc[root_key.function];
   std::deque<WorkItem> work;
-  using ProcKey = std::tuple<SummaryKey, CfgPos, Expr>;
-  std::map<ProcKey,
-           std::vector<std::tuple<GuardId, BddManager::NodeId, KilledConds>>>
+  struct ProcKey {
+    SummaryKey owner;
+    CfgPos pos;
+    Expr q;
+    bool operator==(const ProcKey &o) const {
+      return owner == o.owner && pos == o.pos && q == o.q;
+    }
+  };
+  struct ProcKeyHash {
+    std::size_t operator()(const ProcKey &k) const noexcept {
+      std::size_t h = SummaryKeyHash{}(k.owner);
+      h = hashCombine(h, CfgPosHash{}(k.pos));
+      h = hashCombine(h, ExprHash{}(k.q));
+      return h;
+    }
+  };
+  std::unordered_map<
+      ProcKey, std::vector<std::tuple<GuardId, BddManager::NodeId, KilledConds>>,
+      ProcKeyHash>
       processed;
-  std::set<SummaryKey> seeded_in_scc;
-  std::set<SummaryKey> top_saturated;
-  std::map<SummaryKey, std::set<Waiter>> waiters;
+  std::unordered_set<SummaryKey, SummaryKeyHash> seeded_in_scc;
+  std::unordered_set<SummaryKey, SummaryKeyHash> top_saturated;
+  std::unordered_map<SummaryKey, std::set<Waiter>, SummaryKeyHash> waiters;
 
   auto recordState = [&](const SummaryKey &owner, CfgPos pos, const Expr &q,
                          GuardId &g, BddManager::NodeId &path,
@@ -424,9 +440,81 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
     bool stopped = false;
 
     while (true) {
+      if (!at_after && !m_options.path_sensitive) {
+        const Id cur_site = block_insts[cur_idx].id;
+        if (cur_q.isTerminal()) {
+          if (m_reachability.reachable_site[cur_site])
+            addSummaryEntry(item.owner,
+                            {cur_q, cur_g, BddManager::TRUE_NODE, cur_k});
+          stopped = true;
+          break;
+        }
+        if (cur_q.kind == ExprKind::Val && cur_q.id < m_program.values.size() &&
+            !m_program.values[cur_q.id].constant &&
+            m_program.values[cur_q.id].function == f &&
+            m_index.phi_defs[cur_q.id].empty()) {
+          const auto &defs = m_index.defining_sites[cur_q.id];
+          if (defs.empty()) {
+            if (m_reachability.reachable_site[cur_site])
+              addSummaryEntry(item.owner,
+                              {cur_q, cur_g, BddManager::TRUE_NODE, cur_k});
+            stopped = true;
+            break;
+          }
+          if (defs.size() == 1) {
+            const Id dsite = defs[0];
+            const InstLocation &dloc = m_index.by_site[dsite];
+            if (dloc.function == f && m_reachability.reachable_site[dsite] &&
+                m_reachability.reachable_site[cur_site]) {
+              if (dloc.block == loc.block && dloc.index < cur_idx) {
+                cur_idx = dloc.index;
+                at_after = true;
+                continue;
+              }
+              if (dloc.block != loc.block &&
+                  m_index.blockDominates(f, dloc.block, loc.block)) {
+                enqueue(item.owner, {dsite, Point::After}, cur_q, cur_g, cur_p,
+                        cur_k);
+                stopped = true;
+                break;
+              }
+            }
+          }
+        }
+      }
       if (at_after) {
         const Instruction &ci = block_insts[cur_idx];
         if (ci.opcode == Opcode::Call) {
+          if (!m_options.path_sensitive) {
+            if (cur_q.isTerminal() ||
+                (cur_q.kind == ExprKind::Val && cur_q.id != ci.result)) {
+              if (!callSkip(ci.id).may_return) {
+                stopped = true;
+                break;
+              }
+              ++m_stats.skipped_functions;
+              at_after = false;
+              continue;
+            }
+            if (cur_q.kind == ExprKind::Mem && ci.callee != INVALID &&
+                !ci.opaque_alternative) {
+              const Function &cf = m_program.functions[ci.callee];
+              const bool cannot_modify =
+                  cf.external
+                      ? (m_options.havoc_policy == HavocPolicy::Noop ||
+                         !ci.writes_memory || !cf.writes_memory)
+                      : !canFunctionModifyObj(ci.callee, cur_q.id);
+              if (cannot_modify) {
+                if (!m_reachability.may_return[ci.callee]) {
+                  stopped = true;
+                  break;
+                }
+                ++m_stats.skipped_functions;
+                at_after = false;
+                continue;
+              }
+            }
+          }
           if (cur_idx != loc.index || item.pos.point != Point::After) {
             enqueue(item.owner, {ci.id, Point::After}, cur_q, cur_g, cur_p,
                     cur_k);
@@ -492,30 +580,19 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
       // resolving unsliced indirect targets!
       if (cur_q.isTerminal() ||
           (cur_q.kind == ExprKind::Val && cur_q.id != inst.result)) {
-        const Targets coarse_targets = callees(
-            m_program, inst,
-            valueOf(m_program, m_upper, inst.indirect_target));
-        bool returns = coarse_targets.opaque;
-        BddManager::NodeId skip_path = call_path;
-        KilledConds skip_k = call_k;
-        if (coarse_targets.opaque && inst.writes_memory) {
-          skip_path = quantifyGlobalConditions(skip_path);
-          addKilledConds(skip_k, m_program.global_conditions);
-        }
-        for (Id c : coarse_targets.functions) {
-          returns |= m_reachability.may_return[c];
-          if (m_program.functions[c].external) {
-            if (inst.writes_memory && m_program.functions[c].writes_memory) {
-              skip_path = quantifyGlobalConditions(skip_path);
-              addKilledConds(skip_k, m_program.global_conditions);
-            }
-          } else {
-            skip_path = quantifyFuncConditions(c, skip_path);
-            if (c < m_func_kills_conditions.size())
-              addKilledConds(skip_k, m_func_kills_conditions[c]);
+        const CallSkipInfo &csi = callSkip(inst.id);
+        if (csi.may_return) {
+          BddManager::NodeId skip_path = call_path;
+          KilledConds skip_k = call_k;
+          if (csi.kills_global) {
+            skip_path = quantifyGlobalConditions(skip_path);
+            addKilledConds(skip_k, m_program.global_conditions);
           }
-        }
-        if (returns) {
+          if (m_options.path_sensitive && !csi.killed_conds.empty()) {
+            for (Id cid : csi.killed_conds)
+              skip_path = m_bdd.exists(skip_path, cid);
+            addKilledConds(skip_k, csi.killed_conds);
+          }
           ++m_stats.skipped_functions;
           enqueue(item.owner, {inst.id, Point::Before}, cur_q, cur_g, skip_path,
                   std::move(skip_k));
@@ -2934,6 +3011,7 @@ GuardedSummarySolver::GuardedSummarySolver(
 
   computeFunctionModifications();
   computeFunctionConditionKills();
+  computeCallSkipInfo();
   computeInvariantSSAVals();
   computeDovetailHierarchy();
 

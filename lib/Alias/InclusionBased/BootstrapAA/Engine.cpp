@@ -27,9 +27,11 @@ struct Analysis::Impl {
   Statistics stats;
   ProgramIndex index;
   Sets upper;
+  Sets object_upper;
   SteensgaardHierarchy hierarchy;
   CallGraphInfo call_graph;
   ReachabilityInfo reachability;
+  SliceIndex slice_index;
   std::vector<std::vector<Id>> cover;
   std::vector<std::unique_ptr<ClusterSolver>> solvers;
   std::vector<Statistics> merged_solver_stats;
@@ -89,6 +91,7 @@ struct Analysis::Impl {
     // Stage 1: Steensgaard partitioning & retained points-to hierarchy (§2.1).
     CoarseResult coarse = steensgaard(program, options.havoc_policy);
     upper = coarse.upper;
+    object_upper = std::move(coarse.object_upper);
     hierarchy = std::move(coarse.hierarchy);
     index.populateCallers(program, upper, hierarchy);
     reachability = computeReachability(program, index, upper);
@@ -149,6 +152,16 @@ struct Analysis::Impl {
       stats.effective_andersen_threshold = options.andersen_threshold;
     } else {
       std::vector<std::vector<Id>> partitions = coarse.partitions;
+      SliceIndex coarse_slice_index;
+      bool coarse_slice_index_ready = false;
+      auto getCoarseSliceIndex = [&]() -> const SliceIndex * {
+        if (!coarse_slice_index_ready) {
+          coarse_slice_index = buildSliceIndex(program, index, coarse.upper,
+                                               hierarchy, reachability);
+          coarse_slice_index_ready = true;
+        }
+        return &coarse_slice_index;
+      };
 
       // Optional intermediate cascade stage: Das (2000) One-Level Flow
       // between Steensgaard and Andersen (paper §4, p. 258).
@@ -160,8 +173,9 @@ struct Analysis::Impl {
             continue;
           }
           ++stats.one_level_flow_runs;
-          Slice olf_slice = relevant(program, index, coarse.upper, hierarchy,
-                                     reachability, partition, true);
+          Slice olf_slice =
+              relevant(program, index, coarse.upper, hierarchy, reachability,
+                       partition, true, {}, getCoarseSliceIndex());
           Sets olf = oneLevelFlow(program, index, olf_slice, coarse.upper,
                                   options.havoc_policy);
           auto sub = buildInverseCover(partition, olf);
@@ -214,8 +228,9 @@ struct Analysis::Impl {
           continue;
         }
         ++stats.andersen_runs;
-        Slice slice = relevant(program, index, coarse.upper, hierarchy,
-                               reachability, partition, true);
+        Slice slice =
+            relevant(program, index, coarse.upper, hierarchy, reachability,
+                     partition, true, {}, getCoarseSliceIndex());
         Sets refined = inclusion(program, index, slice, options.havoc_policy);
         auto refinedCover = buildInverseCover(partition, refined);
         std::size_t refinedLargest = 0;
@@ -290,6 +305,9 @@ struct Analysis::Impl {
 
     index.populateCallers(program, upper, hierarchy);
     reachability = computeReachability(program, index, upper);
+    if (options.enable_slicing)
+      slice_index =
+          buildSliceIndex(program, index, upper, hierarchy, reachability);
     auto hasNonNullPts = [](const PointsToSet &pts) -> bool {
       if (pts.isTop())
         return true;
@@ -427,7 +445,8 @@ struct Analysis::Impl {
     BuiltSolver built;
     built.cluster = cluster;
     Slice slice = relevant(program, index, upper, hierarchy, reachability,
-                           cover[cluster], options.enable_slicing);
+                           cover[cluster], options.enable_slicing, {},
+                           options.enable_slicing ? &slice_index : nullptr);
     const SolverMode mode =
         chooseSolverMode(cluster, cover[cluster].size(), slice.inst_list.size());
     if (mode == SolverMode::InputStateTabulation) {
@@ -633,7 +652,8 @@ struct Analysis::Impl {
     cluster_vals.erase(std::unique(cluster_vals.begin(), cluster_vals.end()),
                        cluster_vals.end());
     Slice slice = relevant(program, index, upper, hierarchy, reachability,
-                           cluster_vals, options.enable_slicing, {object});
+                           cluster_vals, options.enable_slicing, {object},
+                           options.enable_slicing ? &slice_index : nullptr);
     std::unique_ptr<ClusterSolver> solver;
     if (options.solver_mode == SolverMode::InputStateTabulation) {
       solver = createTabulationSolver(program, index, upper, call_graph,
@@ -650,6 +670,62 @@ struct Analysis::Impl {
     return *inserted->second;
   }
 
+  PointsToSet fallbackPointsTo(Id value) const {
+    if (value < upper.size()) {
+      const PointsToSet &u = upper[value];
+      if (!u.empty() || program.values[value].constant)
+        return u;
+    }
+    return PointsToSet::top();
+  }
+
+  PointsToSet fallbackObjectPointsTo(Id object) const {
+    if (object < object_upper.size() && !object_upper[object].empty())
+      return object_upper[object];
+    return PointsToSet::top();
+  }
+
+  AliasResult buildFallbackAliases(const PointsToSet &base_pts, Id self_val,
+                                   Id self_obj, Id site, Point point) const {
+    AliasResult fb;
+    fb.status = QueryStatus::ResourceLimit;
+    if (self_val != INVALID)
+      fb.aliases.push_back(self_val);
+    if (self_obj != INVALID)
+      fb.object_aliases.push_back(self_obj);
+    if (base_pts.isTop()) {
+      fb.may_alias_all = true;
+      finalizeAliasResult(fb, PointsToSet::top(), site, point, {}, self_obj);
+      return fb;
+    }
+    if (!hasNonNullTarget(base_pts))
+      return fb;
+
+    const Id fn = index.by_site[site].function;
+    std::set<Id> vals(fb.aliases.begin(), fb.aliases.end());
+    if (fn < non_null_values_by_fn.size()) {
+      for (Id cand : non_null_values_by_fn[fn])
+        if (cand < upper.size() && upper[cand].intersectsNonNull(base_pts))
+          vals.insert(cand);
+    }
+    if (fn < non_null_constants_by_fn.size()) {
+      for (Id cand : non_null_constants_by_fn[fn])
+        if (cand < upper.size() && upper[cand].intersectsNonNull(base_pts))
+          vals.insert(cand);
+    }
+    fb.aliases.assign(vals.begin(), vals.end());
+
+    std::set<Id> objs(fb.object_aliases.begin(), fb.object_aliases.end());
+    for (Id o : non_null_ptr_mem_objects) {
+      if (o < object_upper.size() &&
+          object_upper[o].intersectsNonNull(base_pts))
+        objs.insert(o);
+    }
+    fb.object_aliases.assign(objs.begin(), objs.end());
+    finalizeAliasResult(fb, base_pts, site, point, {}, self_obj);
+    return fb;
+  }
+
   QueryResult queryObject(Id object, Id site, const Context *context_path,
                           Point point,
                           ContextMatch match = ContextMatch::Full) {
@@ -660,8 +736,10 @@ struct Analysis::Impl {
     QueryResult res =
         solver.queryObject(object, site, context_path, point, match);
     mergeStatsDelta(merged_object_solver_stats[object], solver.statistics());
-    if (res.status == QueryStatus::ResourceLimit)
+    if (res.status == QueryStatus::ResourceLimit) {
       ++stats.fallback_queries;
+      return {fallbackObjectPointsTo(object), QueryStatus::ResourceLimit};
+    }
     return res;
   }
 
@@ -830,7 +908,8 @@ struct Analysis::Impl {
     mergeStatsDelta(merged_object_solver_stats[object], solver.statistics());
     if (res.status == QueryStatus::ResourceLimit) {
       ++stats.fallback_queries;
-      return res;
+      return buildFallbackAliases(fallbackObjectPointsTo(object), INVALID,
+                                  object, site, point);
     }
     if (res.reachable()) {
       const QueryResult base =
@@ -982,7 +1061,7 @@ struct Analysis::Impl {
       syncSolverStatistics(c);
       if (part.status == QueryStatus::ResourceLimit) {
         ++stats.fallback_queries;
-        return part;
+        return {fallbackPointsTo(value), QueryStatus::ResourceLimit};
       }
       if (part.reachable()) {
         result.status = QueryStatus::Complete;
@@ -1010,7 +1089,8 @@ struct Analysis::Impl {
       syncSolverStatistics(c);
       if (part.status == QueryStatus::ResourceLimit) {
         ++stats.fallback_queries;
-        return part;
+        return buildFallbackAliases(fallbackPointsTo(value), value, INVALID,
+                                    site, point);
       }
       if (part.reachable()) {
         result.status = QueryStatus::Complete;

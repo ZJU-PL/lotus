@@ -11,6 +11,7 @@ namespace detail {
 
 struct CoarseResult {
   Sets upper;
+  Sets object_upper;
   std::vector<std::vector<Id>> partitions;
   SteensgaardHierarchy hierarchy;
 };

@@ -5,8 +5,11 @@
 #include "Alias/InclusionBased/BootstrapAA/BootstrapAA.h"
 
 #include <exception>
+#include <unordered_map>
 
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalValue.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -170,9 +173,70 @@ int main(int argc, char **argv) {
     if (PrecomputeClusters || AllContexts)
       analysis.precomputeAll();
     bool limited = false;
+    std::unordered_map<const llvm::Value *, unsigned> global_slots;
+    {
+      unsigned g_next = 0;
+      for (const llvm::GlobalVariable &gv : module->globals())
+        if (!gv.hasName())
+          global_slots.emplace(&gv, g_next++);
+      for (const llvm::Function &fn : *module)
+        if (!fn.hasName())
+          global_slots.emplace(&fn, g_next++);
+      for (const llvm::GlobalAlias &ga : module->aliases())
+        if (!ga.hasName())
+          global_slots.emplace(&ga, g_next++);
+    }
+    std::unordered_map<const llvm::Value *, unsigned> local_slots;
+    auto printValueFast = [&](llvm::raw_ostream &os, const llvm::Value &v) {
+      if (llvm::isa<llvm::GlobalValue>(&v)) {
+        if (v.hasName()) {
+          os << '@' << v.getName();
+          return;
+        }
+        if (auto it = global_slots.find(&v); it != global_slots.end()) {
+          os << '@' << it->second;
+          return;
+        }
+      }
+      if (v.hasName()) {
+        os << '%' << v.getName();
+        return;
+      }
+      if (auto it = local_slots.find(&v); it != local_slots.end()) {
+        os << '%' << it->second;
+        return;
+      }
+      if (llvm::isa<llvm::ConstantPointerNull>(&v)) {
+        os << "null";
+        return;
+      }
+      if (llvm::isa<llvm::PoisonValue>(&v)) {
+        os << "poison";
+        return;
+      }
+      if (llvm::isa<llvm::UndefValue>(&v)) {
+        os << "undef";
+        return;
+      }
+      os << "<const>";
+    };
     for (const llvm::Function &function : *module) {
       if (!AllContexts && &function != entry)
         continue;
+      if (function.isDeclaration())
+        continue;
+      local_slots.clear();
+      unsigned l_next = 0;
+      for (const llvm::Argument &arg : function.args())
+        if (!arg.hasName())
+          local_slots.emplace(&arg, l_next++);
+      for (const llvm::BasicBlock &block : function) {
+        if (!block.hasName())
+          local_slots.emplace(&block, l_next++);
+        for (const llvm::Instruction &inst : block)
+          if (!inst.getType()->isVoidTy() && !inst.hasName())
+            local_slots.emplace(&inst, l_next++);
+      }
       for (const llvm::BasicBlock &block : function) {
         for (const llvm::Instruction &instruction : block) {
           if (!instruction.getType()->isPointerTy())
@@ -184,7 +248,7 @@ int main(int argc, char **argv) {
                   : analysis.pointsTo(instruction, instruction, {},
                                       lotus::bootstrap::Point::After);
           llvm::outs() << function.getName() << ": ";
-          instruction.printAsOperand(llvm::outs(), false);
+          printValueFast(llvm::outs(), instruction);
           llvm::outs() << " -> ";
           if (!result.reachable()) {
             llvm::outs() << "<unreachable>\n";
@@ -221,7 +285,7 @@ int main(int argc, char **argv) {
               if (!afirst)
                 llvm::outs() << ", ";
               afirst = false;
-              av->printAsOperand(llvm::outs(), false);
+              printValueFast(llvm::outs(), *av);
             }
             if (aliasRes.status == lotus::bootstrap::QueryStatus::ResourceLimit)
               limited = true;
