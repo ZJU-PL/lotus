@@ -105,15 +105,33 @@ void globalsAndExternalHavoc() {
       ret i32 0
     }
   )IR");
-  BootstrapAA aa(*f.module, nullptr, options());
-  const auto &old = f.instruction("main", "old"),
-             &now = f.instruction("main", "new");
-  CHECK(aa.pointsTo(old, old, {}, Point::After).points_to ==
-        PointsToSet(aa.objectId(*f.module->getNamedGlobal("a"))));
-  CHECK(aa.pointsTo(now, now, {}, Point::After).points_to ==
-        PointsToSet(aa.objectId(*f.module->getNamedGlobal("b"))));
-  const auto &unknown = f.instruction("main", "unknown");
-  CHECK(aa.pointsTo(unknown, unknown, {}, Point::After).points_to.isTop());
+  // Default policy (HavocPolicy::Noop): unmodeled external call is a no-op.
+  {
+    BootstrapAA aa(*f.module, nullptr, options());
+    const auto &old = f.instruction("main", "old"),
+               &now = f.instruction("main", "new"),
+               &unknown = f.instruction("main", "unknown");
+    CHECK(aa.pointsTo(old, old, {}, Point::After).points_to ==
+          PointsToSet(aa.objectId(*f.module->getNamedGlobal("a"))));
+    CHECK(aa.pointsTo(now, now, {}, Point::After).points_to ==
+          PointsToSet(aa.objectId(*f.module->getNamedGlobal("b"))));
+    CHECK(aa.pointsTo(unknown, unknown, {}, Point::After).points_to ==
+          PointsToSet(aa.objectId(*f.module->getNamedGlobal("b"))));
+  }
+  // Opt-in HavocPolicy::Conservative: unmodeled external call havocs memory.
+  {
+    auto opt = options();
+    opt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
+    BootstrapAA aa(*f.module, nullptr, opt);
+    const auto &old = f.instruction("main", "old"),
+               &now = f.instruction("main", "new");
+    CHECK(aa.pointsTo(old, old, {}, Point::After).points_to ==
+          PointsToSet(aa.objectId(*f.module->getNamedGlobal("a"))));
+    CHECK(aa.pointsTo(now, now, {}, Point::After).points_to ==
+          PointsToSet(aa.objectId(*f.module->getNamedGlobal("b"))));
+    const auto &unknown = f.instruction("main", "unknown");
+    CHECK(aa.pointsTo(unknown, unknown, {}, Point::After).points_to.isTop());
+  }
 }
 void partialStoresAndFreeze() {
   Fixture f(R"IR(
@@ -128,10 +146,24 @@ void partialStoresAndFreeze() {
       ret i32 0
     }
   )IR");
-  BootstrapAA aa(*f.module, nullptr, options());
-  for (const char *name : {"p", "frozen"}) {
-    const auto &i = f.instruction("main", name);
-    CHECK(aa.pointsTo(i, i, {}, Point::After).points_to.isTop());
+  // Default HavocPolicy::Noop ignores non-pointer byte store, keeps freeze Top.
+  {
+    BootstrapAA aa(*f.module, nullptr, options());
+    const auto &p = f.instruction("main", "p");
+    const auto &frozen = f.instruction("main", "frozen");
+    CHECK(aa.pointsTo(p, p, {}, Point::After).points_to ==
+          PointsToSet(aa.objectId(*f.module->getNamedGlobal("a"))));
+    CHECK(aa.pointsTo(frozen, frozen, {}, Point::After).points_to.isTop());
+  }
+  // HavocPolicy::Conservative havocs `@slot` to Top on non-pointer byte write.
+  {
+    auto opt = options();
+    opt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
+    BootstrapAA aa(*f.module, nullptr, opt);
+    for (const char *name : {"p", "frozen"}) {
+      const auto &i = f.instruction("main", name);
+      CHECK(aa.pointsTo(i, i, {}, Point::After).points_to.isTop());
+    }
   }
 }
 void phiAndRecursion() {
@@ -546,16 +578,34 @@ void partialByteOverwriteInsideStructIsSound() {
       ret i32 0
     }
   )IR");
-  BootstrapAA aa(*f.module, nullptr, options());
-  const auto b = aa.objectId(*f.module->getNamedGlobal("b"));
-  const auto &r0 = f.instruction("main", "r0");
-  const auto &r1 = f.instruction("main", "r1");
-  const auto &r1_after = f.instruction("main", "r1_after");
-  // Byte write at offset 0 havocs f0 ([0,8)) to top, leaves f1 ([8,16)) exact!
-  CHECK(aa.pointsTo(r0, r0, {}, Point::After).points_to.isTop());
-  CHECK(aa.pointsTo(r1, r1, {}, Point::After).points_to == PointsToSet(b));
-  // Byte write at offset 9 overlaps f1 ([8,16)) -> conservatively top!
-  CHECK(aa.pointsTo(r1_after, r1_after, {}, Point::After).points_to.isTop());
+  // Default HavocPolicy::Noop treats non-pointer byte writes as no-ops.
+  {
+    BootstrapAA aa(*f.module, nullptr, options());
+    const auto a = aa.objectId(*f.module->getNamedGlobal("a"));
+    const auto b = aa.objectId(*f.module->getNamedGlobal("b"));
+    const auto &r0 = f.instruction("main", "r0");
+    const auto &r1 = f.instruction("main", "r1");
+    const auto &r1_after = f.instruction("main", "r1_after");
+    CHECK(aa.pointsTo(r0, r0, {}, Point::After).points_to == PointsToSet(a));
+    CHECK(aa.pointsTo(r1, r1, {}, Point::After).points_to == PointsToSet(b));
+    CHECK(aa.pointsTo(r1_after, r1_after, {}, Point::After).points_to ==
+          PointsToSet(b));
+  }
+  // HavocPolicy::Conservative sounds partial byte overwrites.
+  {
+    auto opt = options();
+    opt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
+    BootstrapAA aa(*f.module, nullptr, opt);
+    const auto b = aa.objectId(*f.module->getNamedGlobal("b"));
+    const auto &r0 = f.instruction("main", "r0");
+    const auto &r1 = f.instruction("main", "r1");
+    const auto &r1_after = f.instruction("main", "r1_after");
+    // Byte write at offset 0 havocs f0 ([0,8)) to top, leaves f1 ([8,16)) exact!
+    CHECK(aa.pointsTo(r0, r0, {}, Point::After).points_to.isTop());
+    CHECK(aa.pointsTo(r1, r1, {}, Point::After).points_to == PointsToSet(b));
+    // Byte write at offset 9 overlaps f1 ([8,16)) -> conservatively top!
+    CHECK(aa.pointsTo(r1_after, r1_after, {}, Point::After).points_to.isTop());
+  }
 }
 
 void indirectFunctionPointersInStructWithoutCollapse() {
@@ -1090,17 +1140,34 @@ void llvmNonZeroOffsetMemCopyAndUnknownLenMemsetSliceSoundness() {
       ret i32 0
     }
   )IR");
+  const auto &after_copy = f.instruction("main", "after_copy");
+  const auto &after_memset = f.instruction("main", "after_memset");
+
+  // Default HavocPolicy::Noop: memcpy still transfers `@b`, unknown-len memset is no-op.
+  for (auto mode : {lotus::bootstrap::SolverMode::GuardedSummary,
+                    lotus::bootstrap::SolverMode::InputStateTabulation}) {
+    auto opt = options();
+    opt.solver_mode = mode;
+    BootstrapAA aa(*f.module, nullptr, opt);
+    const auto b = aa.objectId(*f.module->getNamedGlobal("b"));
+    CHECK(aa.pointsTo(after_copy, after_copy, {}, Point::After).points_to ==
+          PointsToSet(b));
+    CHECK(aa.pointsTo(after_memset, after_memset, {}, Point::After).points_to ==
+          PointsToSet(b));
+  }
+
+  // HavocPolicy::Conservative: unknown-len memset havocs offset 16 to Top.
   auto gOpt = options();
   gOpt.solver_mode = lotus::bootstrap::SolverMode::GuardedSummary;
+  gOpt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
   auto tOpt = options();
   tOpt.solver_mode = lotus::bootstrap::SolverMode::InputStateTabulation;
+  tOpt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
 
   BootstrapAA guarded(*f.module, nullptr, gOpt);
   BootstrapAA tab(*f.module, nullptr, tOpt);
 
   const auto b = guarded.objectId(*f.module->getNamedGlobal("b"));
-  const auto &after_copy = f.instruction("main", "after_copy");
-  const auto &after_memset = f.instruction("main", "after_memset");
 
   CHECK(guarded.pointsTo(after_copy, after_copy, {}, Point::After).points_to ==
         PointsToSet(b));
@@ -1139,17 +1206,33 @@ void llvmPartialMemCopyInvalidatesPointerField() {
       ret i32 0
     }
   )IR");
+  const auto &r0 = f.instruction("main", "r0");
+  const auto &r1 = f.instruction("main", "r1");
+
+  // Default HavocPolicy::Noop: full field copy transfers `@a`, partial f1 is no-op.
+  for (auto mode : {lotus::bootstrap::SolverMode::GuardedSummary,
+                    lotus::bootstrap::SolverMode::InputStateTabulation}) {
+    auto opt = options();
+    opt.solver_mode = mode;
+    BootstrapAA aa(*f.module, nullptr, opt);
+    const auto a = aa.objectId(*f.module->getNamedGlobal("a"));
+    const auto c = aa.objectId(*f.module->getNamedGlobal("c"));
+    CHECK(aa.pointsTo(r0, r0, {}, Point::After).points_to == PointsToSet(a));
+    CHECK(aa.pointsTo(r1, r1, {}, Point::After).points_to == PointsToSet(c));
+  }
+
+  // HavocPolicy::Conservative: partial f1 overwrite widens to Top.
   auto gOpt = options();
   gOpt.solver_mode = lotus::bootstrap::SolverMode::GuardedSummary;
+  gOpt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
   auto tOpt = options();
   tOpt.solver_mode = lotus::bootstrap::SolverMode::InputStateTabulation;
+  tOpt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
 
   BootstrapAA guarded(*f.module, nullptr, gOpt);
   BootstrapAA tab(*f.module, nullptr, tOpt);
 
   const auto a = guarded.objectId(*f.module->getNamedGlobal("a"));
-  const auto &r0 = f.instruction("main", "r0");
-  const auto &r1 = f.instruction("main", "r1");
 
   CHECK(guarded.pointsTo(r0, r0, {}, Point::After).points_to == PointsToSet(a));
   CHECK(tab.pointsTo(r0, r0, {}, Point::After).points_to == PointsToSet(a));
@@ -1657,9 +1740,12 @@ void llvmNestedArrayStrideWraparoundPartialZeroInitAndMemchrSoundness() {
     CHECK(qr.points_to.contains(c));
   }
 
-  // Part B: `memset` starting at `&arr[0].b` (offset 8) with length 16 wraps
-  // across array stride 16 into `arr[1].a` (folded offset 0), so `arr[1].a`
-  // must be invalidated to Top!
+  // Part B: `memset` starting at `&arr[0].b` (offset 8) wraps across array
+  // stride 16 into `arr[1].a` (folded offset 0):
+  // - aligned 16-byte zero-fill (`i8 0, i64 16`) zeroes `arr[1].a` cleanly
+  //   (weak-updating `{@a, NULL_OBJECT}`, NOT Top),
+  // - non-zero fill (`i8 1, i64 16`) and partial zero-fill (`i8 0, i64 12`)
+  //   both invalidate `arr[1].a` to Top!
   {
     Fixture f(R"IR(
       target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
@@ -1675,7 +1761,9 @@ void llvmNestedArrayStrideWraparoundPartialZeroInitAndMemchrSoundness() {
         store i8* @b, i8** %a01
         %raw = bitcast i8** %a01 to i8*
         call void @llvm.memset.p0i8.i64(i8* %raw, i8 0, i64 16, i1 false)
-        %v = load i8*, i8** %a10
+        %v_zero = load i8*, i8** %a10
+        call void @llvm.memset.p0i8.i64(i8* %raw, i8 0, i64 12, i1 false)
+        %v_part = load i8*, i8** %a10
         ret i32 0
       }
     )IR");
@@ -1683,11 +1771,19 @@ void llvmNestedArrayStrideWraparoundPartialZeroInitAndMemchrSoundness() {
                       lotus::bootstrap::SolverMode::InputStateTabulation}) {
       auto opt = options();
       opt.solver_mode = mode;
+      opt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
       BootstrapAA aa(*f.module, nullptr, opt);
-      const auto &v = f.instruction("main", "v");
-      auto qr = aa.pointsTo(v, v, {}, Point::After);
-      CHECK(qr.reachable());
-      CHECK(qr.points_to.isTop());
+      const auto a_obj = aa.objectId(*f.module->getNamedGlobal("a"));
+      const auto &v_zero = f.instruction("main", "v_zero");
+      const auto &v_part = f.instruction("main", "v_part");
+      auto qz = aa.pointsTo(v_zero, v_zero, {}, Point::After);
+      CHECK(qz.reachable());
+      CHECK(!qz.points_to.isTop());
+      CHECK(qz.points_to.contains(a_obj));
+      CHECK(qz.points_to.contains(lotus::bootstrap::NULL_OBJECT));
+      auto qp = aa.pointsTo(v_part, v_part, {}, Point::After);
+      CHECK(qp.reachable());
+      CHECK(qp.points_to.isTop());
     }
   }
 
@@ -1896,6 +1992,7 @@ void llvmNestedArrayStrideWraparoundPartialZeroInitAndMemchrSoundness() {
         opt.solver_mode = mode;
         opt.enable_one_level_flow = olf;
         opt.andersen_threshold = 2;
+        opt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
         BootstrapAA aa(*f.module, nullptr, opt);
         const auto a = aa.objectId(*f.module->getNamedGlobal("a"));
         const auto b = aa.objectId(*f.module->getNamedGlobal("b"));
@@ -1940,8 +2037,19 @@ void llvmPackedStructCrossFieldStoreBitcastBoolAndDisjointIndirectCall() {
         ret i32 0
       }
     )IR");
+    // Default HavocPolicy::Noop: cross-field unaligned store does not clobber `%f1`.
+    {
+      BootstrapAA aa(*f.module, nullptr, options());
+      const auto a = aa.objectId(*f.module->getNamedGlobal("a"));
+      const auto &v = f.instruction("main", "v");
+      auto qr = aa.pointsTo(v, v, {}, Point::After);
+      CHECK(qr.reachable());
+      CHECK(qr.points_to == PointsToSet(a));
+    }
+    // HavocPolicy::Conservative: cross-field store widens `%f1` to Top.
     for (int m = 0; m < 4; ++m) {
       auto opt = options();
+      opt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
       if (m == 1)
         opt.solver_mode = lotus::bootstrap::SolverMode::InputStateTabulation;
       else if (m == 2)
@@ -2416,9 +2524,21 @@ void llvmRealIRSpecManagerCtorsAggregatesAndDerivedAPIs() {
         ret i32 0
       }
     )IR");
-    BootstrapAA aa(*f.module, nullptr, options());
-    const auto &vg = f.instruction("main", "vg");
-    CHECK(aa.pointsTo(vg, vg, {}, Point::After).points_to.isTop());
+    // Default HavocPolicy::Noop treats external global_ctors as no-ops.
+    {
+      BootstrapAA aa(*f.module, nullptr, options());
+      const auto &vg = f.instruction("main", "vg");
+      CHECK(aa.pointsTo(vg, vg, {}, Point::After).points_to ==
+            PointsToSet(aa.objectId(*f.module->getNamedGlobal("a"))));
+    }
+    // HavocPolicy::Conservative degrades globals to Top on external ctors.
+    {
+      auto opt = options();
+      opt.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
+      BootstrapAA aa(*f.module, nullptr, opt);
+      const auto &vg = f.instruction("main", "vg");
+      CHECK(aa.pointsTo(vg, vg, {}, Point::After).points_to.isTop());
+    }
   }
 
   // Part B: Aggregate SSA values (`insertvalue`, `extractvalue`, aggregate
@@ -2736,6 +2856,243 @@ void llvmRealIRSpecManagerCtorsAggregatesAndDerivedAPIs() {
     }
   }
 }
+
+void llvmZeroFillMemsetSpecLibcAddressTakenAndHeapArrays() {
+  // Part A: Zero-fill memset on a struct whose field 0 is a sub-array `[16 x i8]`
+  // (peeled element 0!), plus partial/non-zero memset soundness, targeted
+  // SPEC2006 libc modeling (`fgetc`, `stat(argv, &st)`, `strcpy(&s->buf[0])`,
+  // `sscanf(..., &s->count)`, `sprintf`, `qsort`, `llvm.va_start`/`va_end`),
+  // and `address_taken` filtering on Top indirect calls.
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
+      %struct.Ctx = type { [16 x i8], i64, i8*, void ()* }
+      %struct.Stat = type { i64, i64 }
+      @a = global i8 0
+      @g_safe = global i8* @a
+      @fmt = private unnamed_addr constant [4 x i8] c"%ld\00"
+      @fmt_s = private unnamed_addr constant [3 x i8] c"%d\00"
+      @mode = private unnamed_addr constant [2 x i8] c"r\00"
+
+      declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1 immarg)
+      declare void @llvm.va_start(i8*)
+      declare void @llvm.va_end(i8*)
+      declare i8* @fopen(i8*, i8*)
+      declare i32 @fgetc(i8*)
+      declare i32 @stat(i8*, %struct.Stat*)
+      declare i8* @strcpy(i8*, i8*)
+      declare i32 @sscanf(i8*, i8*, ...)
+      declare i32 @sprintf(i8*, i8*, ...)
+      declare void @qsort(i8*, i64, i64, i32 (i8*, i8*)*)
+
+      define void @target_fn() {
+        ret void
+      }
+
+      define void @never_taken() {
+        ret void
+      }
+
+      define i32 @cmp_fn(i8* %x, i8* %y) {
+        ret i32 0
+      }
+
+      define void @va_helper(i32 %k, ...) {
+        %ap = alloca [24 x i8]
+        %ap_raw = bitcast [24 x i8]* %ap to i8*
+        call void @llvm.va_start(i8* %ap_raw)
+        call void @llvm.va_end(i8* %ap_raw)
+        ret void
+      }
+
+      define i32 @main(i32 %argc, i8** %argv, void ()* %unk_fp) {
+        %ctx = alloca %struct.Ctx
+        %st = alloca %struct.Stat
+        %sbuf = alloca [32 x i8]
+        %raw = bitcast %struct.Ctx* %ctx to i8*
+        call void @llvm.memset.p0i8.i64(i8* align 8 %raw, i8 0, i64 40, i1 false)
+        %p_slot = getelementptr inbounds %struct.Ctx, %struct.Ctx* %ctx, i32 0, i32 2
+        %fp_slot = getelementptr inbounds %struct.Ctx, %struct.Ctx* %ctx, i32 0, i32 3
+        %zero_p = load i8*, i8** %p_slot
+        store i8* @a, i8** %p_slot
+        store void ()* @target_fn, void ()** %fp_slot
+
+        %arg0 = load i8*, i8** %argv
+        %fp = call i8* @fopen(i8* %arg0, i8* getelementptr inbounds ([2 x i8], [2 x i8]* @mode, i64 0, i64 0))
+        %ch = call i32 @fgetc(i8* %fp)
+        %sr = call i32 @stat(i8* %arg0, %struct.Stat* %st)
+        %name0 = getelementptr inbounds %struct.Ctx, %struct.Ctx* %ctx, i32 0, i32 0, i64 0
+        %cpy = call i8* @strcpy(i8* %name0, i8* %arg0)
+        %cnt = getelementptr inbounds %struct.Ctx, %struct.Ctx* %ctx, i32 0, i32 1
+        %sc = call i32 (i8*, i8*, ...) @sscanf(i8* %name0, i8* getelementptr inbounds ([4 x i8], [4 x i8]* @fmt, i64 0, i64 0), i64* %cnt)
+        %sbuf0 = getelementptr inbounds [32 x i8], [32 x i8]* %sbuf, i64 0, i64 0
+        %sp = call i32 (i8*, i8*, ...) @sprintf(i8* %sbuf0, i8* getelementptr inbounds ([3 x i8], [3 x i8]* @fmt_s, i64 0, i64 0), i32 %argc)
+        call void @qsort(i8* %sbuf0, i64 4, i64 8, i32 (i8*, i8*)* @cmp_fn)
+        call void (i32, ...) @va_helper(i32 1, i8* %arg0)
+
+        %safe_ld = load i8*, i8** @g_safe
+        %ctx_p = load i8*, i8** %p_slot
+        %ctx_fp = load void ()*, void ()** %fp_slot
+        call void %ctx_fp()
+
+        ; Partial zero-fill (28 bytes covers [0,28), partially overwriting p_slot at [24,32))
+        call void @llvm.memset.p0i8.i64(i8* align 8 %raw, i8 0, i64 28, i1 false)
+        %part_p = load i8*, i8** %p_slot
+
+        ; Non-zero fill invalidates fp_slot to Top
+        call void @llvm.memset.p0i8.i64(i8* align 8 %raw, i8 1, i64 40, i1 false)
+        %nz_fp = load void ()*, void ()** %fp_slot
+        call void %unk_fp()
+        ret i32 0
+      }
+    )IR");
+
+    for (auto policy : {lotus::bootstrap::HavocPolicy::Noop,
+                        lotus::bootstrap::HavocPolicy::Conservative}) {
+      for (auto mode : {lotus::bootstrap::SolverMode::GuardedSummary,
+                        lotus::bootstrap::SolverMode::InputStateTabulation}) {
+        auto opt = options();
+        opt.solver_mode = mode;
+        opt.havoc_policy = policy;
+        BootstrapAA aa(*f.module, nullptr, opt);
+        const auto a_obj = aa.objectId(*f.module->getNamedGlobal("a"));
+        const auto &zero_p = f.instruction("main", "zero_p");
+        const auto &safe_ld = f.instruction("main", "safe_ld");
+        const auto &ctx_p = f.instruction("main", "ctx_p");
+        const auto &ctx_fp = f.instruction("main", "ctx_fp");
+        const auto &part_p = f.instruction("main", "part_p");
+        const auto &nz_fp = f.instruction("main", "nz_fp");
+
+        auto qz = aa.pointsTo(zero_p, zero_p, {}, Point::After);
+        CHECK(qz.reachable());
+        CHECK(qz.points_to == PointsToSet(lotus::bootstrap::NULL_OBJECT));
+
+        auto qs = aa.pointsTo(safe_ld, safe_ld, {}, Point::After);
+        CHECK(qs.reachable());
+        CHECK(qs.points_to == PointsToSet(a_obj));
+
+        auto qp = aa.pointsTo(ctx_p, ctx_p, {}, Point::After);
+        CHECK(qp.reachable());
+        CHECK(qp.points_to == PointsToSet(a_obj));
+
+        auto qfp = aa.pointsTo(ctx_fp, ctx_fp, {}, Point::After);
+        CHECK(qfp.reachable());
+        CHECK(!qfp.points_to.isTop());
+        CHECK(qfp.points_to ==
+              PointsToSet(aa.objectId(*f.module->getFunction("target_fn"))));
+
+        auto qpart = aa.pointsTo(part_p, part_p, {}, Point::After);
+        CHECK(qpart.reachable());
+        auto qnz = aa.pointsTo(nz_fp, nz_fp, {}, Point::After);
+        CHECK(qnz.reachable());
+        if (policy == lotus::bootstrap::HavocPolicy::Noop) {
+          CHECK(qpart.points_to == PointsToSet(a_obj));
+          CHECK(qnz.points_to ==
+                PointsToSet(aa.objectId(*f.module->getFunction("target_fn"))));
+        } else {
+          CHECK(qpart.points_to.isTop());
+          CHECK(qnz.points_to.isTop());
+        }
+
+        // `never_taken` is not address-taken, so the Top indirect call `%unk_fp`
+        // must NOT target it (while `target_fn` IS address-taken).
+        const llvm::Function *never_fn = f.module->getFunction("never_taken");
+        const llvm::Function *target_fn = f.module->getFunction("target_fn");
+        const llvm::CallBase *unk_call = nullptr;
+        for (const llvm::Instruction &inst :
+             f.module->getFunction("main")->back()) {
+          if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+            if (cb->getCalledOperand()->getName() == "unk_fp")
+              unk_call = cb;
+          }
+        }
+        CHECK(unk_call != nullptr);
+        auto ct = aa.callTargets(*unk_call);
+        CHECK(ct.may_call_unknown);
+        CHECK(std::find(ct.functions.begin(), ct.functions.end(), never_fn) ==
+              ct.functions.end());
+        CHECK(std::find(ct.functions.begin(), ct.functions.end(), target_fn) !=
+              ct.functions.end());
+      }
+    }
+  }
+
+  // Part B: Dynamic heap struct array (`calloc(n, 16)`) with `+1` / `-1`
+  // pointer arithmetic, plus 1-level allocator wrapper (`xmalloc`) splitting.
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
+      %Node = type { i8*, %Node* }
+      @a = global i8 0
+      @b = global i8 0
+      declare noalias i8* @malloc(i64)
+      declare noalias i8* @calloc(i64, i64)
+      declare void @exit(i32)
+
+      define i8* @xmalloc(i64 %n) {
+      entry:
+        %p = call noalias i8* @malloc(i64 %n)
+        %ok = icmp ne i8* %p, null
+        br i1 %ok, label %good, label %oom
+      oom:
+        call void @exit(i32 1)
+        unreachable
+      good:
+        ret i8* %p
+      }
+
+      define i32 @main(i64 %n) {
+        %raw_arr = call noalias i8* @calloc(i64 %n, i64 16)
+        %arr = bitcast i8* %raw_arr to %Node*
+        %p1 = getelementptr inbounds %Node, %Node* %arr, i64 1
+        %p0 = getelementptr inbounds %Node, %Node* %p1, i64 -1
+        %dp = getelementptr inbounds %Node, %Node* %p0, i32 0, i32 0
+        store i8* @a, i8** %dp
+        %ld = load i8*, i8** %dp
+
+        %w1 = call i8* @xmalloc(i64 16)
+        %n1 = bitcast i8* %w1 to %Node*
+        %n1d = getelementptr inbounds %Node, %Node* %n1, i32 0, i32 0
+        store i8* @a, i8** %n1d
+        %w2 = call i8* @xmalloc(i64 16)
+        %n2 = bitcast i8* %w2 to %Node*
+        %n2d = getelementptr inbounds %Node, %Node* %n2, i32 0, i32 0
+        store i8* @b, i8** %n2d
+        %v1 = load i8*, i8** %n1d
+        %v2 = load i8*, i8** %n2d
+        ret i32 0
+      }
+    )IR");
+
+    for (auto mode : {lotus::bootstrap::SolverMode::GuardedSummary,
+                      lotus::bootstrap::SolverMode::InputStateTabulation}) {
+      auto opt = options();
+      opt.solver_mode = mode;
+      BootstrapAA aa(*f.module, nullptr, opt);
+      const auto a_obj = aa.objectId(*f.module->getNamedGlobal("a"));
+      const auto b_obj = aa.objectId(*f.module->getNamedGlobal("b"));
+      const auto &p1 = f.instruction("main", "p1");
+      const auto &p0 = f.instruction("main", "p0");
+      const auto &ld = f.instruction("main", "ld");
+      const auto &v1 = f.instruction("main", "v1");
+      const auto &v2 = f.instruction("main", "v2");
+
+      CHECK(!aa.pointsTo(p1, p1, {}, Point::After).points_to.isTop());
+      CHECK(!aa.pointsTo(p0, p0, {}, Point::After).points_to.isTop());
+      auto qld = aa.pointsTo(ld, ld, {}, Point::After);
+      CHECK(qld.reachable());
+      CHECK(!qld.points_to.isTop());
+      CHECK(qld.points_to.contains(a_obj));
+      CHECK(qld.points_to.contains(lotus::bootstrap::NULL_OBJECT));
+
+      // `xmalloc` calls get distinct heap struct objects!
+      auto qv1 = aa.pointsTo(v1, v1, {}, Point::After);
+      auto qv2 = aa.pointsTo(v2, v2, {}, Point::After);
+      CHECK(qv1.points_to == PointsToSet(a_obj));
+      CHECK(qv2.points_to == PointsToSet(b_obj));
+    }
+  }
+}
 } // namespace
 TEST(BootstrapAATest, CallsAndStackStores) { callsAndStackStores(); }
 TEST(BootstrapAATest, GlobalsAndExternalHavoc) { globalsAndExternalHavoc(); }
@@ -2839,4 +3196,7 @@ TEST(BootstrapAATest, LLVMObjectAliasesAndMayAliasAllSymmetry) {
 }
 TEST(BootstrapAATest, LLVMRealIRSpecManagerCtorsAggregatesAndDerivedAPIs) {
   llvmRealIRSpecManagerCtorsAggregatesAndDerivedAPIs();
+}
+TEST(BootstrapAATest, LLVMZeroFillMemsetSpecLibcAddressTakenAndHeapArrays) {
+  llvmZeroFillMemsetSpecLibcAddressTakenAndHeapArrays();
 }

@@ -123,11 +123,29 @@ Slice relevant(const Program &program, const ProgramIndex &index,
       allocs_by_base[program.baseOf(i.object)].push_back(site);
   }
 
+  bool has_top_read = false;
+  std::vector<bool> referenced_obj_seen(program.objects.size(), false);
+  std::vector<Id> referenced_objs;
+  std::deque<Id> pending_top_read_objs;
+
+  auto recordReferencedObj = [&](Id o) {
+    if (o < 2 || o >= program.objects.size() || !isMemory(program.objects[o]) ||
+        referenced_obj_seen[o])
+      return;
+    referenced_obj_seen[o] = true;
+    referenced_objs.push_back(o);
+    if (has_top_read)
+      pending_top_read_objs.push_back(o);
+  };
+
   auto markInst = [&](Id site) {
     if (site < result.instructions.size() && !result.instructions[site]) {
       result.instructions[site] = true;
       result.inst_list.push_back(site);
       result.relevant_functions[index.by_site[site].function] = true;
+      const Instruction &inst = *index.by_site[site].inst;
+      if (inst.opcode == Opcode::Address || inst.opcode == Opcode::Allocate)
+        recordReferencedObj(inst.object);
     }
   };
 
@@ -155,6 +173,11 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     result.value_list.push_back(value);
     value_work.push_back(value);
     markHigherComponent(hierarchy.value_components[value]);
+    if (program.values[value].constant &&
+        !program.values[value].initial.isTop()) {
+      for (Id o : program.values[value].initial.objects())
+        recordReferencedObj(o);
+    }
   };
 
   std::vector<bool> fn_relevant_propagated(program.functions.size(), false);
@@ -175,6 +198,10 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     result.objects[object] = true;
     result.object_list.push_back(object);
     object_work.push_back(object);
+    if (!program.objects[object].initial.isTop()) {
+      for (Id init_o : program.objects[object].initial.objects())
+        recordReferencedObj(init_o);
+    }
     const Id ocomp = hierarchy.object_components[object];
     if (!relevantHigher[ocomp]) {
       relevantHigher[ocomp] = true;
@@ -186,13 +213,29 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     }
   };
 
+  auto flushTopReadObjs = [&]() {
+    while (!pending_top_read_objs.empty()) {
+      const Id o = pending_top_read_objs.front();
+      pending_top_read_objs.pop_front();
+      for (Id fo : program.overlappingFields(o, 0))
+        needObject(fo);
+    }
+  };
+
+  auto activateTopRead = [&]() {
+    if (!has_top_read) {
+      has_top_read = true;
+      for (Id o : referenced_objs)
+        pending_top_read_objs.push_back(o);
+    }
+    flushTopReadObjs();
+  };
+
   auto needMemory = [&](const PointsToSet &set) {
     if (set.empty())
       return;
     if (set.isTop()) {
-      for (Id o = 2; o < program.objects.size(); ++o)
-        if (isMemory(program.objects[o]))
-          needObject(o);
+      activateTopRead();
       return;
     }
     for (Id o : set.objects())
@@ -206,14 +249,19 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     markInst(site);
     needValue(i.operands[0]);
     needValue(i.operands[1]);
+    // Concrete destination targets stay in `slice.objects` (needed for
+    // write-only memory object aliases), whereas Top destinations never pull
+    // unrelated objects into the slice.
     const PointsToSet pts = valueOf(program, upper, i.operands[0]);
-    needMemory(pts);
-    if (i.write_bytes != 0 && !pts.isTop()) {
-      for (Id o : pts.objects())
-        if (isMemory(program.objects[o]))
-          for (Id fo : program.overlappingFields(o, i.write_bytes))
-            if (fo != o)
-              needObject(fo);
+    if (!pts.isTop()) {
+      needMemory(pts);
+      if (i.write_bytes != 0) {
+        for (Id o : pts.objects())
+          if (isMemory(program.objects[o]))
+            for (Id fo : program.overlappingFields(o, i.write_bytes))
+              if (fo != o)
+                needObject(fo);
+      }
     }
   };
 
@@ -225,9 +273,7 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     if (!i.operands.empty()) {
       needValue(i.operands[0]);
       const PointsToSet pts = valueOf(program, upper, i.operands[0]);
-      if (pts.isTop()) {
-        needMemory(pts);
-      } else {
+      if (!pts.isTop()) {
         for (Id o : pts.objects()) {
           if (!isMemory(program.objects[o]))
             continue;
@@ -247,15 +293,13 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     needValue(i.operands[1]);
     const PointsToSet dst_pts = valueOf(program, upper, i.operands[0]);
     const PointsToSet src_pts = valueOf(program, upper, i.operands[1]);
-    if (dst_pts.isTop()) {
-      needMemory(dst_pts);
-    } else {
+    if (!dst_pts.isTop()) {
       for (Id od : dst_pts.objects())
         for (Id fd : program.overlappingFields(od, i.write_bytes))
           needObject(fd);
     }
     if (src_pts.isTop()) {
-      needMemory(src_pts);
+      activateTopRead();
     } else {
       for (Id os : src_pts.objects())
         for (Id fs : program.overlappingFields(os, i.write_bytes))
@@ -297,7 +341,8 @@ Slice relevant(const Program &program, const ProgramIndex &index,
     needObject(o);
 
   while (!value_work.empty() || !object_work.empty() || !higher_work.empty() ||
-         !fn_work.empty()) {
+         !fn_work.empty() || !pending_top_read_objs.empty()) {
+    flushTopReadObjs();
     while (!value_work.empty()) {
       const Id v = value_work.front();
       value_work.pop_front();
@@ -319,10 +364,8 @@ Slice relevant(const Program &program, const ProgramIndex &index,
           needMemory(valueOf(program, upper, i.operands[0]));
           break;
         case Opcode::Havoc:
-          if (!i.operands.empty()) {
+          if (!i.operands.empty())
             needValue(i.operands[0]);
-            needMemory(valueOf(program, upper, i.operands[0]));
-          }
           break;
         case Opcode::Call: {
           needValue(i.indirect_target);

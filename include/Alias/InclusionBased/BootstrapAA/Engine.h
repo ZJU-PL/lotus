@@ -226,6 +226,10 @@ struct Instruction {
   Id indirect_target = INVALID;
   bool opaque_alternative = false; // EH/callbr: conservative additional path.
   bool writes_memory = true;       // Honored for opaque/external calls.
+  // For Opcode::Havoc: true iff the write fills every covered byte with zero
+  // (e.g., memset(dst, 0, len) in address space 0 when null is invalid), so
+  // completely-covered aligned pointer fields become NULL_OBJECT instead of Top.
+  bool zero_fill = false;
   std::uint64_t write_bytes = 0;
   std::uint64_t read_bytes = 0;
   // For Opcode::Field: byte offset relative to operands[0]. When field_known is
@@ -301,6 +305,9 @@ struct Function {
   std::vector<Block> blocks;
   bool external = false;
   bool writes_memory = true;
+  // False only when proven never address-taken (cannot be targeted by an
+  // indirect call even if the indirect callee expression widens to Top).
+  bool address_taken = true;
   // Condition variables scoped to a single activation of this function (e.g.,
   // predicates over its own formal arguments) that must be existentially
   // quantified when crossing this function's entry boundary.
@@ -356,6 +363,10 @@ struct Program {
   // if any overlapping write is partial or ambiguous (caller must emit Top).
   bool memCopyRelativeOffsets(Id od, Id fd, std::uint64_t write_bytes,
                               std::vector<std::int64_t> &rels) const;
+  // For a zero-fill Havoc of `write_bytes` starting at aligned `od`, returns
+  // true iff every overlapping occurrence of `fd` is completely covered (no
+  // partial pointer overwrite), so `fd` receives NULL_OBJECT instead of Top.
+  bool zeroFillCoversField(Id od, Id fd, std::uint64_t write_bytes) const;
   void validate() const;
 
 private:
@@ -373,8 +384,21 @@ enum class SolverMode {
   InputStateTabulation
 };
 
+enum class HavocPolicy {
+  // Default practical mode: treat unmodeled external calls, inline asm, opaque
+  // indirect-call fallbacks, and non-pointer / unmodeled memory-havoc writes
+  // as no-ops while keeping modeled allocators, memcpy/memmove, zero-fill
+  // memset/bzero, pointer stores, and modeled libc return/callback effects.
+  Noop,
+  // Strictly sound conservative mode: unmodeled external calls, opaque call
+  // targets, non-pointer overwrites, and unknown/partial writes havoc
+  // potentially affected memory (or all memory when the address is Top) to Top.
+  Conservative
+};
+
 struct Options {
   SolverMode solver_mode = SolverMode::GuardedSummary;
+  HavocPolicy havoc_policy = HavocPolicy::Noop;
   std::size_t andersen_threshold = 60;
   bool adaptive_andersen_threshold = true;
   // When true (default), rejecting a large high-overlap partition escalates the

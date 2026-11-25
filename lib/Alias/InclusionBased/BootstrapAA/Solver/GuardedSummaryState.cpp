@@ -506,8 +506,10 @@ void GuardedSummarySolver::computeFunctionModifications() {
         case Opcode::MemCopy: {
           const PointsToSet dst = valueOf(m_program, m_upper, inst.operands[0]);
           if (dst.isTop()) {
-            m_func_modifies[f] = PointsToSet::top();
-            m_func_modifies_any[f] = true;
+            if (m_options.havoc_policy != HavocPolicy::Noop) {
+              m_func_modifies[f] = PointsToSet::top();
+              m_func_modifies_any[f] = true;
+            }
           } else {
             for (Id o : dst.objects())
               for (Id fo : m_program.overlappingFields(o, inst.write_bytes))
@@ -519,24 +521,35 @@ void GuardedSummarySolver::computeFunctionModifications() {
           break;
         }
         case Opcode::Havoc: {
+          const bool noop_havoc =
+              (m_options.havoc_policy == HavocPolicy::Noop);
           if (inst.operands.empty()) {
-            m_func_modifies[f] = PointsToSet::top();
-            m_func_modifies_any[f] = true;
+            if (!noop_havoc) {
+              m_func_modifies[f] = PointsToSet::top();
+              m_func_modifies_any[f] = true;
+            }
           } else {
             const PointsToSet addr =
                 valueOf(m_program, m_upper, inst.operands[0]);
             if (addr.isTop()) {
-              m_func_modifies[f] = PointsToSet::top();
-              m_func_modifies_any[f] = true;
+              if (!noop_havoc) {
+                m_func_modifies[f] = PointsToSet::top();
+                m_func_modifies_any[f] = true;
+              }
             } else {
               for (Id o : addr.objects()) {
                 if (!isMemory(m_program.objects[o]))
                   continue;
-                for (Id fo : m_program.overlappingFields(o, inst.write_bytes))
-                  if (isMemory(m_program.objects[fo])) {
-                    m_func_modifies[f].insert(fo);
-                    m_func_modifies_any[f] = true;
-                  }
+                for (Id fo : m_program.overlappingFields(o, inst.write_bytes)) {
+                  if (!isMemory(m_program.objects[fo]))
+                    continue;
+                  if (noop_havoc &&
+                      (!inst.zero_fill ||
+                       !m_program.zeroFillCoversField(o, fo, inst.write_bytes)))
+                    continue;
+                  m_func_modifies[f].insert(fo);
+                  m_func_modifies_any[f] = true;
+                }
               }
             }
           }

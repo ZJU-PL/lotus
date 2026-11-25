@@ -41,6 +41,10 @@ struct Analysis::Impl {
   // alias queries in the same function must include them symmetrically with
   // `top_component` and `mayAlias`.
   std::vector<std::vector<Id>> empty_upper_values_by_fn;
+  // Non-constant values per function whose refined upper bound is Top (kept in
+  // their own cluster rather than duplicated into every concrete object cluster
+  // of buildInverseCover, and included in finalizeAliasResult for symmetry).
+  std::vector<std::vector<Id>> top_upper_values_by_fn;
   // Non-null-capable local SSA values and referenced constants per function
   // (for full `aliases()` symmetry when `may_alias_all == true`).
   std::vector<std::vector<Id>> non_null_values_by_fn;
@@ -50,15 +54,40 @@ struct Analysis::Impl {
   std::vector<Id> non_null_ptr_mem_objects;
   std::vector<std::vector<Id>> ptr_mem_objs_by_target_comp;
 
-  Impl(const Program &p, Options o) : program(p), options(o), index(program) {
+  static Program prepareProgram(const Program &p, HavocPolicy policy) {
+    p.validate();
+    Program out = p;
+    if (policy == HavocPolicy::Noop) {
+      for (Function &fn : out.functions) {
+        if (fn.external)
+          fn.writes_memory = false;
+        for (Block &bb : fn.blocks) {
+          for (Instruction &inst : bb.instructions) {
+            if (inst.opcode == Opcode::Havoc && !inst.zero_fill) {
+              inst.opcode = Opcode::Nop;
+              inst.result = INVALID;
+              inst.operands.clear();
+              inst.write_bytes = 0;
+            } else if (inst.opcode == Opcode::Call) {
+              inst.writes_memory = false;
+              inst.opaque_alternative = false;
+            }
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  Impl(const Program &p, Options o)
+      : program(prepareProgram(p, o.havoc_policy)), options(o), index(program) {
     const auto preprocessingStart = std::chrono::steady_clock::now();
-    program.validate();
     forInstructions(program, [&](Id f, const Instruction &i) {
       sites.emplace(i.id, std::make_pair(f, i.opcode == Opcode::Call));
     });
 
     // Stage 1: Steensgaard partitioning & retained points-to hierarchy (§2.1).
-    CoarseResult coarse = steensgaard(program);
+    CoarseResult coarse = steensgaard(program, options.havoc_policy);
     upper = coarse.upper;
     hierarchy = std::move(coarse.hierarchy);
     index.populateCallers(program, upper, hierarchy);
@@ -103,12 +132,10 @@ struct Analysis::Impl {
         }
       }
       if (!top_vals.empty()) {
-        inverse[UNKNOWN];
-        for (auto &[obj, vec] : inverse) {
-          vec.insert(vec.end(), top_vals.begin(), top_vals.end());
-          std::sort(vec.begin(), vec.end());
-          vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
-        }
+        std::sort(top_vals.begin(), top_vals.end());
+        top_vals.erase(std::unique(top_vals.begin(), top_vals.end()),
+                       top_vals.end());
+        out.push_back(std::move(top_vals));
       }
       for (auto &cluster : inverse)
         if (!cluster.second.empty())
@@ -135,7 +162,8 @@ struct Analysis::Impl {
           ++stats.one_level_flow_runs;
           Slice olf_slice = relevant(program, index, coarse.upper, hierarchy,
                                      reachability, partition, true);
-          Sets olf = oneLevelFlow(program, index, olf_slice, coarse.upper);
+          Sets olf = oneLevelFlow(program, index, olf_slice, coarse.upper,
+                                  options.havoc_policy);
           auto sub = buildInverseCover(partition, olf);
           std::size_t sub_largest = 0;
           for (const auto &c : sub)
@@ -188,7 +216,7 @@ struct Analysis::Impl {
         ++stats.andersen_runs;
         Slice slice = relevant(program, index, coarse.upper, hierarchy,
                                reachability, partition, true);
-        Sets refined = inclusion(program, index, slice);
+        Sets refined = inclusion(program, index, slice, options.havoc_policy);
         auto refinedCover = buildInverseCover(partition, refined);
         std::size_t refinedLargest = 0;
         for (const auto &cluster : refinedCover)
@@ -271,6 +299,7 @@ struct Analysis::Impl {
       return false;
     };
     empty_upper_values_by_fn.assign(program.functions.size(), {});
+    top_upper_values_by_fn.assign(program.functions.size(), {});
     non_null_values_by_fn.assign(program.functions.size(), {});
     non_null_constants_by_fn.assign(program.functions.size(), {});
     for (Id v = 0; v < program.values.size(); ++v) {
@@ -280,6 +309,9 @@ struct Analysis::Impl {
         continue;
       if (upper[v].empty()) {
         empty_upper_values_by_fn[vinfo.function].push_back(v);
+        non_null_values_by_fn[vinfo.function].push_back(v);
+      } else if (upper[v].isTop()) {
+        top_upper_values_by_fn[vinfo.function].push_back(v);
         non_null_values_by_fn[vinfo.function].push_back(v);
       } else if (hasNonNullPts(upper[v])) {
         non_null_values_by_fn[vinfo.function].push_back(v);
@@ -735,6 +767,10 @@ struct Analysis::Impl {
         merged_vals.insert(tv);
       }
     }
+    if (fn < top_upper_values_by_fn.size()) {
+      for (Id tv : top_upper_values_by_fn[fn])
+        merged_vals.insert(tv);
+    }
     if (fn < empty_upper_values_by_fn.size()) {
       for (Id ev : empty_upper_values_by_fn[fn])
         merged_vals.insert(ev);
@@ -991,6 +1027,27 @@ struct Analysis::Impl {
           result.may_alias_all
               ? PointsToSet::top()
               : query(value, site, context_path, point, match).points_to;
+      // If `value` came from a dedicated top-upper cluster and the FSCS solver
+      // refined it down to a concrete non-empty set, include any local values
+      // from concrete object clusters whose points-to sets intersect `base_pts`.
+      if (!result.may_alias_all && upper[value].isTop() &&
+          hasNonNullTarget(base_pts)) {
+        const Id fn = index.by_site[site].function;
+        auto checkCand = [&](Id cand) {
+          if (merged.count(cand) || !upper[cand].intersectsNonNull(base_pts))
+            return;
+          QueryResult cq = query(cand, site, context_path, point, match);
+          if (cq.reachable() && memoryIntersects(cq.points_to, base_pts))
+            merged.insert(cand);
+        };
+        if (fn < non_null_values_by_fn.size())
+          for (Id cand : non_null_values_by_fn[fn])
+            checkCand(cand);
+        if (fn < non_null_constants_by_fn.size())
+          for (Id cand : non_null_constants_by_fn[fn])
+            checkCand(cand);
+        result.aliases.assign(merged.begin(), merged.end());
+      }
       finalizeAliasResult(result, base_pts, site, point, used_solvers, INVALID);
     }
     return result;

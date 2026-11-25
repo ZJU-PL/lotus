@@ -8,7 +8,8 @@ namespace detail {
 
 // Sparse St_P-restricted Andersen inclusion analysis (§2.1, Theorem 7).
 Sets inclusion(const Program &program, const ProgramIndex &index,
-               const Slice &slice) {
+               const Slice &slice, HavocPolicy havoc_policy) {
+  const bool noop_havoc = (havoc_policy == HavocPolicy::Noop);
   Sets values(program.values.size()), memory(program.objects.size());
   Sets returns(program.functions.size());
   for (Id o : slice.object_list)
@@ -42,7 +43,12 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
     const Object &info = program.objects[o];
     const bool incompatible =
         bytes != 0 && (info.bytes == 0 || info.bytes != bytes);
-    changed |= memory[o].join(incompatible ? PointsToSet::top() : rhs);
+    if (incompatible) {
+      if (!noop_havoc)
+        changed |= memory[o].join(PointsToSet::top());
+    } else {
+      changed |= memory[o].join(rhs);
+    }
   };
   auto store = [&](const PointsToSet &address, const PointsToSet &rhs,
                    std::uint64_t bytes = 0) {
@@ -54,7 +60,7 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
     } else {
       for (Id o : address.objects()) {
         store_one(o, rhs, bytes);
-        if (bytes != 0 && isMemory(program.objects[o])) {
+        if (!noop_havoc && bytes != 0 && isMemory(program.objects[o])) {
           for (Id fo : program.overlappingFields(o, bytes))
             if (fo != o)
               store_one(fo, PointsToSet::top(), 0);
@@ -113,7 +119,8 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
               if (object == NULL_OBJECT)
                 continue;
               const Object &info = program.objects[object];
-              if (!isMemory(info) ||
+              if (!isMemory(info) || object >= slice.objects.size() ||
+                  !slice.objects[object] ||
                   (i.read_bytes != 0 &&
                    (info.bytes == 0 || info.bytes != i.read_bytes)))
                 rhs.join(PointsToSet::top());
@@ -130,7 +137,8 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
         const PointsToSet dst_pts = eval(i.operands[0]);
         const PointsToSet src_pts = eval(i.operands[1]);
         if (dst_pts.isTop()) {
-          store(PointsToSet::top(), PointsToSet::top());
+          if (!noop_havoc)
+            store(PointsToSet::top(), PointsToSet::top());
         } else {
           for (Id od : dst_pts.objects()) {
             if (!isMemory(program.objects[od]))
@@ -146,30 +154,37 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
               if (src_pts.isTop() || dst_unaligned ||
                   !program.memCopyRelativeOffsets(od, fd, i.write_bytes,
                                                   rels)) {
-                changed |= memory[fd].join(PointsToSet::top());
+                if (!noop_havoc)
+                  changed |= memory[fd].join(PointsToSet::top());
                 continue;
               }
               for (Id os : src_pts.objects()) {
+                if (os == NULL_OBJECT)
+                  continue;
                 if (!isMemory(program.objects[os]) ||
                     (os < index.has_unaligned_interior.size() &&
                      index.has_unaligned_interior[os])) {
-                  changed |= memory[fd].join(PointsToSet::top());
+                  if (!noop_havoc)
+                    changed |= memory[fd].join(PointsToSet::top());
                   continue;
                 }
                 for (std::int64_t rel : rels) {
                   const PointsToSet fs_pts =
                       program.resolveField(os, rel, true);
                   if (fs_pts.isTop() || fs_pts.empty()) {
-                    changed |= memory[fd].join(PointsToSet::top());
+                    if (!noop_havoc)
+                      changed |= memory[fd].join(PointsToSet::top());
                     continue;
                   }
                   for (Id fs : fs_pts.objects()) {
                     const Object &fs_info = program.objects[fs];
                     if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes ||
-                        !slice.objects[fs])
-                      changed |= memory[fd].join(PointsToSet::top());
-                    else
+                        !slice.objects[fs]) {
+                      if (!noop_havoc)
+                        changed |= memory[fd].join(PointsToSet::top());
+                    } else {
                       changed |= memory[fd].join(memory[fs]);
+                    }
                   }
                 }
               }
@@ -179,19 +194,30 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
         break;
       }
       case Opcode::Havoc:
-        rhs = PointsToSet::top();
+        if (!noop_havoc)
+          rhs = PointsToSet::top();
         if (i.operands.empty()) {
-          store(PointsToSet::top(), PointsToSet::top());
+          if (!noop_havoc)
+            store(PointsToSet::top(), PointsToSet::top());
         } else {
           const PointsToSet addr = eval(i.operands[0]);
           if (addr.isTop()) {
-            store(PointsToSet::top(), PointsToSet::top());
+            if (!noop_havoc)
+              store(PointsToSet::top(), PointsToSet::top());
           } else {
             for (Id o : addr.objects()) {
               if (!isMemory(program.objects[o]))
                 continue;
-              for (Id fo : program.overlappingFields(o, i.write_bytes))
-                store_one(fo, PointsToSet::top(), 0);
+              const bool o_unaligned =
+                  o < index.has_unaligned_interior.size() &&
+                  index.has_unaligned_interior[o];
+              for (Id fo : program.overlappingFields(o, i.write_bytes)) {
+                if (i.zero_fill && !o_unaligned &&
+                    program.zeroFillCoversField(o, fo, i.write_bytes))
+                  store_one(fo, PointsToSet(NULL_OBJECT), 0);
+                else if (!noop_havoc)
+                  store_one(fo, PointsToSet::top(), 0);
+              }
             }
           }
         }
@@ -202,7 +228,7 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
         break;
       case Opcode::Call: {
         const Targets targets = callees(program, i, eval(i.indirect_target));
-        if (targets.opaque) {
+        if (targets.opaque && !noop_havoc) {
           rhs = PointsToSet::top();
           if (i.writes_memory)
             store(PointsToSet::top(), PointsToSet::top());
@@ -210,9 +236,11 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
         for (Id callee_id : targets.functions) {
           const Function &callee = program.functions[callee_id];
           if (callee.external) {
-            rhs = PointsToSet::top();
-            if (i.writes_memory && callee.writes_memory)
-              store(PointsToSet::top(), PointsToSet::top());
+            if (!noop_havoc) {
+              rhs = PointsToSet::top();
+              if (i.writes_memory && callee.writes_memory)
+                store(PointsToSet::top(), PointsToSet::top());
+            }
           } else {
             for (std::size_t a = 0; a < callee.parameters.size(); ++a) {
               const Id parameter = callee.parameters[a];

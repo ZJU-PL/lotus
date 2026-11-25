@@ -417,11 +417,25 @@ void externalAndUnknownStores() {
   f.inst(Opcode::Store, INVALID, {unknown, unknown});
   Id l3 = f.inst(Opcode::Load, z, {ps});
   f.inst(Opcode::Return);
-  Analysis aa(f.p, refined());
-  CHECK(aa.pointsTo(x, l1, {}, Point::After).points_to.isTop());
-  CHECK(aa.pointsTo(y, l2, {}, Point::After).points_to == pts({b}));
-  CHECK(aa.pointsTo(z, l3, {}, Point::After).points_to.isTop());
-  CHECK(aa.mayAlias(unknown, pb, l3));
+  // Default HavocPolicy::Noop: unmodeled external call is no-op, while
+  // explicit Store of Top through Top address still propagates Top.
+  {
+    Analysis aa(f.p, refined());
+    CHECK(aa.pointsTo(x, l1, {}, Point::After).points_to == pts({a}));
+    CHECK(aa.pointsTo(y, l2, {}, Point::After).points_to == pts({b}));
+    CHECK(aa.pointsTo(z, l3, {}, Point::After).points_to.isTop());
+    CHECK(aa.mayAlias(unknown, pb, l3));
+  }
+  // HavocPolicy::Conservative: external call havocs memory to Top.
+  {
+    Options opt = refined();
+    opt.havoc_policy = HavocPolicy::Conservative;
+    Analysis aa(f.p, opt);
+    CHECK(aa.pointsTo(x, l1, {}, Point::After).points_to.isTop());
+    CHECK(aa.pointsTo(y, l2, {}, Point::After).points_to == pts({b}));
+    CHECK(aa.pointsTo(z, l3, {}, Point::After).points_to.isTop());
+    CHECK(aa.mayAlias(unknown, pb, l3));
+  }
 }
 void readonlyExternal() {
   Fixture f;
@@ -478,9 +492,18 @@ void partialWriteIsWeak() {
   f.p.append(f.main, 0, store);
   Id load = f.inst(Opcode::Load, x, {ps});
   f.inst(Opcode::Return);
-  Analysis aa(f.p, refined());
-  // Mixed pointer bits are not restricted to either the old or the new object.
-  CHECK(aa.pointsTo(x, load, {}, Point::After).points_to.isTop());
+  // Default HavocPolicy::Noop ignores incompatible partial-width store.
+  {
+    Analysis aa(f.p, refined());
+    CHECK(aa.pointsTo(x, load, {}, Point::After).points_to == pts({a}));
+  }
+  // HavocPolicy::Conservative: mixed pointer bits widen to Top.
+  {
+    Options opt = refined();
+    opt.havoc_policy = HavocPolicy::Conservative;
+    Analysis aa(f.p, opt);
+    CHECK(aa.pointsTo(x, load, {}, Point::After).points_to.isTop());
+  }
 }
 void phiParallelLoop() {
   Fixture f;
@@ -2909,6 +2932,7 @@ void round5And6UnslicedIndirectCallPackedStoreBddBudgetAndNullAliasSoundness() {
 
     for (int mode = 0; mode < 4; ++mode) {
       Options opt = refined();
+      opt.havoc_policy = HavocPolicy::Conservative;
       if (mode == 0)
         opt.solver_mode = SolverMode::GuardedSummary;
       else if (mode == 1)
@@ -3883,6 +3907,159 @@ void suffixContextsAndDerivedQueries() {
     CHECK(aa.queryAlias(p8, 8, sRet, px, 8, sRet) == AliasKind::NoAlias);
   }
 }
+
+void zeroFillHavocAddressTakenAndNonDuplicatedTopCover() {
+  // Part A: `zero_fill` Havoc strong-updates singleton fields to NULL_OBJECT,
+  // weak-updates non-singleton heap fields (preserving prior target + NULL),
+  // and widens partial overwrites to Top — matching across both solvers.
+  {
+    Fixture f;
+    Id a = f.object("a");
+    Id pa = f.addr(a);
+
+    Object sg;
+    sg.name = "sg";
+    sg.kind = ObjectKind::Global;
+    sg.singleton = true;
+    sg.bytes = 8;
+    sg.size_bytes = 8;
+    sg.initial = PointsToSet(a);
+    Id o_sg = f.p.addObject(sg);
+
+    Object hg;
+    hg.name = "hg";
+    hg.kind = ObjectKind::Heap;
+    hg.singleton = false;
+    hg.bytes = 8;
+    hg.size_bytes = 8;
+    hg.initial = PointsToSet(a);
+    Id o_hg = f.p.addObject(hg);
+
+    Id psg = f.addr(o_sg), phg = f.addr(o_hg);
+    f.inst(Opcode::Store, INVALID, {phg, pa});
+
+    Instruction z_sg;
+    z_sg.opcode = Opcode::Havoc;
+    z_sg.operands = {psg};
+    z_sg.write_bytes = 8;
+    z_sg.zero_fill = true;
+    f.p.append(f.main, 0, z_sg);
+    Id ld_sg = f.value("ld_sg");
+    Id s_ld_sg = f.inst(Opcode::Load, ld_sg, {psg});
+
+    Instruction z_hg;
+    z_hg.opcode = Opcode::Havoc;
+    z_hg.operands = {phg};
+    z_hg.write_bytes = 8;
+    z_hg.zero_fill = true;
+    f.p.append(f.main, 0, z_hg);
+    Id ld_hg = f.value("ld_hg");
+    Id s_ld_hg = f.inst(Opcode::Load, ld_hg, {phg});
+
+    Instruction z_part;
+    z_part.opcode = Opcode::Havoc;
+    z_part.operands = {psg};
+    z_part.write_bytes = 4;
+    z_part.zero_fill = true;
+    f.p.append(f.main, 0, z_part);
+    Id ld_part = f.value("ld_part");
+    Id s_ld_part = f.inst(Opcode::Load, ld_part, {psg});
+    f.inst(Opcode::Return);
+
+    for (HavocPolicy policy : {HavocPolicy::Noop, HavocPolicy::Conservative}) {
+      for (SolverMode mode :
+           {SolverMode::GuardedSummary, SolverMode::InputStateTabulation}) {
+        Options opt = refined();
+        opt.solver_mode = mode;
+        opt.havoc_policy = policy;
+        Analysis aa(f.p, opt);
+        CHECK(aa.pointsTo(ld_sg, s_ld_sg, {}, Point::After).points_to ==
+              PointsToSet(NULL_OBJECT));
+        CHECK(aa.pointsTo(ld_hg, s_ld_hg, {}, Point::After).points_to ==
+              pts({a, NULL_OBJECT}));
+        if (policy == HavocPolicy::Noop) {
+          CHECK(aa.pointsTo(ld_part, s_ld_part, {}, Point::After).points_to ==
+                PointsToSet(NULL_OBJECT));
+        } else {
+          CHECK(
+              aa.pointsTo(ld_part, s_ld_part, {}, Point::After).points_to.isTop());
+        }
+      }
+    }
+  }
+
+  // Part B: `address_taken == false` excludes a function from Top indirect
+  // calls, and `buildInverseCover` does not duplicate `top_vals` into every
+  // concrete object cluster while preserving full `aliases()` symmetry.
+  {
+    Fixture f;
+    Id unk = f.value("unk");
+    f.p.functions[f.main].parameters = {unk};
+    f.p.functions[f.main].address_taken = false;
+
+    Id taken = f.p.addFunction("taken");
+    f.p.functions[taken].address_taken = true;
+    f.p.addBlock(taken);
+    f.inst(Opcode::Return, INVALID, {}, taken, 0);
+
+    Id not_taken = f.p.addFunction("not_taken");
+    f.p.functions[not_taken].address_taken = false;
+    f.p.addBlock(not_taken);
+    f.inst(Opcode::Return, INVALID, {}, not_taken, 0);
+
+    Id x = f.object("x"), y = f.object("y");
+    Id px = f.addr(x), py = f.addr(y);
+    Id a1 = f.value("a1"), a2 = f.value("a2"), b1 = f.value("b1");
+    f.inst(Opcode::Copy, a1, {px});
+    f.inst(Opcode::Copy, a2, {px});
+    f.inst(Opcode::Copy, b1, {py});
+    // Force `a1, b1, unk` through a directional join so Steensgaard unifies
+    // them into one partition that Andersen splits into `{x}`, `{y}`, `{TOP}`.
+    Id j = f.value("j");
+    f.inst(Opcode::Join, j, {a1, b1, unk});
+    Instruction ic;
+    ic.opcode = Opcode::Call;
+    ic.indirect_target = unk;
+    ic.writes_memory = false;
+    Id sCall = f.p.append(f.main, 0, ic);
+    Id sRet = f.inst(Opcode::Return);
+
+    Options opt = refined();
+    opt.andersen_threshold = 1;
+    opt.adaptive_andersen_threshold = false;
+    Analysis aa(f.p, opt);
+
+    // Top values (`j`, `unk`) are kept in their own cluster, NOT duplicated
+    // into both `{x}` and `{y}` concrete clusters!
+    CHECK(aa.clustersFor(j).size() == 1);
+    CHECK(aa.clustersFor(unk).size() == 1);
+
+    // `aliases()` symmetry holds in both directions between concrete and Top.
+    auto al_a1 = aa.aliases(a1, sRet);
+    CHECK(al_a1.reachable());
+    CHECK(std::find(al_a1.aliases.begin(), al_a1.aliases.end(), a2) !=
+          al_a1.aliases.end());
+    CHECK(std::find(al_a1.aliases.begin(), al_a1.aliases.end(), j) !=
+          al_a1.aliases.end());
+    auto al_j = aa.aliases(j, sRet);
+    CHECK(al_j.reachable() && al_j.may_alias_all);
+    CHECK(std::find(al_j.aliases.begin(), al_j.aliases.end(), a1) !=
+          al_j.aliases.end());
+    CHECK(std::find(al_j.aliases.begin(), al_j.aliases.end(), b1) !=
+          al_j.aliases.end());
+
+    // `callTargets` on Top indirect call includes `taken` and excludes
+    // `not_taken` and `main`.
+    auto ct = aa.callTargets(sCall);
+    CHECK(ct.may_call_unknown);
+    CHECK(std::find(ct.functions.begin(), ct.functions.end(), taken) !=
+          ct.functions.end());
+    CHECK(std::find(ct.functions.begin(), ct.functions.end(), not_taken) ==
+          ct.functions.end());
+    CHECK(std::find(ct.functions.begin(), ct.functions.end(), f.main) ==
+          ct.functions.end());
+  }
+}
 } // namespace
 
 TEST(BootstrapEngineTest, StrongUpdates) { strongUpdates(); }
@@ -4035,4 +4212,7 @@ TEST(BootstrapEngineTest, ObjectAliasesAndMayAliasAllSymmetry) {
 }
 TEST(BootstrapEngineTest, SuffixContextsAndDerivedQueries) {
   suffixContextsAndDerivedQueries();
+}
+TEST(BootstrapEngineTest, ZeroFillHavocAddressTakenAndNonDuplicatedTopCover) {
+  zeroFillHavocAddressTakenAndNonDuplicatedTopCover();
 }

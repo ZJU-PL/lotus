@@ -16,7 +16,9 @@ namespace detail {
 // `coarse_upper` is fixed, propagation runs via a fast worklist over the
 // static 1-level flow graph.
 Sets oneLevelFlow(const Program &program, const ProgramIndex &index,
-                  const Slice &slice, const Sets &coarse_upper) {
+                  const Slice &slice, const Sets &coarse_upper,
+                  HavocPolicy havoc_policy) {
+  const bool noop_havoc = (havoc_policy == HavocPolicy::Noop);
   const std::size_t nv = program.values.size();
   const std::size_t no = program.objects.size();
   const std::size_t total_nodes = nv + no;
@@ -94,10 +96,12 @@ Sets oneLevelFlow(const Program &program, const ProgramIndex &index,
     const Object &info = program.objects[o];
     const bool incompatible =
         bytes != 0 && (info.bytes == 0 || info.bytes != bytes);
-    if (incompatible)
-      seed(memNode(o), PointsToSet::top());
-    else
+    if (incompatible) {
+      if (!noop_havoc)
+        seed(memNode(o), PointsToSet::top());
+    } else {
       addValSourceEdge(rhs_val, memNode(o));
+    }
   };
 
   for (Id site : slice.inst_list) {
@@ -187,7 +191,8 @@ Sets oneLevelFlow(const Program &program, const ProgramIndex &index,
       } else {
         for (Id o : addr.objects()) {
           addStoreToObj(o, i.operands[1], i.write_bytes);
-          if (i.write_bytes != 0 && isMemory(program.objects[o])) {
+          if (!noop_havoc && i.write_bytes != 0 &&
+              isMemory(program.objects[o])) {
             for (Id fo : program.overlappingFields(o, i.write_bytes))
               if (fo != o && fo < slice.objects.size() && slice.objects[fo] &&
                   isMemory(program.objects[fo]))
@@ -201,7 +206,8 @@ Sets oneLevelFlow(const Program &program, const ProgramIndex &index,
       const PointsToSet dst_pts = valueOf(program, coarse_upper, i.operands[0]);
       const PointsToSet src_pts = valueOf(program, coarse_upper, i.operands[1]);
       if (dst_pts.isTop()) {
-        havocAllSliceMem();
+        if (!noop_havoc)
+          havocAllSliceMem();
         break;
       }
       for (Id od : dst_pts.objects()) {
@@ -217,29 +223,36 @@ Sets oneLevelFlow(const Program &program, const ProgramIndex &index,
               index.has_unaligned_interior[od];
           if (src_pts.isTop() || dst_unaligned ||
               !program.memCopyRelativeOffsets(od, fd, i.write_bytes, rels)) {
-            seed(memNode(fd), PointsToSet::top());
+            if (!noop_havoc)
+              seed(memNode(fd), PointsToSet::top());
             continue;
           }
           for (Id os : src_pts.objects()) {
+            if (os == NULL_OBJECT)
+              continue;
             if (!isMemory(program.objects[os]) ||
                 (os < index.has_unaligned_interior.size() &&
                  index.has_unaligned_interior[os])) {
-              seed(memNode(fd), PointsToSet::top());
+              if (!noop_havoc)
+                seed(memNode(fd), PointsToSet::top());
               continue;
             }
             for (std::int64_t rel : rels) {
               const PointsToSet fs_pts = program.resolveField(os, rel, true);
               if (fs_pts.isTop() || fs_pts.empty()) {
-                seed(memNode(fd), PointsToSet::top());
+                if (!noop_havoc)
+                  seed(memNode(fd), PointsToSet::top());
                 continue;
               }
               for (Id fs : fs_pts.objects()) {
                 const Object &fs_info = program.objects[fs];
                 if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes ||
-                    !slice.objects[fs])
-                  seed(memNode(fd), PointsToSet::top());
-                else
+                    !slice.objects[fs]) {
+                  if (!noop_havoc)
+                    seed(memNode(fd), PointsToSet::top());
+                } else {
                   addCopyEdge(memNode(fs), memNode(fd));
+                }
               }
             }
           }
@@ -248,21 +261,31 @@ Sets oneLevelFlow(const Program &program, const ProgramIndex &index,
       break;
     }
     case Opcode::Havoc:
-      if (defines)
+      if (defines && !noop_havoc)
         seed(valNode(i.result), PointsToSet::top());
       if (i.operands.empty()) {
-        havocAllSliceMem();
+        if (!noop_havoc)
+          havocAllSliceMem();
       } else {
         const PointsToSet addr = valueOf(program, coarse_upper, i.operands[0]);
         if (addr.isTop()) {
-          havocAllSliceMem();
+          if (!noop_havoc)
+            havocAllSliceMem();
         } else {
           for (Id o : addr.objects()) {
             if (!isMemory(program.objects[o]))
               continue;
-            for (Id fo : program.overlappingFields(o, i.write_bytes))
-              if (fo >= 2 && fo < slice.objects.size() && slice.objects[fo])
-                seed(memNode(fo), PointsToSet::top());
+            const bool o_unaligned = o < index.has_unaligned_interior.size() &&
+                                     index.has_unaligned_interior[o];
+            for (Id fo : program.overlappingFields(o, i.write_bytes)) {
+              if (fo >= 2 && fo < slice.objects.size() && slice.objects[fo]) {
+                if (i.zero_fill && !o_unaligned &&
+                    program.zeroFillCoversField(o, fo, i.write_bytes))
+                  seedObj(memNode(fo), NULL_OBJECT);
+                else if (!noop_havoc)
+                  seed(memNode(fo), PointsToSet::top());
+              }
+            }
           }
         }
       }
@@ -270,7 +293,7 @@ Sets oneLevelFlow(const Program &program, const ProgramIndex &index,
     case Opcode::Call: {
       const Targets targets = callees(
           program, i, valueOf(program, coarse_upper, i.indirect_target));
-      if (targets.opaque) {
+      if (targets.opaque && !noop_havoc) {
         if (defines)
           seed(valNode(i.result), PointsToSet::top());
         if (i.writes_memory)
@@ -279,10 +302,12 @@ Sets oneLevelFlow(const Program &program, const ProgramIndex &index,
       for (Id callee_id : targets.functions) {
         const Function &callee = program.functions[callee_id];
         if (callee.external) {
-          if (defines)
-            seed(valNode(i.result), PointsToSet::top());
-          if (i.writes_memory && callee.writes_memory)
-            havocAllSliceMem();
+          if (!noop_havoc) {
+            if (defines)
+              seed(valNode(i.result), PointsToSet::top());
+            if (i.writes_memory && callee.writes_memory)
+              havocAllSliceMem();
+          }
           continue;
         }
         for (std::size_t a = 0; a < callee.parameters.size(); ++a) {

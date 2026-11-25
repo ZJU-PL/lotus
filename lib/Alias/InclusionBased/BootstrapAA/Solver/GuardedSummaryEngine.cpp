@@ -534,25 +534,31 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
               : PointsToSet{};
       const Targets targets = callees(m_program, inst, target_pts);
 
+      const bool noop_havoc = (m_options.havoc_policy == HavocPolicy::Noop);
       if (targets.opaque) {
-        const BddManager::NodeId opaque_path =
-            inst.writes_memory ? quantifyGlobalConditions(call_path)
-                               : call_path;
-        KilledConds opaque_k = call_k;
-        if (inst.writes_memory)
-          addKilledConds(opaque_k, m_program.global_conditions);
-        if ((cur_q.kind == ExprKind::Val || cur_q.kind == ExprKind::Deref) &&
-            cur_q.id == inst.result) {
-          enqueue(item.owner, {inst.id, Point::Before}, Expr::makeTop(), cur_g,
-                  opaque_path, std::move(opaque_k));
-        } else if (inst.writes_memory &&
-                   (cur_q.kind == ExprKind::Mem ||
-                    cur_q.kind == ExprKind::Deref)) {
-          enqueue(item.owner, {inst.id, Point::Before}, Expr::makeTop(), cur_g,
-                  opaque_path, std::move(opaque_k));
-        } else {
+        if (noop_havoc) {
           enqueue(item.owner, {inst.id, Point::Before}, cur_q, cur_g,
-                  opaque_path, std::move(opaque_k));
+                  call_path, call_k);
+        } else {
+          const BddManager::NodeId opaque_path =
+              inst.writes_memory ? quantifyGlobalConditions(call_path)
+                                 : call_path;
+          KilledConds opaque_k = call_k;
+          if (inst.writes_memory)
+            addKilledConds(opaque_k, m_program.global_conditions);
+          if ((cur_q.kind == ExprKind::Val || cur_q.kind == ExprKind::Deref) &&
+              cur_q.id == inst.result) {
+            enqueue(item.owner, {inst.id, Point::Before}, Expr::makeTop(),
+                    cur_g, opaque_path, std::move(opaque_k));
+          } else if (inst.writes_memory &&
+                     (cur_q.kind == ExprKind::Mem ||
+                      cur_q.kind == ExprKind::Deref)) {
+            enqueue(item.owner, {inst.id, Point::Before}, Expr::makeTop(),
+                    cur_g, opaque_path, std::move(opaque_k));
+          } else {
+            enqueue(item.owner, {inst.id, Point::Before}, cur_q, cur_g,
+                    opaque_path, std::move(opaque_k));
+          }
         }
       }
 
@@ -586,6 +592,11 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
         }
 
         if (m_program.functions[callee].external) {
+          if (noop_havoc) {
+            enqueue(item.owner, {inst.id, Point::Before}, cur_q, cg,
+                    call_path, call_k);
+            continue;
+          }
           const BddManager::NodeId ext_path =
               (inst.writes_memory && m_program.functions[callee].writes_memory)
                   ? quantifyGlobalConditions(call_path)

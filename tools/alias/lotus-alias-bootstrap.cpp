@@ -31,6 +31,12 @@ llvm::cl::opt<std::string> SolverKind(
     llvm::cl::desc("Cluster solver backend: guarded (PLDI'08 Algs. 2-5) or "
                    "tabulation (reference forward oracle)"),
     llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<std::string> HavocKind(
+    "havoc-policy", llvm::cl::init("noop"),
+    llvm::cl::desc("Policy for unmodeled external calls & havoc writes: "
+                   "noop (default, treat unmodeled side effects as no-ops) or "
+                   "conservative (soundly havoc to TOP)"),
+    llvm::cl::cat(BootstrapCategory));
 llvm::cl::opt<bool> AllContexts(
     "all-contexts", llvm::cl::init(false),
     llvm::cl::desc("Print the union of reachable contexts in every function"),
@@ -135,6 +141,15 @@ int main(int argc, char **argv) {
     } else {
       llvm::errs() << "Unknown --solver value: " << SolverKind
                    << " (expected guarded or tabulation)\n";
+      return 1;
+    }
+    if (HavocKind == "noop") {
+      options.havoc_policy = lotus::bootstrap::HavocPolicy::Noop;
+    } else if (HavocKind == "conservative") {
+      options.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
+    } else {
+      llvm::errs() << "Unknown --havoc-policy value: " << HavocKind
+                   << " (expected noop or conservative)\n";
       return 1;
     }
     options.andersen_threshold = Threshold;

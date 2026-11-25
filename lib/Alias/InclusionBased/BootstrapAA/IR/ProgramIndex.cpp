@@ -64,7 +64,8 @@ Targets callees(const Program &program, const Instruction &instruction,
     result.functions.insert(instruction.callee);
   } else if (instruction.indirect_target == INVALID || target.isTop()) {
     for (Id f = 0; f < program.functions.size(); ++f)
-      result.functions.insert(f);
+      if (program.functions[f].address_taken)
+        result.functions.insert(f);
     result.opaque = true;
   } else {
     for (Id object : target.objects()) {

@@ -168,7 +168,8 @@ public:
 };
 } // namespace
 
-CoarseResult steensgaard(const Program &program) {
+CoarseResult steensgaard(const Program &program, HavocPolicy havoc_policy) {
+  const bool noop_havoc = (havoc_policy == HavocPolicy::Noop);
   Unification graph;
   std::vector<Id> object_nodes;
   object_nodes.reserve(program.objects.size());
@@ -260,6 +261,8 @@ CoarseResult steensgaard(const Program &program) {
   auto applyDirectCall = [&](const Instruction &i, Id f) {
     const Function &callee = program.functions[f];
     if (callee.external) {
+      if (noop_havoc)
+        return;
       if (i.result != INVALID)
         graph.merge(value_target(i.result), top);
       if (i.writes_memory && callee.writes_memory)
@@ -480,26 +483,31 @@ CoarseResult steensgaard(const Program &program) {
         if (graph.top(address)) {
           for (Id o = 0; o < program.objects.size(); ++o)
             if (isMemory(program.objects[o])) {
-              if (i.write_bytes)
-                graph.merge(graph.target(object_nodes[o]), top);
-              else
+              if (i.write_bytes != 0 && (program.objects[o].bytes == 0 ||
+                                         program.objects[o].bytes != i.write_bytes)) {
+                if (!noop_havoc)
+                  graph.merge(graph.target(object_nodes[o]), top);
+              } else {
                 mergeFromValue(graph.target(object_nodes[o]), i.operands[1]);
+              }
             }
         } else if (i.write_bytes != 0) {
           if (accessMatches(address, i.write_bytes, /*is_load=*/false))
             mergeFromValue(graph.target(address), i.operands[1]);
-          else
+          else if (!noop_havoc)
             graph.merge(graph.target(address), top);
           // Cross-field pointer stores (e.g., storing an 8-byte pointer at
           // offset 0 of a packed `<{ i32, i8* }>` struct) partially overwrite
           // overlapping sibling fields, which must widen to top.
-          objs_copy = graph.objects(address);
-          for (Id o : objs_copy) {
-            if (!isMemory(program.objects[o]))
-              continue;
-            for (Id fo : program.overlappingFields(o, i.write_bytes))
-              if (fo != o && isMemory(program.objects[fo]))
-                graph.merge(graph.target(object_nodes[fo]), top);
+          if (!noop_havoc) {
+            objs_copy = graph.objects(address);
+            for (Id o : objs_copy) {
+              if (!isMemory(program.objects[o]))
+                continue;
+              for (Id fo : program.overlappingFields(o, i.write_bytes))
+                if (fo != o && isMemory(program.objects[fo]))
+                  graph.merge(graph.target(object_nodes[fo]), top);
+            }
           }
         }
         break;
@@ -508,7 +516,8 @@ CoarseResult steensgaard(const Program &program) {
         const Id dst_root = value_target(i.operands[0]);
         const Id src_root = value_target(i.operands[1]);
         if (graph.top(dst_root)) {
-          havoc_all();
+          if (!noop_havoc)
+            havoc_all();
           break;
         }
         objs_copy = graph.objects(dst_root);
@@ -529,26 +538,32 @@ CoarseResult steensgaard(const Program &program) {
             if (src_is_top || graph.top(value_target(i.operands[1])) ||
                 unaligned_obj[od] ||
                 !program.memCopyRelativeOffsets(od, fd, i.write_bytes, rels)) {
-              graph.merge(graph.target(object_nodes[fd]), top);
+              if (!noop_havoc)
+                graph.merge(graph.target(object_nodes[fd]), top);
               continue;
             }
             if (src_objs_copy.empty())
               continue;
             for (Id os : src_objs_copy) {
+              if (os == NULL_OBJECT)
+                continue;
               if (!isMemory(program.objects[os]) || unaligned_obj[os]) {
-                graph.merge(graph.target(object_nodes[fd]), top);
+                if (!noop_havoc)
+                  graph.merge(graph.target(object_nodes[fd]), top);
                 continue;
               }
               for (std::int64_t rel : rels) {
                 const PointsToSet fs_pts = program.resolveField(os, rel, true);
                 if (fs_pts.isTop() || fs_pts.empty()) {
-                  graph.merge(graph.target(object_nodes[fd]), top);
+                  if (!noop_havoc)
+                    graph.merge(graph.target(object_nodes[fd]), top);
                   continue;
                 }
                 for (Id fs : fs_pts.objects()) {
                   const Object &fs_info = program.objects[fs];
                   if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes) {
-                    graph.merge(graph.target(object_nodes[fd]), top);
+                    if (!noop_havoc)
+                      graph.merge(graph.target(object_nodes[fd]), top);
                   } else {
                     graph.merge(graph.target(object_nodes[fd]),
                                 graph.target(object_nodes[fs]));
@@ -561,21 +576,32 @@ CoarseResult steensgaard(const Program &program) {
         break;
       }
       case Opcode::Havoc: {
-        if (i.result != INVALID)
+        if (i.result != INVALID && !noop_havoc)
           graph.merge(value_target(i.result), top);
         if (i.operands.empty() || graph.top(value_target(i.operands[0]))) {
-          havoc_all();
+          if (!noop_havoc)
+            havoc_all();
         } else {
           const Id addr = value_target(i.operands[0]);
           objs_copy = graph.objects(addr);
+          if (objs_copy.empty())
+            break;
           for (Id o : objs_copy) {
             if (!isMemory(program.objects[o]))
               continue;
-            for (Id fo : program.overlappingFields(o, i.write_bytes))
-              if (isMemory(program.objects[fo]))
+            const bool o_unaligned =
+                o < unaligned_obj.size() && unaligned_obj[o];
+            for (Id fo : program.overlappingFields(o, i.write_bytes)) {
+              if (!isMemory(program.objects[fo]))
+                continue;
+              if (i.zero_fill && !o_unaligned &&
+                  program.zeroFillCoversField(o, fo, i.write_bytes))
+                graph.markNullable(graph.target(object_nodes[fo]));
+              else if (!noop_havoc)
                 graph.merge(graph.target(object_nodes[fo]), top);
+            }
           }
-          if (i.write_bytes == 0 || objs_copy.empty())
+          if (!noop_havoc && !i.zero_fill && i.write_bytes == 0)
             graph.merge(graph.target(addr), top);
         }
         break;
@@ -586,7 +612,8 @@ CoarseResult steensgaard(const Program &program) {
         if (i.indirect_target == INVALID ||
             graph.top(value_target(i.indirect_target))) {
           for (Id f = 0; f < program.functions.size(); ++f)
-            targets.functions.insert(f);
+            if (program.functions[f].address_taken)
+              targets.functions.insert(f);
           targets.opaque = true;
         } else {
           objs_copy = graph.objects(value_target(i.indirect_target));
@@ -597,7 +624,7 @@ CoarseResult steensgaard(const Program &program) {
               targets.opaque = true;
           }
         }
-        if (targets.opaque) {
+        if (targets.opaque && !noop_havoc) {
           if (i.result != INVALID)
             graph.merge(value_target(i.result), top);
           if (i.writes_memory)

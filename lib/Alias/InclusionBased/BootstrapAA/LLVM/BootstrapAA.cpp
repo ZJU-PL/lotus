@@ -92,7 +92,61 @@ bool knownReadOnly(const llvm::Function *function) {
          name == "rmdir" || name == "chmod" || name == "chown" ||
          name == "chdir" || name == "perror" || name == "isatty" ||
          name == "printf" || name == "fprintf" || name == "vprintf" ||
-         name == "vfprintf";
+         name == "vfprintf" || name == "write" || name == "pwrite" ||
+         name == "send" || name == "sendto" || name == "lseek" ||
+         name == "lseek64" || name == "fsync" || name == "fdatasync" ||
+         name == "dup" || name == "dup2" || name == "umask" ||
+         name == "sleep" || name == "usleep" || name == "clock" ||
+         name == "difftime" || name == "getpid" || name == "getppid" ||
+         name == "getuid" || name == "geteuid" || name == "getgid" ||
+         name == "getegid" || name == "sysconf" || name == "pathconf" ||
+         name == "fpathconf" || name == "rand" || name == "srand" ||
+         name == "drand48" || name == "lrand48" || name == "srand48" ||
+         name == "random" || name == "srandom" || name == "system" ||
+         name == "pclose" || name == "tolower" || name == "toupper" ||
+         name == "isalnum" || name == "isalpha" || name == "isascii" ||
+         name == "isblank" || name == "iscntrl" || name == "isdigit" ||
+         name == "isgraph" || name == "islower" || name == "isprint" ||
+         name == "ispunct" || name == "isspace" || name == "isupper" ||
+         name == "isxdigit" || name == "toascii" || name == "sin" ||
+         name == "sinf" || name == "sinl" || name == "cos" || name == "cosf" ||
+         name == "cosl" || name == "tan" || name == "tanf" || name == "tanl" ||
+         name == "asin" || name == "asinf" || name == "asinl" ||
+         name == "acos" || name == "acosf" || name == "acosl" ||
+         name == "atan" || name == "atanf" || name == "atanl" ||
+         name == "atan2" || name == "atan2f" || name == "atan2l" ||
+         name == "sinh" || name == "sinhf" || name == "sinhl" ||
+         name == "cosh" || name == "coshf" || name == "coshl" ||
+         name == "tanh" || name == "tanhf" || name == "tanhl" ||
+         name == "exp" || name == "expf" || name == "expl" || name == "exp2" ||
+         name == "exp2f" || name == "exp2l" || name == "expm1" ||
+         name == "expm1f" || name == "expm1l" || name == "log" ||
+         name == "logf" || name == "logl" || name == "log10" ||
+         name == "log10f" || name == "log10l" || name == "log2" ||
+         name == "log2f" || name == "log2l" || name == "log1p" ||
+         name == "log1pf" || name == "log1pl" || name == "pow" ||
+         name == "powf" || name == "powl" || name == "sqrt" ||
+         name == "sqrtf" || name == "sqrtl" || name == "cbrt" ||
+         name == "cbrtf" || name == "cbrtl" || name == "hypot" ||
+         name == "hypotf" || name == "hypotl" || name == "ceil" ||
+         name == "ceilf" || name == "ceill" || name == "floor" ||
+         name == "floorf" || name == "floorl" || name == "trunc" ||
+         name == "truncf" || name == "truncl" || name == "round" ||
+         name == "roundf" || name == "roundl" || name == "rint" ||
+         name == "rintf" || name == "rintl" || name == "nearbyint" ||
+         name == "nearbyintf" || name == "nearbyintl" || name == "lrint" ||
+         name == "lrintf" || name == "llrint" || name == "lround" ||
+         name == "llround" || name == "fabs" || name == "fabsf" ||
+         name == "fabsl" || name == "fmod" || name == "fmodf" ||
+         name == "fmodl" || name == "remainder" || name == "remainderf" ||
+         name == "remainderl" || name == "copysign" || name == "copysignf" ||
+         name == "copysignl" || name == "fdim" || name == "fmax" ||
+         name == "fmin" || name == "fma" || name == "ldexp" ||
+         name == "ldexpf" || name == "ldexpl" || name == "scalbn" ||
+         name == "ilogb" || name == "logb" || name == "isnan" ||
+         name == "isinf" || name == "isfinite" || name == "__isnan" ||
+         name == "__isinf" || name == "__finite" || name == "erf" ||
+         name == "erfc" || name == "lgamma" || name == "tgamma";
 }
 
 bool isSideEffectFreeIntrinsic(const llvm::Function *function) {
@@ -113,7 +167,147 @@ bool isSideEffectFreeIntrinsic(const llvm::Function *function) {
          name.startswith("llvm.smul.") || name.startswith("llvm.umul.") ||
          name == "llvm.trap" || name.startswith("llvm.var.annotation") ||
          name.startswith("llvm.is.constant") ||
-         name.startswith("llvm.annotation");
+         name.startswith("llvm.annotation") || name.startswith("llvm.fabs.") ||
+         name.startswith("llvm.floor.") || name.startswith("llvm.ceil.") ||
+         name.startswith("llvm.trunc.") || name.startswith("llvm.round.") ||
+         name.startswith("llvm.rint.") || name.startswith("llvm.nearbyint.") ||
+         name.startswith("llvm.sqrt.") || name.startswith("llvm.pow.") ||
+         name.startswith("llvm.powi.") || name.startswith("llvm.exp.") ||
+         name.startswith("llvm.exp2.") || name.startswith("llvm.log.") ||
+         name.startswith("llvm.log10.") || name.startswith("llvm.log2.") ||
+         name.startswith("llvm.sin.") || name.startswith("llvm.cos.") ||
+         name.startswith("llvm.fma.") || name.startswith("llvm.fmuladd.") ||
+         name.startswith("llvm.copysign.") || name.startswith("llvm.minnum.") ||
+         name.startswith("llvm.maxnum.") || name.startswith("llvm.minimum.") ||
+         name.startswith("llvm.maximum.") || name.startswith("llvm.abs.") ||
+         name.startswith("llvm.smax.") || name.startswith("llvm.smin.") ||
+         name.startswith("llvm.umax.") || name.startswith("llvm.umin.") ||
+         name.startswith("llvm.lround.") || name.startswith("llvm.llround.") ||
+         name.startswith("llvm.lrint.") || name.startswith("llvm.llrint.") ||
+         name.startswith("llvm.is.fpclass.") ||
+         name.startswith("llvm.vector.reduce.") ||
+         name.startswith("llvm.experimental.noalias.scope.decl");
+}
+
+bool formatStringMayHavePercentN(const llvm::Value *fmt) {
+  if (!fmt)
+    return true;
+  fmt = fmt->stripPointerCasts();
+  if (const auto *gep = llvm::dyn_cast<llvm::GEPOperator>(fmt))
+    if (gep->hasAllZeroIndices())
+      fmt = gep->getPointerOperand()->stripPointerCasts();
+  const auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(fmt);
+  if (!gv || !gv->isConstant() || !gv->hasInitializer())
+    return true;
+  const auto *cda =
+      llvm::dyn_cast<llvm::ConstantDataArray>(gv->getInitializer());
+  if (!cda || !cda->isString())
+    return true;
+  const llvm::StringRef s = cda->getAsString();
+  for (std::size_t idx = 0; idx < s.size(); ++idx) {
+    if (s[idx] != '%')
+      continue;
+    ++idx;
+    if (idx < s.size() && s[idx] == '%')
+      continue;
+    while (idx < s.size() &&
+           (s[idx] == '-' || s[idx] == '+' || s[idx] == ' ' || s[idx] == '#' ||
+            s[idx] == '0' || s[idx] == '.' || s[idx] == '*' || s[idx] == '$' ||
+            (s[idx] >= '0' && s[idx] <= '9') || s[idx] == 'h' ||
+            s[idx] == 'l' || s[idx] == 'L' || s[idx] == 'j' || s[idx] == 'z' ||
+            s[idx] == 't' || s[idx] == 'q'))
+      ++idx;
+    if (idx < s.size() && s[idx] == 'n')
+      return true;
+  }
+  return false;
+}
+
+bool knownStaticReturnLibc(llvm::StringRef name) {
+  return name == "getenv" || name == "strerror" || name == "setlocale" ||
+         name == "ctime" || name == "asctime" || name == "localtime" ||
+         name == "gmtime" || name == "__errno_location" ||
+         name == "__ctype_b_loc" || name == "__ctype_tolower_loc" ||
+         name == "__ctype_toupper_loc";
+}
+
+// Infer a sound byte-width bound for targeted libc writes into `ptr` (e.g.,
+// `sscanf(..., &s->count)` writing `sizeof(i64)` bytes, or `strcpy(&s->buf[0],
+// ...)` writing within the `[N x i8]` sub-array field) so sibling pointer
+// fields in the same struct are not spuriously clobbered to Top. Returns 0
+// (whole-object conservative havoc) whenever no safe bound is provable.
+std::uint64_t inferWrittenBytes(const llvm::Value *ptr,
+                                const llvm::DataLayout &layout,
+                                bool allow_typed_pointee) {
+  if (!ptr)
+    return 0;
+  if (allow_typed_pointee) {
+    if (const auto *pt = llvm::dyn_cast<llvm::PointerType>(ptr->getType())) {
+      llvm::Type *elem = pt->getPointerElementType();
+      if (elem && elem->isSized() && !elem->isIntegerTy(8))
+        return layout.getTypeStoreSize(elem);
+    }
+  }
+  const llvm::Value *cur = ptr;
+  while (const auto *bc = llvm::dyn_cast<llvm::BitCastOperator>(cur)) {
+    const llvm::Value *src = bc->getOperand(0);
+    if (const auto *spt = llvm::dyn_cast<llvm::PointerType>(src->getType())) {
+      if (auto *at = llvm::dyn_cast<llvm::ArrayType>(
+              spt->getPointerElementType());
+          at && at->getElementType()->isIntegerTy(8) &&
+          at->getNumElements() > 0)
+        return at->getNumElements();
+    }
+    cur = src;
+  }
+  if (const auto *gep = llvm::dyn_cast<llvm::GEPOperator>(cur)) {
+    if (gep->isInBounds()) {
+      llvm::ArrayType *last_byte_arr = nullptr;
+      const llvm::Value *last_arr_idx = nullptr;
+      bool ended_on_byte_arr = false;
+      for (auto gti = llvm::gep_type_begin(*gep), gte = llvm::gep_type_end(*gep);
+           gti != gte; ++gti) {
+        if (auto *at = llvm::dyn_cast_or_null<llvm::ArrayType>(
+                gti.getIndexedType())) {
+          if (at->getElementType()->isIntegerTy(8)) {
+            last_byte_arr = at;
+            last_arr_idx = nullptr;
+            ended_on_byte_arr = false;
+            continue;
+          }
+        }
+        if (last_byte_arr && !last_arr_idx && gti.getIndexedType() &&
+            gti.getIndexedType()->isIntegerTy(8)) {
+          last_arr_idx = gti.getOperand();
+          ended_on_byte_arr = true;
+        } else {
+          last_byte_arr = nullptr;
+          last_arr_idx = nullptr;
+          ended_on_byte_arr = false;
+        }
+      }
+      if (ended_on_byte_arr && last_byte_arr && last_arr_idx) {
+        if (const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(last_arr_idx)) {
+          const std::int64_t k = ci->getSExtValue();
+          if (k >= 0 &&
+              static_cast<std::uint64_t>(k) < last_byte_arr->getNumElements())
+            return last_byte_arr->getNumElements() -
+                   static_cast<std::uint64_t>(k);
+        }
+      }
+    }
+  }
+  if (const auto *ai = llvm::dyn_cast<llvm::AllocaInst>(cur)) {
+    if (auto *at = llvm::dyn_cast<llvm::ArrayType>(ai->getAllocatedType());
+        at && at->getElementType()->isIntegerTy(8) && at->getNumElements() > 0)
+      return at->getNumElements();
+  }
+  if (const auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(cur)) {
+    if (auto *at = llvm::dyn_cast<llvm::ArrayType>(gv->getValueType());
+        at && at->getElementType()->isIntegerTy(8) && at->getNumElements() > 0)
+      return at->getNumElements();
+  }
+  return 0;
 }
 
 bool isPassThroughPtrIntrinsic(const llvm::Function *function) {
@@ -198,6 +392,16 @@ AllocationModel allocationModel(const llvm::CallBase &call,
     if (name == "strndup" && call.arg_size() == 2 &&
         call.getArgOperand(0)->getType()->isPointerTy() &&
         call.getArgOperand(1)->getType()->isIntegerTy())
+      return {AllocationKind::Fresh, true, -1};
+    if ((name == "fopen" || name == "fopen64") && call.arg_size() == 2 &&
+        call.getArgOperand(0)->getType()->isPointerTy() &&
+        call.getArgOperand(1)->getType()->isPointerTy())
+      return {AllocationKind::Fresh, true, -1};
+    if (name == "fdopen" && call.arg_size() == 2 &&
+        call.getArgOperand(0)->getType()->isIntegerTy() &&
+        call.getArgOperand(1)->getType()->isPointerTy())
+      return {AllocationKind::Fresh, true, -1};
+    if (name == "tmpfile" && call.arg_size() == 0)
       return {AllocationKind::Fresh, true, -1};
     if ((name == "_Znwm" || name == "_Znam" || name == "_Znwj" ||
          name == "_Znaj") &&
@@ -292,7 +496,7 @@ constexpr std::size_t MAX_FLATTENED_FIELDS = 256;
 
 bool flattenType(llvm::Type *ty, const llvm::DataLayout &layout,
                  std::uint64_t base_offset, bool inside_array,
-                 std::vector<FieldSpec> &fields,
+                 bool at_root_array, std::vector<FieldSpec> &fields,
                  std::vector<ArrayRegion> &regions) {
   if (!ty || !ty->isSized())
     return false;
@@ -309,7 +513,7 @@ bool flattenType(llvm::Type *ty, const llvm::DataLayout &layout,
     for (unsigned i = 0; i < st->getNumElements(); ++i) {
       if (!flattenType(st->getElementType(i), layout,
                        base_offset + sl->getElementOffset(i), inside_array,
-                       fields, regions))
+                       /*at_root_array=*/false, fields, regions))
         return false;
     }
     return true;
@@ -322,8 +526,25 @@ bool flattenType(llvm::Type *ty, const llvm::DataLayout &layout,
     const std::uint64_t stride = layout.getTypeAllocSize(elem);
     if (stride == 0)
       return true;
+    if (count == 1)
+      return flattenType(elem, layout, base_offset, inside_array,
+                         /*at_root_array=*/false, fields, regions);
+    // When a sub-array starts at offset 0 of a surrounding struct (e.g.,
+    // `struct S { char name[200]; Node *nodes; }`), peel element 0 outside the
+    // folded ArrayRegion `[stride, count*stride)` so offset 0 (`&s`) is NOT
+    // confused with folded elements `s.name[1..199]` when resolving sibling
+    // struct field GEPs (`&s->nodes`).
+    if (base_offset == 0 && !at_root_array) {
+      if (!flattenType(elem, layout, 0, /*inside_array=*/true,
+                       /*at_root_array=*/false, fields, regions))
+        return false;
+      regions.push_back({stride, count * stride, stride});
+      return flattenType(elem, layout, stride, /*inside_array=*/true,
+                         /*at_root_array=*/false, fields, regions);
+    }
     regions.push_back({base_offset, base_offset + count * stride, stride});
-    return flattenType(elem, layout, base_offset, true, fields, regions);
+    return flattenType(elem, layout, base_offset, /*inside_array=*/true,
+                       /*at_root_array=*/false, fields, regions);
   }
   const std::uint64_t sz = layout.getTypeAllocSize(ty);
   fields.push_back({base_offset, sz, 0, false, inside_array, 0});
@@ -350,8 +571,8 @@ bool flattenAggregateFields(llvm::Type *ty, const llvm::DataLayout &layout,
       !(ty->isStructTy() || ty->isArrayTy()))
     return false;
   std::vector<FieldSpec> raw;
-  if (!flattenType(ty, layout, 0, false, raw, regions) || raw.empty() ||
-      raw.size() > MAX_FLATTENED_FIELDS)
+  if (!flattenType(ty, layout, 0, false, ty->isArrayTy(), raw, regions) ||
+      raw.empty() || raw.size() > MAX_FLATTENED_FIELDS)
     return false;
   std::map<std::uint64_t, FieldSpec> by_off;
   for (const FieldSpec &fs : raw) {
@@ -489,6 +710,7 @@ inferHeapStructType(const llvm::CallBase &call,
 struct BootstrapAA::Impl {
   const llvm::Module &module;
   const llvm::Function *entry_fn = nullptr;
+  HavocPolicy havoc_policy = HavocPolicy::Noop;
   lotus::alias::AliasSpecManager spec_mgr;
   Program program;
   std::unique_ptr<Analysis> analysis;
@@ -518,6 +740,214 @@ struct BootstrapAA::Impl {
   std::unordered_map<const llvm::Function *, Id> agg_ret_slot_base;
   std::unordered_map<const llvm::Argument *, Id> agg_arg_slot_base;
   std::unordered_map<const llvm::Function *, Id> static_return_objects;
+  std::unordered_map<const llvm::Function *, AllocationModel>
+      allocator_wrappers;
+
+  void detectAllocatorWrappers() {
+    auto isLocalAlloca = [](const llvm::Value *v) -> bool {
+      if (!v)
+        return false;
+      const llvm::Value *base = v->stripInBoundsOffsets();
+      return llvm::isa<llvm::AllocaInst>(base);
+    };
+    for (const llvm::Function &fn : module) {
+      if (fn.isDeclaration() || &fn == entry_fn ||
+          !fn.getReturnType()->isPointerTy())
+        continue;
+      if (std::find(parsed_ctors.begin(), parsed_ctors.end(), &fn) !=
+          parsed_ctors.end())
+        continue;
+      bool ok = true;
+      bool saw_ret = false;
+      bool saw_zero_memset = false;
+      std::vector<const llvm::ReturnInst *> rets;
+      std::set<const llvm::CallBase *> alloc_calls;
+      std::map<const llvm::CallBase *, AllocationModel> alloc_models;
+      for (const llvm::BasicBlock &bb : fn) {
+        for (const llvm::Instruction &inst : bb) {
+          if (const auto *ri = llvm::dyn_cast<llvm::ReturnInst>(&inst)) {
+            saw_ret = true;
+            if (!ri->getReturnValue()) {
+              ok = false;
+              break;
+            }
+            rets.push_back(ri);
+          } else if (const auto *si = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+            if (!isLocalAlloca(si->getPointerOperand())) {
+              ok = false;
+              break;
+            }
+          } else if (llvm::isa<llvm::AtomicRMWInst>(inst) ||
+                     llvm::isa<llvm::AtomicCmpXchgInst>(inst) ||
+                     llvm::isa<llvm::MemTransferInst>(inst)) {
+            ok = false;
+            break;
+          } else if (const auto *ms = llvm::dyn_cast<llvm::MemSetInst>(&inst)) {
+            const auto *val_ci =
+                llvm::dyn_cast<llvm::ConstantInt>(ms->getValue());
+            const llvm::Value *dest_base =
+                ms->getRawDest()->stripPointerCasts();
+            if (!val_ci || !val_ci->isZero() ||
+                (!isLocalAlloca(dest_base) &&
+                 !llvm::isa<llvm::CallBase>(dest_base))) {
+              ok = false;
+              break;
+            }
+            if (const auto *dcb = llvm::dyn_cast<llvm::CallBase>(dest_base)) {
+              const AllocationModel dam = allocationModel(*dcb, spec_mgr);
+              if (dam.kind != AllocationKind::Fresh &&
+                  dam.kind != AllocationKind::FreshZeroed) {
+                ok = false;
+                break;
+              }
+            }
+            saw_zero_memset = true;
+          } else if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+            const AllocationModel am = allocationModel(*cb, spec_mgr);
+            if (am.kind == AllocationKind::Fresh ||
+                am.kind == AllocationKind::FreshZeroed) {
+              alloc_calls.insert(cb);
+              alloc_models.emplace(cb, am);
+              continue;
+            }
+            const llvm::Function *callee = directCallee(*cb);
+            if (!callee) {
+              ok = false;
+              break;
+            }
+            if (isSideEffectFreeIntrinsic(callee) ||
+                isPassThroughPtrIntrinsic(callee) || knownReadOnly(callee) ||
+                deallocationCall(*cb, spec_mgr) ||
+                cb->doesNotAccessMemory() || cb->onlyReadsMemory() ||
+                (callee->isDeclaration() && spec_mgr.isExitFunction(callee)))
+              continue;
+            ok = false;
+            break;
+          }
+        }
+        if (!ok)
+          break;
+      }
+      if (!ok || !saw_ret || alloc_calls.empty())
+        continue;
+
+      // Verify every returned value originates solely from fresh alloc calls or
+      // null, and that no alloc call escapes outside `fn` except via `ret`.
+      bool all_zeroed = true;
+      bool may_null = false;
+      bool found_alloc = false;
+      std::deque<const llvm::Value *> work;
+      std::set<const llvm::Value *> seen;
+      for (const llvm::ReturnInst *ri : rets)
+        if (seen.insert(ri->getReturnValue()).second)
+          work.push_back(ri->getReturnValue());
+      while (!work.empty() && ok) {
+        const llvm::Value *v = work.front();
+        work.pop_front();
+        if (llvm::isa<llvm::ConstantPointerNull>(v)) {
+          may_null = true;
+          continue;
+        }
+        if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(v)) {
+          auto it = alloc_models.find(cb);
+          if (it == alloc_models.end()) {
+            ok = false;
+            break;
+          }
+          found_alloc = true;
+          if (it->second.kind != AllocationKind::FreshZeroed)
+            all_zeroed = false;
+          if (it->second.mayBeNull)
+            may_null = true;
+          continue;
+        }
+        if (const auto *bc = llvm::dyn_cast<llvm::BitCastInst>(v)) {
+          if (seen.insert(bc->getOperand(0)).second)
+            work.push_back(bc->getOperand(0));
+          continue;
+        }
+        if (const auto *fr = llvm::dyn_cast<llvm::FreezeInst>(v)) {
+          if (seen.insert(fr->getOperand(0)).second)
+            work.push_back(fr->getOperand(0));
+          continue;
+        }
+        if (const auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(v)) {
+          if (gep->hasAllZeroIndices()) {
+            if (seen.insert(gep->getPointerOperand()).second)
+              work.push_back(gep->getPointerOperand());
+            continue;
+          }
+          ok = false;
+          break;
+        }
+        if (const auto *phi = llvm::dyn_cast<llvm::PHINode>(v)) {
+          for (const llvm::Value *inc : phi->incoming_values())
+            if (seen.insert(inc).second)
+              work.push_back(inc);
+          continue;
+        }
+        if (const auto *sel = llvm::dyn_cast<llvm::SelectInst>(v)) {
+          if (seen.insert(sel->getTrueValue()).second)
+            work.push_back(sel->getTrueValue());
+          if (seen.insert(sel->getFalseValue()).second)
+            work.push_back(sel->getFalseValue());
+          continue;
+        }
+        if (const auto *ld = llvm::dyn_cast<llvm::LoadInst>(v)) {
+          const auto *ai =
+              llvm::dyn_cast<llvm::AllocaInst>(ld->getPointerOperand());
+          if (!ai) {
+            ok = false;
+            break;
+          }
+          bool has_store = false;
+          for (const llvm::User *u : ai->users()) {
+            if (const auto *st = llvm::dyn_cast<llvm::StoreInst>(u)) {
+              if (st->getPointerOperand() != ai) {
+                ok = false;
+                break;
+              }
+              has_store = true;
+              if (seen.insert(st->getValueOperand()).second)
+                work.push_back(st->getValueOperand());
+            } else if (!llvm::isa<llvm::LoadInst>(u) &&
+                       !llvm::isa<llvm::DbgInfoIntrinsic>(u) &&
+                       !(llvm::isa<llvm::IntrinsicInst>(u) &&
+                         llvm::cast<llvm::IntrinsicInst>(u)
+                             ->isLifetimeStartOrEnd())) {
+              ok = false;
+              break;
+            }
+          }
+          if (!has_store)
+            ok = false;
+          continue;
+        }
+        ok = false;
+      }
+      if (!ok || !found_alloc)
+        continue;
+      AllocationModel wrapped;
+      wrapped.kind = (all_zeroed || saw_zero_memset)
+                         ? AllocationKind::FreshZeroed
+                         : AllocationKind::Fresh;
+      wrapped.mayBeNull = may_null;
+      allocator_wrappers.emplace(&fn, wrapped);
+    }
+  }
+
+  AllocationModel effectiveAllocationModel(const llvm::CallBase &call) const {
+    AllocationModel am = allocationModel(call, spec_mgr);
+    if (am.kind != AllocationKind::None)
+      return am;
+    const llvm::Function *callee = directCallee(call);
+    if (callee) {
+      auto it = allocator_wrappers.find(callee);
+      if (it != allocator_wrappers.end())
+        return it->second;
+    }
+    return {};
+  }
 
   // Path-sensitivity condition-variable canonicalization per function.
   struct PredKey {
@@ -661,7 +1091,8 @@ struct BootstrapAA::Impl {
   }
 
   Impl(const llvm::Module &m, const llvm::Function *entry, Options options)
-      : module(m), spec_mgr(discoverSpecFiles()) {
+      : module(m), havoc_policy(options.havoc_policy),
+        spec_mgr(discoverSpecFiles()) {
     std::string diagnostics;
     llvm::raw_string_ostream out(diagnostics);
     if (llvm::verifyModule(module, &out))
@@ -690,11 +1121,15 @@ struct BootstrapAA::Impl {
                        !function.doesNotAccessMemory() &&
                        !function.onlyReadsMemory();
       if (function.isDeclaration()) {
-        if (spec_mgr.isExitFunction(&function) ||
+        if (havoc_policy == HavocPolicy::Noop ||
+            spec_mgr.isExitFunction(&function) ||
             spec_mgr.isDeallocator(&function))
           fn_writes = false;
       }
       program.functions[id].writes_memory = fn_writes;
+      program.functions[id].address_taken = function.hasAddressTaken(
+          /*PutOffender=*/nullptr, /*IgnoreCallbackUses=*/false,
+          /*IgnoreAssumeLikeCalls=*/true, /*IgnoreLLVMUsed=*/false);
       Object object;
       object.name = nameOf(function);
       object.kind = ObjectKind::Function;
@@ -703,6 +1138,7 @@ struct BootstrapAA::Impl {
     }
     program.entry = functions.at(entry);
     parseGlobalCtors(entry);
+    detectAllocatorWrappers();
     computeRecursion();
     const llvm::DataLayout &layout = module.getDataLayout();
 
@@ -801,7 +1237,7 @@ struct BootstrapAA::Impl {
             }
           } else if (const auto *call =
                          llvm::dyn_cast<llvm::CallBase>(&instruction)) {
-            const AllocationModel am = allocationModel(*call, spec_mgr);
+            const AllocationModel am = effectiveAllocationModel(*call);
             if (am.kind != AllocationKind::None) {
               const bool fresh_empty = (am.kind == AllocationKind::Fresh ||
                                         am.kind == AllocationKind::FreshZeroed ||
@@ -814,11 +1250,37 @@ struct BootstrapAA::Impl {
                                          ? nullptr
                                          : inferHeapStructType(*call, spec_mgr);
               if (st) {
+                const std::uint64_t st_size = layout.getTypeAllocSize(st);
+                bool single_elem = false;
+                if (st_size > 0 && (am.kind == AllocationKind::Fresh ||
+                                    am.kind == AllocationKind::FreshZeroed)) {
+                  const llvm::Function *ac = directCallee(*call);
+                  const llvm::StringRef aname =
+                      ac ? ac->getName() : llvm::StringRef();
+                  if ((aname == "malloc" || aname == "valloc" ||
+                       aname == "pvalloc" || aname == "kmalloc" ||
+                       aname == "_Znwm" || aname == "_Znam" ||
+                       aname == "_Znwj" || aname == "_Znaj") &&
+                      call->arg_size() == 1) {
+                    if (const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(
+                            call->getArgOperand(0)))
+                      single_elem = (ci->getZExtValue() == st_size);
+                  } else if (aname == "calloc" && call->arg_size() == 2) {
+                    const auto *n_ci = llvm::dyn_cast<llvm::ConstantInt>(
+                        call->getArgOperand(0));
+                    const auto *s_ci = llvm::dyn_cast<llvm::ConstantInt>(
+                        call->getArgOperand(1));
+                    if (n_ci && s_ci && n_ci->isOne() &&
+                        s_ci->getZExtValue() == st_size)
+                      single_elem = true;
+                  }
+                }
                 createStorageObjects(
                     instruction, st, ObjectKind::Heap,
                     /*allow_singleton=*/false, fresh_empty,
                     function.getName().str() + ":" + nameOf(instruction),
-                    layout, call->getType()->getPointerAddressSpace());
+                    layout, call->getType()->getPointerAddressSpace(), INVALID,
+                    /*dynamic_heap_array=*/!single_elem);
                 if (zero_init) {
                   const Id base = objects.at(&instruction);
                   if (program.objects[base].field_sensitive) {
@@ -843,6 +1305,33 @@ struct BootstrapAA::Impl {
                         ? call->getType()->getPointerAddressSpace()
                         : 0;
                 object.bytes = layout.getPointerSize(as);
+                if (am.kind == AllocationKind::Fresh ||
+                    am.kind == AllocationKind::FreshZeroed) {
+                  const llvm::Function *ac = directCallee(*call);
+                  const llvm::StringRef aname =
+                      ac ? ac->getName() : llvm::StringRef();
+                  if ((aname == "malloc" || aname == "valloc" ||
+                       aname == "pvalloc" || aname == "kmalloc" ||
+                       aname == "_Znwm" || aname == "_Znam" ||
+                       aname == "_Znwj" || aname == "_Znaj") &&
+                      call->arg_size() == 1) {
+                    if (const auto *sz_ci = llvm::dyn_cast<llvm::ConstantInt>(
+                            call->getArgOperand(0));
+                        sz_ci && !sz_ci->isZero())
+                      object.size_bytes = sz_ci->getZExtValue();
+                  } else if (aname == "calloc" && call->arg_size() == 2) {
+                    const auto *n_ci = llvm::dyn_cast<llvm::ConstantInt>(
+                        call->getArgOperand(0));
+                    const auto *s_ci = llvm::dyn_cast<llvm::ConstantInt>(
+                        call->getArgOperand(1));
+                    if (n_ci && s_ci && !n_ci->isZero() && !s_ci->isZero()) {
+                      const std::uint64_t nv = n_ci->getZExtValue();
+                      const std::uint64_t sv = s_ci->getZExtValue();
+                      if (nv <= std::numeric_limits<std::uint64_t>::max() / sv)
+                        object.size_bytes = nv * sv;
+                    }
+                  }
+                }
                 addObject(instruction, std::move(object));
               }
             }
@@ -858,7 +1347,8 @@ struct BootstrapAA::Impl {
     for (const llvm::GlobalVariable &global : module.globals()) {
       valueId(global);
       if (!global.hasInitializer() || global.isExternallyInitialized() ||
-          module_has_external_ctors)
+          (havoc_policy == HavocPolicy::Conservative &&
+           module_has_external_ctors))
         continue;
       const Id base = objects.at(&global);
       if (global.getValueType()->isPointerTy()) {
@@ -1090,7 +1580,8 @@ struct BootstrapAA::Impl {
                             bool fresh_empty_init,
                             const std::string &base_name,
                             const llvm::DataLayout &layout, unsigned addrspace,
-                            Id owner_function = INVALID) {
+                            Id owner_function = INVALID,
+                            bool dynamic_heap_array = false) {
     const PointsToSet default_init =
         fresh_empty_init ? PointsToSet{} : PointsToSet::top();
     if (ty->isPointerTy()) {
@@ -1110,7 +1601,7 @@ struct BootstrapAA::Impl {
     if (ty->isSized() && (ty->isStructTy() || ty->isArrayTy())) {
       std::vector<FieldSpec> fields;
       std::vector<ArrayRegion> regions;
-      if (flattenType(ty, layout, 0, false, fields, regions) &&
+      if (flattenType(ty, layout, 0, false, ty->isArrayTy(), fields, regions) &&
           !fields.empty() && fields.size() <= MAX_FLATTENED_FIELDS) {
         // Sort and deduplicate by offset (keeping pointer fields if colliding).
         std::map<std::uint64_t, FieldSpec> by_off;
@@ -1123,6 +1614,12 @@ struct BootstrapAA::Impl {
         if (!by_off.count(0))
           by_off[0] = {0, 1, 0, false, false, 0};
 
+        const std::uint64_t type_alloc_size = layout.getTypeAllocSize(ty);
+        if (dynamic_heap_array && type_alloc_size > 0) {
+          regions.insert(
+              regions.begin(),
+              {0, std::numeric_limits<std::uint64_t>::max(), type_alloc_size});
+        }
         const FieldSpec &f0 = by_off[0];
         Object base_obj;
         base_obj.name = base_name;
@@ -1130,7 +1627,7 @@ struct BootstrapAA::Impl {
         base_obj.singleton =
             allow_singleton && f0.is_pointer && !f0.inside_array;
         base_obj.bytes = f0.ptr_bytes;
-        base_obj.size_bytes = layout.getTypeAllocSize(ty);
+        base_obj.size_bytes = dynamic_heap_array ? 0 : type_alloc_size;
         base_obj.initial = default_init;
         base_obj.function = owner_function;
         base_obj.field_sensitive = true;
@@ -1227,11 +1724,17 @@ struct BootstrapAA::Impl {
       if (at->getNumElements() == 0)
         return;
       llvm::Type *elem = at->getElementType();
-      if (!elem->isSized() || layout.getTypeAllocSize(elem) == 0)
+      const std::uint64_t stride =
+          elem->isSized() ? layout.getTypeAllocSize(elem) : 0;
+      if (stride == 0)
         return;
-      // Every element of `at` folds identically onto element 0 under
-      // `program.foldOffset`.
+      // Fill element 0 and, when element 0 was peeled from `[stride, end)`,
+      // also fill the folded representative at `offset + stride`.
       fillAggregateType(base, elem, offset, leaf_pts, layout);
+      if (at->getNumElements() > 1 &&
+          program.foldOffset(base, offset + stride) !=
+              program.foldOffset(base, offset))
+        fillAggregateType(base, elem, offset + stride, leaf_pts, layout);
       return;
     }
   }
@@ -1964,7 +2467,8 @@ struct BootstrapAA::Impl {
                 graph[functions.at(&function)].insert(functions.at(callee));
             } else {
               for (const llvm::Function &candidate : module)
-                if (!candidate.isDeclaration())
+                if (!candidate.isDeclaration() &&
+                    candidate.hasAddressTaken(nullptr, false, true, false))
                   graph[functions.at(&function)].insert(
                       functions.at(&candidate));
             }
@@ -2416,13 +2920,18 @@ struct BootstrapAA::Impl {
             return;
           }
         }
-        // Non-pointer store: havoc ONLY fields overlapping the written byte
-        // range (leaving sibling struct pointer fields untouched!).
-        i.opcode = Opcode::Havoc;
-        i.operands = {dst_ptr};
-        llvm::Type *vty = val_op->getType();
-        if (vty->isSized())
-          i.write_bytes = layout.getTypeStoreSize(vty);
+        // Non-pointer store: in Conservative mode havoc overlapping fields; in
+        // Noop mode treat non-pointer stores as no-ops (leaving pointer fields
+        // unaffected and avoiding Top-address global havoc).
+        if (havoc_policy == HavocPolicy::Noop) {
+          i.opcode = Opcode::Nop;
+        } else {
+          i.opcode = Opcode::Havoc;
+          i.operands = {dst_ptr};
+          llvm::Type *vty = val_op->getType();
+          if (vty->isSized())
+            i.write_bytes = layout.getTypeStoreSize(vty);
+        }
       }
     } else if (const auto *bitcast =
                    llvm::dyn_cast<llvm::BitCastInst>(&instruction)) {
@@ -2702,10 +3211,18 @@ struct BootstrapAA::Impl {
         i.opcode = Opcode::Havoc;
         i.operands = {valueId(*memory->getRawDest())};
         i.write_bytes = length ? length->getZExtValue() : 0;
+        if (const auto *ms = llvm::dyn_cast<llvm::MemSetInst>(memory)) {
+          if (const auto *val_ci =
+                  llvm::dyn_cast<llvm::ConstantInt>(ms->getValue());
+              val_ci && val_ci->isZero() && !null_may_be_valid &&
+              ms->getRawDest()->getType()->getPointerAddressSpace() == 0 &&
+              i.write_bytes > 0)
+            i.zero_fill = true;
+        }
       }
     } else if (const auto *call =
                    llvm::dyn_cast<llvm::CallBase>(&instruction)) {
-      const AllocationModel allocation = allocationModel(*call, spec_mgr);
+      const AllocationModel allocation = effectiveAllocationModel(*call);
       const llvm::Function *callee = directCallee(*call);
       const llvm::StringRef name = callee ? callee->getName() : llvm::StringRef();
       if (allocation.kind == AllocationKind::OutParam &&
@@ -2817,6 +3334,12 @@ struct BootstrapAA::Impl {
           hv.opcode = Opcode::Havoc;
           hv.operands = {valueId(*call->getArgOperand(0))};
           hv.write_bytes = len_ci ? len_ci->getZExtValue() : 0;
+          if (const auto *val_ci =
+                  llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1));
+              val_ci && val_ci->isZero() && !null_may_be_valid &&
+              call->getArgOperand(0)->getType()->getPointerAddressSpace() == 0 &&
+              hv.write_bytes > 0)
+            hv.zero_fill = true;
           program.append(fn_id, bb_id, std::move(hv));
         }
         if (i.result != INVALID) {
@@ -2825,6 +3348,356 @@ struct BootstrapAA::Impl {
         } else {
           i.opcode = Opcode::Nop;
         }
+      } else if (callee && callee->isDeclaration() && name == "bzero" &&
+                 call->arg_size() >= 2 &&
+                 call->getArgOperand(0)->getType()->isPointerTy()) {
+        const auto *len_ci =
+            llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1));
+        if (len_ci && len_ci->isZero()) {
+          i.opcode = Opcode::Nop;
+        } else {
+          i.opcode = Opcode::Havoc;
+          i.operands = {valueId(*call->getArgOperand(0))};
+          i.write_bytes = len_ci ? len_ci->getZExtValue() : 0;
+          if (!null_may_be_valid &&
+              call->getArgOperand(0)->getType()->getPointerAddressSpace() == 0 &&
+              i.write_bytes > 0)
+            i.zero_fill = true;
+        }
+      } else if (callee && callee->isIntrinsic() &&
+                 (name == "llvm.va_start" || name == "llvm.va_copy") &&
+                 call->arg_size() >= 1 &&
+                 call->getArgOperand(0)->getType()->isPointerTy()) {
+        i.opcode = Opcode::Havoc;
+        i.operands = {valueId(*call->getArgOperand(0))};
+      } else if (callee && callee->isIntrinsic() && name == "llvm.va_end") {
+        i.opcode = Opcode::Nop;
+      } else if (callee && callee->isDeclaration() &&
+                 (name == "fgetc" || name == "getc" || name == "_IO_getc") &&
+                 i.result == INVALID && call->arg_size() >= 1 &&
+                 call->getArgOperand(0)->getType()->isPointerTy()) {
+        i.opcode = Opcode::Havoc;
+        i.operands = {valueId(*call->getArgOperand(0))};
+        i.write_bytes = inferWrittenBytes(call->getArgOperand(0), layout, true);
+      } else if (callee && callee->isDeclaration() &&
+                 (name == "fputc" || name == "putc" || name == "_IO_putc" ||
+                  name == "ungetc" || name == "frexp" || name == "frexpf" ||
+                  name == "frexpl" || name == "modf" || name == "modff" ||
+                  name == "modfl" || name == "read" || name == "pread" ||
+                  name == "recv") &&
+                 i.result == INVALID && call->arg_size() >= 2 &&
+                 call->getArgOperand(1)->getType()->isPointerTy()) {
+        i.opcode = Opcode::Havoc;
+        i.operands = {valueId(*call->getArgOperand(1))};
+        if ((name == "read" || name == "pread" || name == "recv") &&
+            call->arg_size() >= 3) {
+          if (const auto *n_ci =
+                  llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(2));
+              n_ci && !n_ci->isZero())
+            i.write_bytes = n_ci->getZExtValue();
+          else
+            i.write_bytes =
+                inferWrittenBytes(call->getArgOperand(1), layout, false);
+        } else {
+          i.write_bytes =
+              inferWrittenBytes(call->getArgOperand(1), layout, true);
+        }
+      } else if (callee && callee->isDeclaration() &&
+                 (name == "setbuf" || name == "setvbuf") &&
+                 i.result == INVALID && call->arg_size() >= 2 &&
+                 call->getArgOperand(0)->getType()->isPointerTy()) {
+        if (call->getArgOperand(1)->getType()->isPointerTy()) {
+          Instruction hv;
+          hv.opcode = Opcode::Havoc;
+          hv.operands = {valueId(*call->getArgOperand(1))};
+          hv.write_bytes =
+              inferWrittenBytes(call->getArgOperand(1), layout, false);
+          program.append(fn_id, bb_id, std::move(hv));
+        }
+        i.opcode = Opcode::Havoc;
+        i.operands = {valueId(*call->getArgOperand(0))};
+        i.write_bytes = inferWrittenBytes(call->getArgOperand(0), layout, true);
+      } else if (callee && callee->isDeclaration() && name == "fread" &&
+                 i.result == INVALID && call->arg_size() >= 4 &&
+                 call->getArgOperand(0)->getType()->isPointerTy() &&
+                 call->getArgOperand(3)->getType()->isPointerTy()) {
+        Instruction hv_fp;
+        hv_fp.opcode = Opcode::Havoc;
+        hv_fp.operands = {valueId(*call->getArgOperand(3))};
+        hv_fp.write_bytes =
+            inferWrittenBytes(call->getArgOperand(3), layout, true);
+        program.append(fn_id, bb_id, std::move(hv_fp));
+        i.opcode = Opcode::Havoc;
+        i.operands = {valueId(*call->getArgOperand(0))};
+        const auto *s_ci =
+            llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1));
+        const auto *n_ci =
+            llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(2));
+        if (s_ci && n_ci && !s_ci->isZero() && !n_ci->isZero()) {
+          const std::uint64_t sv = s_ci->getZExtValue();
+          const std::uint64_t nv = n_ci->getZExtValue();
+          if (sv <= std::numeric_limits<std::uint64_t>::max() / nv)
+            i.write_bytes = sv * nv;
+        }
+        if (i.write_bytes == 0)
+          i.write_bytes =
+              inferWrittenBytes(call->getArgOperand(0), layout, false);
+      } else if (callee && callee->isDeclaration() && i.result == INVALID &&
+                 (name == "scanf" || name == "__isoc99_scanf" ||
+                  name == "sscanf" || name == "__isoc99_sscanf" ||
+                  name == "fscanf" || name == "__isoc99_fscanf") &&
+                 call->arg_size() >= 1) {
+        const unsigned first_out =
+            (name == "scanf" || name == "__isoc99_scanf") ? 1u : 2u;
+        const bool is_fscanf = (name == "fscanf" || name == "__isoc99_fscanf");
+        std::vector<std::pair<Id, std::uint64_t>> ptr_targets;
+        if (is_fscanf && call->getArgOperand(0)->getType()->isPointerTy())
+          ptr_targets.emplace_back(
+              valueId(*call->getArgOperand(0)),
+              inferWrittenBytes(call->getArgOperand(0), layout, true));
+        for (unsigned a = first_out; a < call->arg_size(); ++a)
+          if (call->getArgOperand(a)->getType()->isPointerTy())
+            ptr_targets.emplace_back(
+                valueId(*call->getArgOperand(a)),
+                inferWrittenBytes(call->getArgOperand(a), layout, true));
+        if (ptr_targets.empty()) {
+          i.opcode = Opcode::Nop;
+        } else {
+          for (std::size_t idx = 0; idx + 1 < ptr_targets.size(); ++idx) {
+            Instruction hv;
+            hv.opcode = Opcode::Havoc;
+            hv.operands = {ptr_targets[idx].first};
+            hv.write_bytes = ptr_targets[idx].second;
+            program.append(fn_id, bb_id, std::move(hv));
+          }
+          i.opcode = Opcode::Havoc;
+          i.operands = {ptr_targets.back().first};
+          i.write_bytes = ptr_targets.back().second;
+        }
+      } else if (callee && callee->isDeclaration() && i.result == INVALID &&
+                 (name == "sprintf" || name == "snprintf") &&
+                 call->arg_size() >= 2 &&
+                 call->getArgOperand(0)->getType()->isPointerTy()) {
+        const unsigned fmt_idx = (name == "snprintf") ? 2u : 1u;
+        const llvm::Value *fmt_op =
+            fmt_idx < call->arg_size() ? call->getArgOperand(fmt_idx) : nullptr;
+        if (formatStringMayHavePercentN(fmt_op)) {
+          for (unsigned a = fmt_idx + 1; a < call->arg_size(); ++a) {
+            if (call->getArgOperand(a)->getType()->isPointerTy()) {
+              Instruction hv;
+              hv.opcode = Opcode::Havoc;
+              hv.operands = {valueId(*call->getArgOperand(a))};
+              hv.write_bytes =
+                  inferWrittenBytes(call->getArgOperand(a), layout, true);
+              program.append(fn_id, bb_id, std::move(hv));
+            }
+          }
+        }
+        i.opcode = Opcode::Havoc;
+        i.operands = {valueId(*call->getArgOperand(0))};
+        if (name == "snprintf") {
+          if (const auto *n_ci =
+                  llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1));
+              n_ci && !n_ci->isZero())
+            i.write_bytes = n_ci->getZExtValue();
+        }
+        if (i.write_bytes == 0)
+          i.write_bytes =
+              inferWrittenBytes(call->getArgOperand(0), layout, false);
+      } else if (callee && callee->isDeclaration() && i.result == INVALID &&
+                 (name == "vsprintf" || name == "vsnprintf") &&
+                 call->arg_size() >= 3 &&
+                 call->getArgOperand(0)->getType()->isPointerTy() &&
+                 !formatStringMayHavePercentN(
+                     call->getArgOperand(name == "vsnprintf" ? 2u : 1u))) {
+        const unsigned ap_idx = (name == "vsnprintf") ? 3u : 2u;
+        if (ap_idx < call->arg_size() &&
+            call->getArgOperand(ap_idx)->getType()->isPointerTy()) {
+          Instruction hv_ap;
+          hv_ap.opcode = Opcode::Havoc;
+          hv_ap.operands = {valueId(*call->getArgOperand(ap_idx))};
+          program.append(fn_id, bb_id, std::move(hv_ap));
+        }
+        i.opcode = Opcode::Havoc;
+        i.operands = {valueId(*call->getArgOperand(0))};
+        if (name == "vsnprintf") {
+          if (const auto *n_ci =
+                  llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1));
+              n_ci && !n_ci->isZero())
+            i.write_bytes = n_ci->getZExtValue();
+        }
+        if (i.write_bytes == 0)
+          i.write_bytes =
+              inferWrittenBytes(call->getArgOperand(0), layout, false);
+      } else if (callee && callee->isDeclaration() && i.result == INVALID &&
+                 name == "qsort" && call->arg_size() >= 4 &&
+                 call->getArgOperand(0)->getType()->isPointerTy() &&
+                 call->getArgOperand(3)->getType()->isPointerTy()) {
+        const Id base_ptr = valueId(*call->getArgOperand(0));
+        Instruction hv;
+        hv.opcode = Opcode::Havoc;
+        hv.operands = {base_ptr};
+        program.append(fn_id, bb_id, std::move(hv));
+        const Id elem_ptr = makeTempValue(fn_id, nameOf(instruction) + ".elem");
+        Instruction fi;
+        fi.opcode = Opcode::Field;
+        fi.result = elem_ptr;
+        fi.operands = {base_ptr};
+        fi.field_known = false;
+        fi.field_offset = 0;
+        fi.field_array_stride = 0;
+        program.append(fn_id, bb_id, std::move(fi));
+        i.opcode = Opcode::Call;
+        i.writes_memory = true;
+        i.indirect_target = valueId(*call->getArgOperand(3));
+        i.operands = {elem_ptr, elem_ptr};
+      } else if (callee && callee->isDeclaration() && i.result != INVALID &&
+                 name == "bsearch" && call->arg_size() >= 5 &&
+                 call->getArgOperand(0)->getType()->isPointerTy() &&
+                 call->getArgOperand(1)->getType()->isPointerTy() &&
+                 call->getArgOperand(4)->getType()->isPointerTy()) {
+        const Id base_ptr = valueId(*call->getArgOperand(1));
+        const Id elem_ptr = makeTempValue(fn_id, nameOf(instruction) + ".elem");
+        Instruction fi;
+        fi.opcode = Opcode::Field;
+        fi.result = elem_ptr;
+        fi.operands = {base_ptr};
+        fi.field_known = false;
+        fi.field_offset = 0;
+        fi.field_array_stride = 0;
+        program.append(fn_id, bb_id, std::move(fi));
+        Instruction cb_call;
+        cb_call.opcode = Opcode::Call;
+        cb_call.writes_memory = true;
+        cb_call.indirect_target = valueId(*call->getArgOperand(4));
+        cb_call.operands = {valueId(*call->getArgOperand(0)), elem_ptr};
+        program.append(fn_id, bb_id, std::move(cb_call));
+        i.opcode = Opcode::Join;
+        i.operands = {elem_ptr, nullValue()};
+      } else if (callee && callee->isDeclaration() && name == "signal" &&
+                 call->arg_size() >= 2) {
+        if (i.result != INVALID) {
+          const Id sobj = getStaticReturnObject(
+              callee, layout, call->getType()->getPointerAddressSpace());
+          const Id tmp_addr =
+              makeTempValue(fn_id, nameOf(instruction) + ".sig");
+          Instruction addr_i;
+          addr_i.opcode = Opcode::Address;
+          addr_i.object = sobj;
+          addr_i.result = tmp_addr;
+          program.append(fn_id, bb_id, std::move(addr_i));
+          i.opcode = Opcode::Join;
+          i.operands = {tmp_addr, nullValue()};
+          if (call->getArgOperand(1)->getType()->isPointerTy())
+            i.operands.push_back(valueId(*call->getArgOperand(1)));
+        } else {
+          i.opcode = Opcode::Nop;
+        }
+      } else if (callee && callee->isDeclaration() && i.result == INVALID &&
+                 (name == "time" || name == "times" || name == "fsetpos" ||
+                  name == "sigemptyset" || name == "sigfillset" ||
+                  name == "sigaddset" || name == "sigdelset") &&
+                 call->arg_size() >= 1) {
+        if (call->getArgOperand(0)->getType()->isPointerTy()) {
+          i.opcode = Opcode::Havoc;
+          i.operands = {valueId(*call->getArgOperand(0))};
+          i.write_bytes =
+              inferWrittenBytes(call->getArgOperand(0), layout, true);
+        } else {
+          i.opcode = Opcode::Nop;
+        }
+      } else if (callee && callee->isDeclaration() && i.result == INVALID &&
+                 (name == "stat" || name == "fstat" || name == "lstat" ||
+                  name == "stat64" || name == "fstat64" || name == "lstat64" ||
+                  name == "clock_gettime" || name == "getrusage" ||
+                  name == "fgetpos") &&
+                 call->arg_size() >= 2 &&
+                 call->getArgOperand(1)->getType()->isPointerTy()) {
+        // NOTE: arg0 of stat/lstat is read-only `const char *path` (often
+        // `argv`, which is Top); ONLY arg1 (`struct stat *` / `timespec *` /
+        // `rusage *` / `fpos_t *`) is written!
+        i.opcode = Opcode::Havoc;
+        i.operands = {valueId(*call->getArgOperand(1))};
+        i.write_bytes = inferWrittenBytes(call->getArgOperand(1), layout, true);
+      } else if (callee && callee->isDeclaration() && i.result == INVALID &&
+                 (name == "__xstat" || name == "__fxstat" ||
+                  name == "__lxstat") &&
+                 call->arg_size() >= 3 &&
+                 call->getArgOperand(2)->getType()->isPointerTy()) {
+        i.opcode = Opcode::Havoc;
+        i.operands = {valueId(*call->getArgOperand(2))};
+        i.write_bytes = inferWrittenBytes(call->getArgOperand(2), layout, true);
+      } else if (callee && callee->isDeclaration() && i.result == INVALID &&
+                 name == "gettimeofday" && call->arg_size() >= 2) {
+        std::vector<std::pair<Id, std::uint64_t>> outs;
+        for (unsigned a = 0; a < 2; ++a)
+          if (call->getArgOperand(a)->getType()->isPointerTy())
+            outs.emplace_back(
+                valueId(*call->getArgOperand(a)),
+                inferWrittenBytes(call->getArgOperand(a), layout, true));
+        if (outs.empty()) {
+          i.opcode = Opcode::Nop;
+        } else {
+          for (std::size_t idx = 0; idx + 1 < outs.size(); ++idx) {
+            Instruction hv;
+            hv.opcode = Opcode::Havoc;
+            hv.operands = {outs[idx].first};
+            hv.write_bytes = outs[idx].second;
+            program.append(fn_id, bb_id, std::move(hv));
+          }
+          i.opcode = Opcode::Havoc;
+          i.operands = {outs.back().first};
+          i.write_bytes = outs.back().second;
+        }
+      } else if (callee && callee->isDeclaration() && i.result != INVALID &&
+                 name == "freopen" && call->arg_size() >= 3 &&
+                 call->getArgOperand(2)->getType()->isPointerTy()) {
+        Instruction hv;
+        hv.opcode = Opcode::Havoc;
+        hv.operands = {valueId(*call->getArgOperand(2))};
+        program.append(fn_id, bb_id, std::move(hv));
+        i.opcode = Opcode::Join;
+        i.operands = {valueId(*call->getArgOperand(2)), nullValue()};
+      } else if (callee && callee->isDeclaration() && i.result != INVALID &&
+                 name == "strtok" && call->arg_size() >= 2 &&
+                 call->getArgOperand(0)->getType()->isPointerTy()) {
+        const Id sptr = valueId(*call->getArgOperand(0));
+        Instruction hv;
+        hv.opcode = Opcode::Havoc;
+        hv.operands = {sptr};
+        program.append(fn_id, bb_id, std::move(hv));
+        const Id tmp_int = makeTempValue(fn_id, nameOf(instruction) + ".tok");
+        Instruction fi;
+        fi.opcode = Opcode::Field;
+        fi.result = tmp_int;
+        fi.operands = {sptr};
+        fi.field_known = false;
+        fi.field_offset = 0;
+        fi.field_array_stride = 0;
+        program.append(fn_id, bb_id, std::move(fi));
+        const Id sobj = getStaticReturnObject(
+            callee, layout, call->getType()->getPointerAddressSpace());
+        const Id tmp_st = makeTempValue(fn_id, nameOf(instruction) + ".static");
+        Instruction addr_i;
+        addr_i.opcode = Opcode::Address;
+        addr_i.object = sobj;
+        addr_i.result = tmp_st;
+        program.append(fn_id, bb_id, std::move(addr_i));
+        i.opcode = Opcode::Join;
+        i.operands = {tmp_int, tmp_st, nullValue()};
+      } else if (callee && callee->isDeclaration() && i.result != INVALID &&
+                 knownStaticReturnLibc(name)) {
+        const Id sobj = getStaticReturnObject(
+            callee, layout, call->getType()->getPointerAddressSpace());
+        const Id tmp_addr =
+            makeTempValue(fn_id, nameOf(instruction) + ".static");
+        Instruction addr_i;
+        addr_i.opcode = Opcode::Address;
+        addr_i.object = sobj;
+        addr_i.result = tmp_addr;
+        program.append(fn_id, bb_id, std::move(addr_i));
+        i.opcode = Opcode::Join;
+        i.operands = {tmp_addr, nullValue()};
       } else if (callee && callee->isDeclaration() &&
                  (name == "strcpy" || name == "strncpy" || name == "strcat" ||
                   name == "strncat" || name == "wcscpy" || name == "wcsncpy" ||
@@ -2837,7 +3710,31 @@ struct BootstrapAA::Impl {
         hv.opcode = Opcode::Havoc;
         hv.operands = {valueId(*call->getArgOperand(0))};
         hv.write_bytes = 0;
+        if ((name == "strncpy" || name == "strncat") && call->arg_size() >= 3) {
+          if (const auto *n_ci =
+                  llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(2));
+              n_ci && !n_ci->isZero())
+            hv.write_bytes = n_ci->getZExtValue();
+        } else if ((name == "fgets" || name == "getcwd") &&
+                   call->arg_size() >= 2) {
+          if (const auto *n_ci =
+                  llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1));
+              n_ci && !n_ci->isZero())
+            hv.write_bytes = n_ci->getZExtValue();
+        }
+        if (hv.write_bytes == 0)
+          hv.write_bytes =
+              inferWrittenBytes(call->getArgOperand(0), layout, false);
         program.append(fn_id, bb_id, std::move(hv));
+        if ((name == "fgets" || name == "fgetws") && call->arg_size() >= 3 &&
+            call->getArgOperand(2)->getType()->isPointerTy()) {
+          Instruction hv_fp;
+          hv_fp.opcode = Opcode::Havoc;
+          hv_fp.operands = {valueId(*call->getArgOperand(2))};
+          hv_fp.write_bytes =
+              inferWrittenBytes(call->getArgOperand(2), layout, true);
+          program.append(fn_id, bb_id, std::move(hv_fp));
+        }
         if (i.result != INVALID) {
           const bool may_null =
               (name == "fgets" || name == "fgetws" || name == "gets" ||
@@ -2942,6 +3839,13 @@ struct BootstrapAA::Impl {
           return;
         }
         i.opcode = Opcode::Nop;
+      } else if (havoc_policy == HavocPolicy::Noop &&
+                 (call->isInlineAsm() ||
+                  (callee && callee->isDeclaration()))) {
+        // Under HavocPolicy::Noop, unmodeled external calls and inline asm are
+        // treated as pure no-ops.
+        i.opcode = Opcode::Nop;
+        i.result = INVALID;
       } else {
         // Store aggregate arguments to direct defined callee's synthetic slots
         // before emitting the Call instruction.
@@ -2971,7 +3875,10 @@ struct BootstrapAA::Impl {
           }
         }
         i.opcode = Opcode::Call;
-        i.writes_memory = writesMemory(*call, spec_mgr);
+        i.writes_memory =
+            (havoc_policy == HavocPolicy::Noop)
+                ? false
+                : writesMemory(*call, spec_mgr);
         if (callee)
           i.callee = functions.at(callee);
         else if (!call->isInlineAsm())
@@ -2981,8 +3888,10 @@ struct BootstrapAA::Impl {
         auto csit = call_cond_substs.find(call);
         if (csit != call_cond_substs.end())
           i.cond_subst = csit->second;
-        i.opaque_alternative = llvm::isa<llvm::InvokeInst>(call) ||
-                               llvm::isa<llvm::CallBrInst>(call);
+        i.opaque_alternative =
+            (havoc_policy == HavocPolicy::Conservative) &&
+            (llvm::isa<llvm::InvokeInst>(call) ||
+             llvm::isa<llvm::CallBrInst>(call));
         const Id call_sid = recordSite(instruction, fn_id, bb_id, std::move(i));
         (void)call_sid;
         // Load aggregate return value leaves immediately after Call so

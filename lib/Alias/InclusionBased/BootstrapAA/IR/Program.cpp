@@ -171,8 +171,15 @@ PointsToSet Program::resolveField(Id object, std::int64_t delta, bool known,
     // non-field-sensitive objects must stay conservative so they never collapse
     // onto the same singleton object as `&g`.
     if (known && delta != 0 && base_info.size_bytes > 0) {
-      if (delta < 0 || static_cast<std::uint64_t>(delta) >= base_info.size_bytes)
-        return PointsToSet::top();
+      if (delta > 0) {
+        if (static_cast<std::uint64_t>(delta) >= base_info.size_bytes)
+          return PointsToSet::top();
+      } else {
+        const std::uint64_t abs_d =
+            static_cast<std::uint64_t>(-(delta + 1)) + 1;
+        if (base_info.singleton || abs_d >= base_info.size_bytes)
+          return PointsToSet::top();
+      }
     }
     return PointsToSet(object);
   }
@@ -185,14 +192,15 @@ PointsToSet Program::resolveField(Id object, std::int64_t delta, bool known,
     return all;
   };
   auto wholeAllocationPeriod = [&]() -> std::uint64_t {
-    if (base_info.size_bytes == 0)
-      return 0;
+    const std::uint64_t max_u64 = std::numeric_limits<std::uint64_t>::max();
     std::uint64_t period = 0;
     for (const ArrayRegion &r : base_info.array_regions) {
       if (r.stride == 0)
         continue;
       if (period == 0) {
-        if (r.begin == 0 && r.end == base_info.size_bytes)
+        if (r.begin == 0 &&
+            (r.end == max_u64 ||
+             (base_info.size_bytes > 0 && r.end == base_info.size_bytes)))
           period = r.stride;
       } else if (r.begin == 0 && r.end == period && (period % r.stride) == 0) {
         period = r.stride;
@@ -200,35 +208,37 @@ PointsToSet Program::resolveField(Id object, std::int64_t delta, bool known,
     }
     return period;
   };
+  auto modSignedOffset = [](std::int64_t cur_s, std::int64_t d,
+                            std::uint64_t period) -> std::uint64_t {
+    const std::uint64_t cmod = static_cast<std::uint64_t>(cur_s) % period;
+    if (d >= 0) {
+      const std::uint64_t dmod = static_cast<std::uint64_t>(d) % period;
+      return (cmod + dmod) % period;
+    }
+    const std::uint64_t abs_d = static_cast<std::uint64_t>(-(d + 1)) + 1;
+    const std::uint64_t dmod = abs_d % period;
+    return (cmod + (period - dmod)) % period;
+  };
 
   if (!known) {
     // Variable-index GEP inside an aggregate: fold modulo `array_stride` ONLY
     // when an effective whole-allocation folding period `period` covers
-    // `[0, size_bytes)` and `period` divides `array_stride` (`array_stride %
-    // period == 0`). Otherwise an LLVM `inbounds` GEP can legally step across
-    // a sub-array into sibling struct fields, so fall back soundly to all
-    // flattened fields of `base`.
-    if (array_stride > 0 && base_info.size_bytes > 0) {
+    // `[0, size_bytes)` (or an unbounded heap struct array `[0, max_u64)`) and
+    // `period` divides `array_stride` (`array_stride % period == 0`).
+    if (array_stride > 0) {
       const std::uint64_t period = wholeAllocationPeriod();
       const std::uint64_t cur_off = objects[object].offset;
       if (period > 0 && (array_stride % period) == 0 &&
           cur_off <= static_cast<std::uint64_t>(
                          std::numeric_limits<std::int64_t>::max())) {
         const std::int64_t cur_s = static_cast<std::int64_t>(cur_off);
-        const bool ok_add =
-            !((delta > 0 &&
-               cur_s > std::numeric_limits<std::int64_t>::max() - delta) ||
-              (delta < 0 &&
-               cur_s < std::numeric_limits<std::int64_t>::min() - delta));
-        if (ok_add && cur_s + delta >= 0) {
-          const std::uint64_t folded =
-              foldOffset(base, static_cast<std::uint64_t>(cur_s + delta));
-          auto it = std::lower_bound(
-              fields.begin(), fields.end(), folded,
-              [](const auto &e, std::uint64_t o) { return e.first < o; });
-          if (it != fields.end() && it->first == folded)
-            return PointsToSet(it->second);
-        }
+        const std::uint64_t wrapped = modSignedOffset(cur_s, delta, period);
+        const std::uint64_t folded = foldOffset(base, wrapped);
+        auto it = std::lower_bound(
+            fields.begin(), fields.end(), folded,
+            [](const auto &e, std::uint64_t o) { return e.first < o; });
+        if (it != fields.end() && it->first == folded)
+          return PointsToSet(it->second);
       }
     }
     return allFieldsOfBase();
@@ -247,9 +257,16 @@ PointsToSet Program::resolveField(Id object, std::int64_t delta, bool known,
       (delta < 0 && cur_s < std::numeric_limits<std::int64_t>::min() - delta))
     return PointsToSet::top();
   const std::int64_t target_signed = cur_s + delta;
-  if (target_signed < 0)
-    return PointsToSet::top();
-  const std::uint64_t target_raw = static_cast<std::uint64_t>(target_signed);
+  std::uint64_t target_raw = 0;
+  if (target_signed < 0) {
+    const std::uint64_t period = wholeAllocationPeriod();
+    if (period > 0 && !base_info.singleton)
+      target_raw = modSignedOffset(cur_s, delta, period);
+    else
+      return PointsToSet::top();
+  } else {
+    target_raw = static_cast<std::uint64_t>(target_signed);
+  }
   if (base_info.size_bytes > 0 && target_raw >= base_info.size_bytes) {
     // One-past-the-end or out-of-bounds: keep conservative.
     return PointsToSet::top();
@@ -364,14 +381,16 @@ std::vector<Id> Program::overlappingFields(Id object,
               addInterval(r.begin,
                           r.begin + (off_in_elem + len - r.stride));
             }
-            const std::uint64_t num_elems = (r.end - r.begin) / r.stride;
-            if (num_elems > 0) {
-              const std::uint64_t last_start =
-                  r.begin + (num_elems - 1) * r.stride + off_in_elem;
-              const std::uint64_t last_end =
-                  (len > max_u64 - last_start) ? max_u64 : last_start + len;
-              if (last_end > r.end)
-                addInterval(r.end, last_end);
+            if (r.end < max_u64) {
+              const std::uint64_t num_elems = (r.end - r.begin) / r.stride;
+              if (num_elems > 0) {
+                const std::uint64_t last_start =
+                    r.begin + (num_elems - 1) * r.stride + off_in_elem;
+                const std::uint64_t last_end =
+                    (len > max_u64 - last_start) ? max_u64 : last_start + len;
+                if (last_end > r.end)
+                  addInterval(r.end, last_end);
+              }
             }
           } else {
             // Write starts before `r.begin` and enters `r`.
@@ -515,6 +534,8 @@ bool Program::memCopyRelativeOffsets(Id od, Id fd, std::uint64_t write_bytes,
       const ArrayRegion &r = *it;
       if (r.stride == 0 || r.end <= r.begin)
         continue;
+      if (r.end == std::numeric_limits<std::uint64_t>::max())
+        return false;
       const std::uint64_t num_elems = (r.end - r.begin) / r.stride;
       std::vector<std::uint64_t> next;
       for (std::uint64_t c : out) {
@@ -564,6 +585,36 @@ bool Program::memCopyRelativeOffsets(Id od, Id fd, std::uint64_t write_bytes,
     }
   }
   return !rels.empty();
+}
+
+bool Program::zeroFillCoversField(Id od, Id fd,
+                                  std::uint64_t write_bytes) const {
+  if (write_bytes == 0 || od >= objects.size() || fd >= objects.size())
+    return false;
+  const Object &fd_info = objects[fd];
+  if (fd_info.kind != ObjectKind::Global && fd_info.kind != ObjectKind::Stack &&
+      fd_info.kind != ObjectKind::Heap)
+    return false;
+  const Id base = baseOf(od);
+  if (baseOf(fd) != base)
+    return false;
+  const Object &base_info = objects[base];
+  if (!base_info.field_sensitive || base >= fields_of_base.size() ||
+      fields_of_base[base].empty()) {
+    if (od != fd)
+      return false;
+    // Complete coverage of a single pointer cell (size_bytes == bytes > 0) or
+    // the entire known-size allocation [0, size_bytes) zeroes every pointer in
+    // it. Unknown-size allocations (size_bytes == 0) stay conservative.
+    return fd_info.size_bytes > 0 && write_bytes >= fd_info.size_bytes;
+  }
+  if (fd_info.bytes > 0) {
+    std::vector<std::int64_t> rels;
+    return memCopyRelativeOffsets(od, fd, write_bytes, rels);
+  }
+  // Non-pointer flattened leaf field (bytes == 0, size_bytes > 0): any typed
+  // pointer load already checks `info.bytes == read_bytes` and yields Top.
+  return fd_info.size_bytes > 0;
 }
 
 void Program::validate() const {

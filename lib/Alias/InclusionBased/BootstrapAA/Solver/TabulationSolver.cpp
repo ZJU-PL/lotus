@@ -148,16 +148,19 @@ class TabulationSolver final : public ClusterSolver {
     const Object &info = m_program.objects[object];
     if (!isMemory(info))
       return;
+    const bool noop_havoc = (m_options.havoc_policy == HavocPolicy::Noop);
     const bool strong =
         strong_allowed && object < m_index.exact_address_singleton.size() &&
         m_index.exact_address_singleton[object] &&
         (bytes == 0 || (info.bytes != 0 && bytes == info.bytes));
-    if (bytes != 0 && (info.bytes == 0 || info.bytes != bytes))
-      state.memory[object] = PointsToSet::top();
-    else if (strong)
+    if (bytes != 0 && (info.bytes == 0 || info.bytes != bytes)) {
+      if (!noop_havoc)
+        state.memory[object] = PointsToSet::top();
+    } else if (strong) {
       state.memory[object] = rhs;
-    else
+    } else {
       state.memory[object].join(rhs);
+    }
   }
   void write(State &state, const PointsToSet &address, const PointsToSet &rhs,
              std::uint64_t bytes, bool allow_strong) const {
@@ -168,10 +171,11 @@ class TabulationSolver final : public ClusterSolver {
         writeObject(state, object, rhs, bytes, false);
       return;
     }
+    const bool noop_havoc = (m_options.havoc_policy == HavocPolicy::Noop);
     const bool single = allow_strong && address.size() == 1;
     for (Id object : address.objects()) {
       writeObject(state, object, rhs, bytes, single);
-      if (bytes != 0 && isMemory(m_program.objects[object])) {
+      if (!noop_havoc && bytes != 0 && isMemory(m_program.objects[object])) {
         for (Id fo : m_program.overlappingFields(object, bytes))
           if (fo != object)
             writeObject(state, fo, PointsToSet::top(), 0, false);
@@ -180,6 +184,8 @@ class TabulationSolver final : public ClusterSolver {
   }
   State external(const Instruction &instruction, State state,
                  bool writes) const {
+    if (m_options.havoc_policy == HavocPolicy::Noop)
+      return state;
     if (writes && instruction.writes_memory)
       write(state, PointsToSet::top(), PointsToSet::top(), 0, false);
     if (instruction.result != INVALID && m_slice.values[instruction.result])
@@ -285,7 +291,8 @@ class TabulationSolver final : public ClusterSolver {
             if (object == NULL_OBJECT)
               continue;
             const Object &info = m_program.objects[object];
-            if (!isMemory(info) ||
+            if (!isMemory(info) || object >= m_slice.objects.size() ||
+                !m_slice.objects[object] ||
                 (i.read_bytes != 0 &&
                  (info.bytes == 0 || info.bytes != i.read_bytes)))
               rhs.join(PointsToSet::top());
@@ -317,10 +324,12 @@ class TabulationSolver final : public ClusterSolver {
       return state;
     }
     case Opcode::MemCopy: {
+      const bool noop_havoc = (m_options.havoc_policy == HavocPolicy::Noop);
       const PointsToSet dst_pts = eval(state, i.operands[0]);
       const PointsToSet src_pts = eval(state, i.operands[1]);
       if (dst_pts.isTop()) {
-        write(state, PointsToSet::top(), PointsToSet::top(), 0, false);
+        if (!noop_havoc)
+          write(state, PointsToSet::top(), PointsToSet::top(), 0, false);
         return state;
       }
       // Capture pre-copy memory snapshot for memmove overlap soundness.
@@ -339,36 +348,56 @@ class TabulationSolver final : public ClusterSolver {
               m_index.has_unaligned_interior[od];
           if (src_pts.isTop() || dst_unaligned ||
               !m_program.memCopyRelativeOffsets(od, fd, i.write_bytes, rels)) {
-            state.memory[fd] = PointsToSet::top();
+            if (!noop_havoc)
+              state.memory[fd] = PointsToSet::top();
             continue;
           }
           PointsToSet copied;
+          bool any_copied = false;
+          bool saw_unmodeled = false;
           for (Id os : src_pts.objects()) {
+            if (os == NULL_OBJECT)
+              continue;
             if (!isMemory(m_program.objects[os]) ||
                 (os < m_index.has_unaligned_interior.size() &&
                  m_index.has_unaligned_interior[os])) {
-              copied = PointsToSet::top();
-              break;
+              saw_unmodeled = true;
+              if (!noop_havoc) {
+                copied = PointsToSet::top();
+                break;
+              }
+              continue;
             }
             for (std::int64_t rel : rels) {
               const PointsToSet fs_pts = m_program.resolveField(os, rel, true);
               if (fs_pts.isTop() || fs_pts.empty()) {
-                copied = PointsToSet::top();
-                break;
+                saw_unmodeled = true;
+                if (!noop_havoc) {
+                  copied = PointsToSet::top();
+                  break;
+                }
+                continue;
               }
               for (Id fs : fs_pts.objects()) {
                 const Object &fs_info = m_program.objects[fs];
                 if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes ||
-                    !m_slice.objects[fs])
-                  copied = PointsToSet::top();
-                else
+                    !m_slice.objects[fs]) {
+                  saw_unmodeled = true;
+                  if (!noop_havoc)
+                    copied = PointsToSet::top();
+                } else {
+                  any_copied = true;
                   copied.join(prev_memory[fs]);
+                }
               }
             }
             if (copied.isTop())
               break;
           }
-          if (single_dst && fd < m_index.exact_address_singleton.size() &&
+          if (noop_havoc && !any_copied)
+            continue;
+          if (single_dst && (!noop_havoc || !saw_unmodeled) &&
+              fd < m_index.exact_address_singleton.size() &&
               m_index.exact_address_singleton[fd])
             state.memory[fd] = std::move(copied);
           else
@@ -377,25 +406,39 @@ class TabulationSolver final : public ClusterSolver {
       }
       return state;
     }
-    case Opcode::Havoc:
-      if (defines)
+    case Opcode::Havoc: {
+      const bool noop_havoc = (m_options.havoc_policy == HavocPolicy::Noop);
+      if (defines && !noop_havoc)
         state.values[i.result] = PointsToSet::top();
       if (i.operands.empty()) {
-        write(state, PointsToSet::top(), PointsToSet::top(), 0, false);
+        if (!noop_havoc)
+          write(state, PointsToSet::top(), PointsToSet::top(), 0, false);
       } else {
         const PointsToSet addr = eval(state, i.operands[0]);
         if (addr.isTop()) {
-          write(state, PointsToSet::top(), PointsToSet::top(), 0, false);
+          if (!noop_havoc)
+            write(state, PointsToSet::top(), PointsToSet::top(), 0, false);
         } else {
+          const bool single_addr = (addr.size() == 1);
           for (Id o : addr.objects()) {
             if (!isMemory(m_program.objects[o]))
               continue;
-            for (Id fo : m_program.overlappingFields(o, i.write_bytes))
-              writeObject(state, fo, PointsToSet::top(), 0, false);
+            const bool o_unaligned =
+                o < m_index.has_unaligned_interior.size() &&
+                m_index.has_unaligned_interior[o];
+            for (Id fo : m_program.overlappingFields(o, i.write_bytes)) {
+              if (i.zero_fill && !o_unaligned &&
+                  m_program.zeroFillCoversField(o, fo, i.write_bytes))
+                writeObject(state, fo, PointsToSet(NULL_OBJECT), 0,
+                            single_addr);
+              else if (!noop_havoc)
+                writeObject(state, fo, PointsToSet::top(), 0, false);
+            }
           }
         }
       }
       return state;
+    }
     case Opcode::Call:
       return call(id, i, state);
     default:
