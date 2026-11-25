@@ -21,7 +21,9 @@ void GuardedSummarySolver::materializeDeref(const Expr &deref, Id site,
       !m_program.values[deref.id].constant) {
     FsciKey akey{deref.id, site, Point::After};
     if (isInActivePass1(deref.id)) {
-      raw_pts = lookupPass1Fsci(deref.id, site, Point::After);
+      raw_pts = (target_depth < m_cyclic_pass1_depth)
+                    ? valueOf(m_program, m_upper, deref.id)
+                    : lookupPass1Fsci(deref.id, site, Point::After);
     } else {
       auto it = m_fsci_cache.find(akey);
       if (it != m_fsci_cache.end()) {

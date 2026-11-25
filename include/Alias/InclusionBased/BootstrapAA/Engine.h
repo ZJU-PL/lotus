@@ -19,7 +19,13 @@ constexpr Id INVALID = std::numeric_limits<Id>::max();
 constexpr Id UNKNOWN = 0;
 constexpr Id NULL_OBJECT = 1;
 
-// The empty set is bottom; {UNKNOWN} is top, not an ordinary allocation site.
+// Chunked sparse bitvector points-to set with small-buffer inline optimization.
+// - Empty set is bottom; {UNKNOWN} is top (not an ordinary allocation site).
+// - NULL_OBJECT (1) and Top (UNKNOWN == 0) are stored as O(1) header flags, so
+//   empty, top, singletons, nullable singletons, and any <= 2-word sparse sets
+//   require zero heap allocations (sizeof(PointsToSet) == 32 bytes).
+// - Larger sets spill to a sorted contiguous array of 256-bit (4x64-bit) chunks
+//   with O(1) locality-cached lookups and in-place zero-allocation fixpoint joins.
 class PointsToSet {
 public:
   class const_iterator {
@@ -40,10 +46,13 @@ public:
 
   private:
     friend class PointsToSet;
-    const_iterator(const PointsToSet *set, std::size_t word,
+    static constexpr std::uint32_t POS_TOP = 0xFFFFFFFDu;
+    static constexpr std::uint32_t POS_NULL = 0xFFFFFFFEu;
+    static constexpr std::uint32_t POS_END = 0xFFFFFFFFu;
+    const_iterator(const PointsToSet *set, std::uint32_t pos,
                    std::uint64_t remaining);
     const PointsToSet *m_set = nullptr;
-    std::size_t m_word = 0;
+    std::uint32_t m_pos = POS_END;
     std::uint64_t m_remaining = 0;
   };
 
@@ -57,16 +66,36 @@ public:
     const PointsToSet *m_set;
   };
 
-  PointsToSet() = default;
-  explicit PointsToSet(Id object) { insert(object); }
-  static PointsToSet top() { return PointsToSet(UNKNOWN); }
-  bool isTop() const;
-  bool empty() const { return m_words.empty(); }
-  std::size_t size() const;
+  PointsToSet() noexcept : m_header(0), m_size(0) { m_storage.inl = {}; }
+  explicit PointsToSet(Id object) : m_header(0), m_size(0) {
+    m_storage.inl = {};
+    insert(object);
+  }
+  PointsToSet(const PointsToSet &other);
+  PointsToSet(PointsToSet &&other) noexcept;
+  PointsToSet &operator=(const PointsToSet &other);
+  PointsToSet &operator=(PointsToSet &&other) noexcept;
+  ~PointsToSet();
+
+  static PointsToSet top() noexcept {
+    PointsToSet s;
+    s.m_header = FLAG_TOP;
+    s.m_size = 1;
+    return s;
+  }
+  void clear() noexcept;
+  bool isTop() const noexcept { return (m_header & FLAG_TOP) != 0; }
+  bool empty() const noexcept { return m_size == 0; }
+  std::size_t size() const noexcept { return m_size; }
+  bool hasNull() const noexcept { return (m_header & FLAG_NULL) != 0; }
+  bool hasNonNull() const noexcept {
+    return isTop() || m_size > (hasNull() ? 1u : 0u);
+  }
   bool contains(Id object) const;
   bool insert(Id object);
   bool join(const PointsToSet &other);
   bool intersects(const PointsToSet &other) const;
+  bool intersectsNonNull(const PointsToSet &other) const;
   ObjectRange objects() const { return ObjectRange(*this); }
   const_iterator begin() const;
   const_iterator end() const;
@@ -75,15 +104,54 @@ public:
   bool operator<(const PointsToSet &rhs) const;
 
 private:
-  struct Word {
-    Id index = 0;
-    std::uint64_t bits = 0;
-    bool operator==(const Word &other) const {
-      return index == other.index && bits == other.bits;
-    }
-  };
   static constexpr unsigned WORD_BITS = 64;
-  std::vector<Word> m_words;
+  static constexpr unsigned CHUNK_WORDS = 4;
+  static constexpr unsigned CHUNK_BITS = WORD_BITS * CHUNK_WORDS;
+  static constexpr std::uint32_t FLAG_TOP = 1u << 31;
+  static constexpr std::uint32_t FLAG_NULL = 1u << 30;
+  static constexpr std::uint32_t FLAG_HEAP = 1u << 29;
+  static constexpr std::uint32_t COUNT_MASK = (1u << 29) - 1u;
+
+  struct HeapChunk {
+    Id index = 0;
+    std::uint32_t pad = 0;
+    std::uint64_t words[CHUNK_WORDS] = {0, 0, 0, 0};
+  };
+
+  struct InlineStorage {
+    Id idx[2] = {0, 0};
+    std::uint64_t bits[2] = {0, 0};
+  };
+
+  struct HeapStorage {
+    HeapChunk *chunks = nullptr;
+    std::uint32_t capacity = 0;
+    mutable std::uint32_t last_hit = 0;
+    std::uint64_t pad = 0;
+  };
+
+  union Storage {
+    InlineStorage inl;
+    HeapStorage heap;
+    Storage() noexcept : inl{} {}
+  };
+
+  bool isHeap() const noexcept { return (m_header & FLAG_HEAP) != 0; }
+  std::uint32_t count() const noexcept { return m_header & COUNT_MASK; }
+  void setCount(std::uint32_t c) noexcept {
+    m_header = (m_header & ~COUNT_MASK) | (c & COUNT_MASK);
+  }
+  void releaseHeap() noexcept;
+  void setTop() noexcept;
+  std::uint32_t heapFindChunk(Id chunk_idx) const noexcept;
+  void heapGrow(std::uint32_t min_cap);
+  bool heapInsertWord(Id word_idx, std::uint64_t mask, bool update_size = true);
+  void promoteInlineToHeap(Id extra_word_idx, std::uint64_t extra_mask);
+  bool insertWord(Id word_idx, std::uint64_t mask);
+
+  std::uint32_t m_header = 0;
+  std::uint32_t m_size = 0;
+  Storage m_storage;
 };
 
 enum class ObjectKind { Unknown, Null, Global, Stack, Heap, Function };
@@ -422,6 +490,9 @@ struct Statistics {
 
 enum class QueryStatus { Complete, Unreachable, ResourceLimit };
 enum class Point { Before, After };
+enum class ContextMatch { Full, Suffix };
+enum class AliasKind { NoAlias, MayAlias, PartialAlias, MustAlias };
+
 struct QueryResult {
   PointsToSet points_to;
   QueryStatus status = QueryStatus::Unreachable;
@@ -430,13 +501,39 @@ struct QueryResult {
 
 struct AliasResult {
   std::vector<Id> aliases;
+  // Aliased addressable memory pointer objects (`Mem(obj)`), matching C
+  // pointer variables in Kahlon PLDI '08 (e.g., Fig. 5 globals `a, b, c, d`).
+  std::vector<Id> object_aliases;
   bool may_alias_all = false;
   QueryStatus status = QueryStatus::Unreachable;
   bool reachable() const { return status != QueryStatus::Unreachable; }
 };
 
-// Context is a complete sequence of call-site IDs starting in Program::entry.
-// An empty context queries the entry activation, not a union over all callers.
+struct CallTargets {
+  std::vector<Id> functions;
+  bool may_call_unknown = false;
+  QueryStatus status = QueryStatus::Complete;
+  bool reachable() const { return status != QueryStatus::Unreachable; }
+};
+
+struct ModRefResult {
+  PointsToSet modified;
+  PointsToSet referenced;
+  bool may_mod_unknown = false;
+  bool may_ref_unknown = false;
+};
+
+struct ReversePointsToResult {
+  std::vector<Id> values;
+  std::vector<Id> memory_objects;
+  bool may_be_pointed_by_unknown = false;
+};
+
+// Context is a sequence of call-site IDs (caller-to-callee).
+// With ContextMatch::Full (default), the sequence must start in Program::entry
+// (an empty context queries the entry activation).
+// With ContextMatch::Suffix, the sequence matches the union of all reachable
+// entry-rooted call stacks ending with `context` (empty matches all contexts).
 using Context = std::vector<Id>;
 class Analysis {
 public:
@@ -448,23 +545,27 @@ public:
   Analysis &operator=(const Analysis &) = delete;
 
   QueryResult pointsTo(Id value, Id site, const Context &context = {},
-                       Point point = Point::Before);
+                       Point point = Point::Before,
+                       ContextMatch match = ContextMatch::Full);
   QueryResult pointsToAllContexts(Id value, Id site,
                                   Point point = Point::Before);
   // Direct may-alias set computation (Algorithm 3 Step 2: backward A + forward
   // Q, unioned over all clusters in the Disjunctive Alias Cover per Theorem 7).
   AliasResult aliases(Id value, Id site, const Context &context = {},
-                      Point point = Point::Before);
+                      Point point = Point::Before,
+                      ContextMatch match = ContextMatch::Full);
   AliasResult aliasesAllContexts(Id value, Id site,
                                  Point point = Point::Before);
   // Direct queries over addressable memory pointer objects (`Mem(object)`),
   // matching C pointer variables in Kahlon PLDI '08 (e.g., Fig. 5 `a, b, c, d`).
   QueryResult objectPointsTo(Id object, Id site, const Context &context = {},
-                             Point point = Point::Before);
+                             Point point = Point::Before,
+                             ContextMatch match = ContextMatch::Full);
   QueryResult objectPointsToAllContexts(Id object, Id site,
                                         Point point = Point::Before);
   AliasResult objectAliases(Id object, Id site, const Context &context = {},
-                            Point point = Point::Before);
+                            Point point = Point::Before,
+                            ContextMatch match = ContextMatch::Full);
   AliasResult objectAliasesAllContexts(Id object, Id site,
                                        Point point = Point::Before);
   // Eagerly construct every cluster solver, using configured parallelism.
@@ -476,11 +577,55 @@ public:
   std::vector<std::size_t> clustersFor(Id value) const;
   // Conservative may-alias query helper (consistent with non-null object
   // aliasing; unreachable is not used to prove disjointness).
-  bool mayAlias(Id lhs, Id rhs, Id site, const Context &context = {});
+  bool mayAlias(Id lhs, Id rhs, Id site, const Context &context = {},
+                ContextMatch match = ContextMatch::Full);
+  // Cross-site may-alias helpers (all-contexts and explicit per-side contexts).
+  bool mayAliasAcrossSites(Id lhs, Id lhs_site, Id rhs, Id rhs_site,
+                           Point lhs_point = Point::Before,
+                           Point rhs_point = Point::Before);
+  bool mayAliasAcrossSites(Id lhs, Id lhs_site, const Context &lhs_context,
+                           Id rhs, Id rhs_site, const Context &rhs_context,
+                           Point lhs_point = Point::Before,
+                           Point rhs_point = Point::Before,
+                           ContextMatch lhs_match = ContextMatch::Full,
+                           ContextMatch rhs_match = ContextMatch::Full);
+  // Four-state byte-range-aware alias query (size == 0 means unknown/whole
+  // object access).
+  AliasKind queryAlias(Id lhs, std::uint64_t lhs_size, Id lhs_site, Id rhs,
+                       std::uint64_t rhs_size, Id rhs_site,
+                       Point lhs_point = Point::Before,
+                       Point rhs_point = Point::Before);
+  AliasKind queryAlias(Id lhs, std::uint64_t lhs_size, Id lhs_site,
+                       const Context &lhs_context, Id rhs,
+                       std::uint64_t rhs_size, Id rhs_site,
+                       const Context &rhs_context,
+                       Point lhs_point = Point::Before,
+                       Point rhs_point = Point::Before,
+                       ContextMatch lhs_match = ContextMatch::Full,
+                       ContextMatch rhs_match = ContextMatch::Full);
   // Sound must-alias query helper (§1, p. 250): returns true only when lhs and
   // rhs are proven to hold the exact same address on all paths reaching
   // (site, context).
-  bool mustAlias(Id lhs, Id rhs, Id site, const Context &context = {});
+  bool mustAlias(Id lhs, Id rhs, Id site, const Context &context = {},
+                 ContextMatch match = ContextMatch::Full);
+  // Nullability query helpers (true if reachable and points-to includes
+  // NULL_OBJECT or Top).
+  bool mayNull(Id value, Id site, Point point = Point::Before);
+  bool mayNull(Id value, Id site, const Context &context,
+               Point point = Point::Before,
+               ContextMatch match = ContextMatch::Full);
+  // Derived call-graph, Mod/Ref, and reverse points-to queries.
+  CallTargets callTargets(Id call_site);
+  CallTargets callTargets(Id call_site, const Context &context,
+                          ContextMatch match = ContextMatch::Full);
+  std::vector<Id> callersOf(Id function) const;
+  bool isRecursiveFunction(Id function) const;
+  ModRefResult functionModRef(Id function);
+  ModRefResult callModRef(Id call_site);
+  ModRefResult callModRef(Id call_site, const Context &context,
+                          ContextMatch match = ContextMatch::Full);
+  ReversePointsToResult reversePointsTo(Id object);
+  const Object &objectInfo(Id object) const;
   const Statistics &statistics() const;
   const std::vector<std::vector<Id>> &clusters() const;
   const SteensgaardHierarchy &hierarchy() const;

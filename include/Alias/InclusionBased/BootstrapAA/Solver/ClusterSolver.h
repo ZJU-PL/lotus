@@ -16,17 +16,21 @@ class ClusterSolver {
 public:
   virtual ~ClusterSolver() = default;
   virtual QueryResult query(Id value, Id site, const Context *context_path,
-                            Point point) = 0;
+                            Point point,
+                            ContextMatch match = ContextMatch::Full) = 0;
   virtual AliasResult queryAliases(Id value, Id site,
-                                   const Context *context_path,
-                                   Point point) = 0;
+                                   const Context *context_path, Point point,
+                                   ContextMatch match = ContextMatch::Full) = 0;
   virtual QueryResult queryObject(Id object, Id site,
-                                  const Context *context_path, Point point) = 0;
-  virtual AliasResult queryObjectAliases(Id object, Id site,
-                                         const Context *context_path,
-                                         Point point) = 0;
-  virtual bool mustAlias(Id lhs, Id rhs, Id site,
-                         const Context *context_path) = 0;
+                                  const Context *context_path, Point point,
+                                  ContextMatch match = ContextMatch::Full) = 0;
+  virtual AliasResult
+  queryObjectAliases(Id object, Id site, const Context *context_path,
+                     Point point,
+                     ContextMatch match = ContextMatch::Full) = 0;
+  virtual bool mustAlias(Id lhs, Id rhs, Id site, const Context *context_path,
+                         ContextMatch match = ContextMatch::Full) = 0;
+  virtual bool tracksObject(Id object) const = 0;
   virtual const Statistics &statistics() const = 0;
 };
 

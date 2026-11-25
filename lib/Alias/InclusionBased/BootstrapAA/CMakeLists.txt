@@ -26,4 +26,6 @@ target_link_libraries(CanaryBootstrapAA
   PUBLIC
     CanaryBootstrapCore
     LLVMCore
-    LLVMSupport)
+    LLVMSupport
+  PRIVATE
+    AliasSpecManager)

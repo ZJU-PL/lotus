@@ -176,12 +176,16 @@ int main(int argc, char **argv) {
             continue;
           }
           llvm::outs() << '{';
-          bool first = true;
-          for (lotus::bootstrap::Id object : result.points_to.objects()) {
-            if (!first)
-              llvm::outs() << ", ";
-            first = false;
-            llvm::outs() << analysis.objectInfo(object).name;
+          if (result.points_to.isTop()) {
+            llvm::outs() << "TOP";
+          } else {
+            bool first = true;
+            for (lotus::bootstrap::Id object : result.points_to.objects()) {
+              if (!first)
+                llvm::outs() << ", ";
+              first = false;
+              llvm::outs() << analysis.objectInfo(object).name;
+            }
           }
           llvm::outs() << '}';
           if (result.status == lotus::bootstrap::QueryStatus::ResourceLimit) {

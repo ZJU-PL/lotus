@@ -156,9 +156,19 @@ bool GuardedSummarySolver::atomsContradict(const GuardAtom &a,
     } else if (a.kind == GuardKind::PointsTo && b.kind == GuardKind::PointsTo &&
                a.lhs_offset_known && a.lhs_stride == 0) {
       // One fixed runtime pointer value cannot simultaneously point to two
-      // distinct abstract objects (e.g. NULL vs non-null, or two distinct
-      // concrete allocations / fields).
-      return true;
+      // distinct allocations or two distinct aligned struct fields; only skip
+      // contradiction when both targets share the same base aggregate and an
+      // unaligned interior pointer widened across sibling fields.
+      const bool same_base =
+          (m_program.baseOf(a.rhs) == m_program.baseOf(b.rhs));
+      const bool unaligned_pair =
+          same_base &&
+          ((a.rhs < m_index.has_unaligned_interior.size() &&
+            m_index.has_unaligned_interior[a.rhs]) ||
+           (b.rhs < m_index.has_unaligned_interior.size() &&
+            m_index.has_unaligned_interior[b.rhs]));
+      if (!unaligned_pair)
+        return true;
     }
   }
   // Symmetric Alias / NotAlias check (`s ~ u` vs `u !~ s`) when offsets are 0.
@@ -1011,6 +1021,11 @@ PointsToSet GuardedSummarySolver::fsciForSummary(Id val, Id site,
   const std::size_t vdepth = dovetailDepthOfComp(comp);
   if (m_cyclic_pass1_depth != std::numeric_limits<std::size_t>::max() &&
       vdepth >= m_cyclic_pass1_depth) {
+    // Lower-depth summaries (e.g., an ExitReturn at depth < d triggered lazily
+    // during cyclic Pass 1 at depth d) must never consume Pass 1's
+    // under-approximate least-fixpoint sets for higher-depth pointers.
+    if (target_depth < m_cyclic_pass1_depth)
+      return valueOf(m_program, m_upper, val);
     return lookupPass1Fsci(val, site, Point::Before);
   }
   if (m_has_completed_depth && vdepth <= m_completed_depth &&
@@ -1080,7 +1095,7 @@ PointsToSet GuardedSummarySolver::evalGuardPointer(Id val, Id site,
   }
 
   if (ctx != nullptr) {
-    FscsKey key{val, site, site_point, *ctx};
+    FscsKey key{val, site, site_point, *ctx, false};
     auto cached = m_fscs_cache.find(key);
     if (cached != m_fscs_cache.end())
       return cached->second.reachable() ? cached->second.points_to
@@ -1127,26 +1142,7 @@ PointsToSet GuardedSummarySolver::evalGuardPointer(Id val, Id site,
 
 bool GuardedSummarySolver::memoryIntersects(const PointsToSet &a,
                                             const PointsToSet &b) const {
-  if (a.empty() || b.empty())
-    return false;
-  if (a.isTop()) {
-    if (b.isTop())
-      return true;
-    for (Id o : b.objects())
-      if (o != NULL_OBJECT)
-        return true;
-    return false;
-  }
-  if (b.isTop()) {
-    for (Id o : a.objects())
-      if (o != NULL_OBJECT)
-        return true;
-    return false;
-  }
-  for (Id o : a.objects())
-    if (o != NULL_OBJECT && b.contains(o))
-      return true;
-  return false;
+  return a.intersectsNonNull(b);
 }
 
 bool GuardedSummarySolver::isAtomSatisfiable(const GuardAtom &atom,

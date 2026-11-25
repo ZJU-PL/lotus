@@ -502,59 +502,54 @@ public:
   }
 
   static bool memoryIntersects(const PointsToSet &a, const PointsToSet &b) {
-    if (a.empty() || b.empty())
-      return false;
-    if (a.isTop()) {
-      if (b.isTop())
-        return true;
-      for (Id o : b.objects())
-        if (o != NULL_OBJECT)
-          return true;
-      return false;
-    }
-    if (b.isTop()) {
-      for (Id o : a.objects())
-        if (o != NULL_OBJECT)
-          return true;
-      return false;
-    }
-    for (Id o : a.objects())
-      if (o != NULL_OBJECT && b.contains(o))
-        return true;
-    return false;
+    return a.intersectsNonNull(b);
   }
 
-  std::set<std::size_t> collectActiveContexts(const Context *context_path) const {
-    std::set<std::size_t> active{0};
-    if (context_path) {
-      for (Id callsite : *context_path) {
-        std::set<std::size_t> next;
-        for (std::size_t id : active) {
-          auto found = m_records[id]->calls.find(callsite);
-          if (found != m_records[id]->calls.end())
-            next.insert(found->second.begin(), found->second.end());
-        }
-        active = std::move(next);
-      }
-    } else {
+  std::set<std::size_t> collectActiveContexts(const Context *context_path,
+                                              ContextMatch match) const {
+    auto allReachable = [&]() {
+      std::set<std::size_t> all{0};
       std::deque<std::size_t> work{0};
       while (!work.empty()) {
         const std::size_t id = work.front();
         work.pop_front();
         for (const auto &calls : m_records[id]->calls)
           for (std::size_t callee : calls.second)
-            if (active.insert(callee).second)
+            if (all.insert(callee).second)
               work.push_back(callee);
       }
+      return all;
+    };
+    if (!context_path ||
+        (match == ContextMatch::Suffix && context_path->empty()))
+      return allReachable();
+
+    std::set<std::size_t> active;
+    if (match == ContextMatch::Full) {
+      active.insert(0);
+    } else {
+      const Id root_fn = m_index.by_site[(*context_path)[0]].function;
+      for (std::size_t id : allReachable())
+        if (m_records[id]->key.function == root_fn)
+          active.insert(id);
+    }
+    for (Id callsite : *context_path) {
+      std::set<std::size_t> next;
+      for (std::size_t id : active) {
+        auto found = m_records[id]->calls.find(callsite);
+        if (found != m_records[id]->calls.end())
+          next.insert(found->second.begin(), found->second.end());
+      }
+      active = std::move(next);
     }
     return active;
   }
 
-  QueryResult query(Id value, Id site, const Context *context_path,
-                    Point point) override {
+  QueryResult query(Id value, Id site, const Context *context_path, Point point,
+                    ContextMatch match = ContextMatch::Full) override {
     if (m_failed)
       return {PointsToSet::top(), QueryStatus::ResourceLimit};
-    std::set<std::size_t> active = collectActiveContexts(context_path);
+    std::set<std::size_t> active = collectActiveContexts(context_path, match);
     QueryResult result;
     for (std::size_t id : active) {
       auto found = m_records[id]->snapshots.find(site);
@@ -572,10 +567,11 @@ public:
   }
 
   QueryResult queryObject(Id object, Id site, const Context *context_path,
-                          Point point) override {
+                          Point point,
+                          ContextMatch match = ContextMatch::Full) override {
     if (m_failed)
       return {PointsToSet::top(), QueryStatus::ResourceLimit};
-    std::set<std::size_t> active = collectActiveContexts(context_path);
+    std::set<std::size_t> active = collectActiveContexts(context_path, match);
     QueryResult result;
     for (std::size_t id : active) {
       auto found = m_records[id]->snapshots.find(site);
@@ -592,8 +588,16 @@ public:
     return result;
   }
 
-  AliasResult aliasesFromBase(const QueryResult &base, Id self_val, Id site,
-                              const Context *context_path, Point point) {
+  bool isPointerMemObject(Id obj) const {
+    if (obj < 2 || obj >= m_program.objects.size())
+      return false;
+    const Object &info = m_program.objects[obj];
+    return isMemory(info) && (info.bytes > 0 || info.size_bytes == 0);
+  }
+
+  AliasResult aliasesFromBase(const QueryResult &base, Id self_val, Id self_obj,
+                              Id site, const Context *context_path, Point point,
+                              ContextMatch match) {
     AliasResult out;
     out.status = base.status;
     if (!base.reachable())
@@ -609,40 +613,79 @@ public:
       const Value &vinfo = m_program.values[cand];
       if (!vinfo.constant && vinfo.function != INVALID && vinfo.function != fn)
         continue;
-      if (cand == self_val || out.may_alias_all) {
+      if (cand == self_val) {
         out.aliases.push_back(cand);
         continue;
       }
-      QueryResult cq = query(cand, site, context_path, point);
+      QueryResult cq = query(cand, site, context_path, point, match);
       if (cq.reachable() && memoryIntersects(cq.points_to, base.points_to))
         out.aliases.push_back(cand);
     }
+
+    const std::set<std::size_t> active =
+        collectActiveContexts(context_path, match);
+    const bool base_has_non_null =
+        out.may_alias_all || memoryIntersects(base.points_to, base.points_to);
+    for (Id cand_obj : m_slice.object_list) {
+      if (!isPointerMemObject(cand_obj))
+        continue;
+      if (cand_obj == self_obj) {
+        out.object_aliases.push_back(cand_obj);
+        continue;
+      }
+      if (!base_has_non_null)
+        continue;
+      PointsToSet raw_mem;
+      for (std::size_t id : active) {
+        auto found = m_records[id]->snapshots.find(site);
+        if (found == m_records[id]->snapshots.end())
+          continue;
+        const State &state =
+            point == Point::Before ? found->second.first : found->second.second;
+        if (!state.reachable)
+          continue;
+        raw_mem.join(state.memory[cand_obj]);
+      }
+      if (memoryIntersects(raw_mem, base.points_to))
+        out.object_aliases.push_back(cand_obj);
+    }
+    if (self_obj != INVALID &&
+        std::find(out.object_aliases.begin(), out.object_aliases.end(),
+                  self_obj) == out.object_aliases.end())
+      out.object_aliases.push_back(self_obj);
     return out;
   }
 
   AliasResult queryAliases(Id value, Id site, const Context *context_path,
-                           Point point) override {
-    return aliasesFromBase(query(value, site, context_path, point), value, site,
-                           context_path, point);
+                           Point point,
+                           ContextMatch match = ContextMatch::Full) override {
+    return aliasesFromBase(query(value, site, context_path, point, match),
+                           value, INVALID, site, context_path, point, match);
   }
 
-  AliasResult queryObjectAliases(Id object, Id site,
-                                 const Context *context_path,
-                                 Point point) override {
-    return aliasesFromBase(queryObject(object, site, context_path, point),
-                           INVALID, site, context_path, point);
+  AliasResult
+  queryObjectAliases(Id object, Id site, const Context *context_path,
+                     Point point,
+                     ContextMatch match = ContextMatch::Full) override {
+    return aliasesFromBase(
+        queryObject(object, site, context_path, point, match), INVALID, object,
+        site, context_path, point, match);
   }
 
-  bool mustAlias(Id lhs, Id rhs, Id site,
-                 const Context *context_path) override {
-    QueryResult a = query(lhs, site, context_path, Point::Before);
+  bool tracksObject(Id object) const override {
+    return object < m_slice.objects.size() && m_slice.objects[object];
+  }
+
+  bool mustAlias(Id lhs, Id rhs, Id site, const Context *context_path,
+                 ContextMatch match = ContextMatch::Full) override {
+    QueryResult a = query(lhs, site, context_path, Point::Before, match);
     if (a.status != QueryStatus::Complete)
       return false;
     if (m_program.values[lhs].constant && m_program.values[lhs].initial.isTop())
       return false;
     if (lhs == rhs)
       return true;
-    QueryResult b = query(rhs, site, context_path, Point::Before);
+    QueryResult b = query(rhs, site, context_path, Point::Before, match);
     if (b.status != QueryStatus::Complete)
       return false;
     if (m_program.values[rhs].constant && m_program.values[rhs].initial.isTop())

@@ -5,7 +5,6 @@
 #include <stdexcept>
 #include <string>
 
-#include <gtest/gtest.h>
 #include <llvm/AsmParser/Parser.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
@@ -13,6 +12,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
+#include <gtest/gtest.h>
 
 using lotus::bootstrap::BootstrapAA;
 using lotus::bootstrap::Point;
@@ -2084,6 +2084,658 @@ void llvmPackedStructCrossFieldStoreBitcastBoolAndDisjointIndirectCall() {
     CHECK(qa.points_to.contains(b));
   }
 }
+
+void llvmResolvedRecursionSingletonsCppDeleteAndNullableAndersenSplit() {
+  // Part A: An unrelated resolved indirect call (`%fp -> @leaf`) must NOT
+  // disable singleton strong updates on stack allocas in non-recursive
+  // functions, while genuine indirect recursion (`%rfp -> @ind_rec`) MUST still
+  // demote its stack alloca to non-singleton (weak updates).
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+      @a = global i32 0
+      @b = global i32 1
+      @g_leaf = global void ()* @leaf
+      @g_rec = global void (i32)* @ind_rec
+
+      define void @leaf() {
+        ret void
+      }
+
+      define i32* @worker() {
+        %slot = alloca i32*
+        store i32* @a, i32** %slot
+        store i32* @b, i32** %slot
+        %res = load i32*, i32** %slot
+        ret i32* %res
+      }
+
+      define void @ind_rec(i32 %n) {
+      entry:
+        %rslot = alloca i32*
+        store i32* @a, i32** %rslot
+        %cond = icmp sgt i32 %n, 0
+        br i1 %cond, label %recurse, label %done
+      recurse:
+        %rfp = load void (i32)*, void (i32)** @g_rec
+        %next = sub i32 %n, 1
+        call void %rfp(i32 %next)
+        store i32* @b, i32** %rslot
+        br label %done
+      done:
+        %rval = load i32*, i32** %rslot
+        ret void
+      }
+
+      define i32 @main(i32 %argc) {
+        %fp = load void ()*, void ()** @g_leaf
+        call void %fp()
+        %w = call i32* @worker()
+        call void @ind_rec(i32 %argc)
+        ret i32 0
+      }
+    )IR");
+
+    for (lotus::bootstrap::SolverMode mode :
+         {lotus::bootstrap::SolverMode::GuardedSummary,
+          lotus::bootstrap::SolverMode::InputStateTabulation}) {
+      auto opt = options();
+      opt.solver_mode = mode;
+      BootstrapAA aa(*f.module, nullptr, opt);
+      const auto a = aa.objectId(*f.module->getNamedGlobal("a"));
+      const auto b = aa.objectId(*f.module->getNamedGlobal("b"));
+      const auto &slot = f.instruction("worker", "slot");
+      const auto &rslot = f.instruction("ind_rec", "rslot");
+      const auto &w = f.instruction("main", "w");
+      const auto &rval = f.instruction("ind_rec", "rval");
+
+      CHECK(aa.objectInfo(aa.objectId(slot)).singleton);
+      CHECK(!aa.objectInfo(aa.objectId(rslot)).singleton);
+
+      auto qw = aa.pointsTo(w, w, {}, Point::After);
+      CHECK(qw.reachable());
+      CHECK(qw.points_to == PointsToSet(b));
+
+      auto qr = aa.pointsToAllContexts(rval, rval, Point::After);
+      CHECK(qr.reachable());
+      CHECK(qr.points_to.contains(a));
+      CHECK(qr.points_to.contains(b));
+    }
+  }
+
+  // Part B: C++ `operator delete` (`_ZdlPv` / `_ZdlPvm`) must not havoc
+  // unrelated memory and must allow `inferHeapStructType` to flatten `_Znwm`
+  // heap structs.
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+      %Pair = type { i32*, i32* }
+      @a = global i32 0
+      @b = global i32 1
+      @c = global i32 2
+      @g = global i32* @c
+      declare i8* @_Znwm(i64)
+      declare void @_ZdlPv(i8*)
+      declare void @_ZdlPvm(i8*, i64)
+
+      define i32 @main() {
+        %raw = call i8* @_Znwm(i64 16)
+        %s = bitcast i8* %raw to %Pair*
+        %f0 = getelementptr inbounds %Pair, %Pair* %s, i32 0, i32 0
+        %f1 = getelementptr inbounds %Pair, %Pair* %s, i32 0, i32 1
+        store i32* @a, i32** %f0
+        store i32* @b, i32** %f1
+        call void @_ZdlPv(i8* %raw)
+        call void @_ZdlPvm(i8* %raw, i64 16)
+        %v0 = load i32*, i32** %f0
+        %v1 = load i32*, i32** %f1
+        %vg = load i32*, i32** @g
+        ret i32 0
+      }
+    )IR");
+
+    for (lotus::bootstrap::SolverMode mode :
+         {lotus::bootstrap::SolverMode::GuardedSummary,
+          lotus::bootstrap::SolverMode::InputStateTabulation}) {
+      auto opt = options();
+      opt.solver_mode = mode;
+      BootstrapAA aa(*f.module, nullptr, opt);
+      const auto a = aa.objectId(*f.module->getNamedGlobal("a"));
+      const auto b = aa.objectId(*f.module->getNamedGlobal("b"));
+      const auto c = aa.objectId(*f.module->getNamedGlobal("c"));
+      const auto &raw = f.instruction("main", "raw");
+      const auto &v0 = f.instruction("main", "v0");
+      const auto &v1 = f.instruction("main", "v1");
+      const auto &vg = f.instruction("main", "vg");
+
+      CHECK(aa.fieldObjectId(raw, 8) != lotus::bootstrap::INVALID);
+      CHECK(aa.pointsTo(v0, v0, {}, Point::After).points_to == PointsToSet(a));
+      CHECK(aa.pointsTo(v1, v1, {}, Point::After).points_to == PointsToSet(b));
+      CHECK(aa.pointsTo(vg, vg, {}, Point::After).points_to == PointsToSet(c));
+    }
+  }
+
+  // Part C: Nullable `malloc` pointers merged into one Steensgaard partition
+  // must split cleanly under Andersen refinement without `NULL_OBJECT` bridging.
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+      declare i8* @malloc(i64)
+      define i32 @main(i1 %c0, i1 %c1, i1 %c2, i1 %c3, i1 %c4) {
+        %m0 = call i8* @malloc(i64 8)
+        %m1 = call i8* @malloc(i64 8)
+        %m2 = call i8* @malloc(i64 8)
+        %m3 = call i8* @malloc(i64 8)
+        %m4 = call i8* @malloc(i64 8)
+        %m5 = call i8* @malloc(i64 8)
+        %s0 = select i1 %c0, i8* %m0, i8* %m1
+        %s1 = select i1 %c1, i8* %s0, i8* %m2
+        %s2 = select i1 %c2, i8* %s1, i8* %m3
+        %s3 = select i1 %c3, i8* %s2, i8* %m4
+        %sink = select i1 %c4, i8* %s3, i8* %m5
+        ret i32 0
+      }
+    )IR");
+
+    auto opt = options();
+    opt.andersen_threshold = 3;
+    opt.adaptive_andersen_threshold = true;
+    BootstrapAA aa(*f.module, nullptr, opt);
+    CHECK(aa.statistics().steensgaard_largest_partition >= 11);
+    CHECK(aa.statistics().andersen_runs >= 1);
+    CHECK(aa.statistics().adaptive_refinement_rejections == 0);
+    CHECK(aa.statistics().largest_cluster <
+          aa.statistics().steensgaard_largest_partition);
+  }
+}
+
+void llvmObjectAliasesAndMayAliasAllSymmetry() {
+  Fixture f(R"IR(
+    target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+    %Pair = type { i32*, i32* }
+    @t1 = global i32 0
+    @t2 = global i32 1
+    @g_a = global i32* null
+    @g_b = global i32* @t1
+    @g_readonly_init = global i32* @t1
+    @g_other = global i32* @t2
+    @g_null = global i32* null
+
+    define void @copy_ab() {
+      %b = load i32*, i32** @g_b
+      store i32* %b, i32** @g_a
+      ret void
+    }
+
+    define i32 @main(i32 %argc, i8** %argv) {
+      %s = alloca %Pair
+      %f0 = getelementptr inbounds %Pair, %Pair* %s, i32 0, i32 0
+      %f1 = getelementptr inbounds %Pair, %Pair* %s, i32 0, i32 1
+      store i32* @t1, i32** %f0
+      store i32* @t2, i32** %f1
+      call void @copy_ab()
+      %ld_a = load i32*, i32** @g_a
+      %null_copy = bitcast i32* null to i32*
+      ret i32 0
+    }
+  )IR");
+
+  const auto &main_fn = *f.module->getFunction("main");
+  const llvm::Value &argv = *std::next(main_fn.arg_begin());
+  const auto &s_alloca = f.instruction("main", "s");
+  const auto &ld_a = f.instruction("main", "ld_a");
+  const auto &null_copy = f.instruction("main", "null_copy");
+  const auto *ret_inst = main_fn.back().getTerminator();
+
+  auto hasVal = [](const BootstrapAA::LLVMAliasResult &r,
+                   const llvm::Value *v) {
+    return std::find(r.aliases.begin(), r.aliases.end(), v) != r.aliases.end();
+  };
+  auto hasObj = [](const BootstrapAA::LLVMAliasResult &r,
+                   lotus::bootstrap::Id o) {
+    return std::find(r.object_aliases.begin(), r.object_aliases.end(), o) !=
+           r.object_aliases.end();
+  };
+
+  for (lotus::bootstrap::SolverMode mode :
+       {lotus::bootstrap::SolverMode::GuardedSummary,
+        lotus::bootstrap::SolverMode::InputStateTabulation}) {
+    auto opt = options();
+    opt.solver_mode = mode;
+    BootstrapAA aa(*f.module, nullptr, opt);
+
+    const auto t1 = aa.objectId(*f.module->getNamedGlobal("t1"));
+    const auto t2 = aa.objectId(*f.module->getNamedGlobal("t2"));
+    const auto g_a = aa.objectId(*f.module->getNamedGlobal("g_a"));
+    const auto g_b = aa.objectId(*f.module->getNamedGlobal("g_b"));
+    const auto g_ro = aa.objectId(*f.module->getNamedGlobal("g_readonly_init"));
+    const auto g_other = aa.objectId(*f.module->getNamedGlobal("g_other"));
+    const auto g_null = aa.objectId(*f.module->getNamedGlobal("g_null"));
+    const auto sf0 = aa.fieldObjectId(s_alloca, 0);
+    const auto sf1 = aa.fieldObjectId(s_alloca, 8);
+    CHECK(sf0 != lotus::bootstrap::INVALID);
+    CHECK(sf1 != lotus::bootstrap::INVALID);
+
+    // Memory-object aliases for `ld_a` and `g_a`: includes globals and struct
+    // field 0 holding `@t1`, excludes `@t2` holders, `@g_null`, and `i32` vars.
+    for (const auto &ar :
+         {aa.aliases(ld_a, *ret_inst), aa.aliasesAllContexts(ld_a, *ret_inst),
+          aa.objectAliases(g_a, *ret_inst),
+          aa.objectAliasesAllContexts(g_a, *ret_inst)}) {
+      CHECK(ar.reachable());
+      CHECK(!ar.may_alias_all);
+      CHECK(hasVal(ar, &argv));
+      CHECK(hasObj(ar, g_a));
+      CHECK(hasObj(ar, g_b));
+      CHECK(hasObj(ar, g_ro));
+      CHECK(hasObj(ar, sf0));
+      CHECK(!hasObj(ar, g_other));
+      CHECK(!hasObj(ar, g_null));
+      CHECK(!hasObj(ar, sf1));
+      CHECK(!hasObj(ar, t1));
+      CHECK(!hasObj(ar, t2));
+    }
+
+    // `may_alias_all` symmetry on `%argv`: lists `%ld_a` and non-null pointer
+    // memory objects while excluding strictly-NULL `%null_copy` and `@g_null`.
+    auto topAl = aa.aliases(argv, *ret_inst);
+    CHECK(topAl.reachable());
+    CHECK(topAl.may_alias_all);
+    CHECK(hasVal(topAl, &argv));
+    CHECK(hasVal(topAl, &ld_a));
+    CHECK(!hasVal(topAl, &null_copy));
+    CHECK(hasObj(topAl, g_a));
+    CHECK(hasObj(topAl, g_b));
+    CHECK(hasObj(topAl, g_ro));
+    CHECK(hasObj(topAl, g_other));
+    CHECK(hasObj(topAl, sf0));
+    CHECK(hasObj(topAl, sf1));
+    CHECK(!hasObj(topAl, g_null));
+    CHECK(!hasObj(topAl, t1));
+    CHECK(!hasObj(topAl, t2));
+  }
+}
+
+void llvmRealIRSpecManagerCtorsAggregatesAndDerivedAPIs() {
+  using lotus::bootstrap::Id;
+  // Part A: `llvm.global_ctors` priority-ordered startup execution preserves
+  // static global initializers and `context = {}` for `main`; external ctors
+  // fall back soundly to Top.
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-p:64:64"
+      @a = global i8 0
+      @b = global i8 0
+      @c = global i8 0
+      @d = global i8 0
+      @g = global i8* @a
+      @h = global i8* @b
+      @llvm.global_ctors = appending global [2 x { i32, void ()*, i8* }] [
+        { i32, void ()*, i8* } { i32 200, void ()* @ctor_late, i8* null },
+        { i32, void ()*, i8* } { i32 100, void ()* @ctor_early, i8* null }
+      ]
+      define internal void @ctor_early() {
+        store i8* @d, i8** @g
+        ret void
+      }
+      define internal void @ctor_late() {
+        store i8* @c, i8** @g
+        ret void
+      }
+      define i32 @main() {
+        %vg = load i8*, i8** @g
+        %vh = load i8*, i8** @h
+        ret i32 0
+      }
+    )IR");
+    for (auto mode : {lotus::bootstrap::SolverMode::GuardedSummary,
+                      lotus::bootstrap::SolverMode::InputStateTabulation}) {
+      auto opt = options();
+      opt.solver_mode = mode;
+      BootstrapAA aa(*f.module, nullptr, opt);
+      const auto &vg = f.instruction("main", "vg");
+      const auto &vh = f.instruction("main", "vh");
+      const Id oc = aa.objectId(*f.module->getNamedGlobal("c"));
+      const Id ob = aa.objectId(*f.module->getNamedGlobal("b"));
+      CHECK(aa.pointsTo(vg, vg, {}, Point::After).points_to == PointsToSet(oc));
+      CHECK(aa.pointsTo(vh, vh, {}, Point::After).points_to == PointsToSet(ob));
+      CHECK(!aa.mayNull(vg, vg, {}, Point::After));
+    }
+  }
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-p:64:64"
+      @a = global i8 0
+      @g = global i8* @a
+      declare void @ext_ctor()
+      @llvm.global_ctors = appending global [1 x { i32, void ()*, i8* }] [
+        { i32, void ()*, i8* } { i32 100, void ()* @ext_ctor, i8* null }
+      ]
+      define i32 @main() {
+        %vg = load i8*, i8** @g
+        ret i32 0
+      }
+    )IR");
+    BootstrapAA aa(*f.module, nullptr, options());
+    const auto &vg = f.instruction("main", "vg");
+    CHECK(aa.pointsTo(vg, vg, {}, Point::After).points_to.isTop());
+  }
+
+  // Part B: Aggregate SSA values (`insertvalue`, `extractvalue`, aggregate
+  // return/param, aggregate load/store, aggregate select & phi).
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-p:64:64"
+      %Pair = type { i8*, i8* }
+      @a = global i8 0
+      @b = global i8 0
+      @c = global i8 0
+
+      define %Pair @make_pair(i8* %x, i8* %y) {
+        %p1 = insertvalue %Pair undef, i8* %x, 0
+        %p2 = insertvalue %Pair %p1, i8* %y, 1
+        ret %Pair %p2
+      }
+      define %Pair @swap_pair(%Pair %in) {
+        %e0 = extractvalue %Pair %in, 0
+        %e1 = extractvalue %Pair %in, 1
+        %s1 = insertvalue %Pair undef, i8* %e1, 0
+        %s2 = insertvalue %Pair %s1, i8* %e0, 1
+        ret %Pair %s2
+      }
+      define i32 @main(i1 %cond) {
+      entry:
+        %made = call %Pair @make_pair(i8* @a, i8* @b)
+        %swapped = call %Pair @swap_pair(%Pair %made)
+        %alt = call %Pair @make_pair(i8* @c, i8* @a)
+        %chosen = select i1 %cond, %Pair %swapped, %Pair %alt
+        br i1 %cond, label %left, label %right
+      left:
+        br label %merge
+      right:
+        br label %merge
+      merge:
+        %merged = phi %Pair [ %swapped, %left ], [ %chosen, %right ]
+        %slot = alloca %Pair
+        store %Pair %merged, %Pair* %slot
+        %reloaded = load %Pair, %Pair* %slot
+        %f0 = extractvalue %Pair %reloaded, 0
+        %f1 = extractvalue %Pair %reloaded, 1
+        %exact0 = extractvalue %Pair %swapped, 0
+        %exact1 = extractvalue %Pair %swapped, 1
+        ret i32 0
+      }
+    )IR");
+    for (auto mode : {lotus::bootstrap::SolverMode::GuardedSummary,
+                      lotus::bootstrap::SolverMode::InputStateTabulation}) {
+      auto opt = options();
+      opt.solver_mode = mode;
+      BootstrapAA aa(*f.module, nullptr, opt);
+      const Id oa = aa.objectId(*f.module->getNamedGlobal("a"));
+      const Id ob = aa.objectId(*f.module->getNamedGlobal("b"));
+      const Id oc = aa.objectId(*f.module->getNamedGlobal("c"));
+      const auto &exact0 = f.instruction("main", "exact0");
+      const auto &exact1 = f.instruction("main", "exact1");
+      const auto &f0 = f.instruction("main", "f0");
+      const auto &f1 = f.instruction("main", "f1");
+      CHECK(aa.pointsTo(exact0, exact0, {}, Point::After).points_to ==
+            PointsToSet(ob));
+      CHECK(aa.pointsTo(exact1, exact1, {}, Point::After).points_to ==
+            PointsToSet(oa));
+      PointsToSet exp0(ob);
+      exp0.insert(oc);
+      CHECK(aa.pointsTo(f0, f0, {}, Point::After).points_to == exp0);
+      CHECK(aa.pointsTo(f1, f1, {}, Point::After).points_to == PointsToSet(oa));
+    }
+  }
+
+  // Part C: Real LLVM IR instructions (`freeze`, `addrspacecast`,
+  // `inttoptr(ptrtoint)`, `ConstantExpr` select/inttoptr, placement new,
+  // `llvm.launder.invariant.group`, `inferHeapStructType` through `freeze`).
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-p:64:64"
+      %Box = type { i8*, i8* }
+      @a = global i8 0
+      @b = global i8 0
+      @flag = global i1 true
+      declare i8* @malloc(i64)
+      declare i8* @_ZnwmPv(i64, i8*)
+      declare i8* @llvm.launder.invariant.group.p0i8(i8*)
+      declare i64 @llvm.expect.i64(i64, i64)
+
+      define i32 @main() {
+        %fr = freeze i8* @a
+        %as1 = addrspacecast i8* @a to i8 addrspace(1)*
+        %back = addrspacecast i8 addrspace(1)* %as1 to i8*
+        %i = ptrtoint i8* @b to i64
+        %p_rt = inttoptr i64 %i to i8*
+        %ce_p = bitcast i8* inttoptr (i64 ptrtoint (i8* @b to i64) to i8*) to i8*
+        %la = call i8* @llvm.launder.invariant.group.p0i8(i8* @a)
+        %pn = call i8* @_ZnwmPv(i64 8, i8* @a)
+        %ex = call i64 @llvm.expect.i64(i64 1, i64 1)
+        %raw = call i8* @malloc(i64 16)
+        %raw_fr = freeze i8* %raw
+        %box = bitcast i8* %raw_fr to %Box*
+        %bf0 = getelementptr inbounds %Box, %Box* %box, i32 0, i32 0
+        %bf1 = getelementptr inbounds %Box, %Box* %box, i32 0, i32 1
+        store i8* @a, i8** %bf0
+        store i8* @b, i8** %bf1
+        %l0 = load i8*, i8** %bf0
+        %l1 = load i8*, i8** %bf1
+        ret i32 0
+      }
+    )IR");
+    BootstrapAA aa(*f.module, nullptr, options());
+    const Id oa = aa.objectId(*f.module->getNamedGlobal("a"));
+    const Id ob = aa.objectId(*f.module->getNamedGlobal("b"));
+    for (const char *nm : {"fr", "back", "la", "pn", "l0"}) {
+      const auto &inst = f.instruction("main", nm);
+      CHECK(aa.pointsTo(inst, inst, {}, Point::After).points_to ==
+            PointsToSet(oa));
+    }
+    for (const char *nm : {"p_rt", "ce_p", "l1"}) {
+      const auto &inst = f.instruction("main", nm);
+      CHECK(aa.pointsTo(inst, inst, {}, Point::After).points_to ==
+            PointsToSet(ob));
+    }
+  }
+
+  // Part D: `AliasSpecManager` external library semantics (`posix_memalign`,
+  // `strcpy`, non-intrinsic `memcpy`, `getenv`, `fread`, `sin`, `puts`).
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-p:64:64"
+      @a = global i8 0
+      @b = global i8 0
+      @key = global i8 0
+      @g_keep = global i8* @a
+      @src_slot = global i8* @b
+      @dst_slot = global i8* null
+      declare i32 @posix_memalign(i8**, i64, i64)
+      declare i8* @strcpy(i8*, i8*)
+      declare i8* @memcpy(i8*, i8*, i64)
+      declare i8* @getenv(i8*)
+      declare i64 @fread(i8*, i64, i64, i8*)
+      declare double @sin(double)
+      declare i32 @puts(i8*)
+
+      define i32 @main() {
+        %out = alloca i8*
+        store i8* null, i8** %out
+        %pm = call i32 @posix_memalign(i8** %out, i64 16, i64 32)
+        %alloc_p = load i8*, i8** %out
+        %buf = alloca i8
+        %cp_ret = call i8* @strcpy(i8* %buf, i8* @key)
+        %d_i8 = bitcast i8** @dst_slot to i8*
+        %s_i8 = bitcast i8** @src_slot to i8*
+        %mc_ret = call i8* @memcpy(i8* %d_i8, i8* %s_i8, i64 8)
+        %dst_v = load i8*, i8** @dst_slot
+        %env = call i8* @getenv(i8* @key)
+        %rd = call i64 @fread(i8* %buf, i64 1, i64 1, i8* null)
+        %sv = call double @sin(double 1.0)
+        %pu = call i32 @puts(i8* @key)
+        %kept = load i8*, i8** @g_keep
+        ret i32 0
+      }
+    )IR");
+    BootstrapAA aa(*f.module, nullptr, options());
+    const Id oa = aa.objectId(*f.module->getNamedGlobal("a"));
+    const Id ob = aa.objectId(*f.module->getNamedGlobal("b"));
+    const Id obuf = aa.objectId(f.instruction("main", "buf"));
+    const Id opm = aa.objectId(f.instruction("main", "pm"));
+
+    // Unrelated `@g_keep` was NOT clobbered by any of the modeled libc calls!
+    const auto &kept = f.instruction("main", "kept");
+    CHECK(aa.pointsTo(kept, kept, {}, Point::After).points_to ==
+          PointsToSet(oa));
+
+    // `posix_memalign` allocated heap object `opm` into `*out` (joined with
+    // prior `null` for failure soundness).
+    const auto &alloc_p = f.instruction("main", "alloc_p");
+    auto ap_pts = aa.pointsTo(alloc_p, alloc_p, {}, Point::After).points_to;
+    CHECK(!ap_pts.isTop());
+    CHECK(ap_pts.contains(opm));
+    CHECK(ap_pts.contains(lotus::bootstrap::NULL_OBJECT));
+
+    // `strcpy` returns `%buf`, `memcpy` copies `*@src_slot` (`@b`) to
+    // `*@dst_slot` and returns `@dst_slot`.
+    const auto &cp_ret = f.instruction("main", "cp_ret");
+    CHECK(aa.pointsTo(cp_ret, cp_ret, {}, Point::After).points_to ==
+          PointsToSet(obuf));
+    const auto &dst_v = f.instruction("main", "dst_v");
+    CHECK(aa.pointsTo(dst_v, dst_v, {}, Point::After).points_to ==
+          PointsToSet(ob));
+
+    // `getenv` points to dedicated static object | NULL (not Top).
+    const auto &env = f.instruction("main", "env");
+    auto env_pts = aa.pointsTo(env, env, {}, Point::After).points_to;
+    CHECK(!env_pts.isTop());
+    CHECK(env_pts.contains(lotus::bootstrap::NULL_OBJECT));
+    CHECK(env_pts.size() == 2);
+  }
+
+  // Part E: LLVM Suffix contexts + Cross-site & Derived result APIs.
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-p:64:64"
+      %Pair = type { i8*, i8* }
+      @a = global i8 0
+      @b = global i8 0
+      @c = global i8 0
+      @sink = global i8* null
+      @ps = global %Pair zeroinitializer
+
+      define void @callee_a() {
+        store i8* @a, i8** @sink
+        ret void
+      }
+      define void @callee_b() {
+        store i8* @b, i8** @sink
+        ret void
+      }
+      define i8* @leaf(i8* %p) {
+        %copy = bitcast i8* %p to i8*
+        ret i8* %copy
+      }
+      define void @mid(i8* %x, void ()* %fp) {
+        %r1 = call i8* @leaf(i8* %x)
+        %r2 = call i8* @leaf(i8* @c)
+        call void %fp()
+        ret void
+      }
+      define i32 @main() {
+        call void @mid(i8* @a, void ()* @callee_a)
+        call void @mid(i8* @b, void ()* @callee_b)
+        %f0 = getelementptr inbounds %Pair, %Pair* @ps, i32 0, i32 0
+        %f1 = getelementptr inbounds %Pair, %Pair* @ps, i32 0, i32 1
+        %pa = bitcast i8* @a to i8*
+        ret i32 0
+      }
+    )IR");
+    const auto *leaf_fn = f.module->getFunction("leaf");
+    const auto *mid_fn = f.module->getFunction("mid");
+    const auto *main_fn = f.module->getFunction("main");
+    const auto *callee_a = f.module->getFunction("callee_a");
+    const auto *callee_b = f.module->getFunction("callee_b");
+    const auto &leaf_copy = f.instruction("leaf", "copy");
+    const auto *c_r1 = llvm::cast<llvm::CallBase>(&f.instruction("mid", "r1"));
+    const auto *c_r2 = llvm::cast<llvm::CallBase>(&f.instruction("mid", "r2"));
+    const llvm::CallBase *c_ind = nullptr;
+    for (const auto &inst : mid_fn->getEntryBlock())
+      if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst))
+        if (!cb->getCalledFunction())
+          c_ind = cb;
+    std::vector<const llvm::CallBase *> main_calls;
+    for (const auto &inst : main_fn->getEntryBlock())
+      if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst))
+        main_calls.push_back(cb);
+    CHECK(c_ind != nullptr && main_calls.size() == 2);
+
+    for (auto mode : {lotus::bootstrap::SolverMode::GuardedSummary,
+                      lotus::bootstrap::SolverMode::InputStateTabulation}) {
+      auto opt = options();
+      opt.solver_mode = mode;
+      BootstrapAA aa(*f.module, nullptr, opt);
+      const Id oa = aa.objectId(*f.module->getNamedGlobal("a"));
+      const Id ob = aa.objectId(*f.module->getNamedGlobal("b"));
+      const Id oc = aa.objectId(*f.module->getNamedGlobal("c"));
+      const Id osink = aa.objectId(*f.module->getNamedGlobal("sink"));
+
+      // 1-CFA suffix `{c_r1}` -> `{@a, @b}`; `{c_r2}` -> `{@c}`.
+      PointsToSet ab(oa);
+      ab.insert(ob);
+      CHECK(aa.pointsTo(leaf_copy, leaf_copy, {c_r1}, Point::After,
+                        lotus::bootstrap::ContextMatch::Suffix)
+                .points_to == ab);
+      CHECK(aa.pointsTo(leaf_copy, leaf_copy, {c_r2}, Point::After,
+                        lotus::bootstrap::ContextMatch::Suffix)
+                .points_to == PointsToSet(oc));
+
+      // Cross-site mayAlias (`main` `%pa` vs `leaf` `%copy`) and mayAliasGlobal.
+      const auto &pa = f.instruction("main", "pa");
+      CHECK(aa.mayAliasAcrossSites(pa, pa, leaf_copy, leaf_copy, Point::After,
+                                   Point::After));
+      CHECK(!aa.mayAliasAcrossSites(pa, pa, {}, leaf_copy, leaf_copy, {c_r2},
+                                    Point::After, Point::After,
+                                    lotus::bootstrap::ContextMatch::Full,
+                                    lotus::bootstrap::ContextMatch::Suffix));
+      CHECK(aa.mayAliasGlobal(pa, leaf_copy));
+
+      // Four-state byte-range `queryAlias` on `@ps` fields.
+      const auto &f0 = f.instruction("main", "f0");
+      const auto &f1 = f.instruction("main", "f1");
+      CHECK(aa.queryAlias(f0, 8, f0, f1, 8, f1, Point::After, Point::After) ==
+            lotus::bootstrap::AliasKind::NoAlias);
+      CHECK(aa.queryAlias(f0, 16, f0, f1, 8, f1, Point::After, Point::After) ==
+            lotus::bootstrap::AliasKind::PartialAlias);
+      CHECK(aa.queryAlias(f0, 8, f0, f0, 8, f0, Point::After, Point::After) ==
+            lotus::bootstrap::AliasKind::MustAlias);
+
+      // Context-sensitive indirect callTargets & callersOf & ModRef.
+      auto ct1 = aa.callTargets(*c_ind, {main_calls[0]},
+                                lotus::bootstrap::ContextMatch::Suffix);
+      CHECK(ct1.reachable() && !ct1.may_call_unknown);
+      CHECK(ct1.functions == std::vector<const llvm::Function *>{callee_a});
+      auto ct2 = aa.callTargets(*c_ind, {main_calls[1]},
+                                lotus::bootstrap::ContextMatch::Suffix);
+      CHECK(ct2.functions == std::vector<const llvm::Function *>{callee_b});
+      CHECK(aa.callersOf(*leaf_fn).size() == 2);
+      CHECK(!aa.isRecursiveFunction(*leaf_fn));
+      auto mr = aa.functionModRef(*callee_a);
+      CHECK(!mr.may_mod_unknown && mr.modified == PointsToSet(osink));
+      auto cmr = aa.callModRef(*c_ind, {main_calls[0]},
+                               lotus::bootstrap::ContextMatch::Suffix);
+      CHECK(!cmr.may_mod_unknown && cmr.modified == PointsToSet(osink));
+
+      // reversePointsTo & hasValue/hasSite
+      auto rev = aa.reversePointsTo(oc);
+      CHECK(std::find(rev.values.begin(), rev.values.end(), &leaf_copy) !=
+            rev.values.end());
+      CHECK(aa.hasValue(pa) && aa.hasSite(pa));
+    }
+  }
+}
 } // namespace
 TEST(BootstrapAATest, CallsAndStackStores) { callsAndStackStores(); }
 TEST(BootstrapAATest, GlobalsAndExternalHavoc) { globalsAndExternalHavoc(); }
@@ -2177,4 +2829,14 @@ TEST(BootstrapAATest,
 TEST(BootstrapAATest,
      LLVMPackedStructCrossFieldStoreBitcastBoolAndDisjointIndirectCall) {
   llvmPackedStructCrossFieldStoreBitcastBoolAndDisjointIndirectCall();
+}
+TEST(BootstrapAATest,
+     LLVMResolvedRecursionSingletonsCppDeleteAndNullableAndersenSplit) {
+  llvmResolvedRecursionSingletonsCppDeleteAndNullableAndersenSplit();
+}
+TEST(BootstrapAATest, LLVMObjectAliasesAndMayAliasAllSymmetry) {
+  llvmObjectAliasesAndMayAliasAllSymmetry();
+}
+TEST(BootstrapAATest, LLVMRealIRSpecManagerCtorsAggregatesAndDerivedAPIs) {
+  llvmRealIRSpecManagerCtorsAggregatesAndDerivedAPIs();
 }

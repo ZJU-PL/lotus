@@ -32,32 +32,51 @@ public:
 
   QueryResult pointsTo(const llvm::Value &value, const llvm::Instruction &site,
                        const CallContext &context = {},
-                       Point point = Point::Before);
+                       Point point = Point::Before,
+                       ContextMatch match = ContextMatch::Full);
   QueryResult pointsToAllContexts(const llvm::Value &value,
                                   const llvm::Instruction &site,
                                   Point point = Point::Before);
   struct LLVMAliasResult {
     std::vector<const llvm::Value *> aliases;
+    // Aliased addressable memory pointer object IDs (e.g., globals/allocas/
+    // flattened struct pointer fields holding an aliased pointer value).
+    // Map back to LLVM storage via allocationSite(id) and objectInfo(id).
+    std::vector<Id> object_aliases;
     bool may_alias_all = false;
     QueryStatus status = QueryStatus::Unreachable;
     bool reachable() const { return status != QueryStatus::Unreachable; }
   };
+  struct LLVMCallTargets {
+    std::vector<const llvm::Function *> functions;
+    bool may_call_unknown = false;
+    QueryStatus status = QueryStatus::Complete;
+    bool reachable() const { return status != QueryStatus::Unreachable; }
+  };
+  struct LLVMReversePointsToResult {
+    std::vector<const llvm::Value *> values;
+    std::vector<Id> memory_objects;
+    bool may_be_pointed_by_unknown = false;
+  };
   LLVMAliasResult aliases(const llvm::Value &value,
                           const llvm::Instruction &site,
                           const CallContext &context = {},
-                          Point point = Point::Before);
+                          Point point = Point::Before,
+                          ContextMatch match = ContextMatch::Full);
   LLVMAliasResult aliasesAllContexts(const llvm::Value &value,
                                      const llvm::Instruction &site,
                                      Point point = Point::Before);
   QueryResult objectPointsTo(Id object, const llvm::Instruction &site,
                              const CallContext &context = {},
-                             Point point = Point::Before);
+                             Point point = Point::Before,
+                             ContextMatch match = ContextMatch::Full);
   QueryResult objectPointsToAllContexts(Id object,
                                         const llvm::Instruction &site,
                                         Point point = Point::Before);
   LLVMAliasResult objectAliases(Id object, const llvm::Instruction &site,
                                 const CallContext &context = {},
-                                Point point = Point::Before);
+                                Point point = Point::Before,
+                                ContextMatch match = ContextMatch::Full);
   LLVMAliasResult objectAliasesAllContexts(Id object,
                                            const llvm::Instruction &site,
                                            Point point = Point::Before);
@@ -68,10 +87,70 @@ public:
   std::vector<std::size_t> clustersFor(const llvm::Value &value) const;
   std::vector<std::vector<const llvm::Value *>> clusters() const;
   bool mayAlias(const llvm::Value &lhs, const llvm::Value &rhs,
-                const llvm::Instruction &site, const CallContext &context = {});
+                const llvm::Instruction &site, const CallContext &context = {},
+                ContextMatch match = ContextMatch::Full);
+  // Cross-site may-alias helpers (all-contexts and per-side contexts).
+  bool mayAliasAcrossSites(const llvm::Value &lhs,
+                           const llvm::Instruction &lhs_site,
+                           const llvm::Value &rhs,
+                           const llvm::Instruction &rhs_site,
+                           Point lhs_point = Point::Before,
+                           Point rhs_point = Point::Before);
+  bool mayAliasAcrossSites(const llvm::Value &lhs,
+                           const llvm::Instruction &lhs_site,
+                           const CallContext &lhs_context,
+                           const llvm::Value &rhs,
+                           const llvm::Instruction &rhs_site,
+                           const CallContext &rhs_context,
+                           Point lhs_point = Point::Before,
+                           Point rhs_point = Point::Before,
+                           ContextMatch lhs_match = ContextMatch::Full,
+                           ContextMatch rhs_match = ContextMatch::Full);
+  // Four-state byte-range-aware alias query (size == 0 means unknown/whole
+  // object access).
+  AliasKind queryAlias(const llvm::Value &lhs, std::uint64_t lhs_size,
+                       const llvm::Instruction &lhs_site,
+                       const llvm::Value &rhs, std::uint64_t rhs_size,
+                       const llvm::Instruction &rhs_site,
+                       Point lhs_point = Point::Before,
+                       Point rhs_point = Point::Before);
+  AliasKind queryAlias(const llvm::Value &lhs, std::uint64_t lhs_size,
+                       const llvm::Instruction &lhs_site,
+                       const CallContext &lhs_context, const llvm::Value &rhs,
+                       std::uint64_t rhs_size,
+                       const llvm::Instruction &rhs_site,
+                       const CallContext &rhs_context,
+                       Point lhs_point = Point::Before,
+                       Point rhs_point = Point::Before,
+                       ContextMatch lhs_match = ContextMatch::Full,
+                       ContextMatch rhs_match = ContextMatch::Full);
+  // Non-throwing site-free conservative alias convenience query (returns true
+  // for untracked / non-pointer / unreachable values instead of throwing).
+  bool mayAliasGlobal(const llvm::Value &lhs, const llvm::Value &rhs);
   bool mustAlias(const llvm::Value &lhs, const llvm::Value &rhs,
-                 const llvm::Instruction &site,
-                 const CallContext &context = {});
+                 const llvm::Instruction &site, const CallContext &context = {},
+                 ContextMatch match = ContextMatch::Full);
+  bool mayNull(const llvm::Value &value, const llvm::Instruction &site,
+               Point point = Point::Before);
+  bool mayNull(const llvm::Value &value, const llvm::Instruction &site,
+               const CallContext &context, Point point = Point::Before,
+               ContextMatch match = ContextMatch::Full);
+  // Derived call-graph, Mod/Ref, and reverse points-to results.
+  LLVMCallTargets callTargets(const llvm::CallBase &call);
+  LLVMCallTargets callTargets(const llvm::CallBase &call,
+                              const CallContext &context,
+                              ContextMatch match = ContextMatch::Full);
+  std::vector<const llvm::CallBase *>
+  callersOf(const llvm::Function &function) const;
+  bool isRecursiveFunction(const llvm::Function &function) const;
+  ModRefResult functionModRef(const llvm::Function &function);
+  ModRefResult callModRef(const llvm::CallBase &call);
+  ModRefResult callModRef(const llvm::CallBase &call,
+                          const CallContext &context,
+                          ContextMatch match = ContextMatch::Full);
+  LLVMReversePointsToResult reversePointsTo(Id object);
+  bool hasValue(const llvm::Value &value) const;
+  bool hasSite(const llvm::Instruction &site) const;
 
   // UNKNOWN and NULL_OBJECT have no LLVM allocation site. A function object
   // maps to its Function, a global to its GlobalVariable, and storage to its

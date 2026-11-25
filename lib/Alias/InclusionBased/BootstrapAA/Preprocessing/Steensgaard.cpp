@@ -4,7 +4,6 @@
 #include <deque>
 #include <limits>
 #include <map>
-#include <unordered_map>
 #include <vector>
 
 namespace lotus {
@@ -12,8 +11,10 @@ namespace bootstrap {
 namespace detail {
 
 namespace {
-// Unary unification graph supporting recursive shapes, self-edges, and
-// per-node nullability (avoiding a global NULL_OBJECT unification bridge).
+// Unary unification graph supporting recursive shapes, self-edges, per-node
+// nullability (avoiding a global NULL_OBJECT unification bridge), small-to-large
+// per-root object tracking, and event-driven watcher wakeups for almost-linear
+// dynamic constraint propagation.
 class Unification {
   struct Node {
     Id parent;
@@ -21,16 +22,47 @@ class Unification {
     Id target = INVALID;
     bool top = false;
     bool nullable = false;
+    std::vector<Id> objects;
+    std::vector<std::size_t> watchers;
   };
   std::vector<Node> m_nodes;
-  std::size_t m_version = 0;
+  std::deque<std::size_t> m_ready;
+  std::vector<bool> m_queued;
 
 public:
   Id node(bool top = false) {
     Id id = nextId(m_nodes.size(), "unification node");
-    m_nodes.push_back({id, 0, INVALID, top, false});
-    ++m_version;
+    m_nodes.push_back({id, 0, INVALID, top, false, {}, {}});
     return id;
+  }
+  void addObject(Id id, Id obj) { m_nodes[find(id)].objects.push_back(obj); }
+  const std::vector<Id> &objects(Id id) { return m_nodes[find(id)].objects; }
+  void initWorklist(std::size_t count) {
+    m_queued.assign(count, false);
+    m_ready.clear();
+  }
+  void enqueue(std::size_t idx) {
+    if (idx < m_queued.size() && !m_queued[idx]) {
+      m_queued[idx] = true;
+      m_ready.push_back(idx);
+    }
+  }
+  bool hasReady() const { return !m_ready.empty(); }
+  std::size_t popReady() {
+    const std::size_t idx = m_ready.front();
+    m_ready.pop_front();
+    m_queued[idx] = false;
+    return idx;
+  }
+  void watch(Id id, std::size_t idx) {
+    id = find(id);
+    if (!m_nodes[id].top)
+      m_nodes[id].watchers.push_back(idx);
+  }
+  void wake(Id id) {
+    id = find(id);
+    for (std::size_t idx : m_nodes[id].watchers)
+      enqueue(idx);
   }
   std::size_t size() const { return m_nodes.size(); }
   Id existingTarget(Id id) {
@@ -54,7 +86,8 @@ public:
     id = find(id);
     if (!m_nodes[id].nullable) {
       m_nodes[id].nullable = true;
-      ++m_version;
+      if (!m_nodes[id].top)
+        wake(id);
     }
   }
   Id target(Id id) {
@@ -78,12 +111,47 @@ public:
       if (m_nodes[a].rank < m_nodes[b].rank)
         std::swap(a, b);
       Id ta = m_nodes[a].target, tb = m_nodes[b].target;
+      const bool a_was_top = m_nodes[a].top;
+      const bool b_was_top = m_nodes[b].top;
+      const bool a_had_objs = !m_nodes[a].objects.empty();
+      const bool b_had_objs = !m_nodes[b].objects.empty();
+      const bool wake_a =
+          !a_was_top &&
+          (b_had_objs || b_was_top ||
+           (!m_nodes[a].nullable && m_nodes[b].nullable));
+      const bool wake_b =
+          !b_was_top &&
+          (a_had_objs || a_was_top ||
+           (!m_nodes[b].nullable && m_nodes[a].nullable));
+      if (wake_a)
+        for (std::size_t idx : m_nodes[a].watchers)
+          enqueue(idx);
+      if (wake_b)
+        for (std::size_t idx : m_nodes[b].watchers)
+          enqueue(idx);
+
       m_nodes[b].parent = a;
       if (m_nodes[a].rank == m_nodes[b].rank)
         ++m_nodes[a].rank;
       m_nodes[a].top |= m_nodes[b].top;
       m_nodes[a].nullable |= m_nodes[b].nullable;
-      ++m_version;
+      if (m_nodes[a].objects.size() < m_nodes[b].objects.size())
+        m_nodes[a].objects.swap(m_nodes[b].objects);
+      m_nodes[a].objects.insert(m_nodes[a].objects.end(),
+                                m_nodes[b].objects.begin(),
+                                m_nodes[b].objects.end());
+      m_nodes[b].objects.clear();
+      if (m_nodes[a].top) {
+        m_nodes[a].watchers.clear();
+        m_nodes[b].watchers.clear();
+      } else {
+        if (m_nodes[a].watchers.size() < m_nodes[b].watchers.size())
+          m_nodes[a].watchers.swap(m_nodes[b].watchers);
+        m_nodes[a].watchers.insert(m_nodes[a].watchers.end(),
+                                   m_nodes[b].watchers.begin(),
+                                   m_nodes[b].watchers.end());
+        m_nodes[b].watchers.clear();
+      }
       if (m_nodes[a].top) {
         m_nodes[a].target = a;
         if (ta != INVALID)
@@ -97,7 +165,6 @@ public:
       }
     }
   }
-  std::size_t version() const { return m_version; }
 };
 } // namespace
 
@@ -105,8 +172,11 @@ CoarseResult steensgaard(const Program &program) {
   Unification graph;
   std::vector<Id> object_nodes;
   object_nodes.reserve(program.objects.size());
-  for (Id o = 0; o < program.objects.size(); ++o)
-    object_nodes.push_back(graph.node(o == UNKNOWN));
+  for (Id o = 0; o < program.objects.size(); ++o) {
+    const Id n = graph.node(o == UNKNOWN);
+    graph.addObject(n, o);
+    object_nodes.push_back(n);
+  }
   // Represent each Value directly by its points-to target unification node so
   // no unmerged dummy value-wrapper nodes pollute SteensgaardHierarchy.
   std::vector<Id> value_targets;
@@ -162,22 +232,16 @@ CoarseResult steensgaard(const Program &program) {
         graph.merge(graph.target(object_nodes[o]), top);
   };
 
-  std::unordered_map<Id, std::vector<Id>> objects_by_root;
-  auto rebuild_root_objects = [&]() {
-    objects_by_root.clear();
-    for (Id o = 0; o < program.objects.size(); ++o)
-      objects_by_root[graph.find(object_nodes[o])].push_back(o);
-  };
   auto accessMatches = [&](Id address, std::uint64_t bytes,
                            bool is_load) -> bool {
     address = graph.find(address);
     if (graph.top(address))
       return false;
-    auto it = objects_by_root.find(address);
-    if (it == objects_by_root.end())
+    const auto &objs = graph.objects(address);
+    if (objs.empty())
       return true; // Wait for objects to reach this node before mismatching.
     bool found_mem = false;
-    for (Id object : it->second) {
+    for (Id object : objs) {
       if (object == NULL_OBJECT)
         continue;
       if (!isMemory(program.objects[object])) {
@@ -293,242 +357,260 @@ CoarseResult steensgaard(const Program &program) {
         for (auto phi : edge.phi)
           mergeFromValue(value_target(phi.first), phi.second);
 
-  // Dynamic fixpoint: iterate ONLY over deferred dynamic instructions.
+  // Event-driven dynamic worklist: register each deferred instruction on its
+  // operand unification root(s) and re-evaluate only when a watched root gains
+  // new objects, nullability, top-ness, or unaligned-interior status.
   if (!dynamic_insts.empty()) {
     std::vector<bool> unaligned_obj(program.objects.size(), false);
     for (Id o = 0; o < program.objects.size(); ++o)
       unaligned_obj[o] = program.objects[o].has_interior_pointer;
-    std::size_t old = 0;
-    bool unaligned_changed = false;
-    do {
-      old = graph.version();
-      unaligned_changed = false;
-      rebuild_root_objects();
-      for (const Instruction *ip : dynamic_insts) {
-        const Instruction &i = *ip;
-        switch (i.opcode) {
-        case Opcode::Field: {
-          const Id base_root = value_target(i.operands[0]);
-          if (graph.top(base_root)) {
-            graph.merge(value_target(i.result), top);
-          } else {
-            if (graph.nullable(base_root))
-              graph.markNullable(value_target(i.result));
-            auto it = objects_by_root.find(base_root);
-            if (it != objects_by_root.end()) {
-              for (Id obj : it->second) {
-                PointsToSet resolved = program.resolveField(
-                    obj, i.field_offset, i.field_known, i.field_array_stride);
-                if (!resolved.isTop() && obj >= 2 &&
-                    obj < program.objects.size()) {
-                  const Id b = program.baseOf(obj);
-                  const bool non_fs = !program.objects[b].field_sensitive;
-                  for (Id target : resolved.objects()) {
-                    if (target == NULL_OBJECT || target >= unaligned_obj.size())
-                      continue;
-                    bool mark = false;
-                    if (non_fs) {
+
+    graph.initWorklist(dynamic_insts.size());
+    for (std::size_t idx = 0; idx < dynamic_insts.size(); ++idx) {
+      const Instruction &i = *dynamic_insts[idx];
+      graph.enqueue(idx);
+      switch (i.opcode) {
+      case Opcode::Field:
+      case Opcode::Load:
+      case Opcode::Store:
+        graph.watch(value_target(i.operands[0]), idx);
+        break;
+      case Opcode::MemCopy:
+        graph.watch(value_target(i.operands[0]), idx);
+        graph.watch(value_target(i.operands[1]), idx);
+        break;
+      case Opcode::Havoc:
+        if (!i.operands.empty())
+          graph.watch(value_target(i.operands[0]), idx);
+        break;
+      case Opcode::Call:
+        if (i.indirect_target != INVALID)
+          graph.watch(value_target(i.indirect_target), idx);
+        break;
+      default:
+        break;
+      }
+    }
+
+    std::vector<Id> objs_copy;
+    std::vector<Id> src_objs_copy;
+    while (graph.hasReady()) {
+      const std::size_t idx = graph.popReady();
+      const Instruction &i = *dynamic_insts[idx];
+      switch (i.opcode) {
+      case Opcode::Field: {
+        const Id base_root = value_target(i.operands[0]);
+        if (graph.top(base_root)) {
+          graph.merge(value_target(i.result), top);
+        } else {
+          if (graph.nullable(base_root))
+            graph.markNullable(value_target(i.result));
+          objs_copy = graph.objects(base_root);
+          for (Id obj : objs_copy) {
+            PointsToSet resolved = program.resolveField(
+                obj, i.field_offset, i.field_known, i.field_array_stride);
+            if (!resolved.isTop() && obj >= 2 && obj < program.objects.size()) {
+              const Id b = program.baseOf(obj);
+              const bool non_fs = !program.objects[b].field_sensitive;
+              for (Id target : resolved.objects()) {
+                if (target == NULL_OBJECT || target >= unaligned_obj.size())
+                  continue;
+                bool mark = false;
+                if (non_fs) {
+                  mark = true;
+                } else if (!i.field_known) {
+                  const std::uint64_t align = program.objects[target].bytes;
+                  const bool off_ok =
+                      i.field_offset == 0 ||
+                      (align > 0 &&
+                       align <=
+                           static_cast<std::uint64_t>(
+                               std::numeric_limits<std::int64_t>::max()) &&
+                       (i.field_offset %
+                        static_cast<std::int64_t>(align)) == 0);
+                  if (i.field_array_stride == 0 || align == 0 ||
+                      (i.field_array_stride % align) != 0 || !off_ok)
+                    mark = true;
+                } else {
+                  const std::uint64_t co = program.objects[obj].offset;
+                  if (co <= static_cast<std::uint64_t>(
+                                std::numeric_limits<std::int64_t>::max())) {
+                    const std::int64_t cs = static_cast<std::int64_t>(co);
+                    const bool ok =
+                        !((i.field_offset > 0 &&
+                           cs > std::numeric_limits<std::int64_t>::max() -
+                                    i.field_offset) ||
+                          (i.field_offset < 0 &&
+                           cs < std::numeric_limits<std::int64_t>::min() -
+                                    i.field_offset));
+                    if (ok && cs + i.field_offset >= 0 &&
+                        program.objects[target].offset !=
+                            program.foldOffset(
+                                b, static_cast<std::uint64_t>(
+                                       cs + i.field_offset)))
                       mark = true;
-                    } else if (!i.field_known) {
-                      const std::uint64_t align = program.objects[target].bytes;
-                      const bool off_ok =
-                          i.field_offset == 0 ||
-                          (align > 0 &&
-                           align <=
-                               static_cast<std::uint64_t>(
-                                   std::numeric_limits<std::int64_t>::max()) &&
-                           (i.field_offset %
-                            static_cast<std::int64_t>(align)) == 0);
-                      if (i.field_array_stride == 0 || align == 0 ||
-                          (i.field_array_stride % align) != 0 || !off_ok)
-                        mark = true;
-                    } else {
-                      const std::uint64_t co = program.objects[obj].offset;
-                      if (co <= static_cast<std::uint64_t>(
-                                    std::numeric_limits<std::int64_t>::max())) {
-                        const std::int64_t cs = static_cast<std::int64_t>(co);
-                        const bool ok =
-                            !((i.field_offset > 0 &&
-                               cs > std::numeric_limits<std::int64_t>::max() -
-                                        i.field_offset) ||
-                              (i.field_offset < 0 &&
-                               cs < std::numeric_limits<std::int64_t>::min() -
-                                        i.field_offset));
-                        if (ok && cs + i.field_offset >= 0 &&
-                            program.objects[target].offset !=
-                                program.foldOffset(
-                                    b, static_cast<std::uint64_t>(
-                                           cs + i.field_offset)))
-                          mark = true;
-                      }
-                    }
-                    if (mark && !unaligned_obj[target]) {
-                      unaligned_obj[target] = true;
-                      unaligned_changed = true;
-                    }
                   }
                 }
-                for (Id target : resolved.objects()) {
-                  if (target == NULL_OBJECT)
-                    graph.markNullable(value_target(i.result));
-                  else
-                    graph.merge(value_target(i.result), object_nodes[target]);
+                if (mark && !unaligned_obj[target]) {
+                  unaligned_obj[target] = true;
+                  graph.wake(object_nodes[target]);
                 }
               }
             }
-          }
-          break;
-        }
-        case Opcode::Load: {
-          const Id addr = value_target(i.operands[0]);
-          graph.merge(value_target(i.result),
-                      accessMatches(addr, i.read_bytes, /*is_load=*/true)
-                          ? graph.target(addr)
-                          : top);
-          break;
-        }
-        case Opcode::Store: {
-          const Id address = value_target(i.operands[0]);
-          if (graph.top(address)) {
-            for (Id o = 0; o < program.objects.size(); ++o)
-              if (isMemory(program.objects[o])) {
-                if (i.write_bytes)
-                  graph.merge(graph.target(object_nodes[o]), top);
-                else
-                  mergeFromValue(graph.target(object_nodes[o]), i.operands[1]);
-              }
-          } else if (i.write_bytes != 0) {
-            if (accessMatches(address, i.write_bytes, /*is_load=*/false))
-              mergeFromValue(graph.target(address), i.operands[1]);
-            else
-              graph.merge(graph.target(address), top);
-            // Cross-field pointer stores (e.g., storing an 8-byte pointer at
-            // offset 0 of a packed `<{ i32, i8* }>` struct) partially overwrite
-            // overlapping sibling fields, which must widen to top.
-            auto it = objects_by_root.find(address);
-            if (it != objects_by_root.end()) {
-              for (Id o : it->second) {
-                if (!isMemory(program.objects[o]))
-                  continue;
-                for (Id fo : program.overlappingFields(o, i.write_bytes))
-                  if (fo != o && isMemory(program.objects[fo]))
-                    graph.merge(graph.target(object_nodes[fo]), top);
-              }
+            for (Id target : resolved.objects()) {
+              if (target == NULL_OBJECT)
+                graph.markNullable(value_target(i.result));
+              else
+                graph.merge(value_target(i.result), object_nodes[target]);
             }
           }
+        }
+        break;
+      }
+      case Opcode::Load: {
+        const Id addr = value_target(i.operands[0]);
+        graph.merge(value_target(i.result),
+                    accessMatches(addr, i.read_bytes, /*is_load=*/true)
+                        ? graph.target(addr)
+                        : top);
+        break;
+      }
+      case Opcode::Store: {
+        const Id address = value_target(i.operands[0]);
+        if (graph.top(address)) {
+          for (Id o = 0; o < program.objects.size(); ++o)
+            if (isMemory(program.objects[o])) {
+              if (i.write_bytes)
+                graph.merge(graph.target(object_nodes[o]), top);
+              else
+                mergeFromValue(graph.target(object_nodes[o]), i.operands[1]);
+            }
+        } else if (i.write_bytes != 0) {
+          if (accessMatches(address, i.write_bytes, /*is_load=*/false))
+            mergeFromValue(graph.target(address), i.operands[1]);
+          else
+            graph.merge(graph.target(address), top);
+          // Cross-field pointer stores (e.g., storing an 8-byte pointer at
+          // offset 0 of a packed `<{ i32, i8* }>` struct) partially overwrite
+          // overlapping sibling fields, which must widen to top.
+          objs_copy = graph.objects(address);
+          for (Id o : objs_copy) {
+            if (!isMemory(program.objects[o]))
+              continue;
+            for (Id fo : program.overlappingFields(o, i.write_bytes))
+              if (fo != o && isMemory(program.objects[fo]))
+                graph.merge(graph.target(object_nodes[fo]), top);
+          }
+        }
+        break;
+      }
+      case Opcode::MemCopy: {
+        const Id dst_root = value_target(i.operands[0]);
+        const Id src_root = value_target(i.operands[1]);
+        if (graph.top(dst_root)) {
+          havoc_all();
           break;
         }
-        case Opcode::MemCopy: {
-          const Id dst_root = value_target(i.operands[0]);
-          const Id src_root = value_target(i.operands[1]);
-          if (graph.top(dst_root)) {
-            havoc_all();
-            break;
-          }
-          auto dst_it = objects_by_root.find(dst_root);
-          if (dst_it == objects_by_root.end())
-            break;
-          for (Id od : dst_it->second) {
-            if (!isMemory(program.objects[od]))
+        objs_copy = graph.objects(dst_root);
+        if (objs_copy.empty())
+          break;
+        const bool src_is_top = graph.top(src_root);
+        if (!src_is_top)
+          src_objs_copy = graph.objects(src_root);
+        for (Id od : objs_copy) {
+          if (!isMemory(program.objects[od]))
+            continue;
+          const auto fields = program.overlappingFields(od, i.write_bytes);
+          for (Id fd : fields) {
+            if (!isMemory(program.objects[fd]))
               continue;
-            const auto fields = program.overlappingFields(od, i.write_bytes);
-            for (Id fd : fields) {
-              if (!isMemory(program.objects[fd]))
-                continue;
-              const Object &fd_info = program.objects[fd];
-              std::vector<std::int64_t> rels;
-              if (graph.top(src_root) || unaligned_obj[od] ||
-                  !program.memCopyRelativeOffsets(od, fd, i.write_bytes,
-                                                  rels)) {
+            const Object &fd_info = program.objects[fd];
+            std::vector<std::int64_t> rels;
+            if (src_is_top || graph.top(value_target(i.operands[1])) ||
+                unaligned_obj[od] ||
+                !program.memCopyRelativeOffsets(od, fd, i.write_bytes, rels)) {
+              graph.merge(graph.target(object_nodes[fd]), top);
+              continue;
+            }
+            if (src_objs_copy.empty())
+              continue;
+            for (Id os : src_objs_copy) {
+              if (!isMemory(program.objects[os]) || unaligned_obj[os]) {
                 graph.merge(graph.target(object_nodes[fd]), top);
                 continue;
               }
-              auto src_it = objects_by_root.find(src_root);
-              if (src_it == objects_by_root.end())
-                continue;
-              for (Id os : src_it->second) {
-                if (!isMemory(program.objects[os]) || unaligned_obj[os]) {
+              for (std::int64_t rel : rels) {
+                const PointsToSet fs_pts = program.resolveField(os, rel, true);
+                if (fs_pts.isTop() || fs_pts.empty()) {
                   graph.merge(graph.target(object_nodes[fd]), top);
                   continue;
                 }
-                for (std::int64_t rel : rels) {
-                  const PointsToSet fs_pts =
-                      program.resolveField(os, rel, true);
-                  if (fs_pts.isTop() || fs_pts.empty()) {
+                for (Id fs : fs_pts.objects()) {
+                  const Object &fs_info = program.objects[fs];
+                  if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes) {
                     graph.merge(graph.target(object_nodes[fd]), top);
-                    continue;
-                  }
-                  for (Id fs : fs_pts.objects()) {
-                    const Object &fs_info = program.objects[fs];
-                    if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes) {
-                      graph.merge(graph.target(object_nodes[fd]), top);
-                    } else {
-                      graph.merge(graph.target(object_nodes[fd]),
-                                  graph.target(object_nodes[fs]));
-                    }
+                  } else {
+                    graph.merge(graph.target(object_nodes[fd]),
+                                graph.target(object_nodes[fs]));
                   }
                 }
               }
             }
           }
-          break;
         }
-        case Opcode::Havoc: {
+        break;
+      }
+      case Opcode::Havoc: {
+        if (i.result != INVALID)
+          graph.merge(value_target(i.result), top);
+        if (i.operands.empty() || graph.top(value_target(i.operands[0]))) {
+          havoc_all();
+        } else {
+          const Id addr = value_target(i.operands[0]);
+          objs_copy = graph.objects(addr);
+          for (Id o : objs_copy) {
+            if (!isMemory(program.objects[o]))
+              continue;
+            for (Id fo : program.overlappingFields(o, i.write_bytes))
+              if (isMemory(program.objects[fo]))
+                graph.merge(graph.target(object_nodes[fo]), top);
+          }
+          if (i.write_bytes == 0 || objs_copy.empty())
+            graph.merge(graph.target(addr), top);
+        }
+        break;
+      }
+      case Opcode::Call: {
+        Targets targets;
+        targets.opaque = i.opaque_alternative;
+        if (i.indirect_target == INVALID ||
+            graph.top(value_target(i.indirect_target))) {
+          for (Id f = 0; f < program.functions.size(); ++f)
+            targets.functions.insert(f);
+          targets.opaque = true;
+        } else {
+          objs_copy = graph.objects(value_target(i.indirect_target));
+          for (Id obj : objs_copy) {
+            if (program.objects[obj].kind == ObjectKind::Function)
+              targets.functions.insert(program.objects[obj].function);
+            else if (obj != NULL_OBJECT)
+              targets.opaque = true;
+          }
+        }
+        if (targets.opaque) {
           if (i.result != INVALID)
             graph.merge(value_target(i.result), top);
-          if (i.operands.empty() || graph.top(value_target(i.operands[0]))) {
+          if (i.writes_memory)
             havoc_all();
-          } else {
-            const Id addr = value_target(i.operands[0]);
-            auto it = objects_by_root.find(addr);
-            if (it != objects_by_root.end()) {
-              for (Id o : it->second) {
-                if (!isMemory(program.objects[o]))
-                  continue;
-                for (Id fo : program.overlappingFields(o, i.write_bytes))
-                  if (isMemory(program.objects[fo]))
-                    graph.merge(graph.target(object_nodes[fo]), top);
-              }
-            }
-            if (i.write_bytes == 0 || it == objects_by_root.end())
-              graph.merge(graph.target(addr), top);
-          }
-          break;
         }
-        case Opcode::Call: {
-          Targets targets;
-          targets.opaque = i.opaque_alternative;
-          if (i.indirect_target == INVALID ||
-              graph.top(value_target(i.indirect_target))) {
-            for (Id f = 0; f < program.functions.size(); ++f)
-              targets.functions.insert(f);
-            targets.opaque = true;
-          } else {
-            auto it = objects_by_root.find(value_target(i.indirect_target));
-            if (it != objects_by_root.end()) {
-              for (Id obj : it->second) {
-                if (program.objects[obj].kind == ObjectKind::Function)
-                  targets.functions.insert(program.objects[obj].function);
-                else if (obj != NULL_OBJECT)
-                  targets.opaque = true;
-              }
-            }
-          }
-          if (targets.opaque) {
-            if (i.result != INVALID)
-              graph.merge(value_target(i.result), top);
-            if (i.writes_memory)
-              havoc_all();
-          }
-          for (Id f : targets.functions)
-            applyDirectCall(i, f);
-          break;
-        }
-        default:
-          break;
-        }
+        for (Id f : targets.functions)
+          applyDirectCall(i, f);
+        break;
       }
-    } while (old != graph.version() || unaligned_changed);
+      default:
+        break;
+      }
+    }
   }
 
   CoarseResult result;

@@ -244,21 +244,27 @@ public:
                        std::vector<Id> cluster_values, Slice slice,
                        const Options &options);
 
-  QueryResult query(Id value, Id site, const Context *context_path,
-                    Point point) override;
+  QueryResult query(Id value, Id site, const Context *context_path, Point point,
+                    ContextMatch match = ContextMatch::Full) override;
   AliasResult queryAliases(Id value, Id site, const Context *context_path,
-                           Point point) override;
+                           Point point,
+                           ContextMatch match = ContextMatch::Full) override;
   QueryResult queryObject(Id object, Id site, const Context *context_path,
-                          Point point) override;
+                          Point point,
+                          ContextMatch match = ContextMatch::Full) override;
   AliasResult queryObjectAliases(Id object, Id site,
-                                 const Context *context_path,
-                                 Point point) override;
-  bool mustAlias(Id lhs, Id rhs, Id site, const Context *context_path) override;
+                                 const Context *context_path, Point point,
+                                 ContextMatch match = ContextMatch::Full) override;
+  bool mustAlias(Id lhs, Id rhs, Id site, const Context *context_path,
+                 ContextMatch match = ContextMatch::Full) override;
+  bool tracksObject(Id object) const override {
+    return object < m_slice.objects.size() && m_slice.objects[object];
+  }
   const Statistics &statistics() const override { return m_stats; }
 
 private:
   using FsciKey = std::tuple<Id, Id, Point>;
-  using FscsKey = std::tuple<Id, Id, Point, Context>;
+  using FscsKey = std::tuple<Id, Id, Point, Context, bool>;
   static constexpr std::size_t MAX_PASS1_EXTRA_KEYS = 256;
 
   struct WorkItem {
@@ -375,28 +381,39 @@ private:
   PointsToSet computeFsci(Id val, Id site, Point point,
                           std::set<Expr> *entry_anchors = nullptr,
                           bool *path_pruned_out = nullptr);
-  bool validateContext(Id site, const Context &ctx);
-  bool isPathReachable(Id site, Point point, const Context *ctx);
+  bool validateContext(Id site, const Context &ctx, bool is_suffix = false);
+  bool isPathReachable(Id site, Point point, const Context *ctx,
+                       bool is_suffix = false);
   QueryResult computeFscsExpr(const Expr &target, Id site, const Context &ctx,
                               Point point,
-                              std::set<Expr> *entry_anchors = nullptr);
+                              std::set<Expr> *entry_anchors = nullptr,
+                              bool widen_empty_to_top = true,
+                              bool is_suffix = false);
   QueryResult computeFscs(Id val, Id site, const Context &ctx, Point point,
-                          std::set<Expr> *entry_anchors = nullptr);
-  // Algorithm 3 Step 2: forward summary propagation from entry anchors A to Q.
+                          std::set<Expr> *entry_anchors = nullptr,
+                          bool is_suffix = false);
+  // Algorithm 3 Step 2: forward summary propagation from entry anchors A to Q
+  // (covering both SSA pointer values and in-slice memory pointer objects).
   void propagateForwardAnchorsFsci(const std::set<Expr> &anchors, Id target_fn,
                                    Id site, Point point,
                                    const std::vector<Id> &candidates,
+                                   const std::vector<Id> &obj_candidates,
                                    std::set<Id> &out_aliases,
+                                   std::set<Id> &out_obj_aliases,
                                    bool &exact_complete);
   void propagateForwardAnchorsFscs(const std::set<Expr> &anchors,
                                    const Context &ctx, Id site, Point point,
                                    const std::vector<Id> &candidates,
+                                   const std::vector<Id> &obj_candidates,
                                    std::set<Id> &out_aliases,
-                                   bool &exact_complete);
+                                   std::set<Id> &out_obj_aliases,
+                                   bool &exact_complete,
+                                   bool is_suffix = false);
   AliasResult finishAliasQuery(const QueryResult &base,
                                const std::set<Expr> &entry_anchors, Id self_val,
-                               Id site, const Context *context_path,
-                               Point point);
+                               Id self_obj, Id site,
+                               const Context *context_path, Point point,
+                               ContextMatch match = ContextMatch::Full);
   void precomputeDepthSummaries(std::size_t depth);
   void computeFlowSensitiveReachability();
   void runDovetailing();
@@ -431,6 +448,7 @@ private:
   std::map<SummaryKey, std::vector<SummaryEntry>> m_summaries;
   std::set<SummaryKey> m_finalized;
   std::set<SummaryKey> m_path_pruned_summaries;
+  std::set<SummaryKey> m_pass_created_summaries;
 
   std::map<FsciKey, PointsToSet> m_fsci_cache;
   std::set<FsciKey> m_path_pruned_fsci;

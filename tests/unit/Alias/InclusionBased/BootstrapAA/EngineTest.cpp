@@ -102,6 +102,112 @@ void sparsePointsToSets() {
   CHECK(set.isTop());
   CHECK(set.objects().begin() != set.objects().end());
   CHECK(*set.objects().begin() == UNKNOWN);
+
+  // Stress & differential verification of SBO + 256-bit chunked sparse
+  // bitvector against `std::set<Id>` across empty, NULL, inline 1/2-word,
+  // heap 1-chunk (3+ words), heap multi-chunk, copy/move/reuse, and Top.
+  std::vector<PointsToSet> psets(32);
+  std::vector<std::set<Id>> refs(32);
+  std::uint64_t rng = 0x9E3779B97F4A7C15ULL;
+  auto nextRng = [&]() -> std::uint64_t {
+    rng ^= rng << 13;
+    rng ^= rng >> 7;
+    rng ^= rng << 17;
+    return rng;
+  };
+  auto checkMatch = [&](const PointsToSet &s, const std::set<Id> &r) {
+    CHECK(s.empty() == r.empty());
+    CHECK(s.size() == r.size());
+    CHECK(!s.isTop());
+    CHECK(s.hasNull() == (r.count(NULL_OBJECT) != 0));
+    bool ref_non_null = false;
+    for (Id o : r)
+      if (o != NULL_OBJECT)
+        ref_non_null = true;
+    CHECK(s.hasNonNull() == ref_non_null);
+    std::vector<Id> got(s.begin(), s.end());
+    std::vector<Id> exp(r.begin(), r.end());
+    CHECK(got == exp);
+  };
+  // Explicitly exercise 3 words inside a single 256-bit chunk (bits 2, 65, 130)
+  // and inline/heap join edge cases.
+  {
+    PointsToSet a, b;
+    CHECK(a.insert(NULL_OBJECT));
+    CHECK(a.hasNull() && !a.hasNonNull() && a.size() == 1);
+    CHECK(a.insert(2));
+    CHECK(a.insert(65));
+    CHECK(a.insert(130)); // spills to 1 HeapChunk with 3 non-zero words
+    CHECK(a.size() == 4);
+    CHECK(a.contains(NULL_OBJECT) && a.contains(2) && a.contains(65) &&
+          a.contains(130) && !a.contains(131));
+    CHECK(!a.intersectsNonNull(PointsToSet(NULL_OBJECT)));
+    CHECK(a.intersects(PointsToSet(NULL_OBJECT)));
+    CHECK(b.insert(130));
+    CHECK(b.insert(50000));
+    CHECK(a.intersectsNonNull(b));
+    CHECK(b.intersectsNonNull(a));
+    PointsToSet c(b);
+    CHECK(c.join(a)); // inline joining heap
+    CHECK(!c.join(a)); // idempotent no-op join
+    CHECK(c.size() == 5);
+    std::vector<Id> cv(c.begin(), c.end());
+    CHECK(cv == std::vector<Id>({NULL_OBJECT, 2, 65, 130, 50000}));
+    PointsToSet moved(std::move(c));
+    CHECK(c.empty());
+    CHECK(moved.size() == 5);
+    PointsToSet reused;
+    for (Id id : {2u, 65u, 130u, 300u, 700u, 2000u, 9000u})
+      reused.insert(id);
+    reused = moved; // heap copy-assignment buffer reuse
+    CHECK(reused == moved);
+    reused.clear();
+    CHECK(reused.empty() && !reused.hasNull() && !reused.hasNonNull());
+  }
+  for (int iter = 0; iter < 1200; ++iter) {
+    const std::size_t idx = static_cast<std::size_t>(nextRng() % psets.size());
+    const unsigned op = static_cast<unsigned>(nextRng() % 5);
+    if (op < 3) {
+      Id val = (nextRng() % 10 == 0)
+                   ? NULL_OBJECT
+                   : static_cast<Id>(2 + (nextRng() % 20000));
+      const bool c1 = psets[idx].insert(val);
+      const bool c2 = refs[idx].insert(val).second;
+      CHECK(c1 == c2);
+    } else if (op == 3) {
+      const std::size_t src =
+          static_cast<std::size_t>(nextRng() % psets.size());
+      const bool c1 = psets[idx].join(psets[src]);
+      const std::size_t before = refs[idx].size();
+      refs[idx].insert(refs[src].begin(), refs[src].end());
+      const bool c2 = refs[idx].size() != before;
+      CHECK(c1 == c2);
+    } else {
+      const std::size_t other =
+          static_cast<std::size_t>(nextRng() % psets.size());
+      bool ref_inter = false;
+      bool ref_non_null_inter = false;
+      for (Id o : refs[idx]) {
+        if (refs[other].count(o)) {
+          ref_inter = true;
+          if (o != NULL_OBJECT)
+            ref_non_null_inter = true;
+        }
+      }
+      CHECK(psets[idx].intersects(psets[other]) == ref_inter);
+      CHECK(psets[idx].intersectsNonNull(psets[other]) == ref_non_null_inter);
+      CHECK((psets[idx] == psets[other]) == (refs[idx] == refs[other]));
+      if (psets[idx] == psets[other]) {
+        CHECK(!(psets[idx] < psets[other]) && !(psets[other] < psets[idx]));
+      } else {
+        CHECK((psets[idx] < psets[other]) != (psets[other] < psets[idx]));
+      }
+    }
+    if (iter % 40 == 0)
+      checkMatch(psets[idx], refs[idx]);
+  }
+  for (std::size_t i = 0; i < psets.size(); ++i)
+    checkMatch(psets[i], refs[i]);
 }
 void hierarchyMetadata() {
   Fixture f;
@@ -2937,6 +3043,846 @@ void round5And6UnslicedIndirectCallPackedStoreBddBudgetAndNullAliasSoundness() {
               ar.aliases.end());
   }
 }
+
+void auditFixesCyclicPass1NullCoverForwardAliasesAndInteriorGuards() {
+  // Part A: Cyclic dovetailing Pass-1 must NOT poison a lower-depth callee's
+  // `ExitReturn` summary when that callee performs an indirect call through a
+  // cyclic higher-depth function pointer `fp`.
+  {
+    Program p;
+    Object o_ans;
+    o_ans.name = "ans";
+    o_ans.kind = ObjectKind::Global;
+    o_ans.singleton = true;
+    o_ans.bytes = 8;
+    o_ans.initial = PointsToSet(NULL_OBJECT);
+    Id ans = p.addObject(o_ans);
+
+    Object o_cyc;
+    o_cyc.name = "cyc";
+    o_cyc.kind = ObjectKind::Global;
+    o_cyc.singleton = false;
+    o_cyc.bytes = 8;
+    o_cyc.initial = PointsToSet{};
+    Id cyc = p.addObject(o_cyc);
+
+    Object o_slot;
+    o_slot.name = "slot";
+    o_slot.kind = ObjectKind::Global;
+    o_slot.singleton = true;
+    o_slot.bytes = 8;
+    o_slot.initial = PointsToSet(NULL_OBJECT);
+    Id slot = p.addObject(o_slot);
+
+    Id fn_main = p.addFunction("main");
+    Id fn_bar = p.addFunction("bar");
+    Id fn_leaf = p.addFunction("leaf");
+    p.entry = fn_main;
+
+    Object o_leaf_fn;
+    o_leaf_fn.name = "leaf_fn";
+    o_leaf_fn.kind = ObjectKind::Function;
+    o_leaf_fn.function = fn_leaf;
+    o_leaf_fn.initial = PointsToSet::top();
+    Id f_leaf = p.addObject(o_leaf_fn);
+
+    // leaf(): returns &ans (depth 0).
+    Id lb = p.addBlock(fn_leaf);
+    Id l_ans = p.addValue({"l.ans", fn_leaf, false, {}});
+    Instruction il0;
+    il0.opcode = Opcode::Address;
+    il0.result = l_ans;
+    il0.object = ans;
+    p.append(fn_leaf, lb, il0);
+    Instruction il1;
+    il1.opcode = Opcode::Return;
+    il1.operands = {l_ans};
+    p.append(fn_leaf, lb, il1);
+
+    // bar(fp): calls (*fp)() and returns its result. `ExitReturn` of `bar` has
+    // depth 0 (`ans`), while `fp` lives in cyclic depth >= 1 (`cyc`).
+    Id bb = p.addBlock(fn_bar);
+    Id b_fp = p.addValue({"b.fp", fn_bar, false, {}});
+    Id b_res = p.addValue({"b.res", fn_bar, false, {}});
+    p.functions[fn_bar].parameters = {b_fp};
+    Instruction ib0;
+    ib0.opcode = Opcode::Call;
+    ib0.indirect_target = b_fp;
+    ib0.result = b_res;
+    p.append(fn_bar, bb, ib0);
+    Instruction ib1;
+    ib1.opcode = Opcode::Return;
+    ib1.operands = {b_res};
+    p.append(fn_bar, bb, ib1);
+
+    // main(): build cyclic component containing `cyc` and `&leaf` via
+    // `*(&cyc) = &cyc; *(&cyc) = &leaf;` and push `bar`'s result through
+    // another cyclic pointer so Pass 1 of cyclic depth triggers `bar` lazily.
+    Id mb = p.addBlock(fn_main);
+    Id v_pcyc = p.addValue({"pcyc", fn_main, false, {}});
+    Id v_pleaf = p.addValue({"pleaf", fn_main, false, {}});
+    Id v_pslot = p.addValue({"pslot", fn_main, false, {}});
+    Id v_fp1 = p.addValue({"fp1", fn_main, false, {}});
+    Id v_fp2 = p.addValue({"fp2", fn_main, false, {}});
+    Id v_bar = p.addValue({"bar_r", fn_main, false, {}});
+    Id v_out = p.addValue({"out", fn_main, false, {}});
+
+    Instruction im0;
+    im0.opcode = Opcode::Address;
+    im0.result = v_pcyc;
+    im0.object = cyc;
+    p.append(fn_main, mb, im0);
+    Instruction im1;
+    im1.opcode = Opcode::Address;
+    im1.result = v_pleaf;
+    im1.object = f_leaf;
+    p.append(fn_main, mb, im1);
+    Instruction im2;
+    im2.opcode = Opcode::Address;
+    im2.result = v_pslot;
+    im2.object = slot;
+    p.append(fn_main, mb, im2);
+    Instruction im3;
+    im3.opcode = Opcode::Store;
+    im3.operands = {v_pcyc, v_pcyc};
+    p.append(fn_main, mb, im3);
+    Instruction im4;
+    im4.opcode = Opcode::Store;
+    im4.operands = {v_pcyc, v_pleaf};
+    p.append(fn_main, mb, im4);
+    Instruction im5;
+    im5.opcode = Opcode::Load;
+    im5.result = v_fp1;
+    im5.operands = {v_pcyc};
+    p.append(fn_main, mb, im5);
+    Instruction im6;
+    im6.opcode = Opcode::Load;
+    im6.result = v_fp2;
+    im6.operands = {v_fp1};
+    p.append(fn_main, mb, im6);
+    Instruction im7;
+    im7.opcode = Opcode::Call;
+    im7.callee = fn_bar;
+    im7.operands = {v_fp2};
+    im7.result = v_bar;
+    Id s_bar = p.append(fn_main, mb, im7);
+    Instruction im8;
+    im8.opcode = Opcode::Store;
+    im8.operands = {v_pslot, v_bar};
+    p.append(fn_main, mb, im8);
+    Instruction im9;
+    im9.opcode = Opcode::Load;
+    im9.result = v_out;
+    im9.operands = {v_pslot};
+    Id s_out = p.append(fn_main, mb, im9);
+    Instruction im10;
+    im10.opcode = Opcode::Return;
+    im10.operands = {v_out};
+    p.append(fn_main, mb, im10);
+    p.validate();
+
+    for (int m = 0; m < 3; ++m) {
+      Options opt = refined();
+      if (m == 0)
+        opt.solver_mode = SolverMode::GuardedSummary;
+      else if (m == 1) {
+        opt.solver_mode = SolverMode::GuardedSummary;
+        opt.eager_dovetail_summaries = true;
+      } else {
+        opt.solver_mode = SolverMode::InputStateTabulation;
+      }
+      Analysis aa(p, opt);
+      auto qb = aa.pointsTo(v_bar, s_bar, {}, Point::After);
+      CHECK(qb.reachable());
+      CHECK(qb.points_to.contains(ans));
+      auto qo = aa.pointsTo(v_out, s_out, {}, Point::After);
+      CHECK(qo.reachable());
+      CHECK(qo.points_to.contains(ans));
+      auto qf = aa.pointsToAllContexts(v_out, s_out, Point::After);
+      CHECK(qf.reachable());
+      CHECK(qf.points_to.contains(ans));
+    }
+  }
+
+  // Part B: `NULL_OBJECT` must NOT bridge nullable pointers into one giant
+  // inverse cluster during Andersen or One-Level-Flow cover construction.
+  {
+    Fixture f;
+    Id cnull = f.addr(NULL_OBJECT);
+    std::vector<Id> objs;
+    std::vector<Id> ptrs;
+    for (unsigned k = 0; k < 8; ++k) {
+      Id o = f.object("o" + std::to_string(k));
+      objs.push_back(o);
+      Id pa = f.addr(o);
+      Id p_nullable = f.value("p" + std::to_string(k));
+      f.inst(Opcode::Join, p_nullable, {pa, cnull});
+      ptrs.push_back(p_nullable);
+    }
+    // Single sink Join puts all 8 nullable pointers into ONE Steensgaard
+    // partition (bidirectional unification), while directionally each `p_k`
+    // only points to `{o_k, NULL_OBJECT}`.
+    Id sink = f.value("sink");
+    f.inst(Opcode::Join, sink, ptrs);
+    Id sRet = f.inst(Opcode::Return);
+
+    for (bool use_olf : {false, true}) {
+      Options opt = refined();
+      opt.andersen_threshold = 4;
+      opt.adaptive_andersen_threshold = true;
+      opt.enable_one_level_flow = use_olf;
+      Analysis aa(f.p, opt);
+      CHECK(aa.statistics().steensgaard_largest_partition >= 9);
+      CHECK(aa.statistics().adaptive_refinement_rejections == 0);
+      CHECK(aa.statistics().largest_cluster <= 3);
+      for (unsigned k = 0; k < objs.size(); ++k) {
+        auto qr = aa.pointsTo(ptrs[k], sRet);
+        CHECK(qr.reachable());
+        CHECK(qr.points_to == pts({objs[k], NULL_OBJECT}));
+      }
+      auto qs = aa.pointsTo(sink, sRet);
+      CHECK(qs.reachable());
+      for (Id o : objs)
+        CHECK(qs.points_to.contains(o));
+    }
+  }
+
+  // Part C: Algorithm 3 Step 2 forward alias propagation must remain sound when
+  // a call omits a formal pointer argument (`actual == INVALID` -> `Top`),
+  // passes an uninitialized fresh-slot load (`upper` empty -> widens to `Top`),
+  // or passes an in-cluster null-deref load whose caller summary is empty.
+  {
+    Fixture f;
+    Id a = f.object("a"), pa = f.addr(a);
+    Id slot_a = f.object("slot_a", PointsToSet(a), true, ObjectKind::Global);
+    Id pslot_a = f.addr(slot_a);
+    Id cnull = f.addr(NULL_OBJECT);
+    Id callee = f.p.addFunction("callee");
+    f.p.addBlock(callee);
+    Id p1 = f.value("p1", callee), p2 = f.value("p2", callee),
+       p3 = f.value("p3", callee), p4 = f.value("p4", callee);
+    f.p.functions[callee].parameters = {p1, p2, p3, p4};
+    Id cRet = f.inst(Opcode::Return, INVALID, {}, callee, 0);
+
+    // Uninitialized pointer `uninit` (defined by loading a fresh empty stack
+    // slot), omitted 2nd argument (`INVALID`), and `v_bad` (in `p1`'s cluster
+    // via Steensgaard but empty backward summary after overwriting `vp = null`).
+    Id empty_slot =
+        f.object("empty_slot", PointsToSet{}, true, ObjectKind::Stack);
+    Id p_empty = f.addr(empty_slot);
+    Id v_uninit = f.value("uninit");
+    f.inst(Opcode::Load, v_uninit, {p_empty}, f.main, 0);
+    Id vp = f.value("vp"), v_bad = f.value("v_bad");
+    f.inst(Opcode::Copy, vp, {pslot_a}, f.main, 0);
+    f.inst(Opcode::Copy, vp, {cnull}, f.main, 0);
+    f.inst(Opcode::Load, v_bad, {vp}, f.main, 0);
+    Id cs = f.call(callee, INVALID, {pa, INVALID, v_uninit, v_bad}, f.main, 0);
+    f.inst(Opcode::Return, INVALID, {}, f.main, 0);
+
+    for (int m = 0; m < 3; ++m) {
+      Options opt = refined();
+      if (m == 1) {
+        opt.path_sensitive = true;
+        opt.path_sensitive_interprocedural = true;
+      } else if (m == 2) {
+        opt.solver_mode = SolverMode::InputStateTabulation;
+      }
+      Analysis aa(f.p, opt);
+      CHECK(aa.mayAlias(p1, p2, cRet, {cs}));
+      CHECK(aa.mayAlias(p1, p3, cRet, {cs}));
+      CHECK(aa.mayAlias(p1, p4, cRet, {cs}));
+      auto alFscs = aa.aliases(p1, cRet, {cs});
+      CHECK(alFscs.reachable());
+      for (Id px : {p2, p3, p4}) {
+        CHECK(alFscs.may_alias_all ||
+              std::find(alFscs.aliases.begin(), alFscs.aliases.end(), px) !=
+                  alFscs.aliases.end());
+      }
+      auto alFsci = aa.aliasesAllContexts(p1, cRet);
+      CHECK(alFsci.reachable());
+      for (Id px : {p2, p3, p4}) {
+        CHECK(alFsci.may_alias_all ||
+              std::find(alFsci.aliases.begin(), alFsci.aliases.end(), px) !=
+                  alFsci.aliases.end());
+      }
+    }
+  }
+
+  // Part D: Unaligned interior pointer widened across two fields of the same
+  // struct must NOT trigger a false `PointsTo(f0) && PointsTo(f8)` guard
+  // contradiction in `atomsContradict`.
+  {
+    Fixture f;
+    Id target = f.object("target");
+    Object s0;
+    s0.name = "s0";
+    s0.kind = ObjectKind::Global;
+    s0.singleton = false;
+    s0.bytes = 8;
+    s0.size_bytes = 16;
+    s0.field_sensitive = true;
+    s0.initial = PointsToSet(target);
+    Id f0 = f.p.addObject(s0);
+    Object s8 = s0;
+    s8.name = "s8";
+    s8.size_bytes = 8;
+    s8.initial = PointsToSet(NULL_OBJECT);
+    Id f8 = f.p.addFieldObject(f0, 8, s8);
+
+    Id pf0 = f.addr(f0), pf8 = f.addr(f8);
+    Id p_unaligned = f.value("p_unaligned");
+    Instruction fi;
+    fi.opcode = Opcode::Field;
+    fi.result = p_unaligned;
+    fi.operands = {pf0};
+    fi.field_offset = 1; // Unaligned interior byte offset -> widens to {f0, f8}
+    fi.field_known = true;
+    f.p.append(f.main, 0, fi);
+    Id v_ld = f.value("v_ld");
+    f.inst(Opcode::Load, v_ld, {p_unaligned}, f.main, 0);
+    f.inst(Opcode::Store, INVALID, {p_unaligned, v_ld}, f.main, 0);
+    Id v_f8 = f.value("v_f8");
+    Id s_f8 = f.inst(Opcode::Load, v_f8, {pf8}, f.main, 0);
+    f.inst(Opcode::Return, INVALID, {}, f.main, 0);
+
+    for (SolverMode mode :
+         {SolverMode::GuardedSummary, SolverMode::InputStateTabulation}) {
+      Options opt = refined();
+      opt.solver_mode = mode;
+      Analysis aa(f.p, opt);
+      auto qr = aa.pointsTo(v_f8, s_f8, {}, Point::After);
+      CHECK(qr.reachable());
+      CHECK(qr.points_to.contains(target));
+    }
+  }
+}
+
+void objectAliasesAndMayAliasAllSymmetry() {
+  // Part A: Memory-object aliases (`AliasResult::object_aliases`) covering
+  // interprocedural writes, write-only indirect stores, out-of-slice
+  // read-only globals, and flow-sensitive kills (matching Kahlon Fig. 5).
+  {
+    Fixture f;
+    Id t1 = f.object("t1", PointsToSet{}, false, ObjectKind::Global);
+    f.p.objects[t1].bytes = 0;
+    f.p.objects[t1].size_bytes = 4;
+    Id t2 = f.object("t2", PointsToSet{}, false, ObjectKind::Global);
+    f.p.objects[t2].bytes = 0;
+    f.p.objects[t2].size_bytes = 4;
+
+    auto mkPtrGlobal = [&](const char *name, PointsToSet init) {
+      Id o = f.object(name, std::move(init), true, ObjectKind::Global);
+      f.p.objects[o].bytes = 8;
+      f.p.objects[o].size_bytes = 8;
+      return o;
+    };
+    Id g_a = mkPtrGlobal("g_a", PointsToSet(NULL_OBJECT));
+    Id g_b = mkPtrGlobal("g_b", PointsToSet(t1));
+    Id g_c = mkPtrGlobal("g_c", PointsToSet(NULL_OBJECT));
+    Id g_init_only = mkPtrGlobal("g_init_only", PointsToSet(t1));
+    Id g_other = mkPtrGlobal("g_other", PointsToSet(t2));
+    Id g_killed = mkPtrGlobal("g_killed", PointsToSet(t1));
+
+    Id pa = f.addr(g_a), pb = f.addr(g_b), pc = f.addr(g_c),
+       pkilled = f.addr(g_killed), pt2 = f.addr(t2);
+
+    Id bar = f.p.addFunction("bar");
+    f.p.addBlock(bar);
+    Id b_ld = f.value("b_ld", bar);
+    f.inst(Opcode::Load, b_ld, {pb}, bar, 0);
+    f.inst(Opcode::Store, INVALID, {pa, b_ld}, bar, 0);
+    f.inst(Opcode::Return, INVALID, {}, bar, 0);
+
+    Id z = f.value("z"), bv = f.value("bv"), ld_a = f.value("ld_a");
+    f.inst(Opcode::Copy, z, {pc});
+    f.inst(Opcode::Load, bv, {pb});
+    f.inst(Opcode::Store, INVALID, {z, bv}); // write-only indirect store to g_c
+    f.inst(Opcode::Store, INVALID, {pkilled, pt2}); // kills t1 in g_killed
+    f.call(bar, INVALID, {});
+    Id sLd = f.inst(Opcode::Load, ld_a, {pa});
+    Id sRet = f.inst(Opcode::Return);
+    (void)sLd;
+
+    auto hasObj = [](const AliasResult &r, Id o) {
+      return std::find(r.object_aliases.begin(), r.object_aliases.end(), o) !=
+             r.object_aliases.end();
+    };
+
+    for (SolverMode mode :
+         {SolverMode::GuardedSummary, SolverMode::InputStateTabulation}) {
+      Options opt = refined();
+      opt.solver_mode = mode;
+      Analysis aa(f.p, opt);
+      for (const AliasResult &ar : {aa.aliases(ld_a, sRet),
+                                    aa.aliasesAllContexts(ld_a, sRet),
+                                    aa.objectAliases(g_a, sRet),
+                                    aa.objectAliasesAllContexts(g_a, sRet)}) {
+        CHECK(ar.reachable());
+        CHECK(!ar.may_alias_all);
+        CHECK(hasObj(ar, g_a));
+        CHECK(hasObj(ar, g_b));
+        CHECK(hasObj(ar, g_c));
+        CHECK(hasObj(ar, g_init_only));
+        CHECK(!hasObj(ar, g_other));
+        CHECK(!hasObj(ar, g_killed));
+        CHECK(!hasObj(ar, t1));
+        CHECK(!hasObj(ar, t2));
+      }
+    }
+  }
+
+  // Part B: `may_alias_all` symmetry — `aliases(argv)` must list all locally
+  // reachable non-null-capable SSA values and non-null pointer memory objects
+  // while excluding strictly-NULL pointers and values defined after the site.
+  {
+    Fixture f;
+    Id argv = f.value("argv");
+    f.p.functions[f.main].parameters = {argv};
+    Id t = f.object("t", PointsToSet{}, false, ObjectKind::Global);
+    f.p.objects[t].bytes = 0;
+    f.p.objects[t].size_bytes = 4;
+    Id g_ptr = f.object("g_ptr", PointsToSet(t), true, ObjectKind::Global);
+    f.p.objects[g_ptr].bytes = 8;
+    f.p.objects[g_ptr].size_bytes = 8;
+    Id g_null =
+        f.object("g_null", PointsToSet(NULL_OBJECT), true, ObjectKind::Global);
+    f.p.objects[g_null].bytes = 8;
+    f.p.objects[g_null].size_bytes = 8;
+
+    Id pt = f.addr(t), cnull = f.addr(NULL_OBJECT);
+    Id va = f.value("va"), vn = f.value("vn"), v_after = f.value("v_after");
+    f.inst(Opcode::Copy, va, {pt});
+    f.inst(Opcode::Copy, vn, {cnull});
+    Id sQuery = f.inst(Opcode::Nop);
+    f.inst(Opcode::Copy, v_after, {pt});
+    f.inst(Opcode::Return);
+
+    auto hasVal = [](const AliasResult &r, Id v) {
+      return std::find(r.aliases.begin(), r.aliases.end(), v) !=
+             r.aliases.end();
+    };
+    auto hasObj = [](const AliasResult &r, Id o) {
+      return std::find(r.object_aliases.begin(), r.object_aliases.end(), o) !=
+             r.object_aliases.end();
+    };
+
+    for (SolverMode mode :
+         {SolverMode::GuardedSummary, SolverMode::InputStateTabulation}) {
+      Options opt = refined();
+      opt.solver_mode = mode;
+      Analysis aa(f.p, opt);
+      auto topAl = aa.aliases(argv, sQuery);
+      CHECK(topAl.reachable());
+      CHECK(topAl.may_alias_all);
+      CHECK(hasVal(topAl, argv));
+      CHECK(hasVal(topAl, va));
+      CHECK(!hasVal(topAl, vn));
+      CHECK(!hasVal(topAl, v_after));
+      CHECK(hasObj(topAl, g_ptr));
+      CHECK(!hasObj(topAl, g_null));
+      CHECK(!hasObj(topAl, t));
+
+      auto vaAl = aa.aliases(va, sQuery);
+      CHECK(vaAl.reachable());
+      CHECK(hasVal(vaAl, argv));
+      CHECK(hasObj(vaAl, g_ptr));
+      CHECK(!hasObj(vaAl, g_null));
+
+      auto vnAl = aa.aliases(vn, sQuery);
+      CHECK(vnAl.reachable());
+      CHECK(!hasVal(vnAl, argv));
+      CHECK(vnAl.object_aliases.empty());
+    }
+  }
+}
+
+void suffixContextsAndDerivedQueries() {
+  // Part A: Suffix contexts (1-CFA, 2-CFA, empty suffix == AllContexts) across
+  // both GuardedSummary and InputStateTabulation backends, plus cross-site
+  // mayAlias, callTargets, callersOf, isRecursiveFunction, functionModRef,
+  // callModRef, mayNull, and reversePointsTo.
+  {
+    Program p;
+    auto makeGlobalObj = [&](const char *nm) {
+      Object o;
+      o.name = nm;
+      o.kind = ObjectKind::Global;
+      o.singleton = true;
+      o.bytes = 8;
+      o.initial = PointsToSet{};
+      return p.addObject(std::move(o));
+    };
+    auto makeFuncObj = [&](const char *nm, Id fn) {
+      Object o;
+      o.name = nm;
+      o.kind = ObjectKind::Function;
+      o.function = fn;
+      o.initial = PointsToSet::top();
+      return p.addObject(std::move(o));
+    };
+    Id a = makeGlobalObj("a");
+    Id b = makeGlobalObj("b");
+    Id c = makeGlobalObj("c");
+    Id slot = makeGlobalObj("slot");
+    Id read_src = makeGlobalObj("read_src");
+    p.objects[read_src].initial = PointsToSet(c);
+
+    Id fn_main = p.addFunction("main");
+    Id fn_mid = p.addFunction("mid");
+    Id fn_leaf = p.addFunction("leaf");
+    Id fn_w1 = p.addFunction("write_a");
+    Id fn_w2 = p.addFunction("write_b");
+    Id fn_rec = p.addFunction("rec");
+    p.entry = fn_main;
+
+    Id f_w1 = makeFuncObj("write_a", fn_w1);
+    Id f_w2 = makeFuncObj("write_b", fn_w2);
+
+    // leaf(p): reads *(&read_src) into `r`, stores `p` into *(&slot), returns p.
+    Id lb = p.addBlock(fn_leaf);
+    Id l_p = p.addValue({"l.p", fn_leaf, false, {}});
+    Id l_raddr = p.addValue({"l.raddr", fn_leaf, false, {}});
+    Id l_rval = p.addValue({"l.rval", fn_leaf, false, {}});
+    Id l_saddr = p.addValue({"l.saddr", fn_leaf, false, {}});
+    p.functions[fn_leaf].parameters = {l_p};
+    {
+      Instruction i0;
+      i0.opcode = Opcode::Address;
+      i0.result = l_raddr;
+      i0.object = read_src;
+      p.append(fn_leaf, lb, i0);
+      Instruction i1;
+      i1.opcode = Opcode::Load;
+      i1.result = l_rval;
+      i1.operands = {l_raddr};
+      i1.read_bytes = 8;
+      p.append(fn_leaf, lb, i1);
+      Instruction i2;
+      i2.opcode = Opcode::Address;
+      i2.result = l_saddr;
+      i2.object = slot;
+      p.append(fn_leaf, lb, i2);
+      Instruction i3;
+      i3.opcode = Opcode::Store;
+      i3.operands = {l_saddr, l_p};
+      i3.write_bytes = 8;
+      p.append(fn_leaf, lb, i3);
+    }
+    Instruction l_ret_i;
+    l_ret_i.opcode = Opcode::Return;
+    l_ret_i.operands = {l_p};
+    Id s_leaf_ret = p.append(fn_leaf, lb, l_ret_i);
+
+    // mid(x, fp): calls leaf(x) [c_l1], calls leaf(&c) [c_l2], calls (*fp)() [c_ind].
+    Id mb = p.addBlock(fn_mid);
+    Id m_x = p.addValue({"m.x", fn_mid, false, {}});
+    Id m_fp = p.addValue({"m.fp", fn_mid, false, {}});
+    Id m_c = p.addValue({"m.c", fn_mid, false, {}});
+    Id m_r1 = p.addValue({"m.r1", fn_mid, false, {}});
+    Id m_r2 = p.addValue({"m.r2", fn_mid, false, {}});
+    p.functions[fn_mid].parameters = {m_x, m_fp};
+    {
+      Instruction i0;
+      i0.opcode = Opcode::Address;
+      i0.result = m_c;
+      i0.object = c;
+      p.append(fn_mid, mb, i0);
+    }
+    Instruction i_cl1;
+    i_cl1.opcode = Opcode::Call;
+    i_cl1.callee = fn_leaf;
+    i_cl1.operands = {m_x};
+    i_cl1.result = m_r1;
+    Id c_l1 = p.append(fn_mid, mb, i_cl1);
+
+    Instruction i_cl2;
+    i_cl2.opcode = Opcode::Call;
+    i_cl2.callee = fn_leaf;
+    i_cl2.operands = {m_c};
+    i_cl2.result = m_r2;
+    Id c_l2 = p.append(fn_mid, mb, i_cl2);
+
+    Instruction i_cind;
+    i_cind.opcode = Opcode::Call;
+    i_cind.indirect_target = m_fp;
+    Id c_ind = p.append(fn_mid, mb, i_cind);
+    {
+      Instruction i_ret;
+      i_ret.opcode = Opcode::Return;
+      p.append(fn_mid, mb, i_ret);
+    }
+
+    // write_a(): stores &a into *(&a); write_b(): stores &b into *(&b).
+    auto buildWriter = [&](Id fn, Id target_obj) {
+      Id blk = p.addBlock(fn);
+      Id va = p.addValue({"w.a", fn, false, {}});
+      Instruction i0;
+      i0.opcode = Opcode::Address;
+      i0.result = va;
+      i0.object = target_obj;
+      p.append(fn, blk, i0);
+      Instruction i1;
+      i1.opcode = Opcode::Store;
+      i1.operands = {va, va};
+      i1.write_bytes = 8;
+      p.append(fn, blk, i1);
+      Instruction i2;
+      i2.opcode = Opcode::Return;
+      p.append(fn, blk, i2);
+    };
+    buildWriter(fn_w1, a);
+    buildWriter(fn_w2, b);
+
+    // rec(): branches to either base return or recursive call `rec()`.
+    {
+      Id rb = p.addBlock(fn_rec);
+      Id rb_step = p.addBlock(fn_rec);
+      Id rb_ret = p.addBlock(fn_rec);
+      Instruction nop;
+      nop.opcode = Opcode::Nop;
+      p.append(fn_rec, rb, nop);
+      p.functions[fn_rec].blocks[rb].successors.push_back({rb_step, {}});
+      p.functions[fn_rec].blocks[rb].successors.push_back({rb_ret, {}});
+      Instruction rc;
+      rc.opcode = Opcode::Call;
+      rc.callee = fn_rec;
+      p.append(fn_rec, rb_step, rc);
+      p.functions[fn_rec].blocks[rb_step].successors.push_back({rb_ret, {}});
+      Instruction rr;
+      rr.opcode = Opcode::Return;
+      p.append(fn_rec, rb_ret, rr);
+    }
+
+    // main(): calls mid(&a, &write_a) [c_m1], mid(&b, &write_b) [c_m2], rec(),
+    // plus a nullable join `v_null = {a, NULL}`.
+    Id eb = p.addBlock(fn_main);
+    Id v_a = p.addValue({"va", fn_main, false, {}});
+    Id v_b = p.addValue({"vb", fn_main, false, {}});
+    Id v_w1 = p.addValue({"vw1", fn_main, false, {}});
+    Id v_w2 = p.addValue({"vw2", fn_main, false, {}});
+    Id v_cnull = p.addConstant(PointsToSet(NULL_OBJECT), "null");
+    Id v_nullable = p.addValue({"vnull", fn_main, false, {}});
+    {
+      Instruction i0;
+      i0.opcode = Opcode::Address;
+      i0.result = v_a;
+      i0.object = a;
+      p.append(fn_main, eb, i0);
+      Instruction i1;
+      i1.opcode = Opcode::Address;
+      i1.result = v_b;
+      i1.object = b;
+      p.append(fn_main, eb, i1);
+      Instruction i2;
+      i2.opcode = Opcode::Address;
+      i2.result = v_w1;
+      i2.object = f_w1;
+      p.append(fn_main, eb, i2);
+      Instruction i3;
+      i3.opcode = Opcode::Address;
+      i3.result = v_w2;
+      i3.object = f_w2;
+      p.append(fn_main, eb, i3);
+      Instruction i4;
+      i4.opcode = Opcode::Join;
+      i4.result = v_nullable;
+      i4.operands = {v_a, v_cnull};
+      p.append(fn_main, eb, i4);
+    }
+    Instruction i_m1;
+    i_m1.opcode = Opcode::Call;
+    i_m1.callee = fn_mid;
+    i_m1.operands = {v_a, v_w1};
+    Id c_m1 = p.append(fn_main, eb, i_m1);
+
+    Instruction i_m2;
+    i_m2.opcode = Opcode::Call;
+    i_m2.callee = fn_mid;
+    i_m2.operands = {v_b, v_w2};
+    Id c_m2 = p.append(fn_main, eb, i_m2);
+
+    Instruction i_rec;
+    i_rec.opcode = Opcode::Call;
+    i_rec.callee = fn_rec;
+    p.append(fn_main, eb, i_rec);
+
+    Instruction i_mret;
+    i_mret.opcode = Opcode::Return;
+    Id s_main_ret = p.append(fn_main, eb, i_mret);
+    p.validate();
+
+    for (SolverMode mode :
+         {SolverMode::GuardedSummary, SolverMode::InputStateTabulation}) {
+      Options opt = refined();
+      opt.solver_mode = mode;
+      Analysis aa(p, opt);
+
+      // 1-CFA suffix `{c_l1}` unions both `m1` and `m2` -> `{a, b}` (not `c`).
+      auto q_s1 = aa.pointsTo(l_p, s_leaf_ret, {c_l1}, Point::Before,
+                              ContextMatch::Suffix);
+      CHECK(q_s1.reachable());
+      CHECK(q_s1.points_to == pts({a, b}));
+
+      // 1-CFA suffix `{c_l2}` -> strictly `{c}`.
+      auto q_s2 = aa.pointsTo(l_p, s_leaf_ret, {c_l2}, Point::Before,
+                              ContextMatch::Suffix);
+      CHECK(q_s2.reachable());
+      CHECK(q_s2.points_to == pts({c}));
+
+      // Empty suffix == AllContexts -> `{a, b, c}`.
+      auto q_empty = aa.pointsTo(l_p, s_leaf_ret, {}, Point::Before,
+                                 ContextMatch::Suffix);
+      CHECK(q_empty.reachable());
+      CHECK(q_empty.points_to == pts({a, b, c}));
+
+      // 2-CFA suffix `{c_m1, c_l1}` == `{a}`.
+      auto q_s2lvl = aa.pointsTo(l_p, s_leaf_ret, {c_m1, c_l1}, Point::Before,
+                                 ContextMatch::Suffix);
+      CHECK(q_s2lvl.reachable());
+      CHECK(q_s2lvl.points_to == pts({a}));
+
+      // Invalid suffix `{c_m1}` directly for `leaf` -> Unreachable.
+      auto q_bad = aa.pointsTo(l_p, s_leaf_ret, {c_m1}, Point::Before,
+                               ContextMatch::Suffix);
+      CHECK(!q_bad.reachable());
+
+      // Object points-to and aliases under suffix context `{c_l2}`:
+      // `slot` was just overwritten with `l_p == &c`, aliasing `l_rval == &c`.
+      auto qo_s2 = aa.objectPointsTo(slot, s_leaf_ret, {c_l2}, Point::Before,
+                                     ContextMatch::Suffix);
+      CHECK(qo_s2.reachable());
+      CHECK(qo_s2.points_to == pts({c}));
+      auto al_s2 = aa.aliases(l_p, s_leaf_ret, {c_l2}, Point::Before,
+                              ContextMatch::Suffix);
+      CHECK(al_s2.reachable());
+      CHECK(std::find(al_s2.aliases.begin(), al_s2.aliases.end(), l_rval) !=
+            al_s2.aliases.end());
+      CHECK(std::find(al_s2.object_aliases.begin(), al_s2.object_aliases.end(),
+                      slot) != al_s2.object_aliases.end());
+
+      // Cross-site mayAlias across different functions (`main` vs `leaf`) and
+      // per-side contexts!
+      CHECK(aa.mayAliasAcrossSites(v_a, s_main_ret, l_p, s_leaf_ret));
+      CHECK(!aa.mayAliasAcrossSites(v_a, s_main_ret, {}, l_p, s_leaf_ret,
+                                    {c_l2}, Point::Before, Point::Before,
+                                    ContextMatch::Full, ContextMatch::Suffix));
+      CHECK(!aa.mayAliasAcrossSites(l_p, s_leaf_ret, {c_m1, c_l1}, l_p,
+                                    s_leaf_ret, {c_m2, c_l1}, Point::Before,
+                                    Point::Before, ContextMatch::Suffix,
+                                    ContextMatch::Suffix));
+
+      // mayNull
+      CHECK(aa.mayNull(v_nullable, s_main_ret));
+      CHECK(!aa.mayNull(v_a, s_main_ret));
+      CHECK(!aa.mayNull(l_p, s_leaf_ret, {c_l1}, Point::Before,
+                        ContextMatch::Suffix));
+
+      // Context-sensitive indirect callTargets & callersOf & isRecursiveFunction
+      auto ct_all = aa.callTargets(c_ind);
+      CHECK(ct_all.reachable() && !ct_all.may_call_unknown);
+      CHECK(ct_all.functions.size() == 2);
+      auto ct_m1 = aa.callTargets(c_ind, {c_m1}, ContextMatch::Suffix);
+      CHECK(ct_m1.reachable() && !ct_m1.may_call_unknown);
+      CHECK(ct_m1.functions == std::vector<Id>{fn_w1});
+      auto ct_m2 = aa.callTargets(c_ind, {c_m2}, ContextMatch::Suffix);
+      CHECK(ct_m2.functions == std::vector<Id>{fn_w2});
+      CHECK(aa.callersOf(fn_leaf).size() == 2);
+      CHECK(aa.isRecursiveFunction(fn_rec));
+      CHECK(!aa.isRecursiveFunction(fn_leaf));
+
+      // functionModRef & context-sensitive callModRef
+      auto mr_leaf = aa.functionModRef(fn_leaf);
+      CHECK(!mr_leaf.may_mod_unknown && !mr_leaf.may_ref_unknown);
+      CHECK(mr_leaf.modified == pts({slot}));
+      CHECK(mr_leaf.referenced == pts({read_src}));
+      auto mr_cm1 = aa.callModRef(c_ind, {c_m1}, ContextMatch::Suffix);
+      CHECK(mr_cm1.modified == pts({a}));
+      auto mr_cm2 = aa.callModRef(c_ind, {c_m2}, ContextMatch::Suffix);
+      CHECK(mr_cm2.modified == pts({b}));
+
+      // reversePointsTo
+      auto rev_a = aa.reversePointsTo(a);
+      CHECK(std::find(rev_a.values.begin(), rev_a.values.end(), v_a) !=
+            rev_a.values.end());
+      CHECK(std::find(rev_a.values.begin(), rev_a.values.end(), v_b) ==
+            rev_a.values.end());
+    }
+  }
+
+  // Part B: Four-state byte-range `queryAlias` on flattened struct fields.
+  {
+    Program p;
+    Object base;
+    base.name = "s";
+    base.kind = ObjectKind::Global;
+    base.singleton = true;
+    base.bytes = 8;
+    base.size_bytes = 16;
+    base.field_sensitive = true;
+    base.initial = PointsToSet{};
+    Id s0 = p.addObject(base);
+    Object f1;
+    f1.name = "s+8";
+    f1.kind = ObjectKind::Global;
+    f1.singleton = true;
+    f1.bytes = 8;
+    f1.size_bytes = 8;
+    f1.initial = PointsToSet{};
+    Id s8 = p.addFieldObject(s0, 8, f1);
+    Object o_x;
+    o_x.name = "x";
+    o_x.kind = ObjectKind::Global;
+    o_x.singleton = true;
+    o_x.bytes = 8;
+    o_x.initial = PointsToSet{};
+    Id x = p.addObject(std::move(o_x));
+
+    Id fn = p.addFunction("main");
+    p.entry = fn;
+    Id bb = p.addBlock(fn);
+    Id p0 = p.addValue({"p0", fn, false, {}});
+    Id p8 = p.addValue({"p8", fn, false, {}});
+    Id px = p.addValue({"px", fn, false, {}});
+    Id pmay = p.addValue({"pmay", fn, false, {}});
+    {
+      Instruction i0;
+      i0.opcode = Opcode::Address;
+      i0.result = p0;
+      i0.object = s0;
+      p.append(fn, bb, i0);
+      Instruction i1;
+      i1.opcode = Opcode::Field;
+      i1.result = p8;
+      i1.operands = {p0};
+      i1.field_offset = 8;
+      i1.field_known = true;
+      p.append(fn, bb, i1);
+      Instruction i2;
+      i2.opcode = Opcode::Address;
+      i2.result = px;
+      i2.object = x;
+      p.append(fn, bb, i2);
+      Instruction i3;
+      i3.opcode = Opcode::Join;
+      i3.result = pmay;
+      i3.operands = {p0, px};
+      p.append(fn, bb, i3);
+    }
+    Instruction ret;
+    ret.opcode = Opcode::Return;
+    Id sRet = p.append(fn, bb, ret);
+    p.validate();
+    (void)s8;
+
+    Analysis aa(p, refined());
+    CHECK(aa.queryAlias(p0, 8, sRet, p0, 8, sRet) == AliasKind::MustAlias);
+    CHECK(aa.queryAlias(p0, 8, sRet, p8, 8, sRet) == AliasKind::NoAlias);
+    CHECK(aa.queryAlias(p0, 16, sRet, p8, 8, sRet) == AliasKind::PartialAlias);
+    CHECK(aa.queryAlias(p0, 4, sRet, p0, 8, sRet) == AliasKind::PartialAlias);
+    CHECK(aa.queryAlias(pmay, 8, sRet, p0, 8, sRet) == AliasKind::MayAlias);
+    CHECK(aa.queryAlias(p8, 8, sRet, px, 8, sRet) == AliasKind::NoAlias);
+  }
+}
 } // namespace
 
 TEST(BootstrapEngineTest, StrongUpdates) { strongUpdates(); }
@@ -3079,4 +4025,14 @@ TEST(BootstrapEngineTest,
 TEST(BootstrapEngineTest,
      Round5And6UnslicedIndirectCallPackedStoreBddBudgetAndNullAliasSoundness) {
   round5And6UnslicedIndirectCallPackedStoreBddBudgetAndNullAliasSoundness();
+}
+TEST(BootstrapEngineTest,
+     AuditFixesCyclicPass1NullCoverForwardAliasesAndInteriorGuards) {
+  auditFixesCyclicPass1NullCoverForwardAliasesAndInteriorGuards();
+}
+TEST(BootstrapEngineTest, ObjectAliasesAndMayAliasAllSymmetry) {
+  objectAliasesAndMayAliasAllSymmetry();
+}
+TEST(BootstrapEngineTest, SuffixContextsAndDerivedQueries) {
+  suffixContextsAndDerivedQueries();
 }
