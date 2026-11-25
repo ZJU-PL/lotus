@@ -19,11 +19,17 @@ using lotus::alias::ValueFlowPTA;
 using namespace llvm;
 namespace {
 const Value *value(const Module &module, const char *name) {
-  const Function *main = module.getFunction("main");
-  for (const BasicBlock &block : *main)
-    for (const Instruction &instruction : block)
-      if (instruction.getName() == name)
-        return &instruction;
+  if (const Function *main = module.getFunction("main")) {
+    for (const BasicBlock &block : *main)
+      for (const Instruction &instruction : block)
+        if (instruction.getName() == name)
+          return &instruction;
+  }
+  for (const Function &function : module)
+    for (const BasicBlock &block : function)
+      for (const Instruction &instruction : block)
+        if (instruction.getName() == name)
+          return &instruction;
   throw std::runtime_error(std::string("missing value: ") + name);
 }
 void expect(const ValueFlowPTA &analysis, const Module &module,
@@ -337,4 +343,792 @@ TEST(ValueFlowPTATest, NoCallbackAttributeSuppressesOnlyCallbackPaths) {
               noCallback ? 0u : 1u);
     EXPECT_TRUE(result.count(analysis.getUnknownObjectId()));
   }
+}
+
+TEST(ValueFlowPTATest, SharedCalleePreservesLocalFlowSensitivity) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    define void @noop() { ret void }
+    define i8* @main() {
+      %x = alloca i8*
+      store i8* @A, i8** %x
+      call void @noop()
+      %r1 = load i8*, i8** %x
+      store i8* @B, i8** %x
+      call void @noop()
+      %r2 = load i8*, i8** %x
+      ret i8* %r2
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "r1", {"A"});
+  expect(analysis, *module, "r2", {"B"});
+  EXPECT_FALSE(analysis.mayAlias(value(*module, "r1"), value(*module, "r2")));
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+}
+
+TEST(ValueFlowPTATest, PaperFigure1ExactLLVMIR) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    define void @swap(i8** %p, i8** %q) {
+      %s1 = load i8*, i8** %p
+      %s2 = load i8*, i8** %q
+      store i8* %s2, i8** %p
+      store i8* %s1, i8** %q
+      ret void
+    }
+    define i8* @main(i1 %cond) {
+    bb0:
+      %t1 = alloca i8*
+      %t2 = alloca i8*
+      store i8* @A, i8** %t1
+      store i8* @B, i8** %t2
+      br i1 %cond, label %bb1, label %bb2
+    bb1:
+      %a1 = load i8*, i8** %t1
+      br label %bb3
+    bb2:
+      call void @swap(i8** %t1, i8** %t2)
+      %a2 = load i8*, i8** %t1
+      br label %bb3
+    bb3:
+      %a3 = load i8*, i8** %t1
+      ret i8* %a3
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "a1", {"A"});
+  expect(analysis, *module, "a2", {"B"});
+  expect(analysis, *module, "a3", {"A", "B"});
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+  EXPECT_GT(analysis.getStatistics().solver.interproceduralAuxEdges, 0u);
+}
+
+TEST(ValueFlowPTATest, HeapAndAggregatesAvoidUnknownPoisoning) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    %struct.Mixed = type { i32, i8* }
+    @A = global i8 0
+    @B = global i8 0
+    @mixedGlobal = global %struct.Mixed { i32 42, i8* @A }
+    declare i8* @malloc(i64)
+    declare i8* @calloc(i64, i64)
+    declare i32 @printf(i8*, ...)
+    define i8* @main() {
+      %h1 = call i8* @malloc(i64 8)
+      %h1p = bitcast i8* %h1 to i8**
+      store i8* @A, i8** %h1p
+      %h2 = call i8* @malloc(i64 8)
+      %h2p = bitcast i8* %h2 to i8**
+      store i8* @B, i8** %h2p
+      %r1 = load i8*, i8** %h1p
+      %r2 = load i8*, i8** %h2p
+
+      %cz = call i8* @calloc(i64 1, i64 8)
+      %czp = bitcast i8* %cz to i8**
+      %rc = load i8*, i8** %czp
+
+      %st = alloca %struct.Mixed
+      %tag = getelementptr %struct.Mixed, %struct.Mixed* %st, i32 0, i32 0
+      %fld = getelementptr %struct.Mixed, %struct.Mixed* %st, i32 0, i32 1
+      store i32 7, i32* %tag
+      store i8* @A, i8** %fld
+      %rs = load i8*, i8** %fld
+
+      %gfld = getelementptr %struct.Mixed, %struct.Mixed* @mixedGlobal, i32 0, i32 1
+      %rg = load i8*, i8** %gfld
+
+      %pcall = call i32 (i8*, ...) @printf(i8* @A)
+      %afterPrintf = load i8*, i8** %fld
+      ret i8* %afterPrintf
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "r1", {"A"});
+  expect(analysis, *module, "r2", {"B"});
+  EXPECT_FALSE(analysis.mayAlias(value(*module, "r1"), value(*module, "r2")));
+  expect(analysis, *module, "rc", {"null"});
+  expect(analysis, *module, "rs", {"A"});
+  expect(analysis, *module, "rg", {"A"});
+  expect(analysis, *module, "afterPrintf", {"A"});
+  EXPECT_EQ(analysis.getStatistics().conservativeExternalCalls, 0u);
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+}
+
+TEST(ValueFlowPTATest, GlobalCtorsAndDtorsLoweredInPriorityOrder) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @C = global i8 0
+    @g = global i8* null
+    @llvm.global_ctors = appending global [2 x { i32, void ()*, i8* }] [
+      { i32, void ()*, i8* } { i32 200, void ()* @ctor_late, i8* null },
+      { i32, void ()*, i8* } { i32 100, void ()* @ctor_early, i8* null }
+    ]
+    @llvm.global_dtors = appending global [1 x { i32, void ()*, i8* }] [
+      { i32, void ()*, i8* } { i32 100, void ()* @dtor_fn, i8* null }
+    ]
+    define void @ctor_early() {
+      store i8* @A, i8** @g
+      ret void
+    }
+    define void @ctor_late() {
+      store i8* @B, i8** @g
+      ret void
+    }
+    define void @dtor_fn() {
+      store i8* @C, i8** @g
+      ret void
+    }
+    define i8* @main() {
+      %r = load i8*, i8** @g
+      ret i8* %r
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  ASSERT_NO_THROW(analysis.analyze());
+  expect(analysis, *module, "r", {"B"});
+  EXPECT_EQ(analysis.getStatistics().globalCtors, 2u);
+  EXPECT_EQ(analysis.getStatistics().globalDtors, 1u);
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+}
+
+TEST(ValueFlowPTATest, VectorGEPDoesNotCrash) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    define void @main(<2 x i8*> %v) {
+      %g = getelementptr i8, <2 x i8*> %v, <2 x i64> zeroinitializer
+      ret void
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  ASSERT_NO_THROW(analysis.analyze());
+}
+
+TEST(ValueFlowPTATest, FullMemcpyAndZeroMemsetAndByValAndPosixMemalign) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1 immarg)
+    declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1 immarg)
+    declare i32 @posix_memalign(i8**, i64, i64)
+    define i8* @readByVal(i8** byval(i8*) %copy) {
+      %in = load i8*, i8** %copy
+      store i8* @B, i8** %copy
+      ret i8* %in
+    }
+    define i8* @main() {
+      %src = alloca i8*
+      %dst = alloca i8*
+      store i8* @A, i8** %src
+      %srcb = bitcast i8** %src to i8*
+      %dstb = bitcast i8** %dst to i8*
+      call void @llvm.memcpy.p0i8.p0i8.i64(i8* %dstb, i8* %srcb, i64 8, i1 false)
+      %copied = load i8*, i8** %dst
+
+      %zslot = alloca i8*
+      store i8* @A, i8** %zslot
+      %zb = bitcast i8** %zslot to i8*
+      call void @llvm.memset.p0i8.i64(i8* %zb, i8 0, i64 8, i1 false)
+      %zeroed = load i8*, i8** %zslot
+
+      %fromByVal = call i8* @readByVal(i8** byval(i8*) %src)
+      %afterByVal = load i8*, i8** %src
+
+      %outPtr = alloca i8*
+      store i8* null, i8** %outPtr
+      %pm = call i32 @posix_memalign(i8** %outPtr, i64 16, i64 64)
+      %aligned = load i8*, i8** %outPtr
+      ret i8* %copied
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "copied", {"A"});
+  expect(analysis, *module, "zeroed", {"A", "null"});
+  expect(analysis, *module, "fromByVal", {"A"});
+  expect(analysis, *module, "afterByVal", {"A"});
+  expect(analysis, *module, "aligned", {"null", "pm"});
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+}
+
+TEST(ValueFlowPTATest, UnknownIndirectCallFiltersAddressTakenAndKeepsMainSingleton) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @C = global i8 0
+    @g = global i8* @A
+    define void @taken() {
+      store i8* @B, i8** @g
+      ret void
+    }
+    define void @not_taken() {
+      store i8* @C, i8** @g
+      ret void
+    }
+    define i8* @main(void ()* %unknown_fp) {
+      %keep = alloca void ()*
+      store void ()* @taken, void ()** %keep
+      %local = alloca i8*
+      store i8* @A, i8** %local
+      store i8* @B, i8** %local
+      %localVal = load i8*, i8** %local
+      call void %unknown_fp()
+      %gVal = load i8*, i8** @g
+      ret i8* %gVal
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  // main is NOT address-taken, so %local stays a strong singleton!
+  expect(analysis, *module, "localVal", {"B"});
+  // @taken IS address-taken, @not_taken is NOT!
+  const auto &gPts = analysis.getPointsTo(value(*module, "gVal"));
+  EXPECT_TRUE(gPts.count(analysis.getObjectId(module->getNamedValue("B"))));
+  EXPECT_FALSE(gPts.count(analysis.getObjectId(module->getNamedValue("C"))));
+}
+
+TEST(ValueFlowPTATest, IndirectCallMutatingGlobalAndVFGInspectionAPI) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @g = global i8* @A
+    @fp = global void ()* @writer
+    define void @writer() {
+      store i8* @B, i8** @g
+      ret void
+    }
+    define i8* @main() {
+      %f = load void ()*, void ()** @fp
+      call void %f()
+      %r = load i8*, i8** @g
+      ret i8* %r
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "r", {"B"});
+  EXPECT_EQ(analysis.getStatistics().callGraphIterations, 1u);
+  EXPECT_EQ(analysis.getStatistics().resolvedIndirectTargets, 1u);
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+
+  // Verify VFG inspection APIs on ValueFlowPTA.
+  const auto objB = analysis.getObjectId(module->getNamedValue("B"));
+  const auto storesOfB = analysis.getPointedToByStores(objB);
+  EXPECT_EQ(storesOfB.size(), 1u);
+  const StoreInst *storeB = *storesOfB.begin();
+  const auto storeNode = analysis.getStoreNode(storeB);
+  EXPECT_NE(storeNode, 0u);
+  EXPECT_EQ(analysis.getNodeValue(storeNode), storeB);
+  EXPECT_FALSE(analysis.getVFGIndirectSuccessors(storeNode).empty());
+  const auto nodeB = analysis.getValueNode(module->getNamedValue("B"));
+  EXPECT_TRUE(analysis.getVFGSuccessors(nodeB).count(storeNode));
+  EXPECT_FALSE(analysis.getVFGIndirectSuccessors(nodeB).count(storeNode));
+  EXPECT_GT(analysis.getSolver().vfgNodeCount(), analysis.getProgram().nodeCount());
+}
+
+TEST(ValueFlowPTATest, IndirectAllocatorAndReallocContentTransfer) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @allocFp = global i8* (i64)* @malloc
+    declare i8* @malloc(i64)
+    declare i8* @realloc(i8*, i64)
+    define i8* @main() {
+      %fn = load i8* (i64)*, i8* (i64)** @allocFp
+      %buf = call i8* %fn(i64 8)
+      %bufp = bitcast i8* %buf to i8**
+      store i8* @A, i8** %bufp
+      %grown = call i8* @realloc(i8* %buf, i64 16)
+      %grownp = bitcast i8* %grown to i8**
+      %loaded = load i8*, i8** %grownp
+      ret i8* %loaded
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "buf", {"buf", "null"});
+  expect(analysis, *module, "loaded", {"A"});
+  EXPECT_EQ(analysis.getStatistics().conservativeExternalCalls, 0u);
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+}
+
+TEST(ValueFlowPTATest, IndirectCallThroughWrapperStronglyMutatesGlobal) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @g = global i8* @A
+    @fp = global void ()* @writer
+    define void @writer() {
+      store i8* @B, i8** @g
+      ret void
+    }
+    define void @wrapper(void ()* %cb) {
+      call void %cb()
+      ret void
+    }
+    define i8* @main() {
+      %f = load void ()*, void ()** @fp
+      call void @wrapper(void ()* %f)
+      %r = load i8*, i8** @g
+      ret i8* %r
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "r", {"B"});
+  EXPECT_EQ(analysis.getStatistics().callGraphIterations, 1u);
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+}
+
+TEST(ValueFlowPTATest, IndirectExternalAndByValCallsPreserveIntraBlockOrder) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @pmFp = global i32 (i8**, i64, i64)* @posix_memalign
+    @byvalFp = global i8* (i8**)* @readByVal
+    declare i32 @posix_memalign(i8**, i64, i64)
+    define i8* @readByVal(i8** byval(i8*) %copy) {
+      %in = load i8*, i8** %copy
+      ret i8* %in
+    }
+    define i8* @main() {
+      ; Indirect posix_memalign followed immediately by load in SAME block:
+      %out = alloca i8*
+      store i8* null, i8** %out
+      %f1 = load i32 (i8**, i64, i64)*, i32 (i8**, i64, i64)** @pmFp
+      %pmCall = call i32 %f1(i8** %out, i64 16, i64 64)
+      %afterPm = load i8*, i8** %out
+
+      ; Indirect byval call followed immediately by overwrite in SAME block:
+      %slot = alloca i8*
+      store i8* @A, i8** %slot
+      %f2 = load i8* (i8**)*, i8* (i8**)** @byvalFp
+      %fromByVal = call i8* %f2(i8** byval(i8*) %slot)
+      store i8* @B, i8** %slot
+      %afterOverwrite = load i8*, i8** %slot
+      ret i8* %fromByVal
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  // Same-block load after indirect posix_memalign MUST see the allocation!
+  expect(analysis, *module, "afterPm", {"null", "pmCall"});
+  // Indirect byval copy MUST run before call (sees A, NOT post-call B)!
+  expect(analysis, *module, "fromByVal", {"A"});
+  expect(analysis, *module, "afterOverwrite", {"B"});
+}
+
+TEST(ValueFlowPTATest, UnknownIndirectCallPreservesIntraBlockOrderAndCallbacks) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @C = global i8 0
+    @cbObserved = global i8* null
+    define void @cb(i8* %arg) {
+      store i8* %arg, i8** @cbObserved
+      ret void
+    }
+    define i8* @main(void (i8*)* %unknownFp) {
+      %keepCb = alloca void (i8*)*
+      store void (i8*)* @cb, void (i8*)** %keepCb
+
+      ; Indirect unknown call followed immediately by load in SAME block:
+      %gslot = alloca i8*
+      store i8* @C, i8** %gslot
+      call void %unknownFp(i8* @A)
+      %afterUnknown = load i8*, i8** %gslot
+      %cbVal = load i8*, i8** @cbObserved
+      ret i8* %afterUnknown
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  // Same-block load after indirect unknown call MUST see unknown clobber!
+  EXPECT_TRUE(analysis.getPointsTo(value(*module, "afterUnknown"))
+                  .count(analysis.getUnknownObjectId()));
+  // Callback invoked via unknown indirect call MUST receive unknown argument
+  // (in addition to @A from direct indirect-target resolution of @cb)!
+  EXPECT_TRUE(analysis.getPointsTo(value(*module, "cbVal"))
+                  .count(analysis.getUnknownObjectId()));
+}
+
+TEST(ValueFlowPTATest, MixedDefinedAndExternalIndirectCallDoesNotUnsoundlyKill) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    declare void @observe(i8**) readonly
+    define void @writer(i8** %p) {
+      store i8* @B, i8** %p
+      ret void
+    }
+    define i8* @main(i1 %cond) {
+      %slot = alloca i8*
+      store i8* @A, i8** %slot
+      %fp = select i1 %cond, void (i8**)* @writer, void (i8**)* @observe
+      call void %fp(i8** %slot)
+      %after = load i8*, i8** %slot
+      ret i8* %after
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  // Calling @observe preserves @A; calling @writer writes @B. Both must remain!
+  expect(analysis, *module, "after", {"A", "B"});
+}
+
+TEST(ValueFlowPTATest, LibraryMemsetAndMemcpyRespectByteAndLengthChecks) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    declare i8* @memset(i8*, i32, i64)
+    declare i8* @memcpy(i8*, i8*, i64)
+    define i8* @main() {
+      %s1 = alloca i8*
+      store i8* @A, i8** %s1
+      %b1 = bitcast i8** %s1 to i8*
+      %m1 = call i8* @memset(i8* %b1, i32 255, i64 8)
+      %nonZeroSet = load i8*, i8** %s1
+
+      %s2 = alloca i8*
+      store i8* @A, i8** %s2
+      %b2 = bitcast i8** %s2 to i8*
+      %m2 = call i8* @memset(i8* %b2, i32 0, i64 8)
+      %zeroSet = load i8*, i8** %s2
+
+      %src = alloca i8*
+      store i8* @A, i8** %src
+      %srcb = bitcast i8** %src to i8*
+
+      %d1 = alloca i8*
+      store i8* @A, i8** %d1
+      %d1b = bitcast i8** %d1 to i8*
+      %c1 = call i8* @memcpy(i8* %d1b, i8* %srcb, i64 1)
+      %partialCopy = load i8*, i8** %d1
+
+      %d2 = alloca i8*
+      %d2b = bitcast i8** %d2 to i8*
+      %c2 = call i8* @memcpy(i8* %d2b, i8* %srcb, i64 8)
+      %fullCopy = load i8*, i8** %d2
+      ret i8* %fullCopy
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "nonZeroSet", {"A", "unknown"});
+  expect(analysis, *module, "zeroSet", {"A", "null"});
+  expect(analysis, *module, "partialCopy", {"A", "unknown"});
+  expect(analysis, *module, "fullCopy", {"A"});
+}
+
+TEST(ValueFlowPTATest, SharedSwapCallsKeepDisjointLocalsIsolated) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @C = global i8 0
+    @D = global i8 0
+    @E = global i8 0
+    define void @swap(i8** %p, i8** %q) {
+      %s1 = load i8*, i8** %p
+      %s2 = load i8*, i8** %q
+      store i8* %s2, i8** %p
+      store i8* %s1, i8** %q
+      ret void
+    }
+    define i8* @main() {
+      %a = alloca i8*
+      %b = alloca i8*
+      %c = alloca i8*
+      %d = alloca i8*
+      store i8* @A, i8** %a
+      store i8* @B, i8** %b
+      store i8* @C, i8** %c
+      store i8* @D, i8** %d
+      call void @swap(i8** %a, i8** %b)
+      %afterFirst = load i8*, i8** %a
+      store i8* @E, i8** %a
+      call void @swap(i8** %c, i8** %d)
+      %afterSecond = load i8*, i8** %a
+      ret i8* %afterSecond
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  EXPECT_FALSE(analysis.getPointsTo(value(*module, "afterFirst"))
+                   .count(analysis.getObjectId(module->getNamedValue("E"))));
+  expect(analysis, *module, "afterSecond", {"E"});
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+}
+
+TEST(ValueFlowPTATest, ExtractElementAndTaggedPtrToIntArithmetic) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    define i8* @main() {
+      %vec = insertelement <2 x i8*> undef, i8* @A, i32 0
+      %elem = extractelement <2 x i8*> %vec, i32 0
+
+      %slot = alloca i8*
+      store i8* @A, i8** %slot
+      %asInt = ptrtoint i8* @A to i64
+      %tagged = or i64 %asInt, 1
+      %slotInt = bitcast i8** %slot to i64*
+      store i64 %tagged, i64* %slotInt
+      %reloaded = load i8*, i8** %slot
+      ret i8* %elem
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "elem", {"A"});
+  expect(analysis, *module, "reloaded", {"A", "unknown"});
+}
+
+TEST(ValueFlowPTATest, FreshCallocInCalleePreservesNullInitializer) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    declare i8* @calloc(i64, i64)
+    define i8* @readFresh() {
+      %raw = call i8* @calloc(i64 1, i64 8)
+      %slot = bitcast i8* %raw to i8**
+      %val = load i8*, i8** %slot
+      ret i8* %val
+    }
+    define i8* @main() {
+      %res = call i8* @readFresh()
+      ret i8* %res
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "val", {"null"});
+  expect(analysis, *module, "res", {"null"});
+}
+
+TEST(ValueFlowPTATest, MultiEntryLibraryPropagatesGlobalStateAcrossExports) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @G = global i8* null
+    define i8* @get_g() {
+      %loaded = load i8*, i8** @G
+      ret i8* %loaded
+    }
+    define i8* @set_g() {
+      store i8* @A, i8** @G
+      store i8* @B, i8** @G
+      %local = load i8*, i8** @G
+      ret i8* %local
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  // Intra-function strong update inside @set_g still kills @A before %local!
+  expect(analysis, *module, "local", {"B"});
+  // Inter-entry-point driver loop propagates @set_g's final @B write to @get_g
+  // (in any call order, including calling @get_g before @set_g -> null).
+  expect(analysis, *module, "loaded", {"null", "B"});
+}
+
+TEST(ValueFlowPTATest, StrtolGetlineAsprintfByValMismatchAndConstExprPtrToInt) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @constTagged = global i64 add (i64 ptrtoint (i8* @A to i64), i64 1)
+    @byvalRaw = global i8* bitcast (i8* (i8**)* @readByVal to i8*)
+    declare i64 @strtol(i8*, i8**, i32)
+    declare i64 @getline(i8**, i64*, i8*)
+    declare i32 @asprintf(i8**, i8*, ...)
+    define i8* @readByVal(i8** byval(i8*) %copy) {
+      %bvVal = load i8*, i8** %copy
+      ret i8* %bvVal
+    }
+    define i8* @main(i8* %fp) {
+      ; strtol writes arg0 into *arg1 (COPY Arg1 D Arg0 V)
+      %endSlot = alloca i8*
+      store i8* null, i8** %endSlot
+      %n1 = call i64 @strtol(i8* @A, i8** %endSlot, i32 10)
+      %endPtr = load i8*, i8** %endSlot
+
+      ; getline writes newly allocated buffer into *arg0
+      %lineSlot = alloca i8*
+      %cap = alloca i64
+      store i8* null, i8** %lineSlot
+      %glCall = call i64 @getline(i8** %lineSlot, i64* %cap, i8* %fp)
+      %linePtr = load i8*, i8** %lineSlot
+
+      ; asprintf writes newly allocated buffer into *arg0
+      %fmtSlot = alloca i8*
+      store i8* null, i8** %fmtSlot
+      %asCall = call i32 (i8**, i8*, ...) @asprintf(i8** %fmtSlot, i8* @B)
+      %fmtPtr = load i8*, i8** %fmtSlot
+
+      ; ConstantExpr add(ptrtoint(@A), 1) in global initializer
+      %taggedPtr = bitcast i64* @constTagged to i8**
+      %fromTagged = load i8*, i8** %taggedPtr
+
+      ; Mismatched indirect call to a byval callee (0 args) must seed unknown
+      %rawFn = load i8*, i8** @byvalRaw
+      %badFn = bitcast i8* %rawFn to i8* ()*
+      %fromBadByVal = call i8* %badFn()
+      ret i8* %endPtr
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "endPtr", {"null", "A"});
+  expect(analysis, *module, "linePtr", {"null", "glCall"});
+  expect(analysis, *module, "fmtPtr", {"null", "asCall"});
+  EXPECT_TRUE(analysis.getPointsTo(value(*module, "fromTagged"))
+                  .count(analysis.getUnknownObjectId()));
+  EXPECT_TRUE(analysis.getPointsTo(value(*module, "fromBadByVal"))
+                  .count(analysis.getUnknownObjectId()));
+}
+
+TEST(ValueFlowPTATest, InlineAsmDoesNotTriggerSpuriousAddressTakenCallbacks) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @g = global i8* @A
+    define void @cb() {
+      store i8* @B, i8** @g
+      ret void
+    }
+    define i8* @main() {
+      %keep = alloca void ()*
+      store void ()* @cb, void ()** %keep
+      call void asm sideeffect "", ""() readnone
+      %afterReadNone = load i8*, i8** @g
+      %asmPtr = call i8* asm "", "=r"() readnone
+      ret i8* %afterReadNone
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  // Readnone inline asm must NOT invoke unrelated address-taken @cb!
+  expect(analysis, *module, "afterReadNone", {"A"});
+  expect(analysis, *module, "asmPtr", {"unknown"});
+}
+
+TEST(ValueFlowPTATest, AtexitAndSignalInvokeRegisteredHandlersOnly) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @C = global i8 0
+    @gExit = global i8* null
+    @gSig = global i8* null
+    @gOther = global i8* null
+    declare i32 @atexit(void ()*)
+    declare void (i32)* @signal(i32, void (i32)*)
+    define void @onExit() {
+      store i8* @A, i8** @gExit
+      ret void
+    }
+    define void @onSig(i32 %s) {
+      store i8* @B, i8** @gSig
+      ret void
+    }
+    define void @unrelated() {
+      store i8* @C, i8** @gOther
+      ret void
+    }
+    define i8* @main() {
+      %keep = alloca void ()*
+      store void ()* @unrelated, void ()** %keep
+      %r1 = call i32 @atexit(void ()* @onExit)
+      %r2 = call void (i32)* @signal(i32 2, void (i32)* @onSig)
+      %vExit = load i8*, i8** @gExit
+      %vSig = load i8*, i8** @gSig
+      %vOther = load i8*, i8** @gOther
+      ret i8* %vExit
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "vExit", {"null", "A"});
+  expect(analysis, *module, "vSig", {"null", "B"});
+  expect(analysis, *module, "vOther", {"null"});
 }

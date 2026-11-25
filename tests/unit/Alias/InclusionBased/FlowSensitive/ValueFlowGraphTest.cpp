@@ -1,5 +1,6 @@
 #include "Alias/InclusionBased/FlowSensitive/ValueFlow/ValueFlowGraph.h"
 
+#include <array>
 #include <map>
 #include <random>
 #include <sstream>
@@ -556,4 +557,841 @@ TEST(ValueFlowGraphTest, WeakProjectionPreservesOrderAndBranchReachability) {
   EXPECT_EQ(solver.pointsTo(onRight), (PointsToSet{a}));
   EXPECT_EQ(solver.pointsTo(after), (PointsToSet{a, b}));
   EXPECT_EQ(solver.statistics().iteratedDominanceFrontierNodes, 0u);
+}
+
+TEST(ValueFlowGraphTest, SharedCalleeDoesNotDestroyUnrelatedLocalFlowSensitivity) {
+  Program p;
+  const auto a = p.addObject(false, false, "A");
+  const auto b = p.addObject(false, false, "B");
+  const auto mainFn = p.addFunction("main");
+  const auto noopFn = p.addFunction("noop");
+  const auto mainEntry = p.addBlock(mainFn);
+  const auto noopEntry = p.addBlock(noopFn);
+  p.setFunctionEntry(mainFn, mainEntry);
+  p.setFunctionExit(mainFn, mainEntry);
+  p.setFunctionEntry(noopFn, noopEntry);
+  p.setFunctionExit(noopFn, noopEntry);
+  p.addEntryFunction(mainFn);
+
+  const auto x = p.addObject(true, true, "x");
+  p.setEmptyInitializer(x);
+  p.setObjectOwner(x, mainFn);
+
+  p.addStore(mainEntry, p.address(x), p.address(a));
+  const auto c1 = p.addCallSite(mainEntry);
+  p.addCallTarget(c1, noopFn);
+  const auto r1 = load(p, mainEntry, p.address(x));
+  p.addStore(mainEntry, p.address(x), p.address(b));
+  const auto c2 = p.addCallSite(mainEntry);
+  p.addCallTarget(c2, noopFn);
+  const auto r2 = load(p, mainEntry, p.address(x));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(r1), (PointsToSet{a}));
+  EXPECT_EQ(solver.pointsTo(r2), (PointsToSet{b}));
+  EXPECT_EQ(solver.statistics().interproceduralAuxEdges, 0u);
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+}
+
+TEST(ValueFlowGraphTest, ReadOnlyCalleePreservesCallerStrongUpdatesAcrossCalls) {
+  Program p;
+  const auto a = p.addObject(false, false, "A");
+  const auto b = p.addObject(false, false, "B");
+  const auto mainFn = p.addFunction("main");
+  const auto readerFn = p.addFunction("reader");
+  const auto mainEntry = p.addBlock(mainFn);
+  const auto readerEntry = p.addBlock(readerFn);
+  p.setFunctionEntry(mainFn, mainEntry);
+  p.setFunctionExit(mainFn, mainEntry);
+  p.setFunctionEntry(readerFn, readerEntry);
+  p.setFunctionExit(readerFn, readerEntry);
+  p.addEntryFunction(mainFn);
+
+  const auto formalP = p.addNode();
+  p.setFunctionParams(readerFn, {formalP});
+  const auto observed = load(p, readerEntry, formalP);
+
+  const auto x = p.addObject(true, true, "x");
+  p.setEmptyInitializer(x);
+  p.setObjectOwner(x, mainFn);
+
+  p.addStore(mainEntry, p.address(x), p.address(a));
+  const auto c1 = p.addCallSite(mainEntry, 0, 0, {p.address(x)});
+  p.addCallTarget(c1, readerFn);
+  const auto r1 = load(p, mainEntry, p.address(x));
+  p.addStore(mainEntry, p.address(x), p.address(b));
+  const auto c2 = p.addCallSite(mainEntry, 0, 0, {p.address(x)});
+  p.addCallTarget(c2, readerFn);
+  const auto r2 = load(p, mainEntry, p.address(x));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(r1), (PointsToSet{a}));
+  EXPECT_EQ(solver.pointsTo(r2), (PointsToSet{b}));
+  EXPECT_EQ(solver.pointsTo(observed), (PointsToSet{a, b}));
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+}
+
+TEST(ValueFlowGraphTest, PaperFigure1SwapExactInterprocedural) {
+  // Exact multi-function graph from Figure 1(b) of Li et al. (ESEC/FSE 2011).
+  Program p;
+  const auto allocA = p.addObject(false, false, "alloc_A");
+  const auto allocB = p.addObject(false, false, "alloc_B");
+  const auto alloc_a = p.addObject(true, true, "alloc_a");
+  const auto alloc_b = p.addObject(true, true, "alloc_b");
+  p.setEmptyInitializer(alloc_a);
+  p.setEmptyInitializer(alloc_b);
+
+  const auto mainFn = p.addFunction("main");
+  const auto swapFn = p.addFunction("swap");
+  const auto bb0 = p.addBlock(mainFn);
+  const auto bb1 = p.addBlock(mainFn);
+  const auto bb2 = p.addBlock(mainFn);
+  const auto bb3 = p.addBlock(mainFn);
+  const auto bb4 = p.addBlock(swapFn);
+  p.setFunctionEntry(mainFn, bb0);
+  p.setFunctionExit(mainFn, bb3);
+  p.setFunctionEntry(swapFn, bb4);
+  p.setFunctionExit(swapFn, bb4);
+  p.addEntryFunction(mainFn);
+  p.addControlEdge(bb0, bb1);
+  p.addControlEdge(bb0, bb2);
+  p.addControlEdge(bb1, bb3);
+  p.addControlEdge(bb2, bb3);
+
+  const auto paramP = p.addNode();
+  const auto paramQ = p.addNode();
+  p.setFunctionParams(swapFn, {paramP, paramQ});
+
+  p.addStore(bb0, p.address(alloc_a), p.address(allocA));
+  p.addStore(bb0, p.address(alloc_b), p.address(allocB));
+  const auto a1 = load(p, bb1, p.address(alloc_a));
+  const auto cs = p.addCallSite(bb2, 0, 0, {p.address(alloc_a), p.address(alloc_b)});
+  p.addCallTarget(cs, swapFn);
+  const auto a2 = load(p, bb2, p.address(alloc_a));
+  const auto a3 = load(p, bb3, p.address(alloc_a));
+
+  const auto s1 = load(p, bb4, paramP);
+  const auto s2 = load(p, bb4, paramQ);
+  p.addStore(bb4, paramP, s2);
+  p.addStore(bb4, paramQ, s1);
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(paramP), (PointsToSet{alloc_a}));
+  EXPECT_EQ(solver.pointsTo(paramQ), (PointsToSet{alloc_b}));
+  EXPECT_EQ(solver.pointsTo(a1), (PointsToSet{allocA}));
+  EXPECT_EQ(solver.pointsTo(a2), (PointsToSet{allocB}));
+  EXPECT_EQ(solver.pointsTo(a3), (PointsToSet{allocA, allocB}));
+  EXPECT_EQ(solver.pointsTo(s1), (PointsToSet{allocA}));
+  EXPECT_EQ(solver.pointsTo(s2), (PointsToSet{allocB}));
+  EXPECT_GT(solver.statistics().interproceduralAuxEdges, 0u);
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+}
+
+TEST(ValueFlowGraphTest, MultiObjectHeapCycleDoesNotPrematurelyUnblockScalar) {
+  // Two non-scalar heap objects form a 2-node escape cycle (cyc1 <-> cyc2).
+  // Scalar `target` escapes into `chain1`, which is tied into the non-scalar
+  // cycle; a strong update through `strongAlias` must be discovered before
+  // `target` is finalized, without triggering any fallback.
+  Program p;
+  const auto va = p.addObject(false, false, "A");
+  const auto vb = p.addObject(false, false, "B");
+  const auto target = p.addObject(true, true, "target");
+  const auto cyc1 = p.addObject(false, true, "cyc1");
+  const auto cyc2 = p.addObject(false, true, "cyc2");
+  const auto chain1 = p.addObject(false, true, "chain1");
+  const auto chain2 = p.addObject(false, true, "chain2");
+  p.setEmptyInitializer(target);
+  p.setEmptyInitializer(cyc1);
+  p.setEmptyInitializer(cyc2);
+  p.setEmptyInitializer(chain1);
+  p.setEmptyInitializer(chain2);
+  const auto entry = p.addBlock();
+  p.addRoot(entry);
+
+  p.addStore(entry, p.address(cyc1), p.address(cyc2));
+  p.addStore(entry, p.address(cyc2), p.address(cyc1));
+  p.setInitializer(chain1, p.address(target));
+  p.addStore(entry, p.address(chain2), load(p, entry, p.address(chain1)));
+  p.addStore(entry, p.address(cyc1), p.address(chain1));
+  p.addStore(entry, p.address(chain2), p.address(cyc2));
+
+  const auto strongAlias = load(p, entry, p.address(chain1));
+  p.addStore(entry, p.address(target), p.address(va));
+  p.addStore(entry, strongAlias, p.address(vb));
+  const auto out = load(p, entry, p.address(target));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(strongAlias), (PointsToSet{target}));
+  EXPECT_EQ(solver.pointsTo(out), (PointsToSet{vb}));
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+}
+
+TEST(ValueFlowGraphTest, ScalarCycleWeakensOnlyCyclePreservingUnrelatedScalars) {
+  Fixture f;
+  auto &p = f.p;
+  const auto y = p.addObject(true, true, "y");
+  const auto z = p.addObject(true, true, "z");
+  p.setInitializer(f.x, p.address(y));
+  p.setInitializer(y, p.address(f.x));
+  p.setEmptyInitializer(z);
+
+  const auto xBefore = load(p, f.entry, p.address(f.x));
+  p.addStore(f.entry, p.address(f.x), p.address(f.a));
+  const auto xAfter = load(p, f.entry, p.address(f.x));
+
+  // z is completely unrelated to the x <-> y scalar cycle and MUST retain
+  // strong updates!
+  p.addStore(f.entry, p.address(z), p.address(f.a));
+  const auto zStrong = p.addStore(f.entry, p.address(z), p.address(f.b));
+  const auto zAfter = load(p, f.entry, p.address(z));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(xBefore), (PointsToSet{y}));
+  EXPECT_EQ(solver.pointsTo(xAfter), (PointsToSet{y, f.a}));
+  EXPECT_EQ(solver.pointsTo(zAfter), (PointsToSet{f.b}));
+  EXPECT_TRUE(solver.isStrongUpdate(zStrong));
+  EXPECT_TRUE(solver.statistics().usedWeakFallback);
+  EXPECT_EQ(solver.statistics().weakFallbackObjects, 2u);
+  EXPECT_GT(solver.statistics().strongUpdateSites, 0u);
+}
+
+TEST(ValueFlowGraphTest, PermanentlyEmptyEscapePointerPreservesStrongUpdates) {
+  Fixture f;
+  auto &p = f.p;
+  p.setEmptyInitializer(f.x);
+  const auto deadPtr = p.addNode(); // never receives any object (pts == empty)
+  p.addStore(f.entry, p.address(f.x), p.address(f.a));
+  p.addStore(f.entry, deadPtr, p.address(f.x));
+  const auto overwrite = p.addStore(f.entry, p.address(f.x), p.address(f.b));
+  const auto result = load(p, f.entry, p.address(f.x));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(result), (PointsToSet{f.b}));
+  EXPECT_TRUE(solver.isStrongUpdate(overwrite));
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+}
+
+TEST(ValueFlowGraphTest, DynamicIndirectCallResolutionAndVFGInspectionAPI) {
+  Program p;
+  const auto a = p.addObject(false, false, "A");
+  const auto b = p.addObject(false, false, "B");
+  const auto setObj = p.addObject(false, false, "set");
+  const auto fpObj = p.addObject(true, true, "fp");
+  const auto slot = p.addObject(true, true, "slot");
+  p.setInitializer(fpObj, p.address(setObj));
+  p.setEmptyInitializer(slot);
+
+  const auto mainFn = p.addFunction("main");
+  const auto setFn = p.addFunction("set");
+  p.setFunctionObject(setObj, setFn);
+  p.setAddressTakenFunction(setFn, true);
+
+  const auto mainBB = p.addBlock(mainFn);
+  const auto setBB = p.addBlock(setFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(setFn, setBB);
+  p.setFunctionExit(setFn, setBB);
+  p.addEntryFunction(mainFn);
+
+  const auto formalP = p.addNode();
+  p.setFunctionParams(setFn, {formalP});
+  p.addStore(setBB, formalP, p.address(b));
+
+  const auto initStore = p.addStore(mainBB, p.address(slot), p.address(a));
+  const auto calleePtr = load(p, mainBB, p.address(fpObj));
+  const auto cs = p.addCallSite(mainBB, calleePtr, 0, {p.address(slot)});
+  const auto after = load(p, mainBB, p.address(slot));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(after), (PointsToSet{b}));
+  EXPECT_EQ(solver.resolvedCallTargets(cs), (std::set<FunctionID>{setFn}));
+  EXPECT_EQ(solver.statistics().dynamicIndirectTargets, 1u);
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+  EXPECT_TRUE(solver.isFunctionReachable(mainFn));
+  EXPECT_TRUE(solver.isFunctionReachable(setFn));
+  EXPECT_TRUE(solver.isBlockReachable(setBB));
+
+  // Verify VFG inspection APIs.
+  EXPECT_GT(solver.vfgNodeCount(), p.nodeCount());
+  EXPECT_FALSE(solver.isJoinNode(p.address(a)));
+  const auto storedNode = p.access(initStore).value;
+  EXPECT_TRUE(solver.vfgSuccessors(p.address(a)).count(storedNode));
+  EXPECT_FALSE(solver.vfgIndirectSuccessors(p.address(a)).count(storedNode));
+}
+
+TEST(ValueFlowGraphTest, PerFunctionIncrementalReuseOnRecomputation) {
+  Program p;
+  const auto a = p.addObject(false, false, "A");
+  const auto b = p.addObject(false, false, "B");
+  const auto mainFn = p.addFunction("main");
+  const auto stableFn = p.addFunction("stable");
+  const auto changingFn = p.addFunction("changing");
+  const auto mainBB = p.addBlock(mainFn);
+  const auto stableBB = p.addBlock(stableFn);
+  const auto changingBB = p.addBlock(changingFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(stableFn, stableBB);
+  p.setFunctionExit(stableFn, stableBB);
+  p.setFunctionEntry(changingFn, changingBB);
+  p.setFunctionExit(changingFn, changingBB);
+  p.addEntryFunction(mainFn);
+
+  const auto cell = p.addObject(true, true, "cell");
+  const auto heap = p.addObject(false, true, "heap");
+  const auto extra = p.addObject(true, true, "extra");
+  p.setEmptyInitializer(cell);
+  p.setEmptyInitializer(extra);
+  p.setInitializer(heap, p.address(heap));
+  p.addStore(mainBB, p.address(heap), p.address(extra));
+
+  // stableFn loads cell; changingFn initially strongly updates cell, then
+  // becomes weak when heap cycle adds extra into alias.
+  const auto stableRead = load(p, stableBB, p.address(cell));
+  const auto alias = load(p, changingBB, p.address(heap));
+  p.addCopy(p.address(cell), alias);
+  p.addStore(changingBB, alias, p.address(b));
+
+  p.addStore(mainBB, p.address(cell), p.address(a));
+  const auto c1 = p.addCallSite(mainBB);
+  p.addCallTarget(c1, changingFn);
+  const auto c2 = p.addCallSite(mainBB);
+  p.addCallTarget(c2, stableFn);
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(stableRead), (PointsToSet{a, b}));
+  EXPECT_GT(solver.statistics().functionFlowReuseHits, 0u);
+}
+
+TEST(ValueFlowGraphTest, InterproceduralRandomMatchesDenseOracle) {
+  // Independent dense context-insensitive interprocedural reference oracle over
+  // 50 random 3-function programs (main calling f1 and f2 at multiple sites,
+  // with globals, local slots, strong/weak stores, and read-only callees).
+  for (unsigned seed = 0; seed < 50; ++seed) {
+    SCOPED_TRACE(::testing::Message() << "interprocedural seed " << seed);
+    std::mt19937 rng(seed + 1000);
+    Program p;
+    std::vector<ObjectID> globals, vals;
+    std::vector<bool> isSingleton;
+    for (unsigned i = 0; i < 3; ++i) {
+      const bool single = (rng() % 2 == 0);
+      auto g = p.addObject(single, true);
+      p.setEmptyInitializer(g);
+      globals.push_back(g);
+      isSingleton.push_back(single);
+    }
+    for (unsigned i = 0; i < 3; ++i)
+      vals.push_back(p.addObject(false, false));
+
+    const auto mainFn = p.addFunction("main");
+    const auto f1 = p.addFunction("f1");
+    const auto f2 = p.addFunction("f2");
+    std::vector<FunctionID> fns{mainFn, f1, f2};
+    std::vector<BlockID> entries, exits;
+    for (FunctionID fn : fns) {
+      auto e = p.addBlock(fn);
+      auto x = p.addBlock(fn);
+      p.setFunctionEntry(fn, e);
+      p.setFunctionExit(fn, x);
+      p.addControlEdge(e, x);
+      entries.push_back(e);
+      exits.push_back(x);
+    }
+    p.addEntryFunction(mainFn);
+
+    // Local scalar in main that neither f1 nor f2 ever accesses.
+    const auto localOnly = p.addObject(true, true, "localOnly");
+    p.setEmptyInitializer(localOnly);
+    p.setObjectOwner(localOnly, mainFn);
+    p.addStore(entries[0], p.address(localOnly), p.address(vals[0]));
+    const auto localBefore = load(p, entries[0], p.address(localOnly));
+
+    enum class OpKind { Store, Load, Call };
+    struct Op {
+      OpKind kind;
+      unsigned target = 0; // global idx or callee idx (1 or 2)
+      ObjectID storedVal = 0;
+      NodeID loadNode = 0;
+    };
+    std::vector<std::vector<Op>> fnOps(3);
+
+    // f1: modifies globals[0], reads globals[1]
+    {
+      const ObjectID sv = vals[rng() % 3];
+      p.addStore(entries[1], p.address(globals[0]), p.address(sv));
+      fnOps[1].push_back({OpKind::Store, 0, sv, 0});
+      const NodeID ld = load(p, entries[1], p.address(globals[1]));
+      fnOps[1].push_back({OpKind::Load, 1, 0, ld});
+    }
+    // f2: reads globals[0], optionally modifies globals[2]
+    const bool f2ModifiesG2 = (rng() % 2 == 1);
+    {
+      const NodeID ld = load(p, entries[2], p.address(globals[0]));
+      fnOps[2].push_back({OpKind::Load, 0, 0, ld});
+      if (f2ModifiesG2) {
+        const ObjectID sv = vals[rng() % 3];
+        p.addStore(entries[2], p.address(globals[2]), p.address(sv));
+        fnOps[2].push_back({OpKind::Store, 2, sv, 0});
+      }
+    }
+
+    // main: interleave stores, loads, and multiple calls to f1 and f2.
+    for (unsigned step = 0; step < 6; ++step) {
+      const unsigned op = rng() % 4;
+      if (op == 0) {
+        const unsigned gi = rng() % 3;
+        const ObjectID sv = vals[rng() % 3];
+        p.addStore(entries[0], p.address(globals[gi]), p.address(sv));
+        fnOps[0].push_back({OpKind::Store, gi, sv, 0});
+      } else if (op == 1) {
+        const unsigned gi = rng() % 3;
+        const NodeID ld = load(p, entries[0], p.address(globals[gi]));
+        fnOps[0].push_back({OpKind::Load, gi, 0, ld});
+      } else if (op == 2) {
+        const auto cs = p.addCallSite(entries[0]);
+        p.addCallTarget(cs, f1);
+        fnOps[0].push_back({OpKind::Call, 1, 0, 0});
+      } else {
+        const auto cs = p.addCallSite(entries[0]);
+        p.addCallTarget(cs, f2);
+        fnOps[0].push_back({OpKind::Call, 2, 0, 0});
+      }
+    }
+    p.addStore(exits[0], p.address(localOnly), p.address(vals[1]));
+    const auto localAfter = load(p, exits[0], p.address(localOnly));
+
+    // Independent dense context-insensitive interprocedural fixed-point oracle:
+    // merges callee entry states across callsites, propagates exit states back
+    // ONLY for globals modified by the callee (strong overwrite if singleton
+    // global, matching PreprocessGlobalFlow!).
+    using MemState = std::array<PointsToSet, 3>;
+    auto joinSets = [](PointsToSet &dst, const PointsToSet &src) {
+      const auto old = dst.size();
+      dst.insert(src.begin(), src.end());
+      return dst.size() != old;
+    };
+    auto calleeModifies = [&](unsigned callee, unsigned gi) {
+      return (callee == 1 && gi == 0) ||
+             (callee == 2 && gi == 2 && f2ModifiesG2);
+    };
+    std::array<MemState, 3> fnIn{};
+    std::array<MemState, 3> fnOut{};
+    std::array<bool, 3> fnCalled{true, false, false};
+    std::map<NodeID, PointsToSet> expected;
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (unsigned fi = 0; fi < 3; ++fi) {
+        if (!fnCalled[fi])
+          continue;
+        MemState st = fnIn[fi];
+        for (const auto &op : fnOps[fi]) {
+          if (op.kind == OpKind::Store) {
+            if (isSingleton[op.target]) {
+              st[op.target].clear();
+              st[op.target].insert(op.storedVal);
+            } else {
+              st[op.target].insert(op.storedVal);
+            }
+          } else if (op.kind == OpKind::Load) {
+            changed |= joinSets(expected[op.loadNode], st[op.target]);
+          } else {
+            const unsigned c = op.target;
+            if (!fnCalled[c]) {
+              fnCalled[c] = true;
+              changed = true;
+            }
+            for (unsigned gi = 0; gi < 3; ++gi)
+              changed |= joinSets(fnIn[c][gi], st[gi]);
+            for (unsigned gi = 0; gi < 3; ++gi) {
+              if (!calleeModifies(c, gi))
+                continue;
+              if (isSingleton[gi])
+                st[gi] = fnOut[c][gi];
+              else
+                joinSets(st[gi], fnOut[c][gi]);
+            }
+          }
+        }
+        for (unsigned gi = 0; gi < 3; ++gi)
+          changed |= joinSets(fnOut[fi][gi], st[gi]);
+      }
+    }
+
+    Solver solver(p);
+    solver.analyze();
+    // Unrelated localOnly MUST remain exact despite multiple calls to f1/f2!
+    EXPECT_EQ(solver.pointsTo(localBefore), (PointsToSet{vals[0]}));
+    EXPECT_EQ(solver.pointsTo(localAfter), (PointsToSet{vals[1]}));
+    for (const auto &[ld, want] : expected)
+      EXPECT_EQ(solver.pointsTo(ld), want);
+    EXPECT_FALSE(solver.statistics().usedWeakFallback);
+  }
+}
+
+TEST(ValueFlowGraphTest, CallsiteScopedPreprocessGlobalFlowIsolatesSharedCalls) {
+  // Paper Algorithm 2 line 8: swap(&a, &b); a = &E; swap(&c, &d);
+  // Because `a` is NOT passed at the second swap callsite (and does not escape
+  // globally), the second swap must NOT leak `E` backward into the first swap
+  // or clobber `a` after `a = &E`.
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+  const auto C = p.addObject(false, false, "C");
+  const auto D = p.addObject(false, false, "D");
+  const auto E = p.addObject(false, false, "E");
+
+  const auto mainFn = p.addFunction("main");
+  const auto swapFn = p.addFunction("swap");
+  const auto mainBB = p.addBlock(mainFn);
+  const auto swapBB = p.addBlock(swapFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(swapFn, swapBB);
+  p.setFunctionExit(swapFn, swapBB);
+  p.addEntryFunction(mainFn);
+
+  const auto a = p.addObject(true, true, "a");
+  const auto b = p.addObject(true, true, "b");
+  const auto c = p.addObject(true, true, "c");
+  const auto d = p.addObject(true, true, "d");
+  for (ObjectID slot : {a, b, c, d}) {
+    p.setEmptyInitializer(slot);
+    p.setObjectOwner(slot, mainFn);
+  }
+
+  const auto paramP = p.addNode();
+  const auto paramQ = p.addNode();
+  p.setFunctionParams(swapFn, {paramP, paramQ});
+  const auto s1 = load(p, swapBB, paramP);
+  const auto s2 = load(p, swapBB, paramQ);
+  p.addStore(swapBB, paramP, s2);
+  p.addStore(swapBB, paramQ, s1);
+
+  p.addStore(mainBB, p.address(a), p.address(A));
+  p.addStore(mainBB, p.address(b), p.address(B));
+  p.addStore(mainBB, p.address(c), p.address(C));
+  p.addStore(mainBB, p.address(d), p.address(D));
+
+  const auto call1 = p.addCallSite(mainBB, 0, 0, {p.address(a), p.address(b)});
+  p.addCallTarget(call1, swapFn);
+  const auto afterFirst = load(p, mainBB, p.address(a));
+
+  p.addStore(mainBB, p.address(a), p.address(E));
+  const auto call2 = p.addCallSite(mainBB, 0, 0, {p.address(c), p.address(d)});
+  p.addCallTarget(call2, swapFn);
+  const auto afterSecond = load(p, mainBB, p.address(a));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_FALSE(solver.pointsTo(afterFirst).count(E));
+  EXPECT_EQ(solver.pointsTo(afterSecond), (PointsToSet{E}));
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+}
+
+TEST(ValueFlowGraphTest, CallsiteAnchoredInsertionsPreserveIntraBlockOrder) {
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+  const auto mainFn = p.addFunction("main");
+  const auto calleeFn = p.addFunction("callee");
+  const auto mainBB = p.addBlock(mainFn);
+  const auto calleeBB = p.addBlock(calleeFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(calleeFn, calleeBB);
+  p.setFunctionExit(calleeFn, calleeBB);
+  p.addEntryFunction(mainFn);
+
+  const auto slot = p.addObject(true, true, "slot");
+  const auto copy = p.addObject(false, true, "copy");
+  p.setEmptyInitializer(slot);
+  p.setEmptyInitializer(copy);
+  p.setObjectOwner(slot, mainFn);
+  p.setObjectOwner(copy, calleeFn);
+
+  const auto calleeRead = load(p, calleeBB, p.address(copy));
+
+  p.addStore(mainBB, p.address(slot), p.address(A));
+  const auto cs = p.addCallSite(mainBB);
+  p.addCallTarget(cs, calleeFn);
+  const auto afterCall = load(p, mainBB, p.address(slot));
+  p.addStore(mainBB, p.address(slot), p.address(B));
+
+  // Late-anchor a byval copy BEFORE `cs`, and an external write AFTER `cs`
+  // (before `afterCall`).
+  const auto tmp = p.addNode();
+  p.addLoadBeforeCall(cs, p.address(slot), tmp);
+  p.addStoreBeforeCall(cs, p.address(copy), tmp, false);
+  p.addStoreAfterCall(cs, p.address(slot), p.address(B), false);
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(calleeRead), (PointsToSet{A}));
+  EXPECT_EQ(solver.pointsTo(afterCall), (PointsToSet{A, B}));
+}
+
+TEST(ValueFlowGraphTest, CallBoundaryArrivalAtSecondCallsitePropagatesFlow) {
+  // Verify callsite-scoped PreprocessGlobalFlow re-evaluates an already-
+  // processed object when it later arrives at a SECOND callsite's actual arg.
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+
+  const auto mainFn = p.addFunction("main");
+  const auto readFn = p.addFunction("read");
+  const auto writeFn = p.addFunction("write");
+  const auto mainBB = p.addBlock(mainFn);
+  const auto readBB = p.addBlock(readFn);
+  const auto writeBB = p.addBlock(writeFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(readFn, readBB);
+  p.setFunctionExit(readFn, readBB);
+  p.setFunctionEntry(writeFn, writeBB);
+  p.setFunctionExit(writeFn, writeBB);
+  p.addEntryFunction(mainFn);
+
+  // `slot` is a non-global local of `main`; `box` holds &slot and is loaded
+  // after `slot` has already reached `call1(slot)`'s boundary!
+  const auto slot = p.addObject(true, true, "slot");
+  const auto box = p.addObject(false, true, "box");
+  p.setEmptyInitializer(slot);
+  p.setEmptyInitializer(box);
+  p.setObjectOwner(slot, mainFn);
+  p.setObjectOwner(box, mainFn);
+
+  const auto readParam = p.addNode();
+  p.setFunctionParams(readFn, {readParam});
+  const auto observed = load(p, readBB, readParam);
+
+  const auto writeParam = p.addNode();
+  p.setFunctionParams(writeFn, {writeParam});
+  p.addStore(writeBB, writeParam, p.address(B));
+
+  // Direct store &A into slot, then store &slot into non-singleton box.
+  p.addStore(mainBB, p.address(slot), p.address(A));
+  p.addStore(mainBB, p.address(box), p.address(slot));
+
+  // First call passes &slot directly (objReachesCallBoundary[slot] becomes true).
+  const auto c1 = p.addCallSite(mainBB, 0, 0, {p.address(slot)});
+  p.addCallTarget(c1, readFn);
+
+  // Second call passes pointer loaded from `box` (receives `slot` only after
+  // `box` is processed!).
+  const auto latePtr = load(p, mainBB, p.address(box));
+  const auto c2 = p.addCallSite(mainBB, 0, 0, {latePtr});
+  p.addCallTarget(c2, writeFn);
+
+  const auto afterWrite = load(p, mainBB, p.address(slot));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(observed), (PointsToSet{A}));
+  EXPECT_EQ(solver.pointsTo(afterWrite), (PointsToSet{B}));
+}
+
+TEST(ValueFlowGraphTest, NonGlobalCalleeInitializerSurvivesCallerPruning) {
+  // Non-global, non-owned object (e.g., calloc) with explicit initializer
+  // dereferenced strictly inside a callee whose caller does not carry it.
+  Program p;
+  const auto mainFn = p.addFunction("main");
+  const auto calleeFn = p.addFunction("callee");
+  const auto mainBB = p.addBlock(mainFn);
+  const auto calleeBB = p.addBlock(calleeFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(calleeFn, calleeBB);
+  p.setFunctionExit(calleeFn, calleeBB);
+  p.addEntryFunction(mainFn);
+
+  const auto heap = p.addObject(false, true, "callocObj");
+  p.setObjectGlobal(heap, false);
+  p.setInitializer(heap, p.nullValue());
+
+  const auto loaded = load(p, calleeBB, p.address(heap));
+  const auto cs = p.addCallSite(mainBB);
+  p.addCallTarget(cs, calleeFn);
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(loaded), (PointsToSet{p.nullObject()}));
+}
+
+TEST(ValueFlowGraphTest, TwoHopTransitiveEscapeInvalidatesCallsiteScoping) {
+  // local_a escapes into global G (never directly reaching a call boundary).
+  // After `slot` is processed, `slot` escapes into local_a via a late heap
+  // load; `slot` must become globally visible across callsites.
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+
+  const auto mainFn = p.addFunction("main");
+  const auto writerFn = p.addFunction("writer");
+  const auto mainBB = p.addBlock(mainFn);
+  const auto writerBB = p.addBlock(writerFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(writerFn, writerBB);
+  p.setFunctionExit(writerFn, writerBB);
+  p.addEntryFunction(mainFn);
+
+  const auto G = p.addObject(false, true, "G");
+  const auto localA = p.addObject(false, true, "localA");
+  const auto slot = p.addObject(true, true, "slot");
+  const auto relay = p.addObject(false, true, "relay");
+  p.setEmptyInitializer(G);
+  p.setEmptyInitializer(localA);
+  p.setEmptyInitializer(slot);
+  p.setEmptyInitializer(relay);
+  p.setObjectOwner(localA, mainFn);
+  p.setObjectOwner(slot, mainFn);
+  p.setObjectOwner(relay, mainFn);
+
+  // writerFn reaches `slot` strictly through global G -> localA -> slot.
+  const auto pLocalA = load(p, writerBB, p.address(G));
+  const auto pSlot = load(p, writerBB, pLocalA);
+  p.addStore(writerBB, pSlot, p.address(B));
+
+  // main stores &localA into G, stores &localA into relay, then stores &slot
+  // into *relay (creating a 2-hop escape slot -> localA -> G).
+  p.addStore(mainBB, p.address(G), p.address(localA));
+  p.addStore(mainBB, p.address(relay), p.address(localA));
+  const auto loadedLocalA = load(p, mainBB, p.address(relay));
+  p.addStore(mainBB, loadedLocalA, p.address(slot));
+
+  p.addStore(mainBB, p.address(slot), p.address(A));
+  const auto cs = p.addCallSite(mainBB); // no args, void return!
+  p.addCallTarget(cs, writerFn);
+  const auto afterCall = load(p, mainBB, p.address(slot));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_TRUE(solver.pointsTo(afterCall).count(B));
+}
+
+TEST(ValueFlowGraphTest, SecondIndirectTargetStrongStoreTriggersCleanRestart) {
+  // Indirect callsite initially resolves to non-modifying `noop`, then later
+  // resolves to `writer` which strongly writes `slot`. Should trigger a clean
+  // strong restart without weakening `slot`.
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+  const auto C = p.addObject(false, false, "C");
+
+  const auto noopObj = p.addObject(false, false, "noop");
+  const auto writerObj = p.addObject(false, false, "writer");
+  const auto fpSlot = p.addObject(false, true, "fpSlot");
+  const auto slot = p.addObject(true, true, "slot");
+  p.setInitializer(fpSlot, p.address(noopObj));
+  p.setEmptyInitializer(slot);
+
+  const auto mainFn = p.addFunction("main");
+  const auto noopFn = p.addFunction("noop");
+  const auto writerFn = p.addFunction("writer");
+  p.setFunctionObject(noopObj, noopFn);
+  p.setFunctionObject(writerObj, writerFn);
+  p.setAddressTakenFunction(noopFn, true);
+  p.setAddressTakenFunction(writerFn, true);
+
+  const auto mainBB = p.addBlock(mainFn);
+  const auto noopBB = p.addBlock(noopFn);
+  const auto writerBB = p.addBlock(writerFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(noopFn, noopBB);
+  p.setFunctionExit(noopFn, noopBB);
+  p.setFunctionEntry(writerFn, writerBB);
+  p.setFunctionExit(writerFn, writerBB);
+  p.addEntryFunction(mainFn);
+
+  // writerFn overwrites slot strongly twice: B then C; local load must see {C}.
+  p.addStore(writerBB, p.address(slot), p.address(B));
+  p.addStore(writerBB, p.address(slot), p.address(C));
+  const auto insideWriter = load(p, writerBB, p.address(slot));
+
+  // main stores writerObj into fpSlot via a load from another non-singleton
+  // container so noopObj reaches fp first and writerObj arrives later.
+  const auto box = p.addObject(false, true, "box");
+  p.setInitializer(box, p.address(writerObj));
+  const auto lateFn = load(p, mainBB, p.address(box));
+  p.addStore(mainBB, p.address(fpSlot), lateFn);
+
+  p.addStore(mainBB, p.address(slot), p.address(A));
+  const auto fp = load(p, mainBB, p.address(fpSlot));
+  p.addCallSite(mainBB, fp);
+  const auto afterCall = load(p, mainBB, p.address(slot));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(insideWriter), (PointsToSet{C}));
+  EXPECT_EQ(solver.pointsTo(afterCall), (PointsToSet{A, C}));
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+}
+
+TEST(ValueFlowGraphTest, DynamicIndirectCalleeMutatingViaFormalParamCleanRestart) {
+  // Singleton `slot` is emitted BEFORE `fp` resolves to `writer(p) { *p = &B; *p = &C; }`.
+  // When `fp` resolves, `writer` receives `&slot` via formal parameter `p`.
+  // Calling computePointedToBy() before the strongRestartNeeded check detects
+  // the new strong stores through `p` and performs a clean strong restart
+  // instead of falling back to local weakening.
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+  const auto C = p.addObject(false, false, "C");
+
+  const auto writerObj = p.addObject(false, false, "writer");
+  const auto slot = p.addObject(true, true, "slot");
+  const auto fpBox = p.addObject(false, true, "fpBox");
+  const auto fpMid = p.addObject(false, true, "fpMid");
+  p.setEmptyInitializer(slot);
+  p.setInitializer(fpBox, p.address(writerObj));
+  p.setEmptyInitializer(fpMid);
+
+  const auto mainFn = p.addFunction("main");
+  const auto writerFn = p.addFunction("writer");
+  p.setFunctionObject(writerObj, writerFn);
+  p.setAddressTakenFunction(writerFn, true);
+
+  const auto mainBB = p.addBlock(mainFn);
+  const auto writerBB = p.addBlock(writerFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(writerFn, writerBB);
+  p.setFunctionExit(writerFn, writerBB);
+  p.addEntryFunction(mainFn);
+
+  // writerFn strongly updates *param twice (B then C).
+  const auto param = p.addNode();
+  p.setFunctionParams(writerFn, {param});
+  p.addStore(writerBB, param, p.address(B));
+  p.addStore(writerBB, param, p.address(C));
+  const auto insideWriter = load(p, writerBB, param);
+
+  // Two-hop non-singleton chain delays `fp` resolution until after `slot`
+  // could already be emitted.
+  const auto f1 = load(p, mainBB, p.address(fpBox));
+  p.addStore(mainBB, p.address(fpMid), f1);
+  const auto fp = load(p, mainBB, p.address(fpMid));
+
+  p.addStore(mainBB, p.address(slot), p.address(A));
+  const auto beforeCall = load(p, mainBB, p.address(slot));
+  p.addCallSite(mainBB, fp, 0, {p.address(slot)});
+  const auto afterCall = load(p, mainBB, p.address(slot));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(beforeCall), (PointsToSet{A}));
+  EXPECT_EQ(solver.pointsTo(insideWriter), (PointsToSet{C}));
+  EXPECT_EQ(solver.pointsTo(afterCall), (PointsToSet{C}));
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
 }

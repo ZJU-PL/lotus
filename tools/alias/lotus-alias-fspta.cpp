@@ -314,6 +314,60 @@ int runValueFlowAnalysis(const Module &module) {
     return 1;
   }
 
+  if (ComparisonJSON) {
+    std::map<std::string, const Value *> values;
+    auto recordValue = [&](const Value *value) {
+      if (!value || !value->getType()->isPointerTy())
+        return;
+      const Function *function = nullptr;
+      if (const auto *instruction = dyn_cast<Instruction>(value))
+        function = instruction->getFunction();
+      else if (const auto *argument = dyn_cast<Argument>(value))
+        function = argument->getParent();
+      std::string key = function ? function->getName().str() : "@";
+      key += "::";
+      if (value->hasName())
+        key += value->getName().str();
+      else {
+        raw_string_ostream stream(key);
+        value->printAsOperand(stream, false);
+      }
+      values.emplace(std::move(key), value);
+    };
+    for (const GlobalVariable &global : module.globals())
+      recordValue(&global);
+    for (const Function &function : module) {
+      if (function.isDeclaration())
+        continue;
+      for (const Argument &argument : function.args())
+        recordValue(&argument);
+      for (const Instruction &instruction : instructions(function))
+        recordValue(&instruction);
+    }
+    const std::size_t total = values.size();
+    flow_sensitive::sampleComparisonValues(values, ComparisonLimit,
+                                            ComparisonSampleSeed);
+    json::Array observations, aliases;
+    for (auto left = values.begin(); left != values.end(); ++left) {
+      const auto &pointsTo = solver.getPointsTo(left->second);
+      observations.push_back(json::Object{
+          {"key", left->first},
+          {"points_to_size", static_cast<int64_t>(pointsTo.size())}});
+      for (auto right = std::next(left); right != values.end(); ++right) {
+        if (solver.mayAlias(left->second, right->second))
+          aliases.push_back(json::Array{left->first, right->first});
+      }
+    }
+    outs() << "PTA_COMPARISON_JSON "
+           << json::Value(
+                  json::Object{{"schema", 1},
+                               {"total_values", static_cast<int64_t>(total)},
+                               {"truncated", total != values.size()},
+                               {"values", std::move(observations)},
+                               {"may_alias", std::move(aliases)}})
+           << "\n";
+  }
+
   if (PrintPointsTo) {
     auto printPointsTo = [&](const Value *value) {
       if (!value || !value->getType()->isPointerTy())
@@ -351,20 +405,33 @@ int runValueFlowAnalysis(const Module &module) {
   if (DumpStats) {
     const auto &stats = solver.getStatistics();
     outs() << "vfpta.objects=" << stats.objects << "\n"
+           << "vfpta.functions=" << stats.functions << "\n"
+           << "vfpta.call-sites=" << stats.callSites << "\n"
            << "vfpta.value-nodes=" << stats.valueNodes << "\n"
            << "vfpta.control-blocks=" << stats.controlBlocks << "\n"
            << "vfpta.call-graph-iterations=" << stats.callGraphIterations
            << "\n"
            << "vfpta.resolved-indirect-targets="
            << stats.resolvedIndirectTargets << "\n"
+           << "vfpta.dynamic-indirect-targets="
+           << stats.solver.dynamicIndirectTargets << "\n"
+           << "vfpta.spec-modeled-calls=" << stats.specModeledCalls << "\n"
            << "vfpta.conservative-external-calls="
            << stats.conservativeExternalCalls << "\n"
+           << "vfpta.global-ctors=" << stats.globalCtors << "\n"
+           << "vfpta.global-dtors=" << stats.globalDtors << "\n"
            << "vfpta.object-traversals=" << stats.solver.objectTraversals
            << "\n"
            << "vfpta.indirect-flow-computations="
            << stats.solver.indirectFlowComputations << "\n"
            << "vfpta.indirect-flow-cache-hits="
            << stats.solver.indirectFlowCacheHits << "\n"
+           << "vfpta.function-flow-computations="
+           << stats.solver.functionFlowComputations << "\n"
+           << "vfpta.function-flow-reuse-hits="
+           << stats.solver.functionFlowReuseHits << "\n"
+           << "vfpta.interprocedural-aux-edges="
+           << stats.solver.interproceduralAuxEdges << "\n"
            << "vfpta.value-flow-join-nodes="
            << stats.solver.valueFlowJoinNodes << "\n"
            << "vfpta.indirect-edges=" << stats.solver.indirectEdges << "\n"
@@ -379,8 +446,11 @@ int runValueFlowAnalysis(const Module &module) {
            << "\n"
            << "vfpta.sparse-graph-edges=" << stats.solver.sparseGraphEdges
            << "\n"
+           << "vfpta.strong-resets=" << stats.solver.strongResets << "\n"
            << "vfpta.used-weak-fallback="
-           << (stats.solver.usedWeakFallback ? "true" : "false") << "\n";
+           << (stats.solver.usedWeakFallback ? "true" : "false") << "\n"
+           << "vfpta.weak-fallback-objects="
+           << stats.solver.weakFallbackObjects << "\n";
     if (stats.solver.usedWeakFallback)
       outs() << "vfpta.weak-fallback-reason=" << stats.solver.fallbackReason
              << "\n";

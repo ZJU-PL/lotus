@@ -256,10 +256,29 @@ This module contains three flow-sensitive analyses:
     strong-update status of an existing site
 - `ValueFlowPTA` implements the value-flow formulation of Li, Cifuentes, and
   Keynes (ESEC/FSE 2011). It builds a field-insensitive value-flow graph
-  directly from LLVM IR, orders indirect-flow construction by object escape,
-  and applies Algorithm 2's store-plus-IDF sparse reaching-definition solve to
-  its interprocedural supergraph. It does not require a precomputed SVFG or
-  flow-insensitive pre-analysis.
+  directly from LLVM IR without a precomputed SVFG or flow-insensitive
+  pre-analysis. Its mechanisms are:
+  - incremental `ComputePtedSet` reachability and transitive escape-order
+    scheduling (`ComputeEspSet`) with batch non-scalar cycle resolution and
+    local scalar-cycle weakening (preserving strong updates on unrelated
+    scalars)
+  - per-function CFGs with Algorithm 2's callsite-scoped `PreprocessGlobalFlow`
+    auxiliary call-in/entry/exit/call-out wiring (O(|ActiveFuncs|) generation-
+    stamped propagation) and block-level sparse `ComputeLocalFlow` (with
+    per-function incremental reuse, SCC-condensed weak fast path, and factored
+    join nodes)
+  - dynamic indirect-call resolution inside the VFG solver with
+    callsite-anchored intra-block event insertion for indirect external and
+    `byval` targets, mixed defined/external callsite soundness, and
+    address-taken filtering with dedicated unknown-argument callback sites for
+    opaque external calls
+  - pointer-only memory modeling, `AliasSpecManager` library summaries
+    (allocators, deallocators, copy/return-alias/no-effect specs), `byval`
+    value transfer, full vs. partial `memcpy`/`memmove`/`memset`, and
+    priority-ordered `llvm.global_ctors`/`llvm.global_dtors` lowering
+  - public VFG inspection APIs (`getProgram`, `getSolver`, `getValueNode`,
+    `getStoreNode`, `getPointedToByStores`, `getVFGSuccessors`,
+    `getVFGIndirectSuccessors`) for downstream value-flow analyses
 
 Select the versioned solver with `lotus-alias-fspta --analysis=vfspta`.
 Select the direct value-flow solver with
