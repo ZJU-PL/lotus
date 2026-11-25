@@ -1,13 +1,13 @@
 # RQ3 experiment driver
 
-RQ3 compares Regularization, Mutual Refinement, SPDS, and ACF on both suites.
+RQ3 compares Mutual Refinement, SPDS, and ACF on the enabled benchmark suites.
 SPDS uses `--analysis nonreflexive-taint --all-pairs` for the taint suite and
-`--analysis value-flow --all-pairs` for the value-flow suite. The default
-configuration runs
-25 inputs × 4 methods = 100 result rows. ACF reuses RQ1's five adaptive
-measurements; the other three methods run five measurements each. Every method
+`--analysis value-flow --all-pairs` for the value-flow suite. The current
+configuration enables 15 taint inputs and three methods (45 result rows); the
+value-flow suite is disabled. ACF reuses RQ1's five adaptive measurements; the
+other two methods run five measurements each. Every method
 runs one separate capture if all measurements succeed. Its taint client intersects the
-two balanced projection relations on the original directed graph; its
+two balanced projection relations after the configured reverse-edge completion; its
 value-flow client additionally constrains each witness to start/end with
 opening/closing brackets. Both return nonreflexive upper-bound pairs and
 reject prefix acceptance. The taint relation matches the classic CFL
@@ -128,7 +128,7 @@ writes `rq3-methods.csv` with performance and relation sizes, and
 `rq3-bounds.csv` with one row per typed method and benchmark:
 
 ```text
-typed_upper_size    = |U|                 (Regularization, Mutual Refinement, or SPDS)
+typed_upper_size    = |U|                 (Mutual Refinement or SPDS)
 intersection_size  = |U intersect ACF|
 newly_excluded_size = |U| - |U intersect ACF|
 upper_reduction    = newly_excluded_size / |U|
@@ -137,9 +137,10 @@ upper_reduction    = newly_excluded_size / |U|
 An empty typed upper bound has a blank reduction ratio. Missing or failed
 methods produce incomplete comparisons and a nonzero aggregator exit status;
 the other typed method can still be compared with ACF independently. No lower
-bound, certification ratio, or exactness claim is reported. ACF's standalone
-relation size covers the whole relaxed graph and should not be compared
-directly with client-filtered typed relation sizes.
+bound or certification ratio is reported, and ACF's unary exactness is not an
+exactness claim about the typed relation. ACF's standalone relation size covers
+the whole relaxed graph and should not be compared directly with
+client-filtered typed relation sizes.
 
 For the paper's precision table, run this from the RQ3 directory:
 
@@ -156,9 +157,7 @@ undefined. The micro average divides total removed pairs by total candidates.
 No files are written and no experiments are rerun.
 
 The demonstration heatmap reads `rq3-runs.csv` directly (override with `--runs PATH`)
-and shows all four methods: Regularization, Mutual Refinement, SPDS, and ACF,
-including SPDS
-on both taint and value-flow. Successful cells
+and shows the configured methods: Mutual Refinement, SPDS, and ACF. Successful cells
 and solved counts require all configured performance repetitions; resource
 failures are shown as TO/MO. Relation-capture failure does not erase valid
 performance measurements: `rq3-methods.csv` records performance `status` and

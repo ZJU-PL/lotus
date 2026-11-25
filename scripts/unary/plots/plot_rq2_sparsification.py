@@ -300,8 +300,10 @@ def style_log_comparison_axis(ax, limits: tuple[float, float]) -> None:
     ax.set_xlim(limits)
     ax.set_ylim(limits)
     ax.grid(True, which="major", color=GRID_COLOR, linewidth=GRID_WIDTH, zorder=0)
-    ax.xaxis.set_minor_locator(LogLocator(base=10, subs=(2, 5)))
-    ax.yaxis.set_minor_locator(LogLocator(base=10, subs=(2, 5)))
+    ax.xaxis.set_major_locator(LogLocator(base=10, numticks=100))
+    ax.yaxis.set_major_locator(LogLocator(base=10, numticks=100))
+    ax.xaxis.set_minor_locator(LogLocator(base=10, subs=range(2, 10), numticks=100))
+    ax.yaxis.set_minor_locator(LogLocator(base=10, subs=range(2, 10), numticks=100))
     ax.xaxis.set_minor_formatter(NullFormatter())
     ax.yaxis.set_minor_formatter(NullFormatter())
 
@@ -425,6 +427,7 @@ def make_figure(rows: list[Measurement]):
     completed = [row for row in rows if not row.direct_mo]
     mo_count = sum(row.direct_mo for row in rows)
 
+    style_mo_axis(time_mo_ax, time_limits, mo_count)
     style_log_comparison_axis(time_ax, time_limits)
     add_speedup_guides(time_ax, time_limits, speedups)
     scatter_by_suite(time_ax, completed, "direct_time_s", "acf_time_s")
@@ -432,9 +435,9 @@ def make_figure(rows: list[Measurement]):
     time_ax.set_title("(a) End-to-end time", loc="left", pad=5)
     time_ax.set_xlabel("Direct time (s)")
     time_ax.set_ylabel("ACF time (s)")
-    style_mo_axis(time_mo_ax, time_limits, mo_count)
     add_mo_points(time_mo_ax, rows, "acf_time_s")
 
+    style_mo_axis(rss_mo_ax, rss_limits, mo_count)
     style_log_comparison_axis(rss_ax, rss_limits)
     add_speedup_guides(rss_ax, rss_limits, speedups)
     scatter_by_suite(rss_ax, completed, "direct_rss_gib", "acf_rss_gib")
@@ -442,7 +445,6 @@ def make_figure(rows: list[Measurement]):
     rss_ax.set_title("(b) Peak memory", loc="left", pad=5)
     rss_ax.set_xlabel("Direct RSS (GiB)")
     rss_ax.set_ylabel("ACF RSS (GiB)")
-    style_mo_axis(rss_mo_ax, rss_limits, mo_count)
     add_mo_points(rss_mo_ax, rows, "acf_rss_gib")
 
     # plot_preprocessing_ecdf(pre_ax, rows)
