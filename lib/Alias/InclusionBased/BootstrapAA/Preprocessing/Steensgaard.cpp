@@ -266,16 +266,21 @@ CoarseResult steensgaard(const Program &program) {
           for (Id fd : fields) {
             if (!isMemory(program.objects[fd]))
               continue;
-            if (graph.top(src_root) || i.write_bytes == 0) {
+            const Object &fd_info = program.objects[fd];
+            const std::int64_t rel =
+                static_cast<std::int64_t>(fd_info.offset) -
+                static_cast<std::int64_t>(program.objects[od].offset);
+            const bool full_cover =
+                i.write_bytes != 0 && rel >= 0 && fd_info.bytes > 0 &&
+                static_cast<std::uint64_t>(rel) + fd_info.bytes <=
+                    i.write_bytes;
+            if (graph.top(src_root) || !full_cover) {
               graph.merge(graph.target(object_nodes[fd]), top);
               continue;
             }
             auto src_it = objects_by_root.find(src_root);
             if (src_it == objects_by_root.end())
               continue;
-            const std::int64_t rel =
-                static_cast<std::int64_t>(program.objects[fd].offset) -
-                static_cast<std::int64_t>(program.objects[od].offset);
             for (Id os : src_it->second) {
               if (!isMemory(program.objects[os])) {
                 graph.merge(graph.target(object_nodes[fd]), top);
@@ -288,9 +293,7 @@ CoarseResult steensgaard(const Program &program) {
               }
               for (Id fs : fs_pts.objects()) {
                 const Object &fs_info = program.objects[fs];
-                const Object &fd_info = program.objects[fd];
-                if (!isMemory(fs_info) || fd_info.bytes == 0 ||
-                    fs_info.bytes != fd_info.bytes) {
+                if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes) {
                   graph.merge(graph.target(object_nodes[fd]), top);
                 } else {
                   graph.merge(graph.target(object_nodes[fd]),
@@ -310,7 +313,7 @@ CoarseResult steensgaard(const Program &program) {
         } else {
           const Id addr = value_target(i.operands[0]);
           auto it = objects_by_root.find(addr);
-          if (it != objects_by_root.end() && i.write_bytes != 0) {
+          if (it != objects_by_root.end()) {
             for (Id o : it->second) {
               if (!isMemory(program.objects[o]))
                 continue;
@@ -318,9 +321,9 @@ CoarseResult steensgaard(const Program &program) {
                 if (isMemory(program.objects[fo]))
                   graph.merge(graph.target(object_nodes[fo]), top);
             }
-          } else {
-            graph.merge(graph.target(addr), top);
           }
+          if (i.write_bytes == 0 || it == objects_by_root.end())
+            graph.merge(graph.target(addr), top);
         }
         break;
       }

@@ -175,29 +175,34 @@ static initialization. Root pointer parameters and unknown external objects are
 presence of `llvm.global_ctors` conservatively initializes global storage to
 `top`.
 
-Struct and array types (up to 64 flattened fields) are recursively flattened
+Struct and array types (up to 256 flattened fields) are recursively flattened
 into distinct offset-indexed abstract objects, with array elements folded via
-`ArrayRegion` stride metadata so variable-index GEPs within an array of structs
-preserve sibling struct fields. Scalar pointer globals and non-recursive,
-entry-block, single-cell static allocas (and their non-array struct pointer
-fields) support strong updates; heap allocations, array elements, loop
-allocations, and recursive-frame allocations are non-singleton and always
-receive weak updates.
+`ArrayRegion` stride metadata so variable-index GEPs within whole-allocation
+arrays of structs preserve sibling struct fields (while sub-arrays inside
+larger structs conservatively include sibling fields under LLVM `inbounds`).
+Scalar pointer globals and non-recursive, entry-block, single-cell static
+allocas (and their non-array struct pointer fields) support strong updates;
+heap allocations, array elements, loop allocations, and recursive-frame
+allocations are non-singleton and always receive weak updates.
 
-Fresh `alloca` and allocator (`malloc`, `calloc`, `aligned_alloc`, `valloc`,
-`memalign`, scalar/array `operator new`) sites start with empty initial points-to
-sets (matching fresh uninitialized/zeroed storage without collapsing all
-allocations into `top` during Steensgaard preprocessing); `byval` copies,
-`realloc` old/fresh alternatives, and opaque external writes remain conservative.
-When an untyped heap allocation is uniquely bitcast to a struct pointer type,
-the adapter flattens that heap site's struct fields; otherwise it models a
-pointer-sized cell. Non-pointer stores and memory intrinsics invalidate only
-overlapping byte ranges via `Opcode::Havoc`, while `llvm.memcpy`/`llvm.memmove`
-lower to field-preserving `Opcode::MemCopy` (with zero-length intrinsics kept as
-no-ops). Non-default address-space nulls, `null_pointer_is_valid`, non-inbounds
-pointer arithmetic, `inttoptr`, `addrspacecast`, `freeze`, vector pointer
-extracts, inline assembly, and exceptional call alternatives (`invoke`/`callbr`)
-are modeled conservatively.
+Fresh `alloca` and uninitialized allocator (`malloc`, `aligned_alloc`, `valloc`,
+`memalign`, scalar/array `operator new`) sites start with empty initial
+points-to sets (matching fresh uninitialized storage without collapsing all
+allocations into `top` during Steensgaard preprocessing); `calloc` pointer
+storage starts zero-initialized (`NULL_OBJECT`, or `top` under
+`null_pointer_is_valid`); `byval` copies, `realloc` old/fresh alternatives,
+and opaque external writes remain conservative. When an untyped heap allocation
+is exclusively bitcast to a single struct pointer type (aside from null checks,
+`free`, `memset`, and debug/lifetime intrinsics), the adapter flattens that
+heap site's struct fields; otherwise it models a pointer-sized cell.
+Non-pointer stores and memory intrinsics invalidate overlapping byte ranges via
+`Opcode::Havoc` (with unknown-length intrinsics invalidating all fields), while
+`llvm.memcpy`/`llvm.memmove` lower to field-preserving `Opcode::MemCopy`
+(widening partially overwritten pointer fields to `top`, and keeping
+zero-length intrinsics as no-ops). Non-default address-space nulls,
+`null_pointer_is_valid`, non-inbounds pointer arithmetic, `inttoptr`,
+`addrspacecast`, `freeze`, vector pointer extracts, inline assembly, and
+exceptional call alternatives (`invoke`/`callbr`) are modeled conservatively.
 
 Concurrency, signal handlers, arbitrary reentrant external callbacks, dynamic
 loading, and sub-byte/unaligned cross-field integer-pointer reinterpretation
@@ -208,9 +213,9 @@ outside the modeled IR contract are not modeled.
 - Default budgets per cluster solver: `max_contexts = 4096`, `max_steps =
   1000000`. Exhausting either returns `QueryStatus::ResourceLimit` with
   `PointsToSet::top()` (never a partial under-approximation).
-- Guard widening: `max_guard_atoms = 16` and `max_guards_per_state = 16` soundly
+- Guard widening: `max_guard_atoms = 8` and `max_guards_per_state = 16` soundly
   widen complex guard conjunctions to `GUARD_TRUE` instead of dropping paths.
-- ROBDD budget: `max_bdd_nodes = 16384` soundly widens ROBDD operations to
+- ROBDD budget: `max_bdd_nodes = 65536` soundly widens ROBDD operations to
   `TRUE` if the node table reaches capacity.
 - Cached cluster solvers are reused across queries on an `Analysis`/`BootstrapAA`
   instance; concurrent queries on the same instance require external
@@ -253,27 +258,29 @@ required a `ResourceLimit` fallback.
 
 ## Validation
 
-- **Unit & regression tests**: 70/70 CTest cases pass (45 `BootstrapEngineTest`
+- **Unit & regression tests**: 80/80 CTest cases pass (49 `BootstrapEngineTest`
   tests covering Figures 2–5, Definition 8, Algorithms 1–5, FSCS guards,
-  `*s` alias & direct-target guards, multi-depth & eager Algorithm 2
-  dovetailing, flow-sensitive indirect-call reachability for FSCI, Algorithm 3
-  backward-`A` + forward-`Q` interprocedural aliases, ROBDD
-  intraprocedural/interprocedural downward & upward/loop path sensitivity,
-  one-level flow, cyclic linked lists, and 200-program slicing + 150-program
-  cross-backend differential fuzzing; 24 `BootstrapAATest` LLVM 14 tests
-  covering struct/array flattening, `MemCopy`, partial byte overwrites, heap
-  struct inference, function pointers in structs, `main(argv)` partitioning,
-  LLVM intraprocedural & interprocedural ROBDD branch pruning and argument/global
-  kill soundness, `aliases()`, and `fieldObjectId()`; plus
-  `bootstrap_aa_cli_smoke`).
+  caller-loop guard contradiction soundness, `*s` alias & direct-target guards,
+  multi-depth & eager Algorithm 2 dovetailing, flow-sensitive indirect-call
+  reachability for FSCI, Algorithm 3 backward-`A` + forward-`Q` interprocedural
+  aliases, ROBDD intraprocedural/interprocedural downward & upward/loop path
+  sensitivity, empty-block guard/path preservation, dead-branch reachability
+  soundness, one-level flow, cyclic linked lists, and 200-program slicing +
+  150-program cross-backend differential fuzzing; 30 `BootstrapAATest` LLVM 14
+  tests covering struct/array flattening, `MemCopy` (including non-zero-offset
+  and partial-field invalidation), unknown-length `memset` slicing, `calloc`
+  null initialization, sub-array `inbounds` GEP and escaping heap-cast
+  soundness, partial byte overwrites, heap struct inference, function pointers
+  in structs, `main(argv)` partitioning, LLVM intraprocedural & interprocedural
+  ROBDD branch pruning and argument/global kill soundness, caller-loop callee
+  guards, `aliases()`, and `fieldObjectId()`; plus `bootstrap_aa_cli_smoke`).
 - **Real LLVM IR differential audit**: Evaluated `lotus-alias-bootstrap
   --all-contexts` across all 62 regression IR benchmarks under
   `tests/regress/Alias/**/*.ll` (including `PTA/*.ll`, `spec-equake.ll`,
   `spec-mesa.ll`, `spec-parser.ll`, and `FlowSensitive/differential/*.ll`):
   - `guarded` vs `tabulation`: **62/62 exit 0 (0 crashes, 0 fallbacks)**,
-    **0 unsound results**, **60/62 byte-for-byte identical** (only
-    `PTA/global-array.ll` [3 coarser] and `PTA/spec-mesa.ll` [8 coarser] are
-    slightly coarser sound supersets).
+    **0 unsound results**, **61/62 byte-for-byte identical** (only
+    `PTA/spec-mesa.ll` [8 coarser] is a slightly coarser sound superset).
   - `--eager-dovetail` vs default `guarded`: **62/62 byte-for-byte identical**.
   - `--one-level-flow`, `--path-sensitive`, and
     `--path-sensitive --path-sensitive-interproc`: **62/62 exit 0** with 0

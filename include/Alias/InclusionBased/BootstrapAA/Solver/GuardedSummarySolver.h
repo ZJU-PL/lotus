@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace lotus {
@@ -152,15 +153,36 @@ using GuardId = std::uint32_t;
 constexpr GuardId GUARD_TRUE = 0;
 constexpr GuardId GUARD_FALSE = std::numeric_limits<GuardId>::max();
 
+struct KilledConds {
+  bool all = false;
+  std::vector<Id> vars; // sorted, unique when !all
+
+  bool empty() const { return !all && vars.empty(); }
+  bool operator==(const KilledConds &o) const {
+    return all == o.all && vars == o.vars;
+  }
+  bool operator<(const KilledConds &o) const {
+    return std::tie(all, vars) < std::tie(o.all, o.vars);
+  }
+};
+
 struct SummaryEntry {
   Expr source;
   GuardId guard = GUARD_TRUE;
   BddManager::NodeId path = BddManager::TRUE_NODE;
+  KilledConds killed{};
+  SummaryEntry() = default;
+  SummaryEntry(Expr s, GuardId g = GUARD_TRUE,
+               BddManager::NodeId p = BddManager::TRUE_NODE,
+               KilledConds k = {})
+      : source(std::move(s)), guard(g), path(p), killed(std::move(k)) {}
   bool operator==(const SummaryEntry &o) const {
-    return source == o.source && guard == o.guard && path == o.path;
+    return source == o.source && guard == o.guard && path == o.path &&
+           killed == o.killed;
   }
   bool operator<(const SummaryEntry &o) const {
-    return std::tie(source, guard, path) < std::tie(o.source, o.guard, o.path);
+    return std::tie(source, guard, path, killed) <
+           std::tie(o.source, o.guard, o.path, o.killed);
   }
 };
 
@@ -233,6 +255,7 @@ private:
     Expr q;
     GuardId guard = GUARD_TRUE;
     BddManager::NodeId path = BddManager::TRUE_NODE;
+    KilledConds killed;
   };
   struct Waiter {
     SummaryKey owner;
@@ -243,12 +266,13 @@ private:
     std::uint64_t caller_stride = 0;
     GuardId call_guard = GUARD_TRUE;
     BddManager::NodeId call_path = BddManager::TRUE_NODE;
+    KilledConds call_killed;
     bool operator<(const Waiter &o) const {
       return std::tie(owner, call_site, callee, caller_off, caller_known,
-                      caller_stride, call_guard, call_path) <
+                      caller_stride, call_guard, call_path, call_killed) <
              std::tie(o.owner, o.call_site, o.callee, o.caller_off,
                       o.caller_known, o.caller_stride, o.call_guard,
-                      o.call_path);
+                      o.call_path, o.call_killed);
     }
   };
 
@@ -269,6 +293,13 @@ private:
   bool guardSubsumes(GuardId weaker, GuardId stronger) const;
   void computeFunctionModifications();
   void computeFunctionConditionKills();
+  void addKilledCond(KilledConds &dst, Id cid) const;
+  void addKilledConds(KilledConds &dst, const std::vector<Id> &cids) const;
+  void mergeKilledConds(KilledConds &dst, const KilledConds &src) const;
+  bool killedSubsumes(const KilledConds &weaker,
+                      const KilledConds &stronger) const;
+  BddManager::NodeId applyKilledToPath(BddManager::NodeId path,
+                                       const KilledConds &killed);
   BddManager::NodeId quantifyInstConditions(const Instruction &inst,
                                             BddManager::NodeId path);
   BddManager::NodeId quantifyFuncConditions(Id func, BddManager::NodeId path);
@@ -317,6 +348,7 @@ private:
                           std::set<Expr> *entry_anchors = nullptr,
                           bool *path_pruned_out = nullptr);
   bool validateContext(Id site, const Context &ctx);
+  bool isPathReachable(Id site, Point point, const Context *ctx);
   QueryResult computeFscs(Id val, Id site, const Context &ctx, Point point,
                           std::set<Expr> *entry_anchors = nullptr);
   // Algorithm 3 Step 2: forward summary propagation from entry anchors A to Q.

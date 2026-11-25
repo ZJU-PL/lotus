@@ -64,24 +64,44 @@ Slice relevant(const Program &program, const ProgramIndex &index,
       stores_by_comp[hierarchy.value_components[addr]].push_back(site);
   }
   std::vector<std::vector<Id>> havocs_by_comp(hierarchy.successors.size());
+  std::vector<std::vector<Id>> havocs_by_obj(program.objects.size());
   std::vector<Id> top_havocs;
   for (Id site : index.havoc_sites) {
     const Instruction &i = *index.by_site[site].inst;
     if (i.operands.empty() || i.operands[0] == INVALID ||
-        valueOf(program, upper, i.operands[0]).isTop())
+        valueOf(program, upper, i.operands[0]).isTop()) {
       top_havocs.push_back(site);
-    else
+    } else {
       havocs_by_comp[hierarchy.value_components[i.operands[0]]].push_back(site);
+      const PointsToSet pts = valueOf(program, upper, i.operands[0]);
+      for (Id o : pts.objects()) {
+        if (!isMemory(program.objects[o]))
+          continue;
+        for (Id fo : program.overlappingFields(o, i.write_bytes))
+          if (isMemory(program.objects[fo]))
+            havocs_by_obj[fo].push_back(site);
+      }
+    }
   }
   std::vector<std::vector<Id>> memcopies_by_comp(hierarchy.successors.size());
+  std::vector<std::vector<Id>> memcopies_by_obj(program.objects.size());
   std::vector<Id> top_memcopies;
   for (Id site : index.memcopy_sites) {
     const Instruction &i = *index.by_site[site].inst;
     const Id dst = i.operands[0];
-    if (dst == INVALID || valueOf(program, upper, dst).isTop())
+    if (dst == INVALID || valueOf(program, upper, dst).isTop()) {
       top_memcopies.push_back(site);
-    else
+    } else {
       memcopies_by_comp[hierarchy.value_components[dst]].push_back(site);
+      const PointsToSet pts = valueOf(program, upper, dst);
+      for (Id o : pts.objects()) {
+        if (!isMemory(program.objects[o]))
+          continue;
+        for (Id fo : program.overlappingFields(o, i.write_bytes))
+          if (isMemory(program.objects[fo]))
+            memcopies_by_obj[fo].push_back(site);
+      }
+    }
   }
   std::vector<std::vector<Id>> allocs_by_base(program.objects.size());
   for (Id site : index.allocate_sites) {
@@ -178,12 +198,8 @@ Slice relevant(const Program &program, const ProgramIndex &index,
         for (Id o : pts.objects()) {
           if (!isMemory(program.objects[o]))
             continue;
-          if (i.write_bytes != 0) {
-            for (Id fo : program.overlappingFields(o, i.write_bytes))
-              needObject(fo);
-          } else {
-            needObject(o);
-          }
+          for (Id fo : program.overlappingFields(o, i.write_bytes))
+            needObject(fo);
         }
       }
     }
@@ -372,6 +388,14 @@ Slice relevant(const Program &program, const ProgramIndex &index,
           markFuncRelevant(index.by_site[site].function);
           needValue(ci.indirect_target);
         }
+      }
+      for (Id site : havocs_by_obj[obj]) {
+        processHavoc(site);
+        markFuncRelevant(index.by_site[site].function);
+      }
+      for (Id site : memcopies_by_obj[obj]) {
+        processMemCopy(site);
+        markFuncRelevant(index.by_site[site].function);
       }
       const Id base = program.baseOf(obj);
       if (base != obj) {

@@ -625,13 +625,16 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
           if (g == GUARD_FALSE)
             continue;
         }
-        if (inst.write_bytes == 0 || pt_src.isTop() || fd_info.bytes == 0) {
-          out.push_back({Expr::makeTop(), g, path});
-          continue;
-        }
         const std::int64_t rel =
             static_cast<std::int64_t>(fd_info.offset) -
             static_cast<std::int64_t>(m_program.objects[od].offset);
+        const bool full_cover =
+            inst.write_bytes != 0 && rel >= 0 && fd_info.bytes > 0 &&
+            static_cast<std::uint64_t>(rel) + fd_info.bytes <= inst.write_bytes;
+        if (pt_src.isTop() || !full_cover) {
+          out.push_back({Expr::makeTop(), g, path});
+          continue;
+        }
         for (Id os : pt_src.objects()) {
           if (os == NULL_OBJECT)
             continue;
@@ -703,14 +706,8 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
       Id hit_obj = INVALID;
       std::size_t hit_count = 0;
       for (Id o : pt_u.objects()) {
-        if (inst.write_bytes != 0) {
-          const auto fields = m_program.overlappingFields(o, inst.write_bytes);
-          if (std::find(fields.begin(), fields.end(), q.id) != fields.end()) {
-            overlaps = true;
-            hit_obj = o;
-            ++hit_count;
-          }
-        } else if (o == q.id) {
+        const auto fields = m_program.overlappingFields(o, inst.write_bytes);
+        if (std::find(fields.begin(), fields.end(), q.id) != fields.end()) {
           overlaps = true;
           hit_obj = o;
           ++hit_count;
@@ -762,13 +759,9 @@ void GuardedSummarySolver::transferBackward(const Instruction &inst,
       bool overlaps = pt_u.isTop() || pt_s.isTop();
       if (!overlaps) {
         for (Id o : pt_u.objects()) {
-          if (inst.write_bytes != 0) {
-            for (Id fo : m_program.overlappingFields(o, inst.write_bytes))
-              if (pt_s.contains(fo))
-                overlaps = true;
-          } else if (pt_s.contains(o)) {
-            overlaps = true;
-          }
+          for (Id fo : m_program.overlappingFields(o, inst.write_bytes))
+            if (pt_s.contains(fo))
+              overlaps = true;
         }
       }
       if (!overlaps) {

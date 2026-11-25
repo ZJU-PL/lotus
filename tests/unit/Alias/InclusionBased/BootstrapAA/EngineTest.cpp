@@ -1,8 +1,11 @@
 #include "Alias/InclusionBased/BootstrapAA/Engine.h"
 
+#include <algorithm>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -1525,6 +1528,231 @@ void eagerAlgorithm2DovetailingConsistency() {
   CHECK(eager.pointsToAllContexts(l2, sL2, Point::After).points_to ==
         demand.pointsToAllContexts(l2, sL2, Point::After).points_to);
 }
+
+void calleeInCallerLoopGuardContradictionSoundness() {
+  // Non-loop callee `maybe_write(ptr, val)` called inside a loop in `main`:
+  // Iteration 0 writes `x = &c`, iteration 1 writes `y = &c`. Walking backward
+  // across two loop iterations conjoins `([C], s, p -/-> x)` and `([C], s, p -> x)`.
+  // `atomsContradict` must NOT prune this path since `C` is in a loop!
+  Fixture f;
+  Id a = f.object("a"), b = f.object("b"), c = f.object("c");
+  Id x = f.object("x"), y = f.object("y");
+  Id pa = f.addr(a), pb = f.addr(b), pc = f.addr(c);
+  Id px = f.addr(x), py = f.addr(y);
+
+  Id maybeWrite = f.p.addFunction("maybe_write");
+  f.p.addBlock(maybeWrite);
+  Id mp = f.value("mp", maybeWrite), mv = f.value("mv", maybeWrite);
+  f.p.functions[maybeWrite].parameters = {mp, mv};
+  f.inst(Opcode::Store, INVALID, {mp, mv}, maybeWrite, 0);
+  f.inst(Opcode::Return, INVALID, {}, maybeWrite, 0);
+
+  Id loop = f.p.addBlock(f.main);
+  Id exit = f.p.addBlock(f.main);
+  Id ptr = f.value("ptr");
+  Id res = f.value("res");
+
+  f.inst(Opcode::Store, INVALID, {px, pa}, f.main, 0);
+  f.inst(Opcode::Store, INVALID, {py, pb}, f.main, 0);
+  Edge toLoop;
+  toLoop.target = loop;
+  toLoop.phi = {{ptr, px}};
+  f.p.functions[f.main].blocks[0].successors.push_back(toLoop);
+
+  f.call(maybeWrite, INVALID, {ptr, pc}, f.main, loop);
+  Edge back;
+  back.target = loop;
+  back.phi = {{ptr, py}};
+  Edge out;
+  out.target = exit;
+  f.p.functions[f.main].blocks[loop].successors.push_back(back);
+  f.p.functions[f.main].blocks[loop].successors.push_back(out);
+
+  Id sLoad = f.inst(Opcode::Load, res, {px}, f.main, exit);
+  f.inst(Opcode::Return, INVALID, {}, f.main, exit);
+
+  Options gOpt = refined();
+  gOpt.solver_mode = SolverMode::GuardedSummary;
+  Options tOpt = refined();
+  tOpt.solver_mode = SolverMode::InputStateTabulation;
+
+  Analysis guarded(f.p, gOpt);
+  Analysis tab(f.p, tOpt);
+
+  QueryResult gr = guarded.pointsTo(res, sLoad, {}, Point::After);
+  QueryResult tr = tab.pointsTo(res, sLoad, {}, Point::After);
+  CHECK(gr.reachable());
+  CHECK(gr.points_to.contains(c));
+  CHECK(tr.points_to.contains(c));
+  CHECK(gr.points_to == tr.points_to);
+}
+
+void emptyBlockGuardAndPathPreservation() {
+  // Two paths from `bUse` reach consecutive empty blocks in the reverse CFG:
+  // Path 1 enters `bEmpty2` FIRST carrying `!c0` (which later contradicts
+  // `entry -> bLeft` with `c0=true`); Path 2 enters `bEmpty2` SECOND carrying
+  // `c0=true` (feasible, delivering `&a`). `seen_eb` must key on `(guard, path)`
+  // so Path 1 cannot shadow Path 2!
+  Fixture f;
+  Id a = f.object("a");
+  Id slot = f.object("slot");
+  Id pa = f.addr(a), pslot = f.addr(slot);
+  Id c0 = f.p.addCondition();
+
+  Id bLeft = f.p.addBlock(f.main);
+  Id bEmpty1 = f.p.addBlock(f.main); // intentionally empty
+  Id bEmpty2 = f.p.addBlock(f.main); // intentionally empty
+  Id bBadMid = f.p.addBlock(f.main); // intentionally empty
+  Id bGoodMid = f.p.addBlock(f.main); // intentionally empty
+  Id bUse = f.p.addBlock(f.main);
+
+  f.inst(Opcode::Store, INVALID, {pslot, pa}, f.main, 0);
+  f.p.functions[f.main].blocks[0].successors.push_back({bLeft, {}, c0, true});
+
+  f.inst(Opcode::Nop, INVALID, {}, f.main, bLeft);
+  f.p.functions[f.main].blocks[bLeft].successors.push_back(
+      {bEmpty1, {}, INVALID, true});
+  f.p.functions[f.main].blocks[bEmpty1].successors.push_back(
+      {bEmpty2, {}, INVALID, true});
+
+  // bEmpty2 splits to bBadMid (c0=false) and bGoodMid (c0=true), both empty,
+  // both merging into bUse (bBadMid registered first so backward BFS visits
+  // bEmpty2 with `!c0` before `c0`!).
+  f.p.functions[f.main].blocks[bEmpty2].successors.push_back(
+      {bBadMid, {}, c0, false});
+  f.p.functions[f.main].blocks[bEmpty2].successors.push_back(
+      {bGoodMid, {}, c0, true});
+  f.p.functions[f.main].blocks[bBadMid].successors.push_back(
+      {bUse, {}, INVALID, true});
+  f.p.functions[f.main].blocks[bGoodMid].successors.push_back(
+      {bUse, {}, INVALID, true});
+
+  Id res = f.value("res");
+  Id sLoad = f.inst(Opcode::Load, res, {pslot}, f.main, bUse);
+  f.inst(Opcode::Return, INVALID, {}, f.main, bUse);
+
+  Options psOpt = refined();
+  psOpt.path_sensitive = true;
+  Analysis aa(f.p, psOpt);
+  QueryResult qr = aa.pointsTo(res, sLoad, {}, Point::After);
+  CHECK(qr.reachable());
+  CHECK(qr.points_to == PointsToSet(a));
+}
+
+void deadBranchPruneDoesNotFakeUnreachable() {
+  // Reachable point reading an uninitialized local alloca (initial = {}) after
+  // an unrelated dead branch `if (c) { if (!c) *slot = &a; }` was pruned must
+  // remain Complete (with top), NOT falsely reported as Unreachable!
+  Fixture f;
+  Id a = f.object("a");
+  Id pa = f.addr(a);
+  Id slot = f.object("slot", PointsToSet{}, true, ObjectKind::Stack);
+  Id c = f.p.addCondition();
+
+  Id bT1 = f.p.addBlock(f.main);
+  Id bDead = f.p.addBlock(f.main);
+  Id bAfter = f.p.addBlock(f.main);
+
+  Id pslot = f.value("pslot");
+  Instruction alloc;
+  alloc.opcode = Opcode::Allocate;
+  alloc.object = slot;
+  alloc.result = pslot;
+  f.p.append(f.main, 0, alloc);
+  f.p.functions[f.main].blocks[0].successors.push_back({bT1, {}, c, true});
+  f.p.functions[f.main].blocks[0].successors.push_back({bAfter, {}, c, false});
+
+  f.inst(Opcode::Nop, INVALID, {}, f.main, bT1);
+  f.p.functions[f.main].blocks[bT1].successors.push_back({bDead, {}, c, false});
+  f.p.functions[f.main].blocks[bT1].successors.push_back({bAfter, {}, c, true});
+
+  f.inst(Opcode::Store, INVALID, {pslot, pa}, f.main, bDead);
+  Id deadVal = f.value("dead_val");
+  Id sDeadLoad = f.inst(Opcode::Load, deadVal, {pslot}, f.main, bDead);
+  f.p.functions[f.main].blocks[bDead].successors.push_back({bAfter, {}, INVALID, true});
+
+  Id liveVal = f.value("live_val");
+  Id sLiveLoad = f.inst(Opcode::Load, liveVal, {pslot}, f.main, bAfter);
+  f.inst(Opcode::Return, INVALID, {}, f.main, bAfter);
+
+  Options psOpt = refined();
+  psOpt.path_sensitive = true;
+  Analysis aa(f.p, psOpt);
+
+  // Dead branch itself IS genuinely unreachable:
+  CHECK(aa.pointsTo(deadVal, sDeadLoad, {}, Point::After).status ==
+        QueryStatus::Unreachable);
+  CHECK(aa.pointsToAllContexts(deadVal, sDeadLoad, Point::After).status ==
+        QueryStatus::Unreachable);
+
+  // Post-merge live load IS reachable (even though dead branch was pruned):
+  QueryResult liveFscs = aa.pointsTo(liveVal, sLiveLoad, {}, Point::After);
+  CHECK(liveFscs.status == QueryStatus::Complete);
+  CHECK(liveFscs.points_to.isTop());
+
+  QueryResult liveFsci = aa.pointsToAllContexts(liveVal, sLiveLoad, Point::After);
+  CHECK(liveFsci.status == QueryStatus::Complete);
+  CHECK(liveFsci.points_to.isTop());
+}
+
+void interproceduralUpwardPathSensitiveKillAndAliases() {
+  // Part A: `main` branches on `!c`, kills `c` (e.g., mutating a global flag),
+  // then calls `callee`, which branches on `c`. Upward splicing into `main`
+  // must quantify `c` before conjoining with `!c`, keeping `callee` reachable.
+  Fixture f;
+  Id a = f.object("a"), b = f.object("b");
+  Id slot = f.object("slot", PointsToSet(a));
+  Id pa = f.addr(a), pb = f.addr(b), pslot = f.addr(slot);
+  Id c = f.p.addCondition();
+
+  Id callee = f.p.addFunction("callee");
+  f.p.addBlock(callee);
+  Id cbThen = f.p.addBlock(callee);
+  Id cbElse = f.p.addBlock(callee);
+  f.inst(Opcode::Nop, INVALID, {}, callee, 0);
+  f.p.functions[callee].blocks[0].successors.push_back({cbThen, {}, c, true});
+  f.p.functions[callee].blocks[0].successors.push_back({cbElse, {}, c, false});
+
+  f.inst(Opcode::Store, INVALID, {pslot, pb}, callee, cbThen);
+  Id vThen = f.value("v_then", callee);
+  Id sThen = f.inst(Opcode::Load, vThen, {pslot}, callee, cbThen);
+  f.inst(Opcode::Return, INVALID, {}, callee, cbThen);
+  f.inst(Opcode::Return, INVALID, {}, callee, cbElse);
+
+  Id bCall = f.p.addBlock(f.main);
+  Id bDone = f.p.addBlock(f.main);
+  f.inst(Opcode::Store, INVALID, {pslot, pa}, f.main, 0);
+  f.p.functions[f.main].blocks[0].successors.push_back({bCall, {}, c, false});
+  f.p.functions[f.main].blocks[0].successors.push_back({bDone, {}, c, true});
+
+  // Mutate / kill `c` before calling `callee`!
+  Instruction killC;
+  killC.opcode = Opcode::Nop;
+  killC.defines_condition = c;
+  f.p.append(f.main, bCall, killC);
+  Id cs = f.call(callee, INVALID, {}, f.main, bCall);
+  Id afterMain = f.value("after_main");
+  Id sAfter = f.inst(Opcode::Load, afterMain, {pslot}, f.main, bCall);
+  f.inst(Opcode::Return, INVALID, {}, f.main, bCall);
+  f.inst(Opcode::Return, INVALID, {}, f.main, bDone);
+
+  Options opt = refined();
+  opt.path_sensitive = true;
+  opt.path_sensitive_interprocedural = true;
+  Analysis aa(f.p, opt);
+
+  QueryResult insideFscs = aa.pointsTo(vThen, sThen, {cs}, Point::After);
+  CHECK(insideFscs.reachable());
+  CHECK(insideFscs.points_to == PointsToSet(b));
+
+  QueryResult insideFsci = aa.pointsToAllContexts(vThen, sThen, Point::After);
+  CHECK(insideFsci.reachable());
+  CHECK(insideFsci.points_to == PointsToSet(b));
+
+  QueryResult afterRes = aa.pointsTo(afterMain, sAfter, {}, Point::After);
+  CHECK(afterRes.reachable());
+  CHECK(afterRes.points_to.contains(b));
+}
 } // namespace
 
 TEST(BootstrapEngineTest, StrongUpdates) { strongUpdates(); }
@@ -1621,4 +1849,16 @@ TEST(BootstrapEngineTest, FlowSensitiveIndirectCallReachability) {
 }
 TEST(BootstrapEngineTest, EagerAlgorithm2DovetailingConsistency) {
   eagerAlgorithm2DovetailingConsistency();
+}
+TEST(BootstrapEngineTest, CalleeInCallerLoopGuardContradictionSoundness) {
+  calleeInCallerLoopGuardContradictionSoundness();
+}
+TEST(BootstrapEngineTest, EmptyBlockGuardAndPathPreservation) {
+  emptyBlockGuardAndPathPreservation();
+}
+TEST(BootstrapEngineTest, DeadBranchPruneDoesNotFakeUnreachable) {
+  deadBranchPruneDoesNotFakeUnreachable();
+}
+TEST(BootstrapEngineTest, InterproceduralUpwardPathSensitiveKillAndAliases) {
+  interproceduralUpwardPathSensitiveKillAndAliases();
 }

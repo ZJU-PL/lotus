@@ -139,14 +139,24 @@ PointsToSet Program::resolveField(Id object, std::int64_t delta, bool known,
 
   const auto &fields = fields_of_base[base];
   if (!known) {
-    // Variable-index GEP inside an aggregate: if indexing within a known array
-    // region of matching stride, fold to the representative element offset;
-    // otherwise conservatively include all flattened fields of `base`.
-    if (array_stride > 0) {
+    // Variable-index GEP inside an aggregate: fold modulo `array_stride` only
+    // when the matching array region (or an enclosing multiple-stride region)
+    // spans the entire base allocation `[0, size_bytes)`. Otherwise an LLVM
+    // `inbounds` GEP can legally step across a sub-array into sibling struct
+    // fields, so fall back soundly to all flattened fields of `base`.
+    if (array_stride > 0 && base_info.size_bytes > 0) {
       const std::uint64_t cur_off = objects[object].offset;
+      auto strideCoversWholeAllocation = [&](std::uint64_t stride) -> bool {
+        for (const ArrayRegion &outer : base_info.array_regions) {
+          if (outer.begin == 0 && outer.end == base_info.size_bytes &&
+              outer.stride > 0 && (outer.stride % stride) == 0)
+            return true;
+        }
+        return false;
+      };
       for (const ArrayRegion &r : base_info.array_regions) {
         if (r.stride == array_stride && cur_off >= r.begin &&
-            cur_off < r.end) {
+            cur_off < r.end && strideCoversWholeAllocation(r.stride)) {
           const std::int64_t target_signed =
               static_cast<std::int64_t>(cur_off) + delta;
           if (target_signed >= 0) {

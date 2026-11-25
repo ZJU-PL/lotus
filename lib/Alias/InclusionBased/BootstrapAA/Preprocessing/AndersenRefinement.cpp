@@ -132,13 +132,18 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
             for (Id fd : program.overlappingFields(od, i.write_bytes)) {
               if (!slice.objects[fd])
                 continue;
-              if (src_pts.isTop() || i.write_bytes == 0) {
+              const Object &fd_info = program.objects[fd];
+              const std::int64_t rel =
+                  static_cast<std::int64_t>(fd_info.offset) -
+                  static_cast<std::int64_t>(program.objects[od].offset);
+              const bool full_cover =
+                  i.write_bytes != 0 && rel >= 0 && fd_info.bytes > 0 &&
+                  static_cast<std::uint64_t>(rel) + fd_info.bytes <=
+                      i.write_bytes;
+              if (src_pts.isTop() || !full_cover) {
                 changed |= memory[fd].join(PointsToSet::top());
                 continue;
               }
-              const std::int64_t rel =
-                  static_cast<std::int64_t>(program.objects[fd].offset) -
-                  static_cast<std::int64_t>(program.objects[od].offset);
               for (Id os : src_pts.objects()) {
                 if (!isMemory(program.objects[os])) {
                   changed |= memory[fd].join(PointsToSet::top());
@@ -151,9 +156,7 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
                 }
                 for (Id fs : fs_pts.objects()) {
                   const Object &fs_info = program.objects[fs];
-                  const Object &fd_info = program.objects[fd];
-                  if (!isMemory(fs_info) || fd_info.bytes == 0 ||
-                      fs_info.bytes != fd_info.bytes)
+                  if (!isMemory(fs_info) || fs_info.bytes != fd_info.bytes)
                     changed |= memory[fd].join(PointsToSet::top());
                   else
                     changed |= memory[fd].join(memory[fs]);
@@ -176,12 +179,8 @@ Sets inclusion(const Program &program, const ProgramIndex &index,
             for (Id o : addr.objects()) {
               if (!isMemory(program.objects[o]))
                 continue;
-              if (i.write_bytes != 0) {
-                for (Id fo : program.overlappingFields(o, i.write_bytes))
-                  store_one(fo, PointsToSet::top(), 0);
-              } else {
-                store_one(o, PointsToSet::top(), 0);
-              }
+              for (Id fo : program.overlappingFields(o, i.write_bytes))
+                store_one(fo, PointsToSet::top(), 0);
             }
           }
         }

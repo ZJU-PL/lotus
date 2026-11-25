@@ -93,17 +93,25 @@ bool GuardedSummarySolver::atomsContradict(const GuardAtom &a,
   if (a.site != b.site || a.call_suffix != b.call_suffix ||
       a.context_insensitive || b.context_insensitive)
     return false;
-  // Only detect contradictions outside loops (a loop site may execute
-  // multiple times with different pointer targets).
+  // Only detect contradictions outside loops: a site inside a loop, or a
+  // callee site invoked through any call site inside a loop, may execute
+  // multiple times with different pointer targets under the same call suffix.
   const InstLocation &loc = m_index.by_site[a.site];
   if (m_index.in_loop_block[loc.function][loc.block])
     return false;
+  for (Id call_site : a.call_suffix) {
+    const InstLocation &cloc = m_index.by_site[call_site];
+    if (m_index.in_loop_block[cloc.function][cloc.block])
+      return false;
+  }
   if (a.lhs == b.lhs && a.rhs == b.rhs && a.lhs_offset == b.lhs_offset &&
       a.lhs_offset_known == b.lhs_offset_known &&
       a.lhs_stride == b.lhs_stride) {
     if ((a.kind == GuardKind::PointsTo && b.kind == GuardKind::NotPointsTo) ||
-        (a.kind == GuardKind::NotPointsTo && b.kind == GuardKind::PointsTo) ||
-        (a.kind == GuardKind::Alias && b.kind == GuardKind::NotAlias) ||
+        (a.kind == GuardKind::NotPointsTo && b.kind == GuardKind::PointsTo))
+      return a.rhs < m_program.objects.size() &&
+             m_program.objects[a.rhs].singleton;
+    if ((a.kind == GuardKind::Alias && b.kind == GuardKind::NotAlias) ||
         (a.kind == GuardKind::NotAlias && b.kind == GuardKind::Alias))
       return true;
   }
@@ -262,16 +270,11 @@ void GuardedSummarySolver::computeFunctionModifications() {
               for (Id o : addr.objects()) {
                 if (!isMemory(m_program.objects[o]))
                   continue;
-                if (inst.write_bytes != 0) {
-                  for (Id fo : m_program.overlappingFields(o, inst.write_bytes))
-                    if (isMemory(m_program.objects[fo])) {
-                      m_func_modifies[f].insert(fo);
-                      m_func_modifies_any[f] = true;
-                    }
-                } else {
-                  m_func_modifies[f].insert(o);
-                  m_func_modifies_any[f] = true;
-                }
+                for (Id fo : m_program.overlappingFields(o, inst.write_bytes))
+                  if (isMemory(m_program.objects[fo])) {
+                    m_func_modifies[f].insert(fo);
+                    m_func_modifies_any[f] = true;
+                  }
               }
             }
           }
@@ -387,6 +390,65 @@ void GuardedSummarySolver::computeFunctionConditionKills() {
   }
   for (Id f = 0; f < nf; ++f)
     m_func_kills_conditions[f].assign(kills[f].begin(), kills[f].end());
+}
+
+void GuardedSummarySolver::addKilledCond(KilledConds &dst, Id cid) const {
+  if (!m_options.path_sensitive_interprocedural || dst.all || cid == INVALID)
+    return;
+  auto it = std::lower_bound(dst.vars.begin(), dst.vars.end(), cid);
+  if (it != dst.vars.end() && *it == cid)
+    return;
+  dst.vars.insert(it, cid);
+  if (dst.vars.size() > std::max<std::size_t>(m_options.max_guard_atoms, 16)) {
+    dst.all = true;
+    dst.vars.clear();
+  }
+}
+
+void GuardedSummarySolver::addKilledConds(KilledConds &dst,
+                                          const std::vector<Id> &cids) const {
+  if (!m_options.path_sensitive_interprocedural || dst.all || cids.empty())
+    return;
+  for (Id cid : cids) {
+    addKilledCond(dst, cid);
+    if (dst.all)
+      return;
+  }
+}
+
+void GuardedSummarySolver::mergeKilledConds(KilledConds &dst,
+                                            const KilledConds &src) const {
+  if (!m_options.path_sensitive_interprocedural || dst.all || src.empty())
+    return;
+  if (src.all) {
+    dst.all = true;
+    dst.vars.clear();
+    return;
+  }
+  addKilledConds(dst, src.vars);
+}
+
+bool GuardedSummarySolver::killedSubsumes(const KilledConds &weaker,
+                                          const KilledConds &stronger) const {
+  if (weaker.all)
+    return true;
+  if (stronger.all)
+    return false;
+  if (weaker.vars.size() < stronger.vars.size())
+    return false;
+  return std::includes(weaker.vars.begin(), weaker.vars.end(),
+                       stronger.vars.begin(), stronger.vars.end());
+}
+
+BddManager::NodeId
+GuardedSummarySolver::applyKilledToPath(BddManager::NodeId path,
+                                        const KilledConds &killed) {
+  if (!m_options.path_sensitive || m_bdd.isTrue(path) || m_bdd.isFalse(path) ||
+      killed.empty())
+    return path;
+  if (killed.all)
+    return BddManager::TRUE_NODE;
+  return m_bdd.existsAll(path, killed.vars);
 }
 
 BddManager::NodeId

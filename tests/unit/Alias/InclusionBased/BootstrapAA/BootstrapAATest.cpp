@@ -1,6 +1,9 @@
 #include "Alias/InclusionBased/BootstrapAA/BootstrapAA.h"
 
+#include <algorithm>
+#include <memory>
 #include <stdexcept>
+#include <string>
 
 #include <gtest/gtest.h>
 #include <llvm/AsmParser/Parser.h>
@@ -948,6 +951,308 @@ void llvmInterproceduralPathSensitiveArgScopingSoundness() {
   CHECK(r_res.reachable());
   CHECK(r_res.points_to.contains(c));
 }
+
+void llvmCalleeInLoopGuardSoundness() {
+  Fixture f(R"IR(
+    target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
+    @a = global i8 0
+    @b = global i8 0
+    @c = global i8 0
+    define void @maybe_write(i8** %p, i8* %v) {
+      store i8* %v, i8** %p
+      ret void
+    }
+    define i32 @main(i32 %n) {
+    entry:
+      %x = alloca i8*
+      %y = alloca i8*
+      store i8* @a, i8** %x
+      store i8* @b, i8** %y
+      br label %loop
+    loop:
+      %i = phi i32 [ 0, %entry ], [ %next, %loop ]
+      %ptr = phi i8** [ %x, %entry ], [ %y, %loop ]
+      call void @maybe_write(i8** %ptr, i8* @c)
+      %next = add i32 %i, 1
+      %cond = icmp slt i32 %next, %n
+      br i1 %cond, label %loop, label %exit
+    exit:
+      %res = load i8*, i8** %x
+      ret i32 0
+    }
+  )IR");
+  auto gOpt = options();
+  gOpt.solver_mode = lotus::bootstrap::SolverMode::GuardedSummary;
+  auto tOpt = options();
+  tOpt.solver_mode = lotus::bootstrap::SolverMode::InputStateTabulation;
+
+  BootstrapAA guarded(*f.module, nullptr, gOpt);
+  BootstrapAA tab(*f.module, nullptr, tOpt);
+
+  const auto c = guarded.objectId(*f.module->getNamedGlobal("c"));
+  const auto &res = f.instruction("main", "res");
+  auto gr = guarded.pointsTo(res, res, {}, Point::After);
+  auto tr = tab.pointsTo(res, res, {}, Point::After);
+  CHECK(gr.reachable());
+  CHECK(gr.points_to.contains(c));
+  CHECK(gr.points_to == tr.points_to);
+}
+
+void llvmInterproceduralUpwardGlobalFlagMutationSoundness() {
+  Fixture f(R"IR(
+    target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
+    @g_flag = internal global i32 0
+    @init = global i8 0
+    @target = global i8 0
+    define void @helper(i8** %slot) {
+    entry:
+      %v = load i32, i32* @g_flag
+      %c = icmp ne i32 %v, 0
+      br i1 %c, label %active, label %done
+    active:
+      store i8* @target, i8** %slot
+      %ld = load i8*, i8** %slot
+      ret void
+    done:
+      ret void
+    }
+    define i32 @main() {
+    entry:
+      %slot = alloca i8*
+      store i8* @init, i8** %slot
+      %v0 = load i32, i32* @g_flag
+      %c0 = icmp eq i32 %v0, 0
+      br i1 %c0, label %mutate_and_call, label %exit
+    mutate_and_call:
+      store i32 1, i32* @g_flag
+      call void @helper(i8** %slot)
+      %after = load i8*, i8** %slot
+      ret i32 0
+    exit:
+      ret i32 0
+    }
+  )IR");
+  auto opt = options();
+  opt.path_sensitive = true;
+  opt.path_sensitive_interprocedural = true;
+  BootstrapAA aa(*f.module, nullptr, opt);
+
+  const auto target = aa.objectId(*f.module->getNamedGlobal("target"));
+  const auto &ld = f.instruction("helper", "ld");
+  const auto &after = f.instruction("main", "after");
+  const llvm::CallBase *cs = nullptr;
+  for (const auto &bb : *f.module->getFunction("main"))
+    for (const auto &inst : bb)
+      if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst))
+        cs = cb;
+  CHECK(cs != nullptr);
+
+  // @main mutated @g_flag = 1 before calling @helper, so @helper's
+  // `@g_flag != 0` branch MUST remain reachable (both FSCS and FSCI)!
+  auto rFscs = aa.pointsTo(ld, ld, {cs}, Point::After);
+  CHECK(rFscs.reachable());
+  CHECK(rFscs.points_to == PointsToSet(target));
+
+  auto rFsci = aa.pointsToAllContexts(ld, ld, Point::After);
+  CHECK(rFsci.reachable());
+  CHECK(rFsci.points_to == PointsToSet(target));
+
+  auto rAfter = aa.pointsTo(after, after, {}, Point::After);
+  CHECK(rAfter.reachable());
+  CHECK(rAfter.points_to.contains(target));
+}
+
+void llvmNonZeroOffsetMemCopyAndUnknownLenMemsetSliceSoundness() {
+  Fixture f(R"IR(
+    target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
+    %struct.S = type { i64, i64, i8* }
+    @a = global i8 0
+    @b = global i8 0
+    declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1 immarg)
+    declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1 immarg)
+    define i32 @main(i64 %n) {
+      %src = alloca %struct.S
+      %dst = alloca %struct.S
+      %dst_p = getelementptr inbounds %struct.S, %struct.S* %dst, i32 0, i32 2
+      %src_p = getelementptr inbounds %struct.S, %struct.S* %src, i32 0, i32 2
+      store i8* @a, i8** %dst_p
+      store i8* @b, i8** %src_p
+      ; Copy 16 bytes starting at offset 8 (covering field 1 and field 2!)
+      %dst_mid = getelementptr inbounds %struct.S, %struct.S* %dst, i32 0, i32 1
+      %src_mid = getelementptr inbounds %struct.S, %struct.S* %src, i32 0, i32 1
+      %dst_raw = bitcast i64* %dst_mid to i8*
+      %src_raw = bitcast i64* %src_mid to i8*
+      call void @llvm.memcpy.p0i8.p0i8.i64(i8* %dst_raw, i8* %src_raw, i64 16, i1 false)
+      %after_copy = load i8*, i8** %dst_p
+      ; Unknown-length memset at offset 8 must conservatively havoc offset 16!
+      call void @llvm.memset.p0i8.i64(i8* %dst_raw, i8 0, i64 %n, i1 false)
+      %after_memset = load i8*, i8** %dst_p
+      ret i32 0
+    }
+  )IR");
+  auto gOpt = options();
+  gOpt.solver_mode = lotus::bootstrap::SolverMode::GuardedSummary;
+  auto tOpt = options();
+  tOpt.solver_mode = lotus::bootstrap::SolverMode::InputStateTabulation;
+
+  BootstrapAA guarded(*f.module, nullptr, gOpt);
+  BootstrapAA tab(*f.module, nullptr, tOpt);
+
+  const auto b = guarded.objectId(*f.module->getNamedGlobal("b"));
+  const auto &after_copy = f.instruction("main", "after_copy");
+  const auto &after_memset = f.instruction("main", "after_memset");
+
+  CHECK(guarded.pointsTo(after_copy, after_copy, {}, Point::After).points_to ==
+        PointsToSet(b));
+  CHECK(tab.pointsTo(after_copy, after_copy, {}, Point::After).points_to ==
+        PointsToSet(b));
+  CHECK(guarded.pointsTo(after_memset, after_memset, {}, Point::After)
+            .points_to.isTop());
+  CHECK(tab.pointsTo(after_memset, after_memset, {}, Point::After)
+            .points_to.isTop());
+}
+
+void llvmPartialMemCopyInvalidatesPointerField() {
+  Fixture f(R"IR(
+    target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
+    %struct.Pair = type { i8*, i8* }
+    @a = global i8 0
+    @b = global i8 0
+    @c = global i8 0
+    declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1 immarg)
+    define i32 @main() {
+      %src = alloca %struct.Pair
+      %dst = alloca %struct.Pair
+      %s0 = getelementptr inbounds %struct.Pair, %struct.Pair* %src, i32 0, i32 0
+      %s1 = getelementptr inbounds %struct.Pair, %struct.Pair* %src, i32 0, i32 1
+      %d0 = getelementptr inbounds %struct.Pair, %struct.Pair* %dst, i32 0, i32 0
+      %d1 = getelementptr inbounds %struct.Pair, %struct.Pair* %dst, i32 0, i32 1
+      store i8* @a, i8** %s0
+      store i8* @b, i8** %s1
+      store i8* @c, i8** %d1
+      %ds = bitcast %struct.Pair* %dst to i8*
+      %ss = bitcast %struct.Pair* %src to i8*
+      ; 12 bytes copies f0 ([0,8)) completely and overwrites only half of f1 ([8,16))!
+      call void @llvm.memcpy.p0i8.p0i8.i64(i8* %ds, i8* %ss, i64 12, i1 false)
+      %r0 = load i8*, i8** %d0
+      %r1 = load i8*, i8** %d1
+      ret i32 0
+    }
+  )IR");
+  auto gOpt = options();
+  gOpt.solver_mode = lotus::bootstrap::SolverMode::GuardedSummary;
+  auto tOpt = options();
+  tOpt.solver_mode = lotus::bootstrap::SolverMode::InputStateTabulation;
+
+  BootstrapAA guarded(*f.module, nullptr, gOpt);
+  BootstrapAA tab(*f.module, nullptr, tOpt);
+
+  const auto a = guarded.objectId(*f.module->getNamedGlobal("a"));
+  const auto &r0 = f.instruction("main", "r0");
+  const auto &r1 = f.instruction("main", "r1");
+
+  CHECK(guarded.pointsTo(r0, r0, {}, Point::After).points_to == PointsToSet(a));
+  CHECK(tab.pointsTo(r0, r0, {}, Point::After).points_to == PointsToSet(a));
+  CHECK(guarded.pointsTo(r1, r1, {}, Point::After).points_to.isTop());
+  CHECK(tab.pointsTo(r1, r1, {}, Point::After).points_to.isTop());
+}
+
+void llvmCallocInitializesNullObject() {
+  Fixture f(R"IR(
+    target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
+    %struct.Node = type { i8*, i8* }
+    @a = global i8 0
+    declare i8* @calloc(i64, i64)
+    define i32 @main(i1 %cond) {
+    entry:
+      %raw = call i8* @calloc(i64 1, i64 16)
+      %n = bitcast i8* %raw to %struct.Node*
+      %f0 = getelementptr inbounds %struct.Node, %struct.Node* %n, i32 0, i32 0
+      %f1 = getelementptr inbounds %struct.Node, %struct.Node* %n, i32 0, i32 1
+      br i1 %cond, label %init, label %join
+    init:
+      store i8* @a, i8** %f0
+      br label %join
+    join:
+      %v0 = load i8*, i8** %f0
+      %v1 = load i8*, i8** %f1
+      ret i32 0
+    }
+  )IR");
+  BootstrapAA aa(*f.module, nullptr, options());
+  const auto a = aa.objectId(*f.module->getNamedGlobal("a"));
+  const auto &v0 = f.instruction("main", "v0");
+  const auto &v1 = f.instruction("main", "v1");
+
+  PointsToSet aOrNull(a);
+  aOrNull.insert(lotus::bootstrap::NULL_OBJECT);
+  CHECK(aa.pointsTo(v0, v0, {}, Point::After).points_to == aOrNull);
+  CHECK(aa.pointsTo(v1, v1, {}, Point::After).points_to ==
+        PointsToSet(lotus::bootstrap::NULL_OBJECT));
+}
+
+void llvmSubArrayInboundsGepAndEscapingHeapCastSoundness() {
+  // Part A: Variable-index `inbounds` GEP on a sub-array inside a struct can
+  // legally step into sibling fields in LLVM IR -> must include sibling `@b`.
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
+      %struct.Mixed = type { [2 x i8*], i8* }
+      @a = global i8 0
+      @b = global i8 0
+      define i32 @main(i64 %idx) {
+        %s = alloca %struct.Mixed
+        %e0 = getelementptr inbounds %struct.Mixed, %struct.Mixed* %s, i32 0, i32 0, i64 0
+        %other = getelementptr inbounds %struct.Mixed, %struct.Mixed* %s, i32 0, i32 1
+        store i8* @a, i8** %e0
+        store i8* @b, i8** %other
+        %p = getelementptr inbounds i8*, i8** %e0, i64 %idx
+        %v = load i8*, i8** %p
+        ret i32 0
+      }
+    )IR");
+    BootstrapAA aa(*f.module, nullptr, options());
+    const auto a = aa.objectId(*f.module->getNamedGlobal("a"));
+    const auto b = aa.objectId(*f.module->getNamedGlobal("b"));
+    const auto &v = f.instruction("main", "v");
+    auto res = aa.pointsTo(v, v, {}, Point::After);
+    CHECK(res.reachable());
+    CHECK(res.points_to.contains(a));
+    CHECK(res.points_to.contains(b));
+  }
+
+  // Part B: Escaping raw `void*` from `malloc` passed to helper that casts to a
+  // different struct layout inhibits unsound struct flattening.
+  {
+    Fixture f(R"IR(
+      target datalayout = "e-m:e-i64:64-n8:16:32:64-S128"
+      %struct.A = type { i32, i8* }
+      %struct.B = type { i8*, i32 }
+      @x = global i8 0
+      declare i8* @malloc(i64)
+      define void @init_as_B(i8* %raw) {
+        %b = bitcast i8* %raw to %struct.B*
+        %f0 = getelementptr inbounds %struct.B, %struct.B* %b, i32 0, i32 0
+        store i8* @x, i8** %f0
+        ret void
+      }
+      define i32 @main() {
+        %raw = call i8* @malloc(i64 16)
+        %a = bitcast i8* %raw to %struct.A*
+        call void @init_as_B(i8* %raw)
+        %as_ptr = bitcast %struct.A* %a to i8**
+        %v = load i8*, i8** %as_ptr
+        ret i32 0
+      }
+    )IR");
+    BootstrapAA aa(*f.module, nullptr, options());
+    const auto x = aa.objectId(*f.module->getNamedGlobal("x"));
+    const auto &v = f.instruction("main", "v");
+    auto res = aa.pointsTo(v, v, {}, Point::After);
+    CHECK(res.reachable());
+    CHECK(res.points_to.contains(x));
+  }
+}
 } // namespace
 TEST(BootstrapAATest, CallsAndStackStores) { callsAndStackStores(); }
 TEST(BootstrapAATest, GlobalsAndExternalHavoc) { globalsAndExternalHavoc(); }
@@ -996,4 +1301,22 @@ TEST(BootstrapAATest, LLVMInterproceduralPathSensitiveArgAndGlobal) {
 }
 TEST(BootstrapAATest, LLVMInterproceduralPathSensitiveArgScopingSoundness) {
   llvmInterproceduralPathSensitiveArgScopingSoundness();
+}
+TEST(BootstrapAATest, LLVMCalleeInLoopGuardSoundness) {
+  llvmCalleeInLoopGuardSoundness();
+}
+TEST(BootstrapAATest, LLVMInterproceduralUpwardGlobalFlagMutationSoundness) {
+  llvmInterproceduralUpwardGlobalFlagMutationSoundness();
+}
+TEST(BootstrapAATest, LLVMNonZeroOffsetMemCopyAndUnknownLenMemsetSliceSoundness) {
+  llvmNonZeroOffsetMemCopyAndUnknownLenMemsetSliceSoundness();
+}
+TEST(BootstrapAATest, LLVMPartialMemCopyInvalidatesPointerField) {
+  llvmPartialMemCopyInvalidatesPointerField();
+}
+TEST(BootstrapAATest, LLVMCallocInitializesNullObject) {
+  llvmCallocInitializesNullObject();
+}
+TEST(BootstrapAATest, LLVMSubArrayInboundsGepAndEscapingHeapCastSoundness) {
+  llvmSubArrayInboundsGepAndEscapingHeapCastSoundness();
 }

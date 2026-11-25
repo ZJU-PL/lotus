@@ -58,6 +58,7 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
   // is identical to `(Val(v), def_site, Point::After)`. This avoids redundant
   // per-site summaries in long straight-line blocks.
   if (root_key.kind == SummaryKind::LocalPoint &&
+      !m_options.path_sensitive_interprocedural &&
       root_key.target.kind == ExprKind::Val &&
       root_key.target.id != INVALID &&
       root_key.site < m_reachability.reachable_site.size() &&
@@ -103,47 +104,60 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
   const Id root_scc = m_call_graph.function_scc[root_key.function];
   std::deque<WorkItem> work;
   using ProcKey = std::tuple<SummaryKey, CfgPos, Expr>;
-  std::map<ProcKey, std::vector<std::pair<GuardId, BddManager::NodeId>>>
+  std::map<ProcKey,
+           std::vector<std::tuple<GuardId, BddManager::NodeId, KilledConds>>>
       processed;
   std::set<SummaryKey> seeded_in_scc;
   std::set<SummaryKey> top_saturated;
   std::map<SummaryKey, std::set<Waiter>> waiters;
 
   auto recordState = [&](const SummaryKey &owner, CfgPos pos, const Expr &q,
-                         GuardId &g, BddManager::NodeId &path) -> bool {
+                         GuardId &g, BddManager::NodeId &path,
+                         KilledConds &killed) -> bool {
     if (g == GUARD_FALSE || m_bdd.isFalse(path) || top_saturated.count(owner))
       return false;
     auto &seen = processed[{owner, pos, q}];
-    for (const auto &[sg, sp] : seen) {
+    for (const auto &[sg, sp, sk] : seen) {
       if (guardSubsumes(sg, g) &&
-          (!m_options.path_sensitive || m_bdd.isTrue(sp) || sp == path))
+          (!m_options.path_sensitive || m_bdd.isTrue(sp) || sp == path) &&
+          (!m_options.path_sensitive_interprocedural ||
+           killedSubsumes(sk, killed)))
         return false;
     }
     if (seen.size() >= m_options.max_guards_per_state) {
       g = GUARD_TRUE;
       path = BddManager::TRUE_NODE;
+      if (m_options.path_sensitive_interprocedural) {
+        killed.all = true;
+        killed.vars.clear();
+      }
       ++m_stats.guards_widened;
-      for (const auto &[sg, sp] : seen)
-        if (sg == GUARD_TRUE && m_bdd.isTrue(sp))
+      for (const auto &[sg, sp, sk] : seen)
+        if (sg == GUARD_TRUE && m_bdd.isTrue(sp) &&
+            (!m_options.path_sensitive_interprocedural || sk.all))
           return false;
     }
     seen.erase(
-        std::remove_if(seen.begin(), seen.end(),
-                       [&](const auto &prev) {
-                         return guardSubsumes(g, prev.first) &&
-                                (!m_options.path_sensitive ||
-                                 m_bdd.isTrue(path) || path == prev.second);
-                       }),
+        std::remove_if(
+            seen.begin(), seen.end(),
+            [&](const auto &prev) {
+              return guardSubsumes(g, std::get<0>(prev)) &&
+                     (!m_options.path_sensitive || m_bdd.isTrue(path) ||
+                      path == std::get<1>(prev)) &&
+                     (!m_options.path_sensitive_interprocedural ||
+                      killedSubsumes(killed, std::get<2>(prev)));
+            }),
         seen.end());
-    seen.emplace_back(g, path);
+    seen.emplace_back(g, path, killed);
     return true;
   };
 
   auto enqueue = [&](const SummaryKey &owner, CfgPos pos, const Expr &q,
-                     GuardId g, BddManager::NodeId path) {
-    if (!recordState(owner, pos, q, g, path))
+                     GuardId g, BddManager::NodeId path,
+                     KilledConds killed = {}) {
+    if (!recordState(owner, pos, q, g, path, killed))
       return;
-    work.push_back({owner, pos, q, g, path});
+    work.push_back({owner, pos, q, g, path, std::move(killed)});
   };
 
   auto seedKey = [&](const SummaryKey &key) {
@@ -196,16 +210,25 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
     // LocalPoint summaries keep the function's own argument conditions intact
     // so upward caller splicing can correlate them at call sites before
     // crossing the caller's entry boundary.
-    if (owner.kind != SummaryKind::LocalPoint)
+    if (owner.kind != SummaryKind::LocalPoint) {
       entry.path = quantifyFuncEntryConditions(owner.function, entry.path);
-    if (!m_options.path_sensitive_interprocedural)
+      if (m_options.path_sensitive_interprocedural &&
+          owner.function < m_program.functions.size())
+        addKilledConds(
+            entry.killed,
+            m_program.functions[owner.function].entry_kills_conditions);
+    }
+    if (!m_options.path_sensitive_interprocedural) {
       entry.path = BddManager::TRUE_NODE;
+      entry.killed = {};
+    }
     auto &list = m_summaries[owner];
     for (const SummaryEntry &existing : list) {
       if (existing.source == entry.source &&
           guardSubsumes(existing.guard, entry.guard) &&
           (!m_options.path_sensitive_interprocedural ||
-           m_bdd.isTrue(existing.path) || existing.path == entry.path))
+           ((m_bdd.isTrue(existing.path) || existing.path == entry.path) &&
+            killedSubsumes(existing.killed, entry.killed))))
         return;
     }
     std::size_t same_src = 0;
@@ -215,14 +238,20 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
     if (same_src >= m_options.max_guards_per_state) {
       entry.guard = GUARD_TRUE;
       entry.path = BddManager::TRUE_NODE;
+      if (m_options.path_sensitive_interprocedural) {
+        entry.killed.all = true;
+        entry.killed.vars.clear();
+      }
       ++m_stats.guards_widened;
       for (const SummaryEntry &existing : list)
         if (existing.source == entry.source && existing.guard == GUARD_TRUE &&
-            m_bdd.isTrue(existing.path))
+            m_bdd.isTrue(existing.path) &&
+            (!m_options.path_sensitive_interprocedural || existing.killed.all))
           return;
     }
     if (entry.source.kind == ExprKind::Top && entry.guard == GUARD_TRUE &&
-        m_bdd.isTrue(entry.path)) {
+        m_bdd.isTrue(entry.path) &&
+        (!m_options.path_sensitive_interprocedural || entry.killed.all)) {
       list.clear();
       top_saturated.insert(owner);
     } else {
@@ -233,7 +262,9 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
                 return prev.source == entry.source &&
                        guardSubsumes(entry.guard, prev.guard) &&
                        (!m_options.path_sensitive_interprocedural ||
-                        m_bdd.isTrue(entry.path) || entry.path == prev.path);
+                        ((m_bdd.isTrue(entry.path) ||
+                          entry.path == prev.path) &&
+                         killedSubsumes(entry.killed, prev.killed)));
               }),
           list.end());
     }
@@ -251,7 +282,9 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
         GuardId shifted = prependCallSite(entry.guard, w.call_site);
         GuardId combined_g = conjoinGuards(w.call_guard, shifted);
         const BddManager::NodeId caller_before_p =
-            quantifyFuncConditions(w.callee, w.call_path);
+            m_options.path_sensitive_interprocedural
+                ? applyKilledToPath(w.call_path, entry.killed)
+                : quantifyFuncConditions(w.callee, w.call_path);
         BddManager::NodeId combined_p =
             m_options.path_sensitive_interprocedural
                 ? m_bdd.makeAnd(caller_before_p, entry.path)
@@ -261,13 +294,15 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
             ++m_stats.path_infeasible_prunes;
           continue;
         }
+        KilledConds combined_k = w.call_killed;
+        mergeKilledConds(combined_k, entry.killed);
         std::vector<SummaryEntry> subst;
         substituteCalleeExpr(w.callee, ci, entry.source, w.caller_off,
                              w.caller_known, w.caller_stride, combined_g,
                              combined_p, subst);
         for (const SummaryEntry &se : subst)
           enqueue(w.owner, {w.call_site, Point::Before}, se.source, se.guard,
-                  se.path);
+                  se.path, combined_k);
       }
     }
   };
@@ -277,16 +312,19 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
                                  std::int64_t caller_off, bool caller_known,
                                  std::uint64_t caller_stride,
                                  GuardId call_guard,
-                                 BddManager::NodeId call_path) {
+                                 BddManager::NodeId call_path,
+                                 const KilledConds &call_killed) {
     const Instruction &ci = *m_index.by_site[call_site].inst;
     const Id callee_scc = m_call_graph.function_scc[callee];
-    const BddManager::NodeId caller_before_p =
-        quantifyFuncConditions(callee, call_path);
     if (callee_scc != root_scc) {
       const auto &callee_entries = computeSummary(callee_key);
       for (const SummaryEntry &ce : callee_entries) {
         GuardId shifted = prependCallSite(ce.guard, call_site);
         GuardId combined_g = conjoinGuards(call_guard, shifted);
+        const BddManager::NodeId caller_before_p =
+            m_options.path_sensitive_interprocedural
+                ? applyKilledToPath(call_path, ce.killed)
+                : quantifyFuncConditions(callee, call_path);
         BddManager::NodeId combined_p =
             m_options.path_sensitive_interprocedural
                 ? m_bdd.makeAnd(caller_before_p, ce.path)
@@ -296,16 +334,19 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
             ++m_stats.path_infeasible_prunes;
           continue;
         }
+        KilledConds combined_k = call_killed;
+        mergeKilledConds(combined_k, ce.killed);
         std::vector<SummaryEntry> subst;
         substituteCalleeExpr(callee, ci, ce.source, caller_off, caller_known,
                              caller_stride, combined_g, combined_p, subst);
         for (const SummaryEntry &se : subst)
           enqueue(owner, {call_site, Point::Before}, se.source, se.guard,
-                  se.path);
+                  se.path, combined_k);
       }
     } else {
       Waiter w{owner,        call_site,     callee,     caller_off,
-               caller_known, caller_stride, call_guard, call_path};
+               caller_known, caller_stride, call_guard, call_path,
+               call_killed};
       const bool newly_registered = waiters[callee_key].insert(w).second;
       seedKey(callee_key);
       if (!newly_registered)
@@ -315,6 +356,10 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
         ++m_stats.scc_reschedules;
         GuardId shifted = prependCallSite(ce.guard, call_site);
         GuardId combined_g = conjoinGuards(call_guard, shifted);
+        const BddManager::NodeId caller_before_p =
+            m_options.path_sensitive_interprocedural
+                ? applyKilledToPath(call_path, ce.killed)
+                : quantifyFuncConditions(callee, call_path);
         BddManager::NodeId combined_p =
             m_options.path_sensitive_interprocedural
                 ? m_bdd.makeAnd(caller_before_p, ce.path)
@@ -324,12 +369,14 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
             ++m_stats.path_infeasible_prunes;
           continue;
         }
+        KilledConds combined_k = call_killed;
+        mergeKilledConds(combined_k, ce.killed);
         std::vector<SummaryEntry> subst;
         substituteCalleeExpr(callee, ci, ce.source, caller_off, caller_known,
                              caller_stride, combined_g, combined_p, subst);
         for (const SummaryEntry &se : subst)
           enqueue(owner, {call_site, Point::Before}, se.source, se.guard,
-                  se.path);
+                  se.path, combined_k);
       }
     }
   };
@@ -356,6 +403,7 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
     Expr cur_q = item.q;
     GuardId cur_g = item.guard;
     BddManager::NodeId cur_p = item.path;
+    KilledConds cur_k = std::move(item.killed);
     bool hit_call = false;
     bool stopped = false;
 
@@ -364,7 +412,8 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
         const Instruction &ci = block_insts[cur_idx];
         if (ci.opcode == Opcode::Call) {
           if (cur_idx != loc.index || item.pos.point != Point::After) {
-            enqueue(item.owner, {ci.id, Point::After}, cur_q, cur_g, cur_p);
+            enqueue(item.owner, {ci.id, Point::After}, cur_q, cur_g, cur_p,
+                    cur_k);
             stopped = true;
           } else {
             hit_call = true;
@@ -379,6 +428,10 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
             continue;
           }
         }
+        if (m_options.path_sensitive_interprocedural) {
+          addKilledCond(cur_k, ci.defines_condition);
+          addKilledConds(cur_k, ci.kills_conditions);
+        }
         std::vector<SummaryEntry> next;
         transferBackward(ci, cur_q, cur_g, cur_p, target_depth, next);
         if (next.empty()) {
@@ -387,7 +440,7 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
         }
         for (std::size_t k = 1; k < next.size(); ++k)
           enqueue(item.owner, {ci.id, Point::Before}, next[k].source,
-                  next[k].guard, next[k].path);
+                  next[k].guard, next[k].path, cur_k);
         cur_q = next[0].source;
         cur_g = next[0].guard;
         cur_p = next[0].path;
@@ -411,6 +464,11 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
     if (hit_call) {
       const Instruction &inst = block_insts[cur_idx];
       BddManager::NodeId call_path = quantifyInstConditions(inst, cur_p);
+      KilledConds call_k = cur_k;
+      if (m_options.path_sensitive_interprocedural) {
+        addKilledCond(call_k, inst.defines_condition);
+        addKilledConds(call_k, inst.kills_conditions);
+      }
 
       // Fast skip (Algorithm 4 line 2 / Algorithm 5 line 17): a caller-local
       // SSA Val (not defined by this Call) or terminal Expr cannot be modified
@@ -423,21 +481,28 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
             valueOf(m_program, m_upper, inst.indirect_target));
         bool returns = coarse_targets.opaque;
         BddManager::NodeId skip_path = call_path;
-        if (coarse_targets.opaque && inst.writes_memory)
+        KilledConds skip_k = call_k;
+        if (coarse_targets.opaque && inst.writes_memory) {
           skip_path = quantifyGlobalConditions(skip_path);
+          addKilledConds(skip_k, m_program.global_conditions);
+        }
         for (Id c : coarse_targets.functions) {
           returns |= m_reachability.may_return[c];
           if (m_program.functions[c].external) {
-            if (inst.writes_memory && m_program.functions[c].writes_memory)
+            if (inst.writes_memory && m_program.functions[c].writes_memory) {
               skip_path = quantifyGlobalConditions(skip_path);
+              addKilledConds(skip_k, m_program.global_conditions);
+            }
           } else {
             skip_path = quantifyFuncConditions(c, skip_path);
+            if (c < m_func_kills_conditions.size())
+              addKilledConds(skip_k, m_func_kills_conditions[c]);
           }
         }
         if (returns) {
           ++m_stats.skipped_functions;
-          enqueue(item.owner, {inst.id, Point::Before}, cur_q, cur_g,
-                  skip_path);
+          enqueue(item.owner, {inst.id, Point::Before}, cur_q, cur_g, skip_path,
+                  std::move(skip_k));
         }
         continue;
       }
@@ -457,18 +522,21 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
         const BddManager::NodeId opaque_path =
             inst.writes_memory ? quantifyGlobalConditions(call_path)
                                : call_path;
+        KilledConds opaque_k = call_k;
+        if (inst.writes_memory)
+          addKilledConds(opaque_k, m_program.global_conditions);
         if ((cur_q.kind == ExprKind::Val || cur_q.kind == ExprKind::Deref) &&
             cur_q.id == inst.result) {
           enqueue(item.owner, {inst.id, Point::Before}, Expr::makeTop(), cur_g,
-                  opaque_path);
+                  opaque_path, std::move(opaque_k));
         } else if (inst.writes_memory &&
                    (cur_q.kind == ExprKind::Mem ||
                     cur_q.kind == ExprKind::Deref)) {
           enqueue(item.owner, {inst.id, Point::Before}, Expr::makeTop(), cur_g,
-                  opaque_path);
+                  opaque_path, std::move(opaque_k));
         } else {
           enqueue(item.owner, {inst.id, Point::Before}, cur_q, cur_g,
-                  opaque_path);
+                  opaque_path, std::move(opaque_k));
         }
       }
 
@@ -506,31 +574,42 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
               (inst.writes_memory && m_program.functions[callee].writes_memory)
                   ? quantifyGlobalConditions(call_path)
                   : call_path;
+          KilledConds ext_k = call_k;
+          if (inst.writes_memory && m_program.functions[callee].writes_memory)
+            addKilledConds(ext_k, m_program.global_conditions);
           if ((cur_q.kind == ExprKind::Val || cur_q.kind == ExprKind::Deref) &&
               cur_q.id == inst.result) {
             enqueue(item.owner, {inst.id, Point::Before}, Expr::makeTop(), cg,
-                    ext_path);
+                    ext_path, std::move(ext_k));
           } else if (inst.writes_memory &&
                      m_program.functions[callee].writes_memory &&
                      (cur_q.kind == ExprKind::Mem ||
                       cur_q.kind == ExprKind::Deref)) {
             enqueue(item.owner, {inst.id, Point::Before}, Expr::makeTop(), cg,
-                    ext_path);
+                    ext_path, std::move(ext_k));
           } else {
-            enqueue(item.owner, {inst.id, Point::Before}, cur_q, cg, ext_path);
+            enqueue(item.owner, {inst.id, Point::Before}, cur_q, cg, ext_path,
+                    std::move(ext_k));
           }
           continue;
         }
 
+        auto calleeSkipK = [&]() {
+          KilledConds k = call_k;
+          if (callee < m_func_kills_conditions.size())
+            addKilledConds(k, m_func_kills_conditions[callee]);
+          return k;
+        };
+
         if (cur_q.isTerminal()) {
           enqueue(item.owner, {inst.id, Point::Before}, cur_q, cg,
-                  quantifyFuncConditions(callee, call_path));
+                  quantifyFuncConditions(callee, call_path), calleeSkipK());
         } else if (cur_q.kind == ExprKind::Val && cur_q.id == inst.result) {
           SummaryKey ck{callee, SummaryKind::ExitReturn, Expr::makeTop(),
                         INVALID, Point::Before};
           spliceCalleeSummary(item.owner, inst.id, callee, ck, cur_q.val_offset,
                               cur_q.val_offset_known, cur_q.val_stride, cg,
-                              call_path);
+                              call_path, call_k);
         } else if (cur_q.kind == ExprKind::Deref && cur_q.id == inst.result) {
           std::vector<SummaryEntry> mat;
           materializeDeref(cur_q, inst.id, target_depth, cg, call_path, mat,
@@ -544,29 +623,30 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
               spliceCalleeSummary(item.owner, inst.id, callee, ck,
                                   me.source.val_offset,
                                   me.source.val_offset_known,
-                                  me.source.val_stride, me.guard, me.path);
+                                  me.source.val_stride, me.guard, me.path,
+                                  call_k);
             } else {
               if (me.source.kind == ExprKind::Mem)
                 ++m_stats.skipped_functions;
               enqueue(item.owner, {inst.id, Point::Before}, me.source, me.guard,
-                      quantifyFuncConditions(callee, me.path));
+                      quantifyFuncConditions(callee, me.path), calleeSkipK());
             }
           }
         } else if (cur_q.kind == ExprKind::Val) {
           ++m_stats.skipped_functions;
           enqueue(item.owner, {inst.id, Point::Before}, cur_q, cg,
-                  quantifyFuncConditions(callee, call_path));
+                  quantifyFuncConditions(callee, call_path), calleeSkipK());
         } else if (cur_q.kind == ExprKind::Mem) {
           if (!canFunctionModifyObj(callee, cur_q.id)) {
             ++m_stats.skipped_functions;
             enqueue(item.owner, {inst.id, Point::Before}, cur_q, cg,
-                    quantifyFuncConditions(callee, call_path));
+                    quantifyFuncConditions(callee, call_path), calleeSkipK());
           } else {
             SummaryKey ck{callee, SummaryKind::ExitMem, Expr::makeMem(cur_q.id),
                           INVALID, Point::Before};
             spliceCalleeSummary(item.owner, inst.id, callee, ck,
                                 cur_q.val_offset, cur_q.val_offset_known,
-                                cur_q.val_stride, cg, call_path);
+                                cur_q.val_stride, cg, call_path, call_k);
           }
         } else if (cur_q.kind == ExprKind::Deref) {
           const PointsToSet pt_s = applyOffset(
@@ -575,7 +655,7 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
           if (!canFunctionModifyAny(callee, pt_s)) {
             ++m_stats.skipped_functions;
             enqueue(item.owner, {inst.id, Point::Before}, cur_q, cg,
-                    quantifyFuncConditions(callee, call_path));
+                    quantifyFuncConditions(callee, call_path), calleeSkipK());
           } else {
             std::vector<SummaryEntry> mat;
             materializeDeref(cur_q, inst.id, target_depth, cg, call_path, mat);
@@ -588,10 +668,12 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
                 spliceCalleeSummary(item.owner, inst.id, callee, ck,
                                     me.source.val_offset,
                                     me.source.val_offset_known,
-                                    me.source.val_stride, me.guard, me.path);
+                                    me.source.val_stride, me.guard, me.path,
+                                    call_k);
               } else {
                 enqueue(item.owner, {inst.id, Point::Before}, me.source,
-                        me.guard, quantifyFuncConditions(callee, me.path));
+                        me.guard, quantifyFuncConditions(callee, me.path),
+                        calleeSkipK());
               }
             }
           }
@@ -603,36 +685,42 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
     // Step 2: Reached entry (`cur_idx == 0`, `Point::Before`) of `loc.block`.
     if (loc.index != 0 || item.pos.point != Point::Before) {
       if (!recordState(item.owner, {block_insts[0].id, Point::Before}, cur_q,
-                       cur_g, cur_p))
+                       cur_g, cur_p, cur_k))
         continue;
     }
 
     if (loc.block == 0) {
-      addSummaryEntry(item.owner, {cur_q, cur_g, cur_p});
+      addSummaryEntry(item.owner, {cur_q, cur_g, cur_p, cur_k});
       continue;
     }
+
+    auto predBlockFallsThrough = [&](const Block &pb) -> bool {
+      if (pb.instructions.empty())
+        return true;
+      const Instruction &last_inst = pb.instructions.back();
+      if (!m_reachability.reachable_site[last_inst.id])
+        return false;
+      if (last_inst.opcode == Opcode::Return)
+        return false;
+      if (last_inst.opcode == Opcode::Call) {
+        const Targets t = callees(
+            m_program, last_inst,
+            valueOf(m_program, m_upper, last_inst.indirect_target));
+        bool returns = t.opaque;
+        for (Id c : t.functions)
+          returns |= m_reachability.may_return[c];
+        if (!returns)
+          return false;
+      }
+      return true;
+    };
 
     for (const auto &[pred_block, edge_idx] : m_index.pred_edges[f][loc.block]) {
       const Block &pb = m_program.functions[f].blocks[pred_block];
       const Edge &edge = pb.successors[edge_idx];
 
-      if (!pb.instructions.empty()) {
-        const Instruction &last_inst = pb.instructions.back();
-        if (!m_reachability.reachable_site[last_inst.id])
-          continue;
-        if (last_inst.opcode == Opcode::Return)
-          continue;
-        if (last_inst.opcode == Opcode::Call) {
-          const Targets t = callees(
-              m_program, last_inst,
-              valueOf(m_program, m_upper, last_inst.indirect_target));
-          bool returns = t.opaque;
-          for (Id c : t.functions)
-            returns |= m_reachability.may_return[c];
-          if (!returns)
-            continue;
-        }
-      }
+      if (!predBlockFallsThrough(pb))
+        continue;
 
       BddManager::NodeId next_path = cur_p;
       if (m_options.path_sensitive && edge.cond_var != INVALID) {
@@ -655,18 +743,63 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
       for (const SummaryEntry &pe : after_phi) {
         if (pb.instructions.empty()) {
           if (pred_block == 0) {
-            addSummaryEntry(item.owner, pe);
+            addSummaryEntry(item.owner, {pe.source, pe.guard, pe.path, cur_k});
           } else {
-            std::deque<std::tuple<Id, Expr, GuardId, BddManager::NodeId>> ebq;
-            ebq.emplace_back(pred_block, pe.source, pe.guard, pe.path);
-            std::set<std::pair<Id, Expr>> seen_eb;
+            std::deque<
+                std::tuple<Id, Expr, GuardId, BddManager::NodeId, KilledConds>>
+                ebq;
+            std::map<std::pair<Id, Expr>,
+                     std::vector<
+                         std::tuple<GuardId, BddManager::NodeId, KilledConds>>>
+                seen_eb;
+            auto pushEmptyBlock = [&](Id cb, const Expr &cq, GuardId cg,
+                                      BddManager::NodeId cp, KilledConds ck) {
+              if (cg == GUARD_FALSE || m_bdd.isFalse(cp))
+                return;
+              auto &seen = seen_eb[{cb, cq}];
+              for (const auto &[sg, sp, sk] : seen) {
+                if (guardSubsumes(sg, cg) &&
+                    (!m_options.path_sensitive || m_bdd.isTrue(sp) ||
+                     sp == cp) &&
+                    (!m_options.path_sensitive_interprocedural ||
+                     killedSubsumes(sk, ck)))
+                  return;
+              }
+              if (seen.size() >= m_options.max_guards_per_state) {
+                cg = GUARD_TRUE;
+                cp = BddManager::TRUE_NODE;
+                if (m_options.path_sensitive_interprocedural) {
+                  ck.all = true;
+                  ck.vars.clear();
+                }
+                ++m_stats.guards_widened;
+                for (const auto &[sg, sp, sk] : seen)
+                  if (sg == GUARD_TRUE && m_bdd.isTrue(sp) &&
+                      (!m_options.path_sensitive_interprocedural || sk.all))
+                    return;
+              }
+              seen.erase(
+                  std::remove_if(
+                      seen.begin(), seen.end(),
+                      [&](const auto &prev) {
+                        return guardSubsumes(cg, std::get<0>(prev)) &&
+                               (!m_options.path_sensitive || m_bdd.isTrue(cp) ||
+                                cp == std::get<1>(prev)) &&
+                               (!m_options.path_sensitive_interprocedural ||
+                                killedSubsumes(ck, std::get<2>(prev)));
+                      }),
+                  seen.end());
+              seen.emplace_back(cg, cp, ck);
+              ebq.emplace_back(cb, cq, cg, cp, std::move(ck));
+            };
+            pushEmptyBlock(pred_block, pe.source, pe.guard, pe.path, cur_k);
             while (!ebq.empty()) {
-              auto [cb, cq, cg, cp] = std::move(ebq.front());
+              auto [cb, cq, cg, cp, ck] = std::move(ebq.front());
               ebq.pop_front();
-              if (!seen_eb.emplace(cb, cq).second)
-                continue;
               for (const auto &[ppb, peidx] : m_index.pred_edges[f][cb]) {
                 const Block &ppblock = m_program.functions[f].blocks[ppb];
+                if (!predBlockFallsThrough(ppblock))
+                  continue;
                 const Edge &pedge = ppblock.successors[peidx];
                 BddManager::NodeId ppath = cp;
                 if (m_options.path_sensitive && pedge.cond_var != INVALID) {
@@ -688,11 +821,12 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
                   if (!ppblock.instructions.empty()) {
                     enqueue(item.owner,
                             {ppblock.instructions.back().id, Point::After},
-                            ppe.source, ppe.guard, ppe.path);
+                            ppe.source, ppe.guard, ppe.path, ck);
                   } else if (ppb == 0) {
-                    addSummaryEntry(item.owner, ppe);
+                    addSummaryEntry(item.owner,
+                                    {ppe.source, ppe.guard, ppe.path, ck});
                   } else {
-                    ebq.emplace_back(ppb, ppe.source, ppe.guard, ppe.path);
+                    pushEmptyBlock(ppb, ppe.source, ppe.guard, ppe.path, ck);
                   }
                 }
               }
@@ -700,7 +834,7 @@ GuardedSummarySolver::computeSummary(const SummaryKey &input_key) {
           }
         } else {
           enqueue(item.owner, {pb.instructions.back().id, Point::After},
-                  pe.source, pe.guard, pe.path);
+                  pe.source, pe.guard, pe.path, cur_k);
         }
       }
     }
@@ -842,14 +976,17 @@ PointsToSet GuardedSummarySolver::computeFsci(Id val, Id site, Point point,
 
       if (q.isTerminal()) {
         // Only reached when `track_inter_path && !m_bdd.isTrue(cur_path)`:
-        // conjoin `cur_path` with caller `g`'s path condition to `call_site`.
+        // quantify conditions killed along caller `g`'s path before conjoining
+        // with `g`'s path condition to `call_site`.
         SummaryKey pk{g, SummaryKind::LocalPoint, Expr::makeNull(), call_site,
                       Point::Before};
         const auto path_entries = computeSummary(pk);
         for (const SummaryEntry &se : path_entries) {
           if (!isGuardSatisfiable(se.guard, nullptr))
             continue;
-          const BddManager::NodeId combined_p = m_bdd.makeAnd(cur_path, se.path);
+          const BddManager::NodeId lifted =
+              applyKilledToPath(cur_path, se.killed);
+          const BddManager::NodeId combined_p = m_bdd.makeAnd(lifted, se.path);
           pushFrontier(g, q, combined_p);
         }
         continue;
@@ -867,7 +1004,9 @@ PointsToSet GuardedSummarySolver::computeFsci(Id val, Id site, Point point,
             for (const SummaryEntry &se : path_entries) {
               if (!isGuardSatisfiable(se.guard, nullptr))
                 continue;
-              pushFrontier(g, ce.source, m_bdd.makeAnd(cur_path, se.path));
+              const BddManager::NodeId lifted =
+                  applyKilledToPath(cur_path, se.killed);
+              pushFrontier(g, ce.source, m_bdd.makeAnd(lifted, se.path));
             }
           } else {
             if (entry_anchors)
@@ -892,8 +1031,10 @@ PointsToSet GuardedSummarySolver::computeFsci(Id val, Id site, Point point,
           if (!isGuardSatisfiable(se.guard, nullptr))
             continue;
           const BddManager::NodeId combined_p =
-              track_inter_path ? m_bdd.makeAnd(cur_path, se.path)
-                               : BddManager::TRUE_NODE;
+              track_inter_path
+                  ? m_bdd.makeAnd(applyKilledToPath(cur_path, se.killed),
+                                  se.path)
+                  : BddManager::TRUE_NODE;
           pushFrontier(g, se.source, combined_p);
         }
       }
@@ -902,7 +1043,9 @@ PointsToSet GuardedSummarySolver::computeFsci(Id val, Id site, Point point,
 
   m_active_fsci.erase(fkey);
   if (path_pruned_out)
-    *path_pruned_out = pruned_any_path;
+    *path_pruned_out = result.empty() && pruned_any_path &&
+                       m_options.path_sensitive &&
+                       !isPathReachable(site, point, nullptr);
   return result;
 }
 
@@ -937,6 +1080,128 @@ bool GuardedSummarySolver::validateContext(Id site, const Context &ctx) {
     prefix.push_back(call_site);
   }
   return current_fn == m_index.by_site[site].function;
+}
+
+bool GuardedSummarySolver::isPathReachable(Id site, Point point,
+                                           const Context *ctx) {
+  if (!m_reachability.reachable_site[site])
+    return false;
+  const Id leaf_fn = m_index.by_site[site].function;
+  if (ctx != nullptr) {
+    if (!validateContext(site, *ctx))
+      return false;
+    SummaryKey pk{leaf_fn, SummaryKind::LocalPoint, Expr::makeNull(), site,
+                  point};
+    const auto entries = computeSummary(pk);
+    std::set<BddManager::NodeId> frontier;
+    for (const SummaryEntry &se : entries) {
+      if (!isGuardSatisfiable(se.guard, ctx) || m_bdd.isFalse(se.path))
+        continue;
+      if (!m_options.path_sensitive_interprocedural)
+        return true;
+      frontier.insert(quantifyFuncEntryConditions(leaf_fn, se.path));
+    }
+    if (frontier.empty())
+      return false;
+    Context prefix = *ctx;
+    for (std::size_t step = ctx->size(); step > 0 && !frontier.empty();
+         --step) {
+      tick();
+      const Id call_site = (*ctx)[step - 1];
+      prefix.pop_back();
+      const Id caller_fn = m_index.by_site[call_site].function;
+      SummaryKey cpk{caller_fn, SummaryKind::LocalPoint, Expr::makeNull(),
+                     call_site, Point::Before};
+      const auto call_entries = computeSummary(cpk);
+      std::set<BddManager::NodeId> next_frontier;
+      for (BddManager::NodeId cur_path : frontier) {
+        for (const SummaryEntry &se : call_entries) {
+          if (!isGuardSatisfiable(se.guard, &prefix))
+            continue;
+          const BddManager::NodeId lifted =
+              applyKilledToPath(cur_path, se.killed);
+          const BddManager::NodeId combined = m_bdd.makeAnd(lifted, se.path);
+          if (!m_bdd.isFalse(combined))
+            next_frontier.insert(
+                quantifyFuncEntryConditions(caller_fn, combined));
+        }
+      }
+      frontier = std::move(next_frontier);
+    }
+    return !frontier.empty();
+  }
+
+  if (!m_fs_reachable_function[leaf_fn])
+    return false;
+  SummaryKey pk{leaf_fn, SummaryKind::LocalPoint, Expr::makeNull(), site,
+                point};
+  const auto entries = computeSummary(pk);
+  std::deque<std::pair<Id, BddManager::NodeId>> processing;
+  std::map<Id, std::vector<BddManager::NodeId>> processed;
+  auto pushNode = [&](Id fn, BddManager::NodeId p) -> bool {
+    if (m_bdd.isFalse(p))
+      return false;
+    if (!m_options.path_sensitive_interprocedural)
+      return true;
+    p = quantifyFuncEntryConditions(fn, p);
+    if (fn == m_program.entry)
+      return true;
+    auto &seen = processed[fn];
+    for (BddManager::NodeId sp : seen)
+      if (m_bdd.isTrue(sp) || sp == p)
+        return false;
+    if (seen.size() >= m_options.max_guards_per_state) {
+      p = BddManager::TRUE_NODE;
+      for (BddManager::NodeId sp : seen)
+        if (m_bdd.isTrue(sp))
+          return false;
+    }
+    if (m_bdd.isTrue(p))
+      seen.clear();
+    seen.push_back(p);
+    processing.emplace_back(fn, p);
+    return false;
+  };
+  for (const SummaryEntry &se : entries) {
+    if (!isGuardSatisfiable(se.guard, nullptr) || m_bdd.isFalse(se.path))
+      continue;
+    if (pushNode(leaf_fn, se.path))
+      return true;
+  }
+  while (!processing.empty()) {
+    auto [h, cur_path] = processing.front();
+    processing.pop_front();
+    tick();
+    for (Id call_site : m_index.incoming_calls[h]) {
+      if (!m_reachability.reachable_site[call_site])
+        continue;
+      const InstLocation &cloc = m_index.by_site[call_site];
+      const Id g = cloc.function;
+      if (!m_fs_reachable_function[g])
+        continue;
+      const Instruction &ci = *cloc.inst;
+      if (ci.callee == INVALID && ci.indirect_target != INVALID) {
+        bool exact = true;
+        const PointsToSet tpts = evalGuardPointer(ci.indirect_target, call_site,
+                                                  nullptr, false, exact);
+        const Targets ct = callees(m_program, ci, tpts);
+        if (!ct.functions.count(h))
+          continue;
+      }
+      SummaryKey cpk{g, SummaryKind::LocalPoint, Expr::makeNull(), call_site,
+                     Point::Before};
+      const auto call_entries = computeSummary(cpk);
+      for (const SummaryEntry &se : call_entries) {
+        if (!isGuardSatisfiable(se.guard, nullptr))
+          continue;
+        const BddManager::NodeId lifted =
+            applyKilledToPath(cur_path, se.killed);
+        if (pushNode(g, m_bdd.makeAnd(lifted, se.path)))
+          return true;
+      }
+    }
+  }
+  return false;
 }
 
 // Section 3 (p. 258): Computing Flow- and Context-Sensitive points-to & entry
@@ -1034,8 +1299,10 @@ QueryResult GuardedSummarySolver::computeFscs(Id val, Id site,
         for (const SummaryEntry &se : path_entries) {
           if (!isGuardSatisfiable(se.guard, &prefix))
             continue;
+          const BddManager::NodeId lifted =
+              applyKilledToPath(cur_path, se.killed);
           insertFrontier(next_frontier, caller_fn, q,
-                         m_bdd.makeAnd(cur_path, se.path), next_at_entry);
+                         m_bdd.makeAnd(lifted, se.path), next_at_entry);
         }
         continue;
       }
@@ -1052,8 +1319,10 @@ QueryResult GuardedSummarySolver::computeFscs(Id val, Id site,
             for (const SummaryEntry &se : path_entries) {
               if (!isGuardSatisfiable(se.guard, &prefix))
                 continue;
+              const BddManager::NodeId lifted =
+                  applyKilledToPath(cur_path, se.killed);
               insertFrontier(next_frontier, caller_fn, ce.source,
-                             m_bdd.makeAnd(cur_path, se.path), next_at_entry);
+                             m_bdd.makeAnd(lifted, se.path), next_at_entry);
             }
           } else {
             if (entry_anchors)
@@ -1076,8 +1345,10 @@ QueryResult GuardedSummarySolver::computeFscs(Id val, Id site,
           if (!isGuardSatisfiable(se.guard, &prefix))
             continue;
           const BddManager::NodeId combined_p =
-              track_inter_path ? m_bdd.makeAnd(cur_path, se.path)
-                               : BddManager::TRUE_NODE;
+              track_inter_path
+                  ? m_bdd.makeAnd(applyKilledToPath(cur_path, se.killed),
+                                  se.path)
+                  : BddManager::TRUE_NODE;
           insertFrontier(next_frontier, caller_fn, se.source, combined_p,
                          next_at_entry);
         }
@@ -1097,7 +1368,8 @@ QueryResult GuardedSummarySolver::computeFscs(Id val, Id site,
   m_active_fscs.erase(key);
 
   if (result.empty()) {
-    if (m_options.path_sensitive && pruned_any_path) {
+    if (m_options.path_sensitive && pruned_any_path &&
+        !isPathReachable(site, point, &ctx)) {
       QueryResult qr{{}, QueryStatus::Unreachable};
       m_fscs_cache.emplace(std::move(key), qr);
       return qr;
@@ -1118,29 +1390,100 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
   if (anchors.empty())
     return;
 
+  const bool track_inter_path = m_options.path_sensitive_interprocedural;
+
   // Resolve concrete objects represented by entry anchors so constant / field
   // expressions match forward along summaries.
   PointsToSet anchor_objs;
   for (const Expr &a : anchors)
     evaluateAtEntry(a, anchor_objs);
 
-  auto matchesFrontier = [&](const Expr &src,
-                             const std::set<Expr> &frontier) -> bool {
-    if (frontier.count(src))
-      return true;
-    if (src.kind == ExprKind::Top)
-      return true;
-    if (src.kind == ExprKind::Addr)
-      return anchor_objs.contains(src.id);
-    if (src.kind == ExprKind::Null)
-      return anchor_objs.contains(NULL_OBJECT);
-    return false;
+  using FrontierMap = std::map<Expr, std::vector<BddManager::NodeId>>;
+  auto addToFrontier = [&](FrontierMap &map, const Expr &e,
+                           BddManager::NodeId p) -> bool {
+    if (m_bdd.isFalse(p))
+      return false;
+    if (!track_inter_path)
+      p = BddManager::TRUE_NODE;
+    auto &vec = map[e];
+    for (BddManager::NodeId sp : vec)
+      if (m_bdd.isTrue(sp) || sp == p)
+        return false;
+    if (vec.size() >= m_options.max_guards_per_state) {
+      p = BddManager::TRUE_NODE;
+      for (BddManager::NodeId sp : vec)
+        if (m_bdd.isTrue(sp))
+          return false;
+    }
+    if (m_bdd.isTrue(p))
+      vec.clear();
+    vec.push_back(p);
+    return true;
   };
 
-  std::map<Id, std::set<Expr>> fwd_processed;
-  std::deque<std::pair<Id, std::set<Expr>>> fwd_work;
-  fwd_processed[m_program.entry] = anchors;
-  fwd_work.emplace_back(m_program.entry, anchors);
+  auto matchSummaryForward =
+      [&](const SummaryEntry &se, const FrontierMap &frontier,
+          std::vector<BddManager::NodeId> &out_paths) {
+        auto consider = [&](BddManager::NodeId fp) {
+          const BddManager::NodeId joined =
+              track_inter_path ? m_bdd.makeAnd(fp, se.path)
+                               : BddManager::TRUE_NODE;
+          if (!m_bdd.isFalse(joined))
+            out_paths.push_back(
+                track_inter_path ? applyKilledToPath(joined, se.killed)
+                                 : BddManager::TRUE_NODE);
+        };
+        auto it = frontier.find(se.source);
+        if (it != frontier.end()) {
+          for (BddManager::NodeId fp : it->second)
+            consider(fp);
+        }
+        if (se.source.kind == ExprKind::Top) {
+          if (!track_inter_path) {
+            out_paths.push_back(BddManager::TRUE_NODE);
+          } else {
+            for (const auto &[fe, fps] : frontier)
+              for (BddManager::NodeId fp : fps)
+                consider(fp);
+          }
+          return;
+        }
+        if (se.source.kind == ExprKind::Addr &&
+            anchor_objs.contains(se.source.id)) {
+          if (!track_inter_path) {
+            out_paths.push_back(BddManager::TRUE_NODE);
+          } else {
+            for (const auto &[fe, fps] : frontier) {
+              PointsToSet fo;
+              evaluateAtEntry(fe, fo);
+              if (fo.contains(se.source.id))
+                for (BddManager::NodeId fp : fps)
+                  consider(fp);
+            }
+          }
+        } else if (se.source.kind == ExprKind::Null &&
+                   anchor_objs.contains(NULL_OBJECT)) {
+          if (!track_inter_path) {
+            out_paths.push_back(BddManager::TRUE_NODE);
+          } else {
+            for (const auto &[fe, fps] : frontier) {
+              PointsToSet fo;
+              evaluateAtEntry(fe, fo);
+              if (fo.contains(NULL_OBJECT))
+                for (BddManager::NodeId fp : fps)
+                  consider(fp);
+            }
+          }
+        }
+      };
+
+  std::map<Id, FrontierMap> fwd_processed;
+  std::deque<std::pair<Id, FrontierMap>> fwd_work;
+  FrontierMap entry_map;
+  for (const Expr &a : anchors)
+    addToFrontier(entry_map, a, BddManager::TRUE_NODE);
+  fwd_processed[m_program.entry] = entry_map;
+  fwd_work.emplace_back(m_program.entry, std::move(entry_map));
 
   // Build reachable call sites per function restricted to FS-reachable funcs.
   std::map<Id, std::vector<Id>> outgoing_calls;
@@ -1153,7 +1496,8 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
   }
 
   while (!fwd_work.empty()) {
-    auto [h, cur_set] = std::move(fwd_work.front());
+    const Id h = fwd_work.front().first;
+    FrontierMap cur_map = std::move(fwd_work.front().second);
     fwd_work.pop_front();
     tick();
 
@@ -1172,19 +1516,45 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
         targets = callees(m_program, ci, tpts);
       }
 
+      std::vector<SummaryEntry> call_path_entries;
+      bool computed_call_path = false;
+      auto getCallPathEntries = [&]() -> const std::vector<SummaryEntry> & {
+        if (!computed_call_path) {
+          computed_call_path = true;
+          SummaryKey pk{h, SummaryKind::LocalPoint, Expr::makeNull(), call_site,
+                        Point::Before};
+          call_path_entries = computeSummary(pk);
+        }
+        return call_path_entries;
+      };
+
       for (Id callee : targets.functions) {
         if (m_program.functions[callee].external ||
             !m_fs_reachable_function[callee])
           continue;
 
-        std::set<Expr> callee_in;
+        FrontierMap callee_in;
         // 1. Terminal anchors always propagate into reachable callees.
-        for (const Expr &e : cur_set)
-          if (e.isTerminal())
-            callee_in.insert(e);
+        for (const auto &[e, fps] : cur_map) {
+          if (!e.isTerminal())
+            continue;
+          if (!track_inter_path) {
+            addToFrontier(callee_in, e, BddManager::TRUE_NODE);
+          } else {
+            for (const SummaryEntry &se : getCallPathEntries()) {
+              if (!isGuardSatisfiable(se.guard, nullptr))
+                continue;
+              for (BddManager::NodeId fp : fps) {
+                const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
+                if (!m_bdd.isFalse(j))
+                  addToFrontier(callee_in, e, applyKilledToPath(j, se.killed));
+              }
+            }
+          }
+        }
 
         // 2. Formal parameters whose matching actual has a satisfiable summary
-        //    from `cur_set` to `(call_site, Before)`.
+        //    from `cur_map` to `(call_site, Before)`.
         const auto &params = m_program.functions[callee].parameters;
         for (std::size_t a = 0; a < params.size(); ++a) {
           const Id param = params[a];
@@ -1194,27 +1564,62 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
           if (actual == INVALID)
             continue;
           if (m_program.values[actual].constant) {
-            if (m_program.values[actual].initial.intersects(anchor_objs))
-              callee_in.insert(Expr::makeVal(param));
+            if (m_program.values[actual].initial.intersects(anchor_objs)) {
+              if (!track_inter_path) {
+                addToFrontier(callee_in, Expr::makeVal(param),
+                              BddManager::TRUE_NODE);
+              } else {
+                for (const SummaryEntry &se : getCallPathEntries()) {
+                  if (!isGuardSatisfiable(se.guard, nullptr))
+                    continue;
+                  for (const auto &[fe, fps] : cur_map) {
+                    PointsToSet fo;
+                    evaluateAtEntry(fe, fo);
+                    if (!fo.intersects(m_program.values[actual].initial))
+                      continue;
+                    for (BddManager::NodeId fp : fps) {
+                      const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
+                      if (!m_bdd.isFalse(j))
+                        addToFrontier(callee_in, Expr::makeVal(param),
+                                      applyKilledToPath(j, se.killed));
+                    }
+                  }
+                }
+              }
+            }
             continue;
           }
           SummaryKey ak{h, SummaryKind::LocalPoint, Expr::makeVal(actual),
                         call_site, Point::Before};
           const auto entries = computeSummary(ak);
           for (const SummaryEntry &se : entries) {
-            if (isGuardSatisfiable(se.guard, nullptr) &&
-                matchesFrontier(se.source, cur_set)) {
-              callee_in.insert(Expr::makeVal(param));
-              break;
-            }
+            if (!isGuardSatisfiable(se.guard, nullptr))
+              continue;
+            std::vector<BddManager::NodeId> matched;
+            matchSummaryForward(se, cur_map, matched);
+            for (BddManager::NodeId mp : matched)
+              addToFrontier(callee_in, Expr::makeVal(param), mp);
           }
         }
 
         // 3. Forward Retain / Propagate for relevant memory objects.
-        for (const Expr &e : cur_set) {
+        for (const auto &[e, fps] : cur_map) {
           if (e.kind == ExprKind::Mem && !canFunctionModifyObj(h, e.id)) {
             ++m_stats.skipped_functions;
-            callee_in.insert(e);
+            if (!track_inter_path) {
+              addToFrontier(callee_in, e, BddManager::TRUE_NODE);
+            } else {
+              for (const SummaryEntry &se : getCallPathEntries()) {
+                if (!isGuardSatisfiable(se.guard, nullptr))
+                  continue;
+                for (BddManager::NodeId fp : fps) {
+                  const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
+                  if (!m_bdd.isFalse(j))
+                    addToFrontier(callee_in, e,
+                                  applyKilledToPath(j, se.killed));
+                }
+              }
+            }
           }
         }
         if (m_func_modifies_any[h]) {
@@ -1225,20 +1630,23 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
                           call_site, Point::Before};
             const auto entries = computeSummary(mk);
             for (const SummaryEntry &se : entries) {
-              if (isGuardSatisfiable(se.guard, nullptr) &&
-                  matchesFrontier(se.source, cur_set)) {
-                callee_in.insert(Expr::makeMem(obj));
-                break;
-              }
+              if (!isGuardSatisfiable(se.guard, nullptr))
+                continue;
+              std::vector<BddManager::NodeId> matched;
+              matchSummaryForward(se, cur_map, matched);
+              for (BddManager::NodeId mp : matched)
+                addToFrontier(callee_in, Expr::makeMem(obj), mp);
             }
           }
         }
 
-        std::set<Expr> not_processed;
+        FrontierMap not_processed;
         auto &seen = fwd_processed[callee];
-        for (const Expr &e : callee_in)
-          if (seen.insert(e).second)
-            not_processed.insert(e);
+        for (const auto &[e, fps] : callee_in) {
+          for (BddManager::NodeId fp : fps)
+            if (addToFrontier(seen, e, fp))
+              addToFrontier(not_processed, e, fp);
+        }
         if (!not_processed.empty())
           fwd_work.emplace_back(callee, std::move(not_processed));
       }
@@ -1248,7 +1656,7 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
   const auto fit = fwd_processed.find(target_fn);
   if (fit == fwd_processed.end())
     return;
-  const std::set<Expr> &target_frontier = fit->second;
+  const FrontierMap &target_frontier = fit->second;
   for (Id cand : candidates) {
     if (m_program.values[cand].constant) {
       if (m_program.values[cand].initial.intersects(anchor_objs))
@@ -1259,8 +1667,11 @@ void GuardedSummarySolver::propagateForwardAnchorsFsci(
                   point};
     const auto entries = computeSummary(ck);
     for (const SummaryEntry &se : entries) {
-      if (isGuardSatisfiable(se.guard, nullptr) &&
-          matchesFrontier(se.source, target_frontier)) {
+      if (!isGuardSatisfiable(se.guard, nullptr))
+        continue;
+      std::vector<BddManager::NodeId> matched;
+      matchSummaryForward(se, target_frontier, matched);
+      if (!matched.empty()) {
         out_aliases.insert(cand);
         break;
       }
@@ -1276,24 +1687,93 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
   if (anchors.empty())
     return;
 
+  const bool track_inter_path = m_options.path_sensitive_interprocedural;
+
   PointsToSet anchor_objs;
   for (const Expr &a : anchors)
     evaluateAtEntry(a, anchor_objs);
 
-  auto matchesFrontier = [&](const Expr &src,
-                             const std::set<Expr> &frontier) -> bool {
-    if (frontier.count(src))
-      return true;
-    if (src.kind == ExprKind::Top)
-      return true;
-    if (src.kind == ExprKind::Addr)
-      return anchor_objs.contains(src.id);
-    if (src.kind == ExprKind::Null)
-      return anchor_objs.contains(NULL_OBJECT);
-    return false;
+  using FrontierMap = std::map<Expr, std::vector<BddManager::NodeId>>;
+  auto addToFrontier = [&](FrontierMap &map, const Expr &e,
+                           BddManager::NodeId p) {
+    if (m_bdd.isFalse(p))
+      return;
+    if (!track_inter_path)
+      p = BddManager::TRUE_NODE;
+    auto &vec = map[e];
+    for (BddManager::NodeId sp : vec)
+      if (m_bdd.isTrue(sp) || sp == p)
+        return;
+    if (vec.size() >= m_options.max_guards_per_state) {
+      p = BddManager::TRUE_NODE;
+      for (BddManager::NodeId sp : vec)
+        if (m_bdd.isTrue(sp))
+          return;
+    }
+    if (m_bdd.isTrue(p))
+      vec.clear();
+    vec.push_back(p);
   };
 
-  std::set<Expr> frontier = anchors;
+  auto matchSummaryForward =
+      [&](const SummaryEntry &se, const FrontierMap &frontier,
+          std::vector<BddManager::NodeId> &out_paths) {
+        auto consider = [&](BddManager::NodeId fp) {
+          const BddManager::NodeId joined =
+              track_inter_path ? m_bdd.makeAnd(fp, se.path)
+                               : BddManager::TRUE_NODE;
+          if (!m_bdd.isFalse(joined))
+            out_paths.push_back(
+                track_inter_path ? applyKilledToPath(joined, se.killed)
+                                 : BddManager::TRUE_NODE);
+        };
+        auto it = frontier.find(se.source);
+        if (it != frontier.end()) {
+          for (BddManager::NodeId fp : it->second)
+            consider(fp);
+        }
+        if (se.source.kind == ExprKind::Top) {
+          if (!track_inter_path) {
+            out_paths.push_back(BddManager::TRUE_NODE);
+          } else {
+            for (const auto &[fe, fps] : frontier)
+              for (BddManager::NodeId fp : fps)
+                consider(fp);
+          }
+          return;
+        }
+        if (se.source.kind == ExprKind::Addr &&
+            anchor_objs.contains(se.source.id)) {
+          if (!track_inter_path) {
+            out_paths.push_back(BddManager::TRUE_NODE);
+          } else {
+            for (const auto &[fe, fps] : frontier) {
+              PointsToSet fo;
+              evaluateAtEntry(fe, fo);
+              if (fo.contains(se.source.id))
+                for (BddManager::NodeId fp : fps)
+                  consider(fp);
+            }
+          }
+        } else if (se.source.kind == ExprKind::Null &&
+                   anchor_objs.contains(NULL_OBJECT)) {
+          if (!track_inter_path) {
+            out_paths.push_back(BddManager::TRUE_NODE);
+          } else {
+            for (const auto &[fe, fps] : frontier) {
+              PointsToSet fo;
+              evaluateAtEntry(fe, fo);
+              if (fo.contains(NULL_OBJECT))
+                for (BddManager::NodeId fp : fps)
+                  consider(fp);
+            }
+          }
+        }
+      };
+
+  FrontierMap frontier;
+  for (const Expr &a : anchors)
+    addToFrontier(frontier, a, BddManager::TRUE_NODE);
   Context prefix;
   prefix.reserve(ctx.size());
   const Id leaf_fn = m_index.by_site[site].function;
@@ -1308,10 +1788,36 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
                              : leaf_fn;
     const Instruction &ci = *cloc.inst;
 
-    std::set<Expr> next_frontier;
-    for (const Expr &e : frontier)
-      if (e.isTerminal())
-        next_frontier.insert(e);
+    std::vector<SummaryEntry> call_path_entries;
+    bool computed_call_path = false;
+    auto getCallPathEntries = [&]() -> const std::vector<SummaryEntry> & {
+      if (!computed_call_path) {
+        computed_call_path = true;
+        SummaryKey pk{caller_fn, SummaryKind::LocalPoint, Expr::makeNull(),
+                      call_site, Point::Before};
+        call_path_entries = computeSummary(pk);
+      }
+      return call_path_entries;
+    };
+
+    FrontierMap next_frontier;
+    for (const auto &[e, fps] : frontier) {
+      if (!e.isTerminal())
+        continue;
+      if (!track_inter_path) {
+        addToFrontier(next_frontier, e, BddManager::TRUE_NODE);
+      } else {
+        for (const SummaryEntry &se : getCallPathEntries()) {
+          if (!isGuardSatisfiable(se.guard, &prefix))
+            continue;
+          for (BddManager::NodeId fp : fps) {
+            const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
+            if (!m_bdd.isFalse(j))
+              addToFrontier(next_frontier, e, applyKilledToPath(j, se.killed));
+          }
+        }
+      }
+    }
 
     const auto &params = m_program.functions[callee_fn].parameters;
     for (std::size_t a = 0; a < params.size(); ++a) {
@@ -1322,26 +1828,61 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
       if (actual == INVALID)
         continue;
       if (m_program.values[actual].constant) {
-        if (m_program.values[actual].initial.intersects(anchor_objs))
-          next_frontier.insert(Expr::makeVal(param));
+        if (m_program.values[actual].initial.intersects(anchor_objs)) {
+          if (!track_inter_path) {
+            addToFrontier(next_frontier, Expr::makeVal(param),
+                          BddManager::TRUE_NODE);
+          } else {
+            for (const SummaryEntry &se : getCallPathEntries()) {
+              if (!isGuardSatisfiable(se.guard, &prefix))
+                continue;
+              for (const auto &[fe, fps] : frontier) {
+                PointsToSet fo;
+                evaluateAtEntry(fe, fo);
+                if (!fo.intersects(m_program.values[actual].initial))
+                  continue;
+                for (BddManager::NodeId fp : fps) {
+                  const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
+                  if (!m_bdd.isFalse(j))
+                    addToFrontier(next_frontier, Expr::makeVal(param),
+                                  applyKilledToPath(j, se.killed));
+                }
+              }
+            }
+          }
+        }
         continue;
       }
       SummaryKey ak{caller_fn, SummaryKind::LocalPoint, Expr::makeVal(actual),
                     call_site, Point::Before};
       const auto entries = computeSummary(ak);
       for (const SummaryEntry &se : entries) {
-        if (isGuardSatisfiable(se.guard, &prefix) &&
-            matchesFrontier(se.source, frontier)) {
-          next_frontier.insert(Expr::makeVal(param));
-          break;
-        }
+        if (!isGuardSatisfiable(se.guard, &prefix))
+          continue;
+        std::vector<BddManager::NodeId> matched;
+        matchSummaryForward(se, frontier, matched);
+        for (BddManager::NodeId mp : matched)
+          addToFrontier(next_frontier, Expr::makeVal(param), mp);
       }
     }
 
-    for (const Expr &e : frontier) {
+    for (const auto &[e, fps] : frontier) {
       if (e.kind == ExprKind::Mem && !canFunctionModifyObj(caller_fn, e.id)) {
         ++m_stats.skipped_functions;
-        next_frontier.insert(e);
+        if (!track_inter_path) {
+          addToFrontier(next_frontier, e, BddManager::TRUE_NODE);
+        } else {
+          for (const SummaryEntry &se : getCallPathEntries()) {
+            if (!isGuardSatisfiable(se.guard, &prefix))
+              continue;
+            for (BddManager::NodeId fp : fps) {
+              const BddManager::NodeId j = m_bdd.makeAnd(fp, se.path);
+              if (!m_bdd.isFalse(j))
+                addToFrontier(next_frontier, e,
+                              applyKilledToPath(j, se.killed));
+            }
+          }
+        }
       }
     }
     if (m_func_modifies_any[caller_fn]) {
@@ -1352,11 +1893,12 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
                       call_site, Point::Before};
         const auto entries = computeSummary(mk);
         for (const SummaryEntry &se : entries) {
-          if (isGuardSatisfiable(se.guard, &prefix) &&
-              matchesFrontier(se.source, frontier)) {
-            next_frontier.insert(Expr::makeMem(obj));
-            break;
-          }
+          if (!isGuardSatisfiable(se.guard, &prefix))
+            continue;
+          std::vector<BddManager::NodeId> matched;
+          matchSummaryForward(se, frontier, matched);
+          for (BddManager::NodeId mp : matched)
+            addToFrontier(next_frontier, Expr::makeMem(obj), mp);
         }
       }
     }
@@ -1375,8 +1917,11 @@ void GuardedSummarySolver::propagateForwardAnchorsFscs(
                   point};
     const auto entries = computeSummary(ck);
     for (const SummaryEntry &se : entries) {
-      if (isGuardSatisfiable(se.guard, &ctx) &&
-          matchesFrontier(se.source, frontier)) {
+      if (!isGuardSatisfiable(se.guard, &ctx))
+        continue;
+      std::vector<BddManager::NodeId> matched;
+      matchSummaryForward(se, frontier, matched);
+      if (!matched.empty()) {
         out_aliases.insert(cand);
         break;
       }

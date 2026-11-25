@@ -306,14 +306,17 @@ class TabulationSolver final : public ClusterSolver {
           if (!m_slice.objects[fd])
             continue;
           const Object &fd_info = m_program.objects[fd];
-          if (i.write_bytes == 0 || src_pts.isTop() || fd_info.bytes == 0) {
+          const std::int64_t rel =
+              static_cast<std::int64_t>(fd_info.offset) -
+              static_cast<std::int64_t>(m_program.objects[od].offset);
+          const bool full_cover =
+              i.write_bytes != 0 && rel >= 0 && fd_info.bytes > 0 &&
+              static_cast<std::uint64_t>(rel) + fd_info.bytes <= i.write_bytes;
+          if (src_pts.isTop() || !full_cover) {
             state.memory[fd] = PointsToSet::top();
             continue;
           }
           PointsToSet copied;
-          const std::int64_t rel =
-              static_cast<std::int64_t>(fd_info.offset) -
-              static_cast<std::int64_t>(m_program.objects[od].offset);
           for (Id os : src_pts.objects()) {
             if (!isMemory(m_program.objects[os])) {
               copied = PointsToSet::top();
@@ -353,12 +356,8 @@ class TabulationSolver final : public ClusterSolver {
           for (Id o : addr.objects()) {
             if (!isMemory(m_program.objects[o]))
               continue;
-            if (i.write_bytes != 0) {
-              for (Id fo : m_program.overlappingFields(o, i.write_bytes))
-                writeObject(state, fo, PointsToSet::top(), 0, false);
-            } else {
-              writeObject(state, o, PointsToSet::top(), 0, false);
-            }
+            for (Id fo : m_program.overlappingFields(o, i.write_bytes))
+              writeObject(state, fo, PointsToSet::top(), 0, false);
           }
         }
       }

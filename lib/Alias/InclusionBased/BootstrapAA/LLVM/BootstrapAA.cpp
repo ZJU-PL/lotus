@@ -54,7 +54,7 @@ bool writesMemory(const llvm::CallBase &call) {
          !call.onlyReadsMemory();
 }
 
-enum class AllocationKind { None, Fresh, Reallocate };
+enum class AllocationKind { None, Fresh, FreshZeroed, Reallocate };
 struct AllocationModel {
   AllocationKind kind = AllocationKind::None;
   bool mayBeNull = false;
@@ -75,8 +75,9 @@ AllocationModel allocationModel(const llvm::CallBase &call) {
   };
   if ((name == "malloc" || name == "valloc") && integerArguments(1))
     return {AllocationKind::Fresh, true};
-  if ((name == "calloc" || name == "aligned_alloc" || name == "memalign") &&
-      integerArguments(2))
+  if (name == "calloc" && integerArguments(2))
+    return {AllocationKind::FreshZeroed, true};
+  if ((name == "aligned_alloc" || name == "memalign") && integerArguments(2))
     return {AllocationKind::Fresh, true};
   if (name == "realloc" && call.arg_size() == 2 &&
       call.getArgOperand(0)->getType()->isPointerTy() &&
@@ -188,24 +189,40 @@ bool containsPointerType(llvm::Type *ty, std::set<llvm::Type *> &seen) {
   return false;
 }
 
-// Inspect bitcast users of a heap allocation to see if it is consistently cast
-// to a single sized StructType (enabling field-sensitive heap objects!).
+// Inspect all users of a heap allocation to see if it is exclusively cast to a
+// single sized StructType (aside from non-reinterpreting null checks, free,
+// memset, and debug/lifetime intrinsics). Escaping raw void* uses inhibit
+// struct flattening to stay sound against cross-function type punning.
 llvm::StructType *inferHeapStructType(const llvm::CallBase &call) {
   llvm::StructType *inferred = nullptr;
   for (const llvm::User *user : call.users()) {
-    const auto *bc = llvm::dyn_cast<llvm::BitCastInst>(user);
-    if (!bc)
+    if (const auto *bc = llvm::dyn_cast<llvm::BitCastInst>(user)) {
+      auto *ptr_ty = llvm::dyn_cast<llvm::PointerType>(bc->getType());
+      if (!ptr_ty)
+        return nullptr;
+      auto *st =
+          llvm::dyn_cast<llvm::StructType>(ptr_ty->getPointerElementType());
+      if (!st || !st->isSized())
+        return nullptr;
+      if (inferred && inferred != st)
+        return nullptr;
+      inferred = st;
       continue;
-    auto *ptr_ty = llvm::dyn_cast<llvm::PointerType>(bc->getType());
-    if (!ptr_ty)
+    }
+    if (llvm::isa<llvm::ICmpInst>(user))
       continue;
-    auto *st =
-        llvm::dyn_cast<llvm::StructType>(ptr_ty->getPointerElementType());
-    if (!st || !st->isSized())
-      return nullptr;
-    if (inferred && inferred != st)
-      return nullptr;
-    inferred = st;
+    if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(user)) {
+      if (deallocationCall(*cb) || llvm::isa<llvm::MemSetInst>(cb))
+        continue;
+      const llvm::Function *callee = directCallee(*cb);
+      if (callee) {
+        const llvm::StringRef name = callee->getName();
+        if (name.startswith("llvm.dbg.") || name.startswith("llvm.lifetime.") ||
+            name == "llvm.assume")
+          continue;
+      }
+    }
+    return nullptr;
   }
   return inferred;
 }
@@ -346,7 +363,12 @@ struct BootstrapAA::Impl {
                          llvm::dyn_cast<llvm::CallBase>(&instruction)) {
             const AllocationModel am = allocationModel(*call);
             if (am.kind != AllocationKind::None) {
-              const bool fresh_empty = (am.kind == AllocationKind::Fresh);
+              const bool fresh_empty = (am.kind == AllocationKind::Fresh ||
+                                        am.kind == AllocationKind::FreshZeroed);
+              const bool zero_init = (am.kind == AllocationKind::FreshZeroed);
+              const PointsToSet zero_ptr = null_may_be_valid
+                                               ? PointsToSet::top()
+                                               : PointsToSet(NULL_OBJECT);
               llvm::StructType *st = inferHeapStructType(*call);
               if (st) {
                 createStorageObjects(
@@ -354,12 +376,24 @@ struct BootstrapAA::Impl {
                     /*allow_singleton=*/false, fresh_empty,
                     function.getName().str() + ":" + nameOf(instruction),
                     layout, call->getType()->getPointerAddressSpace());
+                if (zero_init) {
+                  const Id base = objects.at(&instruction);
+                  if (program.objects[base].field_sensitive) {
+                    for (auto [off, fid] : program.fields_of_base[base])
+                      if (program.objects[fid].bytes > 0)
+                        program.objects[fid].initial = zero_ptr;
+                  } else if (program.objects[base].bytes > 0) {
+                    program.objects[base].initial = zero_ptr;
+                  }
+                }
               } else {
                 Object object;
                 object.name =
                     function.getName().str() + ":" + nameOf(instruction);
                 object.kind = ObjectKind::Heap;
-                if (fresh_empty)
+                if (zero_init)
+                  object.initial = zero_ptr;
+                else if (fresh_empty)
                   object.initial = PointsToSet{};
                 // Untyped heap allocation: allow pointer-sized loads/stores
                 // (weak updates) instead of collapsing all heap accesses to top.
