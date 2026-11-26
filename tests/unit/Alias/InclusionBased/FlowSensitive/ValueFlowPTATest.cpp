@@ -1096,21 +1096,37 @@ TEST(ValueFlowPTATest, AtexitAndSignalInvokeRegisteredHandlersOnly) {
     @A = global i8 0
     @B = global i8 0
     @C = global i8 0
+    @D = global i8 0
+    @E = global i8 0
     @gExit = global i8* null
     @gSig = global i8* null
+    @gPostReg = global i8* null
     @gOther = global i8* null
+    @llvm.global_dtors = appending global [1 x { i32, void ()*, i8* }] [
+      { i32, void ()*, i8* } { i32 100, void ()* @dtor_check, i8* null }
+    ]
     declare i32 @atexit(void ()*)
     declare void (i32)* @signal(i32, void (i32)*)
     define void @onExit() {
+      %seenInExit = load i8*, i8** @gPostReg
       store i8* @A, i8** @gExit
       ret void
     }
     define void @onSig(i32 %s) {
+      %seenInSig = load i8*, i8** @gPostReg
       store i8* @B, i8** @gSig
+      ret void
+    }
+    define void @dtor_check() {
+      %seenInDtor = load i8*, i8** @gExit
       ret void
     }
     define void @unrelated() {
       store i8* @C, i8** @gOther
+      ret void
+    }
+    define void @dead_reg() {
+      %d = call i32 @atexit(void ()* @unrelated)
       ret void
     }
     define i8* @main() {
@@ -1118,17 +1134,318 @@ TEST(ValueFlowPTATest, AtexitAndSignalInvokeRegisteredHandlersOnly) {
       store void ()* @unrelated, void ()** %keep
       %r1 = call i32 @atexit(void ()* @onExit)
       %r2 = call void (i32)* @signal(i32 2, void (i32)* @onSig)
-      %vExit = load i8*, i8** @gExit
+      %vExitBeforeRet = load i8*, i8** @gExit
       %vSig = load i8*, i8** @gSig
       %vOther = load i8*, i8** @gOther
-      ret i8* %vExit
+      store i8* @D, i8** @gPostReg
+      ret i8* %vExitBeforeRet
     }
   )", diagnostic, context);
   ASSERT_NE(module, nullptr);
   ASSERT_FALSE(verifyModule(*module, &errs()));
   ValueFlowPTA analysis(*module);
   analysis.analyze();
-  expect(analysis, *module, "vExit", {"null", "A"});
+  // atexit handler has NOT run yet before main returns, runs after main
+  // (observing @D stored after atexit()), and its write @A reaches dtors.
+  expect(analysis, *module, "vExitBeforeRet", {"null"});
+  expect(analysis, *module, "seenInExit", {"D"});
+  expect(analysis, *module, "seenInDtor", {"null", "A"});
+  // signal handler may fire immediately (main sees @B) AND after subsequent
+  // writes (handler sees both null and @D).
   expect(analysis, *module, "vSig", {"null", "B"});
+  expect(analysis, *module, "seenInSig", {"null", "D"});
+  // Unrelated / dead-registered handler must NOT run.
   expect(analysis, *module, "vOther", {"null"});
+}
+
+TEST(ValueFlowPTATest, ExitCallInvokesRegisteredAtexitHandlersWithCurrentState) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    @C = global i8 0
+    @g = global i8* @A
+    @h = global i8* null
+    declare i32 @atexit(void ()*)
+    declare i32 @on_exit(void (i32, i8*)*, i8*)
+    declare void @exit(i32) noreturn
+    define void @cleanup1() {
+      %observed = load i8*, i8** @g
+      store i8* @C, i8** @h
+      ret void
+    }
+    define void @cleanup2(i32 %status, i8* %arg) {
+      %observedFromH = load i8*, i8** @h
+      %observedArg = bitcast i8* %arg to i8*
+      ret void
+    }
+    define i32 @main() {
+      %r1 = call i32 @atexit(void ()* @cleanup1)
+      %r2 = call i32 @on_exit(void (i32, i8*)* @cleanup2, i8* @A)
+      store i8* @B, i8** @g
+      call void @exit(i32 1)
+      unreachable
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "observed", {"B"});
+  expect(analysis, *module, "observedFromH", {"null", "C"});
+  expect(analysis, *module, "observedArg", {"A"});
+}
+
+TEST(ValueFlowPTATest, OpaqueExternalEscapeFlowsThroughSubsequentDefinedWrapper) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 0
+    @B = global i8 0
+    declare void @register_slot(i8**)
+    declare void @trigger()
+    define void @call_trigger() {
+      call void @trigger()
+      ret void
+    }
+    define i8* @main() {
+      %x = alloca i8*
+      %y = alloca i8*
+      call void @register_slot(i8** %x)
+      store i8* @A, i8** %x
+      store i8* @B, i8** %x
+      store i8* @A, i8** %y
+      call void @call_trigger()
+      %xAfter = load i8*, i8** %x
+      %yAfter = load i8*, i8** %y
+      ret i8* %xAfter
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  // %x escaped to opaque @register_slot, so @call_trigger -> @trigger must
+  // clobber %x with unknown (while keeping the pre-call strong kill of @A and
+  // NOT injecting %x itself into %xAfter). %y never escaped externally.
+  expect(analysis, *module, "xAfter", {"B", "unknown"});
+  expect(analysis, *module, "yAfter", {"A"});
+  EXPECT_FALSE(analysis.getStatistics().solver.usedWeakFallback);
+}
+
+TEST(ValueFlowPTATest, AggregateVectorPtrToIntAndVarArgCarriersPreserveSoundness) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    %struct.Carrier = type { i32, i8** }
+    %struct.RetPair = type { i8*, i32 }
+    @A = global i8 0
+    @B = global i8 0
+    @C = global i8 0
+    declare void @llvm.va_start(i8*)
+    declare void @llvm.va_end(i8*)
+
+    define void @sub_struct(%struct.Carrier %s) {
+      %p = extractvalue %struct.Carrier %s, 1
+      store i8* @B, i8** %p
+      ret void
+    }
+    define void @use_struct(%struct.Carrier %s) {
+      call void @sub_struct(%struct.Carrier %s)
+      ret void
+    }
+    define %struct.RetPair @make_pair() {
+      %p0 = insertvalue %struct.RetPair undef, i8* @C, 0
+      %p1 = insertvalue %struct.RetPair %p0, i32 42, 1
+      ret %struct.RetPair %p1
+    }
+    define void @use_vec(<2 x i8**> %v) {
+      %p = extractelement <2 x i8**> %v, i32 0
+      store i8* @B, i8** %p
+      ret void
+    }
+    define void @sub_int(i64 %raw) {
+      %p = inttoptr i64 %raw to i8**
+      store i8* @B, i8** %p
+      ret void
+    }
+    define void @use_int(i64 %raw) {
+      call void @sub_int(i64 %raw)
+      ret void
+    }
+    define void @vconsumer(i8* %ap) {
+      %p = va_arg i8* %ap, i8**
+      store i8* @B, i8** %p
+      ret void
+    }
+    define void @vhelper(i32 %n, ...) {
+      %ap = alloca i8
+      call void @llvm.va_start(i8* %ap)
+      call void @vconsumer(i8* %ap)
+      call void @llvm.va_end(i8* %ap)
+      ret void
+    }
+    define i8* @main() {
+      ; 1. Two-hop first-class aggregate argument + aggregate return
+      %sSlot = alloca i8*
+      store i8* @A, i8** %sSlot
+      %c0 = insertvalue %struct.Carrier undef, i32 1, 0
+      %c1 = insertvalue %struct.Carrier %c0, i8** %sSlot, 1
+      call void @use_struct(%struct.Carrier %c1)
+      %afterStruct = load i8*, i8** %sSlot
+      %pair = call %struct.RetPair @make_pair()
+      %fromRetPair = extractvalue %struct.RetPair %pair, 0
+
+      ; 2. First-class vector-of-pointers argument
+      %vSlot = alloca i8*
+      store i8* @A, i8** %vSlot
+      %vec = insertelement <2 x i8**> undef, i8** %vSlot, i32 0
+      call void @use_vec(<2 x i8**> %vec)
+      %afterVec = load i8*, i8** %vSlot
+
+      ; 3. Two-hop ptrtoint argument + deep (>6) arithmetic ptrtoint store
+      %iSlot = alloca i8*
+      store i8* @A, i8** %iSlot
+      %i0 = ptrtoint i8** %iSlot to i64
+      %i1 = add i64 %i0, 1
+      %i2 = add i64 %i1, 1
+      %i3 = add i64 %i2, 1
+      %i4 = add i64 %i3, 1
+      %i5 = add i64 %i4, 1
+      %i6 = add i64 %i5, 1
+      %i7 = add i64 %i6, 1
+      %i8 = add i64 %i7, 1
+      call void @use_int(i64 %i8)
+      %afterInt = load i8*, i8** %iSlot
+
+      %deepSlot = alloca i8*
+      store i8* @A, i8** %deepSlot
+      %deepIntPtr = bitcast i8** %deepSlot to i64*
+      store i64 %i8, i64* %deepIntPtr
+      %afterDeepIntStore = load i8*, i8** %deepSlot
+
+      ; 4. Variadic argument forwarded via va_list to helper
+      %vaSlot = alloca i8*
+      store i8* @A, i8** %vaSlot
+      call void (i32, ...) @vhelper(i32 1, i8** %vaSlot)
+      %afterVarArg = load i8*, i8** %vaSlot
+
+      ret i8* %afterStruct
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  expect(analysis, *module, "afterStruct", {"B"});
+  expect(analysis, *module, "fromRetPair", {"C"});
+  expect(analysis, *module, "afterVec", {"B"});
+  expect(analysis, *module, "afterInt", {"A", "B"});
+  expect(analysis, *module, "afterDeepIntStore", {"A", "unknown"});
+  EXPECT_TRUE(analysis.getPointsTo(value(*module, "afterVarArg"))
+                  .count(analysis.getObjectId(module->getNamedValue("B"))));
+}
+
+TEST(ValueFlowPTATest, ReadOnlyConstantGlobalImmuneToExternalClobber) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 1
+    @B = global i8 2
+    @vtable = constant [2 x i8*] [i8* @A, i8* @B]
+    @strlit = constant [4 x i8] c"abc\00"
+    @mutGlobal = global i8* @A
+
+    declare void @opaque_clobber()
+
+    define i8* @main(i32 %idx) {
+      call void @opaque_clobber()
+      %gep = getelementptr [2 x i8*], [2 x i8*]* @vtable, i32 0, i32 %idx
+      %vtVal = load i8*, i8** %gep
+      %mutVal = load i8*, i8** @mutGlobal
+      %strPtr = getelementptr [4 x i8], [4 x i8]* @strlit, i32 0, i32 0
+      %strAsPtr = bitcast i8* %strPtr to i8**
+      %strLoaded = load i8*, i8** %strAsPtr
+      ret i8* %vtVal
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  // Constant global with definitive initializer is immune to unknown clobber.
+  expect(analysis, *module, "vtVal", {"A", "B"});
+  // Empty-initialized constant string literal yields no pointer targets.
+  expect(analysis, *module, "strLoaded", {});
+  // Mutable global receives unknown from opaque_clobber().
+  expect(analysis, *module, "mutVal", {"A", "unknown"});
+}
+
+TEST(ValueFlowPTATest, IndirectByValCalleeResolvesInSinglePassWithIsolation) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    %struct.Box = type { i8* }
+    @A = global i8 1
+    @B = global i8 2
+    @fp = global i8* (%struct.Box*)* @callee
+
+    define i8* @callee(%struct.Box* byval(%struct.Box) %arg) {
+      %f0 = getelementptr %struct.Box, %struct.Box* %arg, i32 0, i32 0
+      %inVal = load i8*, i8** %f0
+      store i8* @B, i8** %f0
+      %afterMut = load i8*, i8** %f0
+      ret i8* %inVal
+    }
+
+    define i8* @main() {
+      %box = alloca %struct.Box
+      %p0 = getelementptr %struct.Box, %struct.Box* %box, i32 0, i32 0
+      store i8* @A, i8** %p0
+      %fn = load i8* (%struct.Box*)*, i8* (%struct.Box*)** @fp
+      %ret = call i8* %fn(%struct.Box* byval(%struct.Box) %box)
+      %callerAfter = load i8*, i8** %p0
+      ret i8* %ret
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  // Callee-side byval copy resolves dynamically in a single solver pass.
+  EXPECT_EQ(analysis.getStatistics().callGraphIterations, 1u);
+  expect(analysis, *module, "inVal", {"A"});
+  expect(analysis, *module, "ret", {"A"});
+  expect(analysis, *module, "afterMut", {"A", "B"});
+  // Callee's mutation of its byval copy must not leak back to caller's box.
+  expect(analysis, *module, "callerAfter", {"A"});
+}
+
+TEST(ValueFlowPTATest, IndirectUnknownTargetResolvesInSinglePass) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  auto module = parseAssemblyString(R"(
+    @A = global i8 1
+    declare i8* (i8**)* @get_unknown_fn()
+
+    define i8* @main() {
+      %slot = alloca i8*
+      store i8* @A, i8** %slot
+      %fp = call i8* (i8**)* @get_unknown_fn()
+      %res = call i8* %fp(i8** %slot)
+      %after = load i8*, i8** %slot
+      ret i8* %res
+    }
+  )", diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  ASSERT_FALSE(verifyModule(*module, &errs()));
+
+  ValueFlowPTA analysis(*module);
+  analysis.analyze();
+  EXPECT_EQ(analysis.getStatistics().callGraphIterations, 1u);
+  expect(analysis, *module, "res", {"unknown"});
+  expect(analysis, *module, "after", {"A", "unknown"});
 }

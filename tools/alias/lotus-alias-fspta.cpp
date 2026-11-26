@@ -20,7 +20,9 @@
 
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IRReader/IRReader.h>
 #include <llvm/Support/CommandLine.h>
+#include <llvm/Support/Error.h>
 #include <llvm/Support/InitLLVM.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/SourceMgr.h>
@@ -561,13 +563,62 @@ int main(int argc, char **argv) {
   }
   LLVMContext context;
   SMDiagnostic diagnostic;
+  if (Analysis == AnalysisOption::ValueFlow) {
+    if (!PrintPointsTo && !ComparisonJSON && !ValidateAnnotations &&
+        !PrintObjectMap) {
+      context.setDiscardValueNames(true);
+    }
+    // Lazy-load debug metadata (never inspected by ValueFlowPTA) and
+    // materialize globals, aliases, and function bodies directly.
+    std::unique_ptr<Module> module = llvm::getLazyIRFileModule(
+        InputFilename, diagnostic, context, /*ShouldLazyLoadMetadata=*/true);
+    if (!module) {
+      diagnostic.print(argv[0], errs());
+      return 1;
+    }
+    for (GlobalVariable &gv : module->globals()) {
+      if (gv.isMaterializable()) {
+        if (llvm::Error err = gv.materialize()) {
+          errs() << argv[0] << ": failed to materialize global " << gv.getName()
+                 << ": " << llvm::toString(std::move(err)) << "\n";
+          return 1;
+        }
+      }
+    }
+    for (GlobalAlias &ga : module->aliases()) {
+      if (ga.isMaterializable()) {
+        if (llvm::Error err = ga.materialize()) {
+          errs() << argv[0] << ": failed to materialize alias " << ga.getName()
+                 << ": " << llvm::toString(std::move(err)) << "\n";
+          return 1;
+        }
+      }
+    }
+    for (GlobalIFunc &gif : module->ifuncs()) {
+      if (gif.isMaterializable()) {
+        if (llvm::Error err = gif.materialize()) {
+          errs() << argv[0] << ": failed to materialize ifunc " << gif.getName()
+                 << ": " << llvm::toString(std::move(err)) << "\n";
+          return 1;
+        }
+      }
+    }
+    for (Function &fn : *module) {
+      if (fn.isMaterializable()) {
+        if (llvm::Error err = fn.materialize()) {
+          errs() << argv[0] << ": failed to materialize function "
+                 << fn.getName() << ": " << llvm::toString(std::move(err))
+                 << "\n";
+          return 1;
+        }
+      }
+    }
+    return runValueFlowAnalysis(*module);
+  }
   std::unique_ptr<Module> module =
       loadIRModule(InputFilename, context, diagnostic, argv[0]);
   if (!module)
     return 1;
-
-  if (Analysis == AnalysisOption::ValueFlow)
-    return runValueFlowAnalysis(*module);
 
   ICFG icfg;
   ICFGBuilder icfgBuilder(&icfg);

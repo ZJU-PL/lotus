@@ -1395,3 +1395,420 @@ TEST(ValueFlowGraphTest, DynamicIndirectCalleeMutatingViaFormalParamCleanRestart
   EXPECT_EQ(solver.pointsTo(afterCall), (PointsToSet{C}));
   EXPECT_FALSE(solver.statistics().usedWeakFallback);
 }
+
+TEST(ValueFlowGraphTest, DeadEmptyPointerDoesNotInvertAcyclicEscapeOrder) {
+  // Acyclic escape order A ✂ B ✂ C with ObjectID(C) < ObjectID(A).
+  // A escapes into a genuinely dead pointer (deadPtr), while C escapes into
+  // `p = load(&A)` which is only temporarily empty until A is processed.
+  // breakBlockedSingletons() must process A first (provably dead empty ptr),
+  // preserving full precision on C without triggering weak fallback.
+  Program p;
+  const auto V1 = p.addObject(false, false, "V1");
+  const auto V2 = p.addObject(false, false, "V2");
+  const auto C = p.addObject(true, true, "C");
+  const auto A = p.addObject(true, true, "A");
+  const auto B = p.addObject(true, true, "B");
+  p.setEmptyInitializer(C);
+  p.setEmptyInitializer(A);
+  p.setEmptyInitializer(B);
+
+  const auto entry = p.addBlock();
+  p.addRoot(entry);
+
+  const auto deadPtr = p.addNode(); // never receives any object
+  p.addStore(entry, deadPtr, p.address(A));
+  p.addStore(entry, p.address(A), p.address(B));
+  const auto pLoad = load(p, entry, p.address(A)); // temporarily empty
+  p.addStore(entry, pLoad, p.address(C));
+  const auto qLoad = load(p, entry, p.address(B)); // will point to C
+
+  p.addStore(entry, p.address(C), p.address(V1));
+  const auto strongKill = p.addStore(entry, qLoad, p.address(V2));
+  const auto res = load(p, entry, p.address(C));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(qLoad), (PointsToSet{C}));
+  EXPECT_EQ(solver.pointsTo(res), (PointsToSet{V2}));
+  EXPECT_TRUE(solver.isStrongUpdate(strongKill));
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+}
+
+TEST(ValueFlowGraphTest, ScalarCycleThroughEmptyLoadPreservesDownstreamScalar) {
+  // X <-> X2 form a scalar cycle, while Y (with lower ObjectID than X) escapes
+  // into `p = load(&X)` (initially empty). Implicit load dependency Y -> X
+  // must ensure only {X, X2} are weakened while Y keeps its strong updates.
+  Program p;
+  const auto V1 = p.addObject(false, false, "V1");
+  const auto V2 = p.addObject(false, false, "V2");
+  const auto Y = p.addObject(true, true, "Y");
+  const auto X = p.addObject(true, true, "X");
+  const auto X2 = p.addObject(true, true, "X2");
+  p.setEmptyInitializer(Y);
+  p.setInitializer(X, p.address(X2));
+  p.setInitializer(X2, p.address(X));
+
+  const auto entry = p.addBlock();
+  p.addRoot(entry);
+
+  const auto pFromX = load(p, entry, p.address(X));
+  p.addStore(entry, pFromX, p.address(Y));
+
+  p.addStore(entry, p.address(Y), p.address(V1));
+  const auto yStrong = p.addStore(entry, p.address(Y), p.address(V2));
+  const auto yRes = load(p, entry, p.address(Y));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(yRes), (PointsToSet{V2}));
+  EXPECT_TRUE(solver.isStrongUpdate(yStrong));
+  EXPECT_TRUE(solver.statistics().usedWeakFallback);
+  EXPECT_EQ(solver.statistics().weakFallbackObjects, 2u);
+}
+
+TEST(ValueFlowGraphTest, ExternalEscapeDisablesCallsitePruningCleanly) {
+  // Local singleton `slot` escapes externally via addExternalEscape().
+  // Subsequent call to no-arg defined wrapper `trigger()` (which stores through
+  // unknown) must NOT be pruned for `slot`, while unrelated local `safe` stays
+  // unaffected and `slot` itself is NOT injected into its own points-to set.
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+
+  const auto mainFn = p.addFunction("main");
+  const auto triggerFn = p.addFunction("trigger");
+  const auto mainBB = p.addBlock(mainFn);
+  const auto triggerBB = p.addBlock(triggerFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(triggerFn, triggerBB);
+  p.setFunctionExit(triggerFn, triggerBB);
+  p.addEntryFunction(mainFn);
+
+  const auto slot = p.addObject(true, true, "slot");
+  const auto safe = p.addObject(true, true, "safe");
+  p.setEmptyInitializer(slot);
+  p.setEmptyInitializer(safe);
+  p.setObjectOwner(slot, mainFn);
+  p.setObjectOwner(safe, mainFn);
+
+  p.addStore(triggerBB, p.unknownValue(), p.unknownValue(),
+             /*allowStrong=*/false);
+
+  p.addExternalEscape(mainBB, p.address(slot));
+  p.addStore(mainBB, p.address(slot), p.address(A));
+  p.addStore(mainBB, p.address(slot), p.address(B)); // strong kill before call
+  p.addStore(mainBB, p.address(safe), p.address(A));
+  const auto cs = p.addCallSite(mainBB);
+  p.addCallTarget(cs, triggerFn);
+  const auto slotAfter = load(p, mainBB, p.address(slot));
+  const auto safeAfter = load(p, mainBB, p.address(safe));
+
+  Solver solver(p);
+  solver.analyze();
+  EXPECT_EQ(solver.pointsTo(slotAfter), (PointsToSet{B, p.unknownObject()}));
+  EXPECT_EQ(solver.pointsTo(safeAfter), (PointsToSet{A}));
+  EXPECT_FALSE(solver.statistics().usedWeakFallback);
+}
+
+TEST(ValueFlowGraphTest, SVFGNodeBS256BitChunkOperationsAndBoundaryIds) {
+  using lotus::analysis::SVFGNodeBS;
+  const std::vector<std::uint32_t> boundaryA = {
+      0, 1, 63, 64, 127, 128, 191, 192, 255, 256, 511, 512, 1024, 4096};
+  const std::vector<std::uint32_t> boundaryB = {
+      1, 64, 128, 255, 257, 512, 768, 4096, 8192};
+
+  SVFGNodeBS a;
+  for (std::uint32_t id : boundaryA)
+    EXPECT_TRUE(a.insertBit(id));
+  for (std::uint32_t id : boundaryA)
+    EXPECT_FALSE(a.insertBit(id));
+  EXPECT_EQ(a.size(), boundaryA.size());
+
+  SVFGNodeBS b;
+  b.insertSorted(boundaryB);
+  EXPECT_EQ(b.size(), boundaryB.size());
+
+  EXPECT_TRUE(a.intersects(b));
+  SVFGNodeBS disjoint;
+  disjoint.insertBit(2);
+  disjoint.insertBit(258);
+  disjoint.insertBit(9000);
+  EXPECT_FALSE(a.intersects(disjoint));
+
+  std::vector<std::uint32_t> inter;
+  a.forEachIn(b, [&](std::uint32_t id) { inter.push_back(id); });
+  EXPECT_EQ(inter, (std::vector<std::uint32_t>{1, 64, 128, 255, 512, 4096}));
+
+  std::vector<std::uint32_t> onlyInA;
+  a.forEachNotIn(b, [&](std::uint32_t id) { onlyInA.push_back(id); });
+  EXPECT_EQ(onlyInA,
+            (std::vector<std::uint32_t>{0, 63, 127, 191, 192, 256, 511, 1024}));
+
+  SVFGNodeBS merged = a;
+  SVFGNodeBS diff;
+  EXPECT_TRUE(merged.uniteWithDiff(b, diff));
+  EXPECT_EQ(diff, (SVFGNodeBS{257, 768, 8192}));
+  EXPECT_TRUE(a.isSubsetOf(merged));
+  EXPECT_TRUE(b.isSubsetOf(merged));
+  EXPECT_FALSE(merged.isSubsetOf(a));
+
+  SVFGNodeBS merged2;
+  merged2.unite(b);
+  merged2.unite(a);
+  EXPECT_EQ(merged, merged2);
+  EXPECT_EQ(merged.hash(), merged2.hash());
+
+  EXPECT_TRUE(merged.subtract(b));
+  EXPECT_EQ(merged, (SVFGNodeBS{0, 63, 127, 191, 192, 256, 511, 1024}));
+  EXPECT_EQ(merged.erase(256), 1u);
+  EXPECT_EQ(merged.erase(256), 0u);
+  EXPECT_FALSE(merged.count(256));
+}
+
+TEST(ValueFlowGraphTest, ReadOnlyConstantGlobalIgnoresStoresAndFeedsLoads) {
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+  const auto C = p.addObject(false, false, "C");
+
+  const auto ro1 = p.addObject(false, true, "ro1");
+  const auto ro2 = p.addObject(false, true, "ro2");
+  const auto roEmpty = p.addObject(false, true, "roEmpty");
+  const auto mutGlob = p.addObject(false, true, "mutGlob");
+  p.setObjectReadOnly(ro1, true);
+  p.setObjectReadOnly(ro2, true);
+  p.setObjectReadOnly(roEmpty, true);
+  p.setInitializer(ro1, p.address(A));
+  p.setInitializer(ro2, p.address(B));
+  p.setEmptyInitializer(roEmpty);
+  p.setInitializer(mutGlob, p.address(A));
+
+  const auto fn = p.addFunction("main");
+  const auto bb = p.addBlock(fn);
+  p.setFunctionEntry(fn, bb);
+  p.setFunctionExit(fn, bb);
+  p.addEntryFunction(fn);
+
+  // Wildcard unknown store + direct store through a shared pointer to ro1/ro2.
+  p.addStore(bb, p.unknownValue(), p.unknownValue(), /*allowStrong=*/false);
+  const auto sharedPtr = p.addNode();
+  p.addCopy(p.address(ro1), sharedPtr);
+  p.addCopy(p.address(ro2), sharedPtr);
+  p.addCopy(p.address(roEmpty), sharedPtr);
+  p.addStore(bb, sharedPtr, p.address(C), /*allowStrong=*/false);
+
+  const auto l1 = load(p, bb, sharedPtr);
+  const auto l2 = load(p, bb, sharedPtr);
+  const auto lEmpty = load(p, bb, p.address(roEmpty));
+  const auto lMut = load(p, bb, p.address(mutGlob));
+  const auto lUnk = load(p, bb, p.unknownValue());
+
+  Solver solver(p);
+  solver.analyze();
+  // Read-only globals ignore direct & unknown stores and share their load fan.
+  EXPECT_EQ(solver.pointsTo(l1), (PointsToSet{A, B}));
+  EXPECT_EQ(solver.pointsTo(l2), (PointsToSet{A, B}));
+  EXPECT_TRUE(solver.pointsTo(lEmpty).empty());
+  // Mutable global receives wildcard unknown store.
+  EXPECT_EQ(solver.pointsTo(lMut), (PointsToSet{A, p.unknownObject()}));
+  // Wildcard load soundly observes explicit read-only initializers.
+  EXPECT_TRUE(solver.pointsTo(lUnk).count(A));
+  EXPECT_TRUE(solver.pointsTo(lUnk).count(B));
+}
+
+TEST(ValueFlowGraphTest, OnlineCopySCCCondensationAndCompactedHooksExact) {
+  // Build > 1024 VFG nodes with a large copy cycle containing dereference,
+  // store-through, external-escape, and indirect-call hooks so
+  // condenseVFGSCCs(), PendingHookBatch, hook compaction, and wave merge
+  // caches all exercise on the cycle.
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+  const auto calleeObj = p.addObject(false, false, "callee");
+  const auto targetSlot = p.addObject(false, true, "targetSlot");
+  const auto escSlot = p.addObject(true, true, "escSlot");
+  p.setEmptyInitializer(targetSlot);
+  p.setEmptyInitializer(escSlot);
+
+  const auto mainFn = p.addFunction("main");
+  const auto calleeFn = p.addFunction("callee");
+  p.setFunctionObject(calleeObj, calleeFn);
+  p.setAddressTakenFunction(calleeFn, true);
+  const auto mainBB = p.addBlock(mainFn);
+  const auto calleeBB = p.addBlock(calleeFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(calleeFn, calleeBB);
+  p.setFunctionExit(calleeFn, calleeBB);
+  p.addEntryFunction(mainFn);
+
+  // Callee stores &B into targetSlot.
+  p.addStore(calleeBB, p.address(targetSlot), p.address(B), false);
+
+  // Construct a 1100-node copy ring so condenseVFGSCCs() triggers (>= 1024).
+  std::vector<NodeID> ring;
+  ring.reserve(1100);
+  for (int i = 0; i < 1100; ++i)
+    ring.push_back(p.addNode());
+  for (std::size_t i = 0; i < ring.size(); ++i)
+    p.addCopy(ring[i], ring[(i + 1) % ring.size()]);
+
+  // Seed &targetSlot, &calleeObj, and &A into different nodes on the ring.
+  p.addCopy(p.address(targetSlot), ring[0]);
+  p.addCopy(p.address(calleeObj), ring[300]);
+  p.addCopy(p.address(escSlot), ring[600]);
+  p.addCopy(p.address(A), ring[900]);
+
+  // Attach diverse hooks around the ring.
+  p.addExternalEscape(mainBB, ring[100]);
+  p.addStore(mainBB, ring[200], p.address(A), /*allowStrong=*/false);
+  const auto loadedBefore = load(p, mainBB, ring[400]);
+  const auto cs = p.addCallSite(mainBB, ring[700]);
+  const auto loadedAfter = load(p, mainBB, ring[800]);
+
+  Solver solver(p);
+  solver.analyze();
+
+  EXPECT_TRUE(solver.isFunctionReachable(calleeFn));
+  EXPECT_EQ(solver.resolvedCallTargets(cs), (std::set<FunctionID>{calleeFn}));
+  EXPECT_TRUE(solver.pointsTo(ring[0]).count(targetSlot));
+  EXPECT_TRUE(solver.pointsTo(ring[500]).count(calleeObj));
+  EXPECT_TRUE(solver.pointsTo(ring[1099]).count(A));
+  EXPECT_TRUE(solver.pointsTo(loadedBefore).count(A));
+  EXPECT_FALSE(solver.pointsTo(loadedBefore).count(B));
+  EXPECT_TRUE(solver.pointsTo(loadedAfter).count(A));
+  EXPECT_TRUE(solver.pointsTo(loadedAfter).count(B));
+  EXPECT_TRUE(solver.pointedToBy(targetSlot).count(ring[400]));
+  EXPECT_TRUE(solver.pointedToBy(targetSlot).count(ring[800]));
+  EXPECT_TRUE(solver.vfgSuccessors(ring[0]).count(ring[1]));
+}
+
+TEST(ValueFlowGraphTest,
+     MultiFunctionWeakObjectsRemainExactWithoutPromotionBounds) {
+  // With all lossy active-function promotion bounds removed, multiple weak
+  // objects accessed across many functions plus a trailing `load unknown` ->
+  // `store unknown` sequence must retain exact flow-sensitive per-object
+  // precision (no flow-insensitive weak-cell collapse or cross-object merging).
+  Program p;
+  const auto mainFn = p.addFunction("main");
+  const auto mainBB = p.addBlock(mainFn);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.addEntryFunction(mainFn);
+
+  std::vector<ObjectID> payloads;
+  std::vector<ObjectID> cells;
+  for (int i = 0; i < 12; ++i) {
+    payloads.push_back(p.addObject(false, false, "P" + std::to_string(i)));
+    const auto cell = p.addObject(false, true, "C" + std::to_string(i));
+    p.setEmptyInitializer(cell);
+    cells.push_back(cell);
+  }
+
+  std::vector<NodeID> helperLoads;
+  for (int f = 0; f < 5; ++f) {
+    const auto hFn = p.addFunction("h" + std::to_string(f));
+    const auto hBB = p.addBlock(hFn);
+    p.setFunctionEntry(hFn, hBB);
+    p.setFunctionExit(hFn, hBB);
+    for (int i = 0; i < 12; ++i) {
+      p.addStore(hBB, p.address(cells[i]), p.address(payloads[i]), false);
+      helperLoads.push_back(load(p, hBB, p.address(cells[i])));
+    }
+    const auto cs = p.addCallSite(mainBB);
+    p.addCallTarget(cs, hFn);
+  }
+
+  // Trailing unknown load + store after all helper calls: unkLoaded sees all
+  // stored payloads, but helperLoads (which execute strictly before the store)
+  // must NOT see other cells' payloads.
+  const auto unkLoaded = load(p, mainBB, p.unknownValue());
+  p.addStore(mainBB, p.unknownValue(), unkLoaded, /*allowStrong=*/false);
+
+  Solver solver(p);
+  solver.analyze();
+
+  for (int i = 0; i < 12; ++i) {
+    EXPECT_TRUE(solver.pointsTo(helperLoads[i]).count(payloads[i]));
+    EXPECT_FALSE(solver.pointsTo(helperLoads[i]).count(payloads[(i + 1) % 12]));
+    EXPECT_TRUE(solver.pointsTo(unkLoaded).count(payloads[i]));
+  }
+}
+
+TEST(ValueFlowGraphTest, DynamicUnknownExternalTargetAndLazyResolvedTargets) {
+  // Verify setUnknownExternalTarget resolves dynamically when calleePointer
+  // gains `unknown` (with and without argument escape) and resolvedCallTargets
+  // lazily includes concrete address-taken targets even when siteCallsUnknownHub
+  // is active.
+  Program p;
+  const auto A = p.addObject(false, false, "A");
+  const auto B = p.addObject(false, false, "B");
+  const auto atObj = p.addObject(false, false, "atFn");
+
+  const auto mainFn = p.addFunction("main");
+  const auto atFn = p.addFunction("atFn");
+  const auto unkWritable = p.addFunction("<unk_rw>");
+  const auto unkReadOnly = p.addFunction("<unk_ro>");
+  p.setFunctionObject(atObj, atFn);
+  p.setAddressTakenFunction(atFn, true);
+
+  const auto mainBB = p.addBlock(mainFn);
+  const auto atBB = p.addBlock(atFn);
+  const auto rwBB = p.addBlock(unkWritable);
+  const auto roBB = p.addBlock(unkReadOnly);
+  p.setFunctionEntry(mainFn, mainBB);
+  p.setFunctionExit(mainFn, mainBB);
+  p.setFunctionEntry(atFn, atBB);
+  p.setFunctionExit(atFn, atBB);
+  p.setFunctionEntry(unkWritable, rwBB);
+  p.setFunctionExit(unkWritable, rwBB);
+  p.setFunctionEntry(unkReadOnly, roBB);
+  p.setFunctionExit(unkReadOnly, roBB);
+  p.addEntryFunction(mainFn);
+
+  p.addStore(rwBB, p.unknownValue(), p.address(B), /*allowStrong=*/false);
+  p.setFunctionReturn(unkWritable, p.unknownValue());
+  p.setFunctionReturn(unkReadOnly, p.address(A));
+
+  const auto localEsc = p.addObject(true, true, "localEsc");
+  const auto localSafe = p.addObject(true, true, "localSafe");
+  p.setEmptyInitializer(localEsc);
+  p.setEmptyInitializer(localSafe);
+  p.setObjectOwner(localEsc, mainFn);
+  p.setObjectOwner(localSafe, mainFn);
+  p.addStore(mainBB, p.address(localEsc), p.address(A));
+  p.addStore(mainBB, p.address(localSafe), p.address(A));
+
+  const auto fp = p.addNode();
+  p.addCopy(p.unknownValue(), fp);
+  p.addCopy(p.address(atObj), fp);
+
+  const auto resRW = p.addNode();
+  const auto csRW = p.addCallSite(mainBB, fp, resRW, {p.address(localEsc)});
+  p.setUnknownExternalTarget(csRW, unkWritable, /*escapeArgs=*/true);
+
+  const auto resRO = p.addNode();
+  const auto csRO = p.addCallSite(mainBB, fp, resRO, {p.address(localSafe)});
+  p.setUnknownExternalTarget(csRO, unkReadOnly, /*escapeArgs=*/false);
+
+  const auto afterEsc = load(p, mainBB, p.address(localEsc));
+  const auto afterSafe = load(p, mainBB, p.address(localSafe));
+
+  Solver solver(p);
+  solver.analyze();
+
+  EXPECT_TRUE(solver.isFunctionReachable(unkWritable));
+  EXPECT_TRUE(solver.isFunctionReachable(unkReadOnly));
+  EXPECT_TRUE(solver.isFunctionReachable(atFn));
+  // Lazy resolvedCallTargets must report concrete target `atFn` as well.
+  EXPECT_TRUE(solver.resolvedCallTargets(csRW).count(atFn));
+  EXPECT_TRUE(solver.resolvedCallTargets(csRW).count(unkWritable));
+  // localEsc escaped via csRW so unkWritable's `store unknown, &B` reaches it.
+  EXPECT_TRUE(solver.pointsTo(afterEsc).count(A));
+  EXPECT_TRUE(solver.pointsTo(afterEsc).count(B));
+  // localSafe passed only to readonly csRO; still keeps A.
+  EXPECT_TRUE(solver.pointsTo(afterSafe).count(A));
+  EXPECT_TRUE(solver.pointsTo(resRW).count(p.unknownObject()));
+  EXPECT_TRUE(solver.pointsTo(resRO).count(A));
+}

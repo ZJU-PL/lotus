@@ -18,6 +18,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace lotus::alias::vfg {
@@ -42,6 +43,7 @@ public:
     bool singleton = false;
     bool memory = true;
     bool isGlobal = true;
+    bool readOnly = false;
     FunctionID ownerFunction = 0;
     std::string name;
   };
@@ -52,6 +54,7 @@ public:
     // A load's SSA result or a store's distinct value-flow node.
     NodeID value = 0;
     bool allowStrong = true;
+    bool sourceIsUnknown = false;
   };
   struct BlockEvent {
     enum class Kind { Access, Call };
@@ -64,6 +67,7 @@ public:
     std::vector<AccessID> accesses;
     std::vector<BlockEvent> events;
     std::vector<BlockID> successors;
+    std::vector<NodeID> externalEscapes;
   };
   struct Function {
     BlockID entry = 0;
@@ -81,6 +85,8 @@ public:
     std::vector<NodeID> actualArgs;
     std::vector<FunctionID> directTargets;
     std::vector<FunctionID> externalCallbacks;
+    FunctionID unknownExternalTarget = 0;
+    bool unknownExternalEscapesArgs = false;
     bool mayReturn = true;
     bool isInvoke = false;
     bool hasExternalTarget = false;
@@ -129,6 +135,17 @@ public:
   void addCallTarget(CallSiteID site, FunctionID callee);
   void markCallExternal(CallSiteID site, bool isExternal = true);
   void addExternalCallback(CallSiteID site, FunctionID callback);
+  // Register an optional synthetic external callee function invoked dynamically
+  // inside Solver::analyze() if `unknownObject()` reaches `site.calleePointer`,
+  // and whether actual arguments externally escape on that resolution.
+  void setUnknownExternalTarget(CallSiteID site, FunctionID target,
+                                bool escapeArgs = true);
+  // Record that any object reaching `value` escapes to opaque external or
+  // non-pointer-tracked global state when `block` (or `site`) is reachable,
+  // preventing callsite scoping from pruning calls that may touch it via
+  // `unknown` without injecting `value` into `unknown`'s stored contents.
+  void addExternalEscape(BlockID block, NodeID value);
+  void addExternalEscapeAfterCall(CallSiteID site, NodeID value);
 
   // Use once per object, before constructing a Solver. Unspecified initial
   // contents default to unknown; call setEmptyInitializer() for freshly
@@ -138,6 +155,7 @@ public:
   void setSingleton(ObjectID object, bool singleton);
   void setObjectOwner(ObjectID object, FunctionID owner);
   void setObjectGlobal(ObjectID object, bool isGlobal);
+  void setObjectReadOnly(ObjectID object, bool readOnly);
 
   ObjectID nullObject() const { return 1; }
   ObjectID unknownObject() const { return 2; }
@@ -165,6 +183,8 @@ private:
   void checkFunction(FunctionID id, bool allowImplicit = false) const;
   void checkCallSite(CallSiteID id) const;
   std::vector<std::vector<NodeID>> edges_{1};
+  std::unordered_map<NodeID, NodeSet> largeEdges_;
+  std::unordered_map<CallSiteID, NodeSet> largeExternalCallbacks_;
   std::vector<bool> sources_{false};
   std::vector<Object> objects_{1};
   std::vector<InitializerKind> initializerKinds_{InitializerKind::Unknown};
