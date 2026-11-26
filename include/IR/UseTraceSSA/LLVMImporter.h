@@ -1,5 +1,4 @@
-#ifndef LOTUS_IR_USETRACESSA_LLVMIMPORTER_H
-#define LOTUS_IR_USETRACESSA_LLVMIMPORTER_H
+#pragma once
 
 #include "IR/UseTraceSSA/TraceFlowGraph.h"
 #include "IR/UseTraceSSA/UseTraceSSA.h"
@@ -129,4 +128,3 @@ void appendLLVMScalarTransfers(TraceFlowGraph &graph, FunctionID id,
 
 } // namespace usetracessa
 } // namespace lotus
-#endif

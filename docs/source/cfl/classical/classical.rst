@@ -24,6 +24,8 @@ layout:
    ``Engines/STG/``, ``Engines/Skewed/``, ``Engines/EndpointQuotient/``,
    ``Engines/CAT/``, and ``Engines/IEOCE/`` contain the paper algorithms;
    ``Engines/CERT/`` is the Lotus-native cardinality-certified engine.
+   ``Engines/SparseSubset/`` implements the all-pairs set-pair saturation
+   from "Beating Rytter's Bound".
    ``Engines/POCR/`` also contains the client grammars.
    ``Engines/SubcubicAA/`` provides the specialized OOPSLA 2014 PEG
    memory/value alias algorithms through a separate graph-analysis API.
@@ -174,6 +176,15 @@ Solver backends
    kernel is available directly for selected-symbol observation contracts.
    See :doc:`/cfl/classical/cert_cfl` for the promotion rules, resource
    limits, and the completed-snapshot adapter contract.
+
+``SparseSubset``
+   Select with ``--solver sparse-subset``. Implements the all-pairs set-pair
+   saturation from "Beating Rytter's Bound": bit-sliced lane counters,
+   sparse-subset tabulation per length-``L`` block, and two-sided incremental
+   reports with exact pending-list corrections. It is a batch backend that
+   recomputes the fixed point after each graph update and always returns the
+   complete relation. See :doc:`/cfl/classical/sparse_subset` for the
+   parameters, invariants, and validation.
 
 All backends return exactly the same grammar-relative relation. Tests compare
 their complete triples, not only start-symbol answers, against an independent

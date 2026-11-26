@@ -12,6 +12,7 @@ set(SVFG_SOURCES
     SVFGSerializer.cpp
     SVFGOPT.cpp
     SVFGStats.cpp
+    MemorySSADump.cpp
 )
 
 # Create library
@@ -23,6 +24,8 @@ target_link_libraries(SVFG PUBLIC
     CanaryICFG
     AserPTA
     AliasSpecManager
+    CanaryADT
+    CanaryGraphWriter
     LLVMAnalysis
     LLVMCore
     LLVMSupport

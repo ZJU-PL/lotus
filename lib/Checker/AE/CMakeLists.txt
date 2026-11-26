@@ -3,6 +3,7 @@
 
 set(AE_SOURCES
   AbstractState.cpp
+  AbstractStateStore.cpp
   AbstractInterpretation.cpp
   AEDetector.cpp
   AbsExtAPI.cpp
@@ -20,5 +21,6 @@ target_link_libraries(AE
     CheckerFramework
     CanarySMT
     AserPTA
+    SVFG
     ${Z3_LIBRARIES}
 )

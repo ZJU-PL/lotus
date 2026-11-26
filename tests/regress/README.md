@@ -18,6 +18,3 @@ registered under `tests/integration/`. See [the test guide](../README.md).
 - `Dataflow/APA/`: APA command-line ordering regressions.
 - `Verification/`: CLAM and SymAbsAI regression suites.
 
-Historical fixtures without a registered consumer have been moved out of the
-regression tree to `tests/archive/legacy-llvm/`. A regression must have a
-registered consumer and a deterministic pass/fail oracle.

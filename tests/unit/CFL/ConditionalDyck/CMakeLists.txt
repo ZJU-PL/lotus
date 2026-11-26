@@ -1,0 +1,1 @@
+lotus_collect_test_sources(cfl_tests ConditionalDyckTest.cpp)

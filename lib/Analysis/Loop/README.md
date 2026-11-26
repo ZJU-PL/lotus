@@ -71,7 +71,7 @@ This directory builds the static library `CanaryLoopAnalysis` and links against:
 
 - `CanaryCFG`
 - `CanaryDebugInfo`
-- `CanaryPDG`
+- `CanaryPDGConstruction`
 - `CanaryAliasAnalysisWrapper`
 - `LLVMAnalysis`
 

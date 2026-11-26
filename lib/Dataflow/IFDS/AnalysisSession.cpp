@@ -3,9 +3,9 @@
 #include "Analysis/CFG/ExternCallbackModel.h"
 #include "Analysis/CFG/GlobalCtorsDtorsModel.h"
 #include "Analysis/CallGraph/CallGraphBuilder.h"
+#include "Analysis/CallGraph/OTF/OTFResolver.h"
 #include "Analysis/TypeHierarchy/DIBasedTypeHierarchy.h"
 #include "Analysis/TypeHierarchy/LLVMVFTableProvider.h"
-#include "Analysis/CallGraph/OTF/OTFResolver.h"
 
 #include <stdexcept>
 #include <unordered_set>
@@ -178,7 +178,33 @@ std::shared_ptr<const AnalysisGraph> AnalysisSession::graph() {
       });
   return m_graph;
 }
+std::shared_ptr<const FunctionIndex> AnalysisSession::function_index() {
+  if (!m_functions)
+    m_functions = std::make_shared<FunctionIndex>(m_module);
+  return m_functions;
+}
+std::shared_ptr<const CallGraphSCCs> AnalysisSession::call_graph_sccs() {
+  if (!m_sccs)
+    m_sccs = std::make_shared<CallGraphSCCs>(function_index(), graph());
+  return m_sccs;
+}
+std::shared_ptr<const UsedGlobals> AnalysisSession::used_globals() {
+  if (!m_globals)
+    m_globals = std::make_shared<UsedGlobals>(call_graph_sccs());
+  return m_globals;
+}
+std::shared_ptr<const lotus::graph::IntervalReachabilityIndex>
+AnalysisSession::call_graph_reachability() {
+  if (!m_reachability)
+    m_reachability = std::make_shared<lotus::graph::IntervalReachabilityIndex>(
+        call_graph_sccs()->components());
+  return m_reachability;
+}
 void AnalysisSession::invalidate() {
+  m_reachability.reset();
+  m_globals.reset();
+  m_sccs.reset();
+  m_functions.reset();
   m_graph.reset();
   m_vtables.reset();
   m_hierarchy.reset();

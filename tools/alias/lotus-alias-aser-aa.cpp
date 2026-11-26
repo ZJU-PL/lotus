@@ -62,6 +62,14 @@ static cl::opt<bool> DumpStats("dump-stats",
 
 static cl::opt<std::string> OutputFile("o", cl::desc("Output file for results"),
                                        cl::value_desc("filename"));
+static cl::opt<std::string> WritePointsTo(
+    "write-ander",
+    cl::desc("Write AserPTA points-to results and node layout to a file"),
+    cl::init(""), cl::value_desc("filename"));
+static cl::opt<std::string> ReadPointsTo(
+    "read-ander",
+    cl::desc("Load AserPTA points-to results and rebuild indirect-call edges"),
+    cl::init(""), cl::value_desc("filename"));
 
 // Config file options are defined in CLIUtils.cpp
 
@@ -148,6 +156,10 @@ int main(int argc, char **argv) {
   errs() << "Solver type: " << SolverType << "\n";
   errs() << "Field-sensitive: " << (FieldSensitive ? "yes" : "no") << "\n";
 
+  AnalysisOptions analysisOptions;
+  analysisOptions.readPointsToPath = ReadPointsTo;
+  analysisOptions.writePointsToPath = WritePointsTo;
+
   // Initialize AliasSpecManager with config files
   auto specFilePaths = collectConfigFilePaths();
   auto specManager = createAliasSpecManager(specFilePaths, module.get());
@@ -176,11 +188,14 @@ int main(int argc, char **argv) {
         if (AnalysisMode == "ci") {
           // Context-insensitive
           if (SolverType == "basic") {
-            runAnalysis<CIBasicSolver<Pts>>(*module, DumpStats);
+            runAnalysis<CIBasicSolver<Pts>>(*module, analysisOptions,
+                                            DumpStats);
           } else if (SolverType == "wave") {
-            runAnalysis<CIWaveSolver<Pts>>(*module, DumpStats);
+            runAnalysis<CIWaveSolver<Pts>>(*module, analysisOptions,
+                                           DumpStats);
           } else if (SolverType == "deep") {
-            runAnalysis<CIDeepSolver<Pts>>(*module, DumpStats);
+            runAnalysis<CIDeepSolver<Pts>>(*module, analysisOptions,
+                                           DumpStats);
           } else {
             errs() << "Unknown solver type: " << SolverType << "\n";
             return 1;
@@ -188,11 +203,14 @@ int main(int argc, char **argv) {
         } else if (AnalysisMode == "1-cfa") {
           // 1-call-site sensitive
           if (SolverType == "basic") {
-            runAnalysis<CS1BasicSolver<Pts>>(*module, DumpStats);
+            runAnalysis<CS1BasicSolver<Pts>>(*module, analysisOptions,
+                                             DumpStats);
           } else if (SolverType == "wave") {
-            runAnalysis<CS1WaveSolver<Pts>>(*module, DumpStats);
+            runAnalysis<CS1WaveSolver<Pts>>(*module, analysisOptions,
+                                            DumpStats);
           } else if (SolverType == "deep") {
-            runAnalysis<CS1DeepSolver<Pts>>(*module, DumpStats);
+            runAnalysis<CS1DeepSolver<Pts>>(*module, analysisOptions,
+                                            DumpStats);
           } else {
             errs() << "Unknown solver type: " << SolverType << "\n";
             return 1;
@@ -200,11 +218,14 @@ int main(int argc, char **argv) {
         } else if (AnalysisMode == "2-cfa") {
           // 2-call-site sensitive
           if (SolverType == "basic") {
-            runAnalysis<CS2BasicSolver<Pts>>(*module, DumpStats);
+            runAnalysis<CS2BasicSolver<Pts>>(*module, analysisOptions,
+                                             DumpStats);
           } else if (SolverType == "wave") {
-            runAnalysis<CS2WaveSolver<Pts>>(*module, DumpStats);
+            runAnalysis<CS2WaveSolver<Pts>>(*module, analysisOptions,
+                                            DumpStats);
           } else if (SolverType == "deep") {
-            runAnalysis<CS2DeepSolver<Pts>>(*module, DumpStats);
+            runAnalysis<CS2DeepSolver<Pts>>(*module, analysisOptions,
+                                            DumpStats);
           } else {
             errs() << "Unknown solver type: " << SolverType << "\n";
             return 1;
@@ -212,11 +233,14 @@ int main(int argc, char **argv) {
         } else if (AnalysisMode == "origin") {
           // Origin-sensitive
           if (SolverType == "basic") {
-            runAnalysis<OriginBasicSolver<Pts>>(*module, DumpStats);
+            runAnalysis<OriginBasicSolver<Pts>>(*module, analysisOptions,
+                                                DumpStats);
           } else if (SolverType == "wave") {
-            runAnalysis<OriginWaveSolver<Pts>>(*module, DumpStats);
+            runAnalysis<OriginWaveSolver<Pts>>(*module, analysisOptions,
+                                               DumpStats);
           } else if (SolverType == "deep") {
-            runAnalysis<OriginDeepSolver<Pts>>(*module, DumpStats);
+            runAnalysis<OriginDeepSolver<Pts>>(*module, analysisOptions,
+                                               DumpStats);
           } else {
             errs() << "Unknown solver type: " << SolverType << "\n";
             return 1;

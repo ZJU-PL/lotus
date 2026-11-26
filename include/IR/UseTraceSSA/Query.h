@@ -1,5 +1,5 @@
-#ifndef LOTUS_IR_USETRACESSA_QUERY_H
-#define LOTUS_IR_USETRACESSA_QUERY_H
+#pragma once
+
 
 #include "IR/UseTraceSSA/TraceFlowGraph.h"
 #include "IR/UseTraceSSA/SearchBudget.h"
@@ -187,4 +187,3 @@ private:
 
 } // namespace usetracessa
 } // namespace lotus
-#endif

@@ -26,20 +26,21 @@ LLVM pass wrapper.
 Core Components
 ---------------
 
-* ``AnalysisDriver`` – Coordinates whole-module symbolic execution and summary
-  scheduling.
-* ``AnalysisState`` – Represents symbolic memory, guarded values, points-to
-  items, summaries, and bug queries.
-* ``ProgramVar`` and ``Property*`` – Name symbolic values and represent scalar
-  properties such as offsets, sizes, and affine expressions.
-* ``ConstraintRepr`` and ``PathCondSolver`` – Encode symbolic predicates and
-  discharge path-feasibility queries.
-* ``MemoryAPI`` and ``GVFGUtility`` – Connect symbolic execution to allocation
-  modeling, data layout, library summaries, and GVFG construction.
-* ``TaintModel`` – Provides source, transfer, and sink facts used by
-  taint-sensitive bug checks.
-* ``SymbolicExecutionWrapper`` – Integrates the engine with the LLVM pass
-  pipeline and checker report infrastructure.
+* ``Support/AnalysisContext`` & ``Support/AnalysisLimit`` – Module-scoped
+  layout/GVFG/call-graph context and configurable resource budgets.
+* ``Domain/ProgramVar``, ``Domain/Property*``, and ``Domain/SymbolicMemory`` –
+  Symbolic variables, affine scalar expressions, and abstract memory objects.
+* ``Models/MemoryAPI`` & ``Models/TaintModel`` – Allocator/deallocator models
+  and taint source, transfer, and sink specifications.
+* ``Solver/ConstraintRepr``, ``Solver/PathCondSolver``, and
+  ``Solver/SummarySolverManager`` – Path conditions and SMT feasibility checks.
+* ``Engine/AnalysisDriver``, ``Engine/AnalysisState``, and
+  ``Engine/AnalysisSummary`` – Whole-module scheduling, symbolic transfer,
+  taint propagation, and interprocedural summaries.
+* ``Checks/Query`` & ``Checks/QueryEngine`` – Bug query construction, summary
+  inlining, and MPA batch discharging via ``AnalysisExtension`` hooks.
+* ``Integration/SymbolicExecutionWrapper`` – Integrates the engine with the
+  LLVM pass pipeline and checker report infrastructure.
 
 Supported checks
 ----------------

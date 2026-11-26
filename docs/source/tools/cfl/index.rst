@@ -17,6 +17,7 @@ context-free grammars for precise interprocedural analysis.
 ``lotus-cfl-interleaved-dyck staged-bounds``,
 ``lotus-cfl-interleaved-dyck unary``, ``lotus-cfl-interleaved-dyck spds``,
 ``lotus-cfl-interleaved-dyck lcl``, ``lotus-cfl-interleaved-dyck affine-spds``,
+``lotus-cfl-interleaved-dyck ilp``,
 ``lotus-cfl-interleaved-dyck-graph-reduction.py``, ``lotus-cfl-dynamic-dyck``, and ``csr``.
 
 Classical CFL solving and clients
@@ -24,9 +25,9 @@ Classical CFL solving and clients
 
 ``lotus-cfl-solve`` runs a supplied grammar over a text, DOT, or JSON
 graph. Select the engine with ``--solver``; the available backends include
-``sparse-set``, ``sparse-bitvector``, ``graspan``, ``transitive-closure``,
-``pocr``, ``hpocr``, ``focr``, ``pearl``, ``stg``, ``sqid``, ``skewed``,
-``endpoint-quotient``, ``cert``, ``cat``, ``iea``, and ``iea-ocr``.
+``sparse-set``, ``sparse-bitvector``, ``sparse-subset``, ``graspan``,
+``transitive-closure``, ``pocr``, ``hpocr``, ``focr``, ``pearl``, ``stg``, ``sqid``,
+``skewed``, ``endpoint-quotient``, ``cert``, ``cat``, ``iea``, and ``iea-ocr``.
 
 ``lotus-cfl-alias`` consumes LLVM IR or bitcode. It uses Aser as the constraint
 frontend but drives points-to propagation and indirect-call discovery through
@@ -75,6 +76,12 @@ See :doc:`/cfl/classical/cat_ieoce` for the algorithm and API details.
 Use ``--solver cert`` to select the cardinality-certified exact all-symbol CFL
 reachability engine. See :doc:`/cfl/classical/cert_cfl` for architecture and
 options.
+
+Use ``--solver sparse-subset`` to select the all-pairs set-pair saturation
+engine. It is a batch backend: every ``solve`` recomputes the fixed point for
+the current graph, and the result is always the complete relation. It is not
+part of the ``--all-solvers`` benchmark sweep because of that rebuild cost. See
+:doc:`/cfl/classical/sparse_subset` for the algorithm and parameters.
 
 The general solver accepts the vendored datasets under
 ``benchmarks/real-world/CFL/Classical``, POCR grammar/graph files, and exposes
@@ -342,6 +349,25 @@ and a shared observer map can be loaded or dumped with
 ``--observer``/``--dump-observer``. See
 :doc:`/cfl/interleaved_dyck/affine_spds` for the library API and algorithm
 details.
+
+ILP Reachability
+----------------
+
+Encodes interleaved-Dyck reachability as an integer linear program over the
+path expression. The default backend is Z3; an optional Gurobi backend can be
+enabled with ``-DLOTUS_ENABLE_GUROBI=ON`` (see :doc:`/cfl/interleaved_dyck/ilp`).
+
+**Command**: ``lotus-cfl-interleaved-dyck ilp``
+
+**Location**: ``tools/cfl/interleaved-dyck/ilp/lotus-cfl-interleaved-dyck-ilp.cpp``
+
+.. code-block:: bash
+
+   cmake --build build --target lotus-cfl-interleaved-dyck
+   build/bin/lotus-cfl-interleaved-dyck ilp --query 0 3 graph.dot
+
+Select the solver with ``--backend z3|gurobi`` (default: ``z3``), and adjust
+resource limits with ``--max-disjuncts`` / ``--max-expression-nodes``.
 
 Interleaved-Dyck Graph Reduction
 --------------------------------

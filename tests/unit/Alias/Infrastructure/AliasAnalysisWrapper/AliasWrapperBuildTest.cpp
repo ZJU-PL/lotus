@@ -102,4 +102,30 @@ TEST_F(AliasWrapperBuildTest, EnabledOptionalBackendsInitialize) {
     EXPECT_EQ(wrapper.query(pointer, pointer), llvm::AliasResult::MustAlias);
   }
 }
+
+TEST_F(AliasWrapperBuildTest, PrecisionPresetsMapToExpectedConfigs) {
+  EXPECT_EQ(lotus::AAConfig::FICI(), lotus::AAConfig::SparrowAA_NoCtx());
+  EXPECT_EQ(lotus::AAConfig::FICS(), lotus::AAConfig::SparrowAA_1CFA());
+  EXPECT_EQ(lotus::AAConfig::FICS(0), lotus::AAConfig::SparrowAA_NoCtx());
+  EXPECT_EQ(lotus::AAConfig::FICS(2), lotus::AAConfig::SparrowAA_2CFA());
+  EXPECT_EQ(lotus::AAConfig::FSCI(), lotus::AAConfig::TPA_NoCtx());
+  EXPECT_EQ(lotus::AAConfig::FSCS(), lotus::AAConfig::TPA_1CFA());
+  EXPECT_EQ(lotus::AAConfig::FSCS(0), lotus::AAConfig::TPA_NoCtx());
+  EXPECT_EQ(lotus::AAConfig::FSCS(2), lotus::AAConfig::TPA_2CFA());
+
+  const auto fallback = lotus::AAConfig::DyckAA();
+  EXPECT_EQ(lotus::parseAAConfigFromString("fici", fallback),
+            lotus::AAConfig::FICI());
+  EXPECT_EQ(lotus::parseAAConfigFromString("FICS", fallback),
+            lotus::AAConfig::FICS(1));
+  EXPECT_EQ(lotus::parseAAConfigFromString("fics-2cfa", fallback),
+            lotus::AAConfig::FICS(2));
+  EXPECT_EQ(lotus::parseAAConfigFromString("fsci", fallback),
+            lotus::AAConfig::FSCI());
+  EXPECT_EQ(lotus::parseAAConfigFromString("fscs", fallback),
+            lotus::AAConfig::FSCS(1));
+  EXPECT_EQ(lotus::parseAAConfigFromString("fscs-3", fallback),
+            lotus::AAConfig::FSCS(3));
+  EXPECT_EQ(lotus::parseAAConfigFromString("fics-invalid", fallback), fallback);
+}
 } // namespace

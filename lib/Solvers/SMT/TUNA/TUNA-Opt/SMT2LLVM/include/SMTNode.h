@@ -1,3 +1,5 @@
+#pragma once
+
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
@@ -21,10 +23,6 @@
 #include <iostream>
 
 #include"z3++.h"
-
-#ifndef LLMAPPING
-#define LLMAPPING std::map<std::string, Value*>
-#endif
 
 using namespace llvm;
 using namespace z3;

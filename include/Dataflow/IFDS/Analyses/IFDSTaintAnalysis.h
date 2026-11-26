@@ -118,6 +118,8 @@ public:
     bool track_arrays = true;          // Track array element taint
     bool use_sanitizers = true;        // Apply sanitizer specifications
     bool strict_sanitization = false; // Require exact type match for sanitizers
+    // Treat pointer parameters of main as tainted initial inputs.
+    bool taint_main_args = false;
   };
 
 private:

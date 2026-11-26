@@ -9,8 +9,7 @@
  * self-contained. Mirrors tests/unit/Checker/Pulse/PulseCheckerFixture.h.
  */
 
-#ifndef LOTUS_UNITTEST_DATAFLOW_NPA_INTERPROCEDURAL_CLIENT_TEST_SUPPORT_H_
-#define LOTUS_UNITTEST_DATAFLOW_NPA_INTERPROCEDURAL_CLIENT_TEST_SUPPORT_H_
+#pragma once
 
 #include "Dataflow/NPA/Analyses/Inter/ConstantPropagation.h"
 #include "Dataflow/NPA/Analyses/Inter/Interval.h"
@@ -582,5 +581,3 @@ template <> struct TensorSemiringTraits<BackwardTensorLangDomain> {
   }
 };
 } // namespace npa
-
-#endif // LOTUS_UNITTEST_DATAFLOW_NPA_INTERPROCEDURAL_CLIENT_TEST_SUPPORT_H_

@@ -1,8 +1,6 @@
-#include "SMTNode.h"
+#pragma once
 
-#ifndef LLMAPPING
-#define LLMAPPING std::map<std::string, Value*>
-#endif
+#include "SMTNode.h"
 
 namespace SLOT
 {

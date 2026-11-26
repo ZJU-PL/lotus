@@ -1,7 +1,8 @@
-#include "IR/PDG/Analysis/PropertySpec.h"
+#include "IR/PDG/Query/PropertySpec.h"
+
+#include <sstream>
 
 #include <gtest/gtest.h>
-#include <sstream>
 
 using namespace pdg;
 

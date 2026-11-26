@@ -33,9 +33,10 @@ The SeaHorn framework is organized into the following subdirectories:
   * Horn clause generation and solving (HornifyFunction, HornifyModule)
   * Symbolic execution engines (BvOpSem, ClpOpSem, UfoOpSem)
   * Bounded model checking (Bmc, PathBmc)
-  * **K-Induction** – Production k-induction engine reusing PathBMC (in ``KInduction/``)
   * Counterexample generation (CexHarness, CexExeGenerator)
   * **Smt/** – SMT solver integration (Z3, Yices2)
+
+* **KInduction/** – Production k-induction engine reusing PathBMC (a sibling of ``seahorn/``)
 
 * **Analysis/** – Analysis passes for verification
   * ``CrabAnalysis.cc`` – CRAB abstract interpretation integration

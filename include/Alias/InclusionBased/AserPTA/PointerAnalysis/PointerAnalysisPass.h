@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "Alias/InclusionBased/AserPTA/AnalysisOptions.h"
 #include "Alias/InclusionBased/AserPTA/Util/Log.h"
 
 #include <chrono>
@@ -19,26 +20,32 @@
 template <typename Solver> class PointerAnalysisPass : public llvm::ModulePass {
 private:
   std::unique_ptr<Solver> solver; // owner of the solver
+  aser::AnalysisOptions options;
 
 public:
   static char ID;
-  PointerAnalysisPass() : llvm::ModulePass(ID), solver(nullptr) {}
+  PointerAnalysisPass(
+      const aser::AnalysisOptions &options = aser::AnalysisOptions())
+      : llvm::ModulePass(ID), solver(nullptr), options(options) {}
 
   /// @brief Runs pointer analysis on the given module.
   /// @param M The LLVM module to analyze.
   /// @return false (analysis pass does not modify IR).
   bool runOnModule(llvm::Module &M) override {
-    analyze(&M);
+    analyze(&M, "main", options);
     return false; // Analysis doesn't modify IR
   }
 
   /// @brief Analyzes the given module with the specified entry function.
   /// @param M Pointer to the LLVM module.
   /// @param entry Name of the entry function (default: "main").
-  void analyze(llvm::Module *M, llvm::StringRef entry = "main") {
+  void analyze(llvm::Module *M, llvm::StringRef entry = "main",
+               const aser::AnalysisOptions &analysisOptions =
+                   aser::AnalysisOptions()) {
     if (solver.get() != nullptr) {
       if (solver->getLLVMModule() == M &&
-          entry.equals(solver->getEntryName())) {
+          entry.equals(solver->getEntryName()) &&
+          analysisOptions == options) {
         return;
       }
     }
@@ -47,7 +54,7 @@ public:
 
     LOG_INFO("PTA start to run");
     auto start = std::chrono::steady_clock::now();
-    solver->analyze(M, entry);
+    solver->analyze(M, entry, analysisOptions);
 
     auto end = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed_seconds = end - start;

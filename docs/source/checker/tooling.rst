@@ -6,7 +6,7 @@ checker frontend.
 
 **Header**: ``include/Checker/Framework/Subcommands.h``
 
-**Implementation**: ``tools/checker/``
+**Implementation**: ``lib/Checker/Framework/Subcommands.cpp`` (runners in ``tools/checker/``)
 
 **Build target**: ``lotus-check``
 
@@ -38,7 +38,8 @@ Declares accessor functions for each subcommand (defined in
 
    auto &sub = lotus::checker::tooling::genericSubCommand();
    auto &sub = lotus::checker::tooling::kintSubCommand();
-   auto &sub = lotus::checker::tooling::taintSubCommand();
+   auto &sub = lotus::checker::tooling::taintIFDSSubCommand();
+   auto &sub = lotus::checker::tooling::taintTPASubCommand();
    auto &sub = lotus::checker::tooling::concurrencySubCommand();
    auto &sub = lotus::checker::tooling::pulseSubCommand();
    auto &sub = lotus::checker::tooling::fitxSubCommand();
@@ -58,7 +59,9 @@ Registered Subcommands
 +-------------------+-------------------------------------------+
 | ``kint``          | Run the KINT integer checker              |
 +-------------------+-------------------------------------------+
-| ``taint``         | Run the IFDS-based taint analysis         |
+| ``taint-ifds``    | Run the IFDS-based taint analysis         |
++-------------------+-------------------------------------------+
+| ``taint-tpa``     | Run the TPA-native sparse taint analysis  |
 +-------------------+-------------------------------------------+
 | ``concur``        | Run the concurrency checker suite         |
 +-------------------+-------------------------------------------+

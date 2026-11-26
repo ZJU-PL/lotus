@@ -55,8 +55,43 @@ static cl::opt<CheckpointPolicy> CheckpointPolicyOpt(
                           "Fail when checkpoints remain unchecked")),
     cl::init(CheckpointPolicy::Strict),
     cl::sub(lotus::checker::tooling::aeSubCommand()));
+
+static cl::opt<bool> StateStoreStatsOpt(
+    "ae.state-store-stats",
+    cl::desc("Report how many abstract states each instruction retained"),
+    cl::init(false), cl::sub(lotus::checker::tooling::aeSubCommand()));
+
+enum class FunEntryMode { Main, NoMain };
+static cl::opt<FunEntryMode> FunEntryOpt(
+    "ae.fun-entry", cl::desc("Where abstract execution starts (default: main)"),
+    cl::values(clEnumValN(FunEntryMode::Main, "main",
+                          "Analyze entry points reachable from main"),
+               clEnumValN(FunEntryMode::NoMain, "no-main",
+                          "Analyze each call-graph root SCC")),
+    cl::init(FunEntryMode::Main),
+    cl::sub(lotus::checker::tooling::aeSubCommand()));
+
+static cl::opt<int64_t> TimeoutOpt(
+    "ae.timeout",
+    cl::desc("Wall-clock budget for the whole analysis in seconds "
+             "(0 disables; findings so far are still reported)"),
+    cl::init(0), cl::sub(lotus::checker::tooling::aeSubCommand()));
+
+static cl::opt<std::string> SparsityOpt(
+    "ae.sparsity",
+    cl::desc("SVF-compatible spelling of --ae.state-store: "
+             "dense|semi-sparse|sparse"),
+    cl::value_desc("dense|semi-sparse|sparse"), cl::init(""),
+    cl::sub(lotus::checker::tooling::aeSubCommand()));
+
+static cl::opt<std::string> StateLayoutOpt(
+    "ae.state-store",
+    cl::desc("Per-instruction abstract state retention (default: dense). "
+             "'sparse' drops states no later reader can observe; findings are "
+             "identical, peak memory is lower"),
+    cl::value_desc("dense|sparse|semi-sparse"),
+    cl::init("dense"), cl::sub(lotus::checker::tooling::aeSubCommand()));
 int runAECheckerTool(const char *argv0) {
-  (void)lotus::checker::tooling::statsEnabled();
   auto selectedOr =
       lotus::checker::tooling::resolveChecks(lotus::checker::EngineKind::AE);
   if (!selectedOr) {
@@ -71,6 +106,16 @@ int runAECheckerTool(const char *argv0) {
   if (!M) {
     Err.print(argv0, errs());
     return lotus::checker::tooling::EXIT_ERROR;
+  }
+  if (FunEntryOpt == FunEntryMode::Main) {
+    const Function *entry = M->getFunction("main");
+    if (!entry || entry->isDeclaration())
+      entry = M->getFunction("svf.main");
+    if (!entry || entry->isDeclaration()) {
+      errs() << "AE requires a defined main/svf.main entry; use "
+                "--ae.fun-entry=no-main for a library module\n";
+      return lotus::checker::tooling::EXIT_ERROR;
+    }
   }
   BugReportMgr &mgr = BugReportMgr::get_instance();
   lotus::checker::tooling::AnalysisStatsRecorder stats("ae", *M, mgr);
@@ -91,7 +136,32 @@ int runAECheckerTool(const char *argv0) {
   ae.setRecursionMode(HandleRecurOpt);
   ae.setWidenDelay(WidenDelayOpt);
   ae.setStrictCheckpoint(CheckpointPolicyOpt == CheckpointPolicy::Strict);
-  ae.setPrintStats(false);
+  ae.setPrintStats(StateStoreStatsOpt ||
+                   lotus::checker::tooling::statsEnabled());
+  ae.setFunEntryMode(FunEntryOpt == FunEntryMode::NoMain
+                         ? lotus::analysis::AbstractInterpretation::FunEntryMode::NoMain
+                         : lotus::analysis::AbstractInterpretation::FunEntryMode::Main);
+  if (TimeoutOpt < 0) {
+    errs() << "--ae.timeout must be >= 0 (0 disables the budget)\n";
+    return 2;
+  }
+  ae.setTimeLimitSeconds(TimeoutOpt);
+  {
+    // `--ae.sparsity` mirrors SVF's flag name; `--ae.state-store` is the
+    // Lotus-native spelling. Whichever was passed explicitly wins; with
+    // neither, fall back to the documented default (`dense`).
+    std::string requested = StateLayoutOpt.getValue();
+    if (StateLayoutOpt.getNumOccurrences() == 0 &&
+        SparsityOpt.getNumOccurrences() != 0)
+      requested = SparsityOpt.getValue();
+    lotus::analysis::StateLayout layout = lotus::analysis::StateLayout::Dense;
+    if (!lotus::analysis::parseStateLayout(requested, layout)) {
+      errs() << "unknown AE sparsity value '" << requested
+             << "' (expected dense, semi-sparse or sparse)\n";
+      return 2;
+    }
+    ae.setStateLayout(layout);
+  }
   ae.setEnableBufOverflowCheck(runOverflow);
   ae.setEnableNullDerefCheck(runNullDeref);
   ae.setEnableMemLeakCheck(runMemLeak);

@@ -36,6 +36,12 @@ class ConstraintBuilder final
     : public aser::SolverBase<LanguageModel, ConstraintBuilder> {
 public:
   void solve() {}
+
+  // SolverBase still instantiates runSolver() for cache replay and on-the-fly
+  // call graph paths, but this builder only uses the graph construction
+  // facilities of the base class; constraint solving is performed by the
+  // classical AliasClient instead.
+  void runSolver(LanguageModel &) {}
 };
 
 struct LLVMGepOffsetResolver {

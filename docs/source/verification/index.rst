@@ -7,8 +7,6 @@ This section documents the verification tools and frameworks used throughout Lot
    :maxdepth: 2
 
    analysis
-   automata
-   trace_abstraction
    backend
    crab
    clam

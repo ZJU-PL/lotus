@@ -1,0 +1,559 @@
+#include "Alias/InclusionBased/BootstrapAA/Preprocessing/RelevantSlice.h"
+
+#include <deque>
+#include <vector>
+
+namespace lotus {
+namespace bootstrap {
+namespace detail {
+
+bool touches(const Program & /*program*/, const Slice &slice,
+             const PointsToSet &targets) {
+  if (targets.empty())
+    return false;
+  if (targets.isTop())
+    return !slice.object_list.empty();
+  for (Id object : targets.objects()) {
+    if (object >= 2 && object < slice.objects.size() && slice.objects[object])
+      return true;
+  }
+  return false;
+}
+
+SliceIndex buildSliceIndex(const Program &program, const ProgramIndex &index,
+                           const Sets &upper,
+                           const SteensgaardHierarchy &hierarchy,
+                           const ReachabilityInfo &reachability) {
+  SliceIndex si;
+  si.stores_by_comp.resize(hierarchy.successors.size());
+  si.stores_by_obj.resize(program.objects.size());
+  for (Id site : index.store_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    const Id addr = i.operands[0];
+    if (addr == INVALID || valueOf(program, upper, addr).isTop()) {
+      si.top_stores.push_back(site);
+    } else {
+      si.stores_by_comp[hierarchy.value_components[addr]].push_back(site);
+      if (i.write_bytes != 0) {
+        const PointsToSet pts = valueOf(program, upper, addr);
+        for (Id o : pts.objects()) {
+          if (!isMemory(program.objects[o]))
+            continue;
+          for (Id fo : program.overlappingFields(o, i.write_bytes))
+            if (fo != o && isMemory(program.objects[fo]))
+              si.stores_by_obj[fo].push_back(site);
+        }
+      }
+    }
+  }
+
+  si.havocs_by_comp.resize(hierarchy.successors.size());
+  si.havocs_by_obj.resize(program.objects.size());
+  for (Id site : index.havoc_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    if (i.operands.empty() || i.operands[0] == INVALID ||
+        valueOf(program, upper, i.operands[0]).isTop()) {
+      si.top_havocs.push_back(site);
+    } else {
+      si.havocs_by_comp[hierarchy.value_components[i.operands[0]]].push_back(
+          site);
+      const PointsToSet pts = valueOf(program, upper, i.operands[0]);
+      for (Id o : pts.objects()) {
+        if (!isMemory(program.objects[o]))
+          continue;
+        for (Id fo : program.overlappingFields(o, i.write_bytes))
+          if (isMemory(program.objects[fo]))
+            si.havocs_by_obj[fo].push_back(site);
+      }
+    }
+  }
+
+  si.memcopies_by_comp.resize(hierarchy.successors.size());
+  si.memcopies_by_obj.resize(program.objects.size());
+  for (Id site : index.memcopy_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    const Id dst = i.operands[0];
+    if (dst == INVALID || valueOf(program, upper, dst).isTop()) {
+      si.top_memcopies.push_back(site);
+    } else {
+      si.memcopies_by_comp[hierarchy.value_components[dst]].push_back(site);
+      const PointsToSet pts = valueOf(program, upper, dst);
+      for (Id o : pts.objects()) {
+        if (!isMemory(program.objects[o]))
+          continue;
+        for (Id fo : program.overlappingFields(o, i.write_bytes))
+          if (isMemory(program.objects[fo]))
+            si.memcopies_by_obj[fo].push_back(site);
+      }
+    }
+  }
+
+  si.allocs_by_base.resize(program.objects.size());
+  for (Id site : index.allocate_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    if (i.object < program.objects.size())
+      si.allocs_by_base[program.baseOf(i.object)].push_back(site);
+  }
+
+  bool any_addr_taken_non_returning = false;
+  for (Id f = 0; f < program.functions.size(); ++f) {
+    if (program.functions[f].address_taken) {
+      si.addr_taken_funcs.push_back(f);
+      if (!reachability.may_return[f])
+        any_addr_taken_non_returning = true;
+    }
+  }
+
+  for (Id site : index.call_sites) {
+    const Instruction &i = *index.by_site[site].inst;
+    bool writes_ext = false;
+    bool has_non_returning = false;
+    if (i.callee != INVALID) {
+      writes_ext =
+          (i.opaque_alternative && i.writes_memory) ||
+          (program.functions[i.callee].external && i.writes_memory &&
+           program.functions[i.callee].writes_memory);
+      has_non_returning = !reachability.may_return[i.callee];
+    } else {
+      const PointsToSet tgt = valueOf(program, upper, i.indirect_target);
+      if (tgt.isTop()) {
+        writes_ext = i.writes_memory;
+        has_non_returning = any_addr_taken_non_returning;
+      } else {
+        const Targets targets = callees(program, i, tgt);
+        writes_ext = targets.opaque && i.writes_memory;
+        for (Id callee : targets.functions) {
+          if (program.functions[callee].external && i.writes_memory &&
+              program.functions[callee].writes_memory)
+            writes_ext = true;
+          if (!reachability.may_return[callee])
+            has_non_returning = true;
+        }
+      }
+    }
+    if (writes_ext)
+      si.memory_writing_calls.push_back(site);
+    if (has_non_returning)
+      si.non_returning_calls.push_back(site);
+  }
+  return si;
+}
+
+// Algorithm 1 (Kahlon PLDI '08, p. 253): worklist-based backward closure
+// computing both V_P (relevant values/objects) and St_P (relevant statements).
+Slice relevant(const Program &program, const ProgramIndex &index,
+               const Sets &upper, const SteensgaardHierarchy &hierarchy,
+               const ReachabilityInfo &reachability,
+               const std::vector<Id> &seeds, bool enabled,
+               const std::vector<Id> &seed_objects,
+               const SliceIndex *prebuilt) {
+  Slice result;
+  result.values.assign(program.values.size(), !enabled);
+  result.objects.assign(program.objects.size(), !enabled);
+  result.instructions.assign(index.by_site.size(), !enabled);
+  result.relevant_functions.assign(program.functions.size(), !enabled);
+
+  if (!enabled) {
+    for (Id v = 0; v < program.values.size(); ++v)
+      result.value_list.push_back(v);
+    for (Id o = 2; o < program.objects.size(); ++o)
+      if (isMemory(program.objects[o]))
+        result.object_list.push_back(o);
+      else
+        result.objects[o] = false;
+    for (Id s = 0; s < index.by_site.size(); ++s)
+      if (index.by_site[s].inst)
+        result.inst_list.push_back(s);
+    return result;
+  }
+
+  SliceIndex local_si;
+  if (!prebuilt) {
+    local_si = buildSliceIndex(program, index, upper, hierarchy, reachability);
+    prebuilt = &local_si;
+  }
+  const SliceIndex &si = *prebuilt;
+
+  std::vector<bool> relevantHigher(hierarchy.successors.size(), false);
+  std::vector<bool> higherExpanded(hierarchy.successors.size(), false);
+  std::deque<Id> value_work;
+  std::deque<Id> object_work;
+  std::deque<Id> higher_work;
+
+  bool has_top_read = false;
+  std::vector<bool> referenced_obj_seen(program.objects.size(), false);
+  std::vector<Id> referenced_objs;
+  std::deque<Id> pending_top_read_objs;
+
+  auto recordReferencedObj = [&](Id o) {
+    if (o < 2 || o >= program.objects.size() || !isMemory(program.objects[o]) ||
+        referenced_obj_seen[o])
+      return;
+    referenced_obj_seen[o] = true;
+    referenced_objs.push_back(o);
+    if (has_top_read)
+      pending_top_read_objs.push_back(o);
+  };
+
+  auto markInst = [&](Id site) {
+    if (site < result.instructions.size() && !result.instructions[site]) {
+      result.instructions[site] = true;
+      result.inst_list.push_back(site);
+      result.relevant_functions[index.by_site[site].function] = true;
+      const Instruction &inst = *index.by_site[site].inst;
+      if (inst.opcode == Opcode::Address || inst.opcode == Opcode::Allocate)
+        recordReferencedObj(inst.object);
+    }
+  };
+
+  auto markHigherComponent = [&](Id comp) {
+    if (higherExpanded[comp])
+      return;
+    higherExpanded[comp] = true;
+    std::vector<Id> stack(hierarchy.predecessors[comp].begin(),
+                          hierarchy.predecessors[comp].end());
+    if (hierarchy.cyclic[comp])
+      stack.push_back(comp);
+    while (!stack.empty()) {
+      const Id current = stack.back();
+      stack.pop_back();
+      if (relevantHigher[current])
+        continue;
+      relevantHigher[current] = true;
+      higher_work.push_back(current);
+      if (!higherExpanded[current]) {
+        higherExpanded[current] = true;
+        stack.insert(stack.end(), hierarchy.predecessors[current].begin(),
+                     hierarchy.predecessors[current].end());
+      }
+    }
+  };
+
+  auto needValue = [&](Id value) {
+    if (value == INVALID || result.values[value])
+      return;
+    result.values[value] = true;
+    result.value_list.push_back(value);
+    value_work.push_back(value);
+    markHigherComponent(hierarchy.value_components[value]);
+    if (program.values[value].constant &&
+        !program.values[value].initial.isTop()) {
+      for (Id o : program.values[value].initial.objects())
+        recordReferencedObj(o);
+    }
+  };
+
+  std::vector<bool> fn_relevant_propagated(program.functions.size(), false);
+  std::deque<Id> fn_work;
+  auto markFuncRelevant = [&](Id f) {
+    if (f < program.functions.size() && !fn_relevant_propagated[f]) {
+      fn_relevant_propagated[f] = true;
+      result.relevant_functions[f] = true;
+      fn_work.push_back(f);
+    }
+  };
+
+  bool activated_top_memory_ops = false;
+  auto needObject = [&](Id object) {
+    if (object < 2 || object >= program.objects.size() ||
+        !isMemory(program.objects[object]) || result.objects[object])
+      return;
+    result.objects[object] = true;
+    result.object_list.push_back(object);
+    object_work.push_back(object);
+    if (!program.objects[object].initial.isTop()) {
+      for (Id init_o : program.objects[object].initial.objects())
+        recordReferencedObj(init_o);
+    }
+    const Id ocomp = hierarchy.object_components[object];
+    if (!relevantHigher[ocomp]) {
+      relevantHigher[ocomp] = true;
+      higher_work.push_back(ocomp);
+    }
+    for (Id alloc_site : si.allocs_by_base[program.baseOf(object)]) {
+      markInst(alloc_site);
+      markFuncRelevant(index.by_site[alloc_site].function);
+    }
+  };
+
+  auto flushTopReadObjs = [&]() {
+    while (!pending_top_read_objs.empty()) {
+      const Id o = pending_top_read_objs.front();
+      pending_top_read_objs.pop_front();
+      for (Id fo : program.overlappingFields(o, 0))
+        needObject(fo);
+    }
+  };
+
+  auto activateTopRead = [&]() {
+    if (!has_top_read) {
+      has_top_read = true;
+      for (Id o : referenced_objs)
+        pending_top_read_objs.push_back(o);
+    }
+    flushTopReadObjs();
+  };
+
+  auto needMemory = [&](const PointsToSet &set) {
+    if (set.empty())
+      return;
+    if (set.isTop()) {
+      activateTopRead();
+      return;
+    }
+    for (Id o : set.objects())
+      needObject(o);
+  };
+
+  auto processStore = [&](Id site) {
+    if (result.instructions[site])
+      return;
+    const Instruction &i = *index.by_site[site].inst;
+    markInst(site);
+    needValue(i.operands[0]);
+    needValue(i.operands[1]);
+    // Concrete destination targets stay in `slice.objects` (needed for
+    // write-only memory object aliases), whereas Top destinations never pull
+    // unrelated objects into the slice.
+    const PointsToSet pts = valueOf(program, upper, i.operands[0]);
+    if (!pts.isTop()) {
+      needMemory(pts);
+      if (i.write_bytes != 0) {
+        for (Id o : pts.objects())
+          if (isMemory(program.objects[o]))
+            for (Id fo : program.overlappingFields(o, i.write_bytes))
+              if (fo != o)
+                needObject(fo);
+      }
+    }
+  };
+
+  auto processHavoc = [&](Id site) {
+    if (result.instructions[site])
+      return;
+    const Instruction &i = *index.by_site[site].inst;
+    markInst(site);
+    if (!i.operands.empty()) {
+      needValue(i.operands[0]);
+      const PointsToSet pts = valueOf(program, upper, i.operands[0]);
+      if (!pts.isTop()) {
+        for (Id o : pts.objects()) {
+          if (!isMemory(program.objects[o]))
+            continue;
+          for (Id fo : program.overlappingFields(o, i.write_bytes))
+            needObject(fo);
+        }
+      }
+    }
+  };
+
+  auto processMemCopy = [&](Id site) {
+    if (result.instructions[site])
+      return;
+    const Instruction &i = *index.by_site[site].inst;
+    markInst(site);
+    needValue(i.operands[0]);
+    needValue(i.operands[1]);
+    const PointsToSet dst_pts = valueOf(program, upper, i.operands[0]);
+    const PointsToSet src_pts = valueOf(program, upper, i.operands[1]);
+    if (!dst_pts.isTop()) {
+      for (Id od : dst_pts.objects())
+        for (Id fd : program.overlappingFields(od, i.write_bytes))
+          needObject(fd);
+    }
+    if (src_pts.isTop()) {
+      activateTopRead();
+    } else {
+      for (Id os : src_pts.objects())
+        for (Id fs : program.overlappingFields(os, i.write_bytes))
+          needObject(fs);
+    }
+  };
+
+  for (Id site : si.non_returning_calls) {
+    const Instruction &i = *index.by_site[site].inst;
+    if (i.indirect_target != INVALID) {
+      markInst(site);
+      needValue(i.indirect_target);
+    }
+  }
+
+  for (Id v : seeds)
+    needValue(v);
+  for (Id o : seed_objects)
+    needObject(o);
+
+  bool processed_all_addr_taken_returns = false;
+  auto pullCalleeReturns = [&](Id f) {
+    markFuncRelevant(f);
+    for (Id ret_site : index.return_sites[f]) {
+      const Instruction &ret = *index.by_site[ret_site].inst;
+      markInst(ret_site);
+      if (!ret.operands.empty())
+        needValue(ret.operands[0]);
+    }
+  };
+
+  while (!value_work.empty() || !object_work.empty() || !higher_work.empty() ||
+         !fn_work.empty() || !pending_top_read_objs.empty()) {
+    flushTopReadObjs();
+    while (!value_work.empty()) {
+      const Id v = value_work.front();
+      value_work.pop_front();
+
+      for (Id site : index.defining_sites[v]) {
+        const Instruction &i = *index.by_site[site].inst;
+        markInst(site);
+        markFuncRelevant(index.by_site[site].function);
+        switch (i.opcode) {
+        case Opcode::Allocate:
+        case Opcode::Copy:
+        case Opcode::Join:
+        case Opcode::Field:
+          for (Id op : i.operands)
+            needValue(op);
+          break;
+        case Opcode::Load:
+          needValue(i.operands[0]);
+          needMemory(valueOf(program, upper, i.operands[0]));
+          break;
+        case Opcode::Havoc:
+          if (!i.operands.empty())
+            needValue(i.operands[0]);
+          break;
+        case Opcode::Call: {
+          needValue(i.indirect_target);
+          if (i.callee != INVALID) {
+            pullCalleeReturns(i.callee);
+          } else {
+            const PointsToSet tgt = valueOf(program, upper, i.indirect_target);
+            if (tgt.isTop()) {
+              if (!processed_all_addr_taken_returns) {
+                processed_all_addr_taken_returns = true;
+                for (Id f : si.addr_taken_funcs)
+                  pullCalleeReturns(f);
+              }
+            } else {
+              const Targets targets = callees(program, i, tgt);
+              for (Id f : targets.functions)
+                pullCalleeReturns(f);
+            }
+          }
+          break;
+        }
+        default:
+          break;
+        }
+      }
+
+      for (const auto &phi_loc : index.phi_defs[v]) {
+        markFuncRelevant(phi_loc.first);
+        const Edge &edge = program.functions[phi_loc.first]
+                               .blocks[phi_loc.second.first]
+                               .successors[phi_loc.second.second];
+        for (auto phi : edge.phi)
+          if (phi.first == v)
+            needValue(phi.second);
+      }
+
+      const Id owner = program.values[v].function;
+      if (owner != INVALID) {
+        const auto &params = program.functions[owner].parameters;
+        for (std::size_t a = 0; a < params.size(); ++a) {
+          if (params[a] != v)
+            continue;
+          markFuncRelevant(owner);
+          for (Id call_site : index.incoming_calls[owner]) {
+            const Instruction &ci = *index.by_site[call_site].inst;
+            markInst(call_site);
+            markFuncRelevant(index.by_site[call_site].function);
+            needValue(ci.indirect_target);
+            if (a < ci.operands.size())
+              needValue(ci.operands[a]);
+          }
+        }
+      }
+    }
+
+    while (!higher_work.empty()) {
+      const Id comp = higher_work.front();
+      higher_work.pop_front();
+      for (Id site : si.stores_by_comp[comp]) {
+        processStore(site);
+        markFuncRelevant(index.by_site[site].function);
+      }
+      for (Id site : si.havocs_by_comp[comp]) {
+        processHavoc(site);
+        markFuncRelevant(index.by_site[site].function);
+      }
+      for (Id site : si.memcopies_by_comp[comp]) {
+        processMemCopy(site);
+        markFuncRelevant(index.by_site[site].function);
+      }
+    }
+
+    while (!object_work.empty()) {
+      const Id obj = object_work.front();
+      object_work.pop_front();
+      if (!activated_top_memory_ops) {
+        activated_top_memory_ops = true;
+        for (Id site : si.top_stores) {
+          processStore(site);
+          markFuncRelevant(index.by_site[site].function);
+        }
+        for (Id site : si.top_havocs) {
+          processHavoc(site);
+          markFuncRelevant(index.by_site[site].function);
+        }
+        for (Id site : si.top_memcopies) {
+          processMemCopy(site);
+          markFuncRelevant(index.by_site[site].function);
+        }
+        for (Id site : si.memory_writing_calls) {
+          const Instruction &ci = *index.by_site[site].inst;
+          markInst(site);
+          markFuncRelevant(index.by_site[site].function);
+          needValue(ci.indirect_target);
+        }
+      }
+      for (Id site : si.stores_by_obj[obj]) {
+        processStore(site);
+        markFuncRelevant(index.by_site[site].function);
+      }
+      for (Id site : si.havocs_by_obj[obj]) {
+        processHavoc(site);
+        markFuncRelevant(index.by_site[site].function);
+      }
+      for (Id site : si.memcopies_by_obj[obj]) {
+        processMemCopy(site);
+        markFuncRelevant(index.by_site[site].function);
+      }
+      const Id base = program.baseOf(obj);
+      if (base != obj) {
+        const Id bcomp = hierarchy.object_components[base];
+        if (!relevantHigher[bcomp]) {
+          relevantHigher[bcomp] = true;
+          higher_work.push_back(bcomp);
+        }
+      }
+    }
+
+    while (!fn_work.empty()) {
+      const Id f = fn_work.front();
+      fn_work.pop_front();
+      for (Id call_site : index.incoming_calls[f]) {
+        const Instruction &ci = *index.by_site[call_site].inst;
+        markInst(call_site);
+        if (ci.indirect_target != INVALID)
+          needValue(ci.indirect_target);
+        markFuncRelevant(index.by_site[call_site].function);
+      }
+    }
+  }
+
+  return result;
+}
+
+} // namespace detail
+} // namespace bootstrap
+} // namespace lotus

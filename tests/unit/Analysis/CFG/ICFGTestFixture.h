@@ -8,8 +8,7 @@
  * translation units without textual inclusion of .inc fragments.
  */
 
-#ifndef LOTUS_UNITTEST_ANALYSIS_CFG_ICFG_TEST_FIXTURE_H_
-#define LOTUS_UNITTEST_ANALYSIS_CFG_ICFG_TEST_FIXTURE_H_
+#pragma once
 
 #include "IR/ICFG/GraphAnalysis.h"
 #include "IR/ICFG/ICFG.h"
@@ -24,5 +23,3 @@
 #include <gtest/gtest.h>
 
 class ICFGTest : public lotus::unittest::LlvmModuleTest {};
-
-#endif // LOTUS_UNITTEST_ANALYSIS_CFG_ICFG_TEST_FIXTURE_H_

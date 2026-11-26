@@ -182,6 +182,11 @@ public:
     return pointsTo.size() != oldSize;
   }
 
+  /// Rewrite the object IDs carried by this edge's guard.
+  template <typename MapFn> void remapObjectIds(MapFn &&map) {
+    pointsTo.remapIds(map);
+  }
+
   //===------------------------------------------------------------------===
   // Classification
   //===------------------------------------------------------------------===

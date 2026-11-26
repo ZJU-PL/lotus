@@ -25,6 +25,8 @@ void TransferFunction::evalEntryNode(const ProgramPoint &pp,
   if (!cfg.doesNotReturn())
     evalResult.addTopLevelProgramPoint(
         ProgramPoint(pp.getContext(), cfg.getExitNode()));
+  for (const auto *exit : cfg.getUnwindExitNodes())
+    evalResult.addTopLevelProgramPoint(ProgramPoint(pp.getContext(), exit));
 }
 
 } // namespace tpa

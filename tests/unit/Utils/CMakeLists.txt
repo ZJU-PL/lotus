@@ -5,14 +5,20 @@ add_subdirectory(Parallel)
 lotus_collect_test_sources(utils_tests
   UtilsTestMain.cpp
   GraphSlicerTest.cpp
+  IntervalReachabilityTest.cpp
   LLVMCallUtilsTest.cpp
   LLVMFunctionUtilsTest.cpp
   StringUtilsTest.cpp
-  PathExpressionsTest.cpp)
+  PathExpressionsTest.cpp
+  HierarchicalClustererTest.cpp
+  Graph/DotWriterTest.cpp)
 
 set(LOTUS_UTILS_TEST_INCLUDE_DIRS)
 set(LOTUS_UTILS_TEST_LIBS
     CanaryADT
+    CanaryGraphWriter
+    CanaryICFG
+    SVFG
     CanaryLLVMUtils
     CanaryFormats
     CanaryParallel)

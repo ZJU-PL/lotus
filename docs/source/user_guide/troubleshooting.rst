@@ -9,15 +9,13 @@ Installation Issues
 LLVM Version Mismatch
 ~~~~~~~~~~~~~~~~~~~~~
 
-**Problem**: CMake can't find LLVM or finds wrong version.
+CMake can't find LLVM or finds wrong version.
 
 .. code-block:: text
 
    CMake Error: Could not find LLVM
    -- or --
    Found LLVM 15.0.0 but need 14.0.0
-
-**Solution**:
 
 1. Check that LLVM 14.x is installed and visible on ``PATH``:
 
@@ -34,14 +32,12 @@ LLVM Version Mismatch
 Z3 Not Found
 ~~~~~~~~~~~~
 
-**Problem**: Z3 library or headers not found during build.
+Z3 library or headers not found during build.
 
 .. code-block:: text
 
    Could not find Z3 libraries
    fatal error: z3.h: No such file or directory
-
-**Solution**:
 
 1. Install Z3 development package:
 
@@ -49,32 +45,29 @@ Z3 Not Found
 
    # Ubuntu/Debian
    sudo apt-get install libz3-dev
-   
    # macOS
    brew install z3
-   
-   # Or build from source
+   # Or build from source (modern Z3 builds with CMake, not scripts/mk_make.py)
    git clone https://github.com/Z3Prover/z3
-   cd z3
-   python scripts/mk_make.py
-   cd build && make && sudo make install
+   cmake -S z3 -B z3/build -DCMAKE_BUILD_TYPE=Release
+   cmake --build z3/build -j$(nproc)
+   sudo cmake --install z3/build
 
 2. Specify Z3 path:
 
 .. code-block:: bash
 
-   cmake ../ -DZ3_ROOT=/path/to/z3/install
+   cmake ../ -DZ3_DIR=/path/to/z3/install
+   # Z3_ROOT is also accepted by cmake/FindZ3.cmake
 
 Boost Not Found
 ~~~~~~~~~~~~~~~
 
-**Problem**: Boost libraries required for SeaHorn, CLAM, and/or CclyzerAA not found.
+Boost libraries required for SeaHorn, CLAM, and/or CclyzerAA not found.
 
 .. code-block:: text
 
    Could NOT find Boost
-
-**Solution**:
 
 1. Install Boost:
 
@@ -82,7 +75,6 @@ Boost Not Found
 
    # Ubuntu/Debian
    sudo apt-get install libboost-all-dev
-   
    # macOS
    brew install boost
 
@@ -101,13 +93,11 @@ Boost Not Found
 Compilation Errors
 ~~~~~~~~~~~~~~~~~~
 
-**Problem**: Undefined reference errors during linking.
+Undefined reference errors during linking.
 
 .. code-block:: text
 
    undefined reference to `llvm::PassRegistry::registerPass'
-
-**Solution**:
 
 1. Ensure LLVM was built with:
 
@@ -130,13 +120,11 @@ Analysis Issues
 Analysis Crashes
 ~~~~~~~~~~~~~~~~
 
-**Problem**: Tool crashes with segmentation fault.
+Tool crashes with segmentation fault.
 
 .. code-block:: text
 
    Segmentation fault (core dumped)
-
-**Solution**:
 
 1. Run with debug build:
 
@@ -155,7 +143,7 @@ Analysis Crashes
    opt -verify input.bc -o /dev/null
 
 3. Common causes:
-   
+
    - Malformed LLVM IR
    - Null pointer dereference in analysis
    - Stack overflow (increase limit: ``ulimit -s unlimited``)
@@ -163,9 +151,7 @@ Analysis Crashes
 Analysis Takes Too Long
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-**Problem**: Analysis runs indefinitely or for hours.
-
-**Solution**:
+Analysis runs indefinitely or for hours.
 
 1. Use faster analysis mode:
 
@@ -173,7 +159,6 @@ Analysis Takes Too Long
 
    # For alias analysis, use context-insensitive
    ./build/bin/lotus-alias-aser-aa -analysis-mode=ci input.bc
-   
    # For CLAM, use interval domain
    ./build/bin/clam --crab-dom=int input.bc
 
@@ -195,21 +180,18 @@ Analysis Takes Too Long
 
    # Disable field sensitivity
    ./build/bin/lotus-alias-aser-aa -field-sensitive=false input.bc
-   
    # Limit context depth
    ./build/bin/lotus-alias-aser-aa -analysis-mode=1-cfa input.bc
 
 Out of Memory
 ~~~~~~~~~~~~~
 
-**Problem**: Analysis exhausts system memory.
+Analysis exhausts system memory.
 
 .. code-block:: text
 
    std::bad_alloc
    Killed
-
-**Solution**:
 
 1. Increase available memory (if possible)
 
@@ -237,9 +219,7 @@ Out of Memory
 False Positives
 ~~~~~~~~~~~~~~~
 
-**Problem**: Analysis reports bugs that don't exist.
-
-**Solution**:
+Analysis reports bugs that don't exist.
 
 1. Use more precise analysis:
 
@@ -247,7 +227,6 @@ False Positives
 
    # 1-CFA instead of CI
    ./build/bin/lotus-alias-aser-aa -analysis-mode=1-cfa input.bc
-   
    # Zones domain instead of intervals
    ./build/bin/clam --crab-dom=zones input.bc
 
@@ -272,9 +251,7 @@ False Positives
 Missing Bugs (False Negatives)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Problem**: Analysis doesn't detect known bugs.
-
-**Solution**:
+Analysis doesn't detect known bugs.
 
 1. Enable all checkers:
 
@@ -288,9 +265,8 @@ Missing Bugs (False Negatives)
 
    # Interprocedural
    ./build/bin/clam --crab-inter --crab-check --crab-null-check --crab-uaf-check --crab-bounds-check input.bc
-   
    # Context-sensitive taint
-   ./build/bin/lotus-check --engine=taint input.bc --verbose
+   ./build/bin/lotus-check --engine=taint-ifds input.bc --verbose
 
 3. Check if bug type is supported:
 
@@ -304,13 +280,11 @@ Tool-Specific Issues
 CLAM Issues
 ~~~~~~~~~~~
 
-**Problem**: CLAM fails with "unsupported instruction".
+CLAM fails with "unsupported instruction".
 
 .. code-block:: text
 
    Unsupported LLVM instruction: <instruction>
-
-**Solution**:
 
 1. Preprocess bitcode:
 
@@ -328,9 +302,7 @@ CLAM Issues
    # Some domains don't support all operations
    ./build/bin/clam --crab-dom=int input.bc  # Basic support
 
-**Problem**: CLAM reports "Could not allocate memory".
-
-**Solution**:
+CLAM reports "Could not allocate memory".
 
 1. Use less expensive domain:
 
@@ -348,9 +320,7 @@ CLAM Issues
 DyckAA Issues
 ~~~~~~~~~~~~~
 
-**Problem**: DyckAA produces too many alias pairs.
-
-**Solution**:
+DyckAA produces too many alias pairs.
 
 1. Enable function type checking:
 
@@ -360,9 +330,7 @@ DyckAA Issues
 
 2. The analysis is very precise but conservative. This is expected behavior.
 
-**Problem**: Call graph is incomplete.
-
-**Solution**:
+Call graph is incomplete.
 
 .. code-block:: bash
 
@@ -372,9 +340,7 @@ DyckAA Issues
 PDG Query Issues
 ~~~~~~~~~~~~~~~~
 
-**Problem**: PDG query returns empty set unexpectedly.
-
-**Solution**:
+PDG query returns empty set unexpectedly.
 
 1. Check node names. Function names are case-sensitive, so this query does not
    match ``main``:
@@ -401,9 +367,7 @@ PDG Query Issues
 
    ./build/bin/lotus-ir-pdg-query -v -q "MATCH (n) RETURN n" input.bc
 
-**Problem**: Query parser error.
-
-**Solution**:
+Query parser error.
 
 1. Check query syntax. String values must be quoted, so this query is invalid:
 
@@ -427,321 +391,28 @@ PDG Query Issues
 Taint Analysis Issues
 ~~~~~~~~~~~~~~~~~~~~~
 
-**Problem**: No taint flows detected but vulnerability exists.
-
-**Solution**:
+No taint flows detected but vulnerability exists.
 
 1. Specify custom sources/sinks:
 
 .. code-block:: bash
 
-   ./build/bin/lotus-check --engine=taint input.bc --taint.sources=my_input_func \
+   ./build/bin/lotus-check --engine=taint-ifds input.bc --taint.sources=my_input_func \
                       --taint.sinks=my_output_func
 
 2. Check that source and sink functions are actually called
 
-3. Use ``lotus-check --engine=taint`` for interprocedural flow:
+3. Use ``lotus-check --engine=taint-ifds`` for interprocedural flow:
 
 .. code-block:: bash
 
-   ./build/bin/lotus-check --engine=taint input.bc
-
-Performance Tuning
-------------------
-
-Speeding Up Analysis
-~~~~~~~~~~~~~~~~~~~~
-
-1. **Choose appropriate analysis**:
-   Use context-insensitive pointer analysis (e.g., ``-analysis-mode=ci``) or
-   simpler abstract domains (e.g., ``--crab-dom=int``) for initial scans.
-
-2. **Reduce scope**:
-
-.. code-block:: bash
-
-   # Analyze specific function
-   llvm-extract -func=main input.bc -o main.bc
-   ./build/bin/tool main.bc
-
-3. **Use preprocessing**:
-
-.. code-block:: bash
-
-   # Simplify IR first
-   opt -mem2reg -simplifycfg input.bc -o simplified.bc
-   ./build/bin/tool simplified.bc
-
-
-Reducing Memory Usage
-~~~~~~~~~~~~~~~~~~~~~
-
-1. **Use sparse representations**:
-
-.. code-block:: bash
-
-   # Field-insensitive uses less memory
-   ./build/bin/lotus-alias-aser-aa -field-sensitive=false input.bc
-
-2. **Limit analysis depth**:
-
-.. code-block:: bash
-
-   ./build/bin/lotus-alias-aser-aa -analysis-mode=1-cfa input.bc  # Not 2-cfa
-
-3. **Process in batches**:
-
-.. code-block:: bash
-
-   # Analyze files separately
-   for f in *.bc; do
-       ./build/bin/tool "$f"
-   done
-
-Frequently Asked Questions
---------------------------
-
-General Questions
-~~~~~~~~~~~~~~~~~
-
-**Q: Which alias analysis should I use?**
-
-A: Use SparrowAA or DyckAA for fast whole-program analysis, AserPTA
-(``-analysis-mode=1-cfa``) for callsite-sensitive pointer analysis, or Sea-DSA
-for memory-graph and field-sensitive verification.
-
-**Q: Can Lotus analyze C++ code?**
-
-A: Yes! Compile to LLVM IR:
-
-.. code-block:: bash
-
-   clang++ -emit-llvm -c code.cpp -o code.bc
-   ./build/bin/tool code.bc
-
-**Q: Does Lotus support multi-threaded programs?**
-
-A: Yes, use:
-
-- ``lotus-check --engine=concur`` for concurrency bugs
-- ``lotus-alias-aser-aa -analysis-mode=origin`` for thread-aware analysis
-- MHP analysis in concurrency module
-
-**Q: How do I visualize results?**
-
-A: Generate DOT files:
-
-.. code-block:: bash
-
-   # Call graph
-   ./build/bin/lotus-alias-dyck-aa -dot-dyck-callgraph input.bc
-   
-   # PDG
-   ./build/bin/lotus-ir-pdg-query --format=dot input.bc
-   
-   # Sea-DSA memory graph
-   ./build/bin/lotus-alias-seadsa-tool --sea-dsa-dot --outdir=output/ input.bc
-   
-   # Convert to PDF
-   dot -Tpdf output.dot -o output.pdf
-
-**Q: Can I integrate Lotus into my own tool?**
-
-A: Yes! See :doc:`../developer/api_reference` for programmatic usage.
-
-Analysis Questions
-~~~~~~~~~~~~~~~~~~
-
-**Q: What's the difference between flow-sensitive and flow-insensitive?**
-
-A: 
-
-- **Flow-insensitive**: Single points-to set per variable for entire program. Faster but less precise.
-- **Flow-sensitive**: Different points-to sets at different program points. Slower but more precise.
-
-Example:
-
-.. code-block:: c
-
-   int x, y;
-   int *p;
-   p = &x;  // p points to x
-   p = &y;  // p points to y
-   
-   // Flow-insensitive: p may point to {x, y} everywhere
-   // Flow-sensitive: p points to {x} at line 4, {y} at line 5
-
-**Q: What's context sensitivity?**
-
-A: Distinguishing different calling contexts:
-
-.. code-block:: c
-
-   void foo(int *p) { *p = 10; }
-   
-   int main() {
-       int x, y;
-       foo(&x);  // Context 1
-       foo(&y);  // Context 2
-   }
-
-- **Context-insensitive**: Analyzes ``foo`` once, ``p`` may point to {x, y}
-- **Context-sensitive**: Analyzes ``foo`` twice, ``p`` points to {x} in context 1, {y} in context 2
-
-**Q: How accurate is the analysis?**
-
-A: Lotus analyses are **sound** (no false negatives for most analyses) but may have **false positives**. Trade-off between precision and performance.
-
-**Q: Can I customize source/sink definitions?**
-
-A: Yes:
-
-.. code-block:: bash
-
-   ./build/bin/lotus-check --engine=taint input.bc --taint.sources=my_source1,my_source2 \
-                      --taint.sinks=my_sink1,my_sink2
-
-Or create custom analysis (see :doc:`../developer/developer_guide`).
-
-CLAM Questions
-~~~~~~~~~~~~~~
-
-**Q: Which abstract domain should I use?**
-
-A:
-
-- **Intervals** (``int``): Fast, simple ranges [l, u]
-- **Zones** (``zones``): Moderate, difference constraints (x - y ≤ c)
-- **Octagons** (``oct``): More precise, diagonal constraints (±x ± y ≤ c)
-- **Polyhedra** (``pk``): Most precise, but expensive
-
-Start with ``zones`` as good balance.
-
-**Q: What's interprocedural analysis?**
-
-A: Analyzes across function boundaries:
-
-.. code-block:: bash
-
-   # Intraprocedural: each function separately
-   ./build/bin/clam input.bc
-   
-   # Interprocedural: considers call context
-   ./build/bin/clam --crab-inter input.bc
-
-Interprocedural is more precise but slower.
-
-**Q: Can CLAM verify my assertions?**
-
-A: Yes:
-
-.. code-block:: c
-
-   int main() {
-       int x = 5;
-       assert(x >= 0 && x <= 10);  // CLAM can verify this
-       return 0;
-   }
-
-.. code-block:: bash
-
-   ./build/bin/clam --crab-check input.bc
-
-Bug Detection Questions
-~~~~~~~~~~~~~~~~~~~~~~~
-
-**Q: Why does Kint report false positives?**
-
-A: Kint uses bounded SMT-based reasoning and library/function summaries.  A
-timeout, incomplete model, or unconstrained input can leave a possible bug
-path.  Add assertions or improve models to constrain the relevant behavior:
-
-.. code-block:: c
-
-   void process(int x) {
-       if (x < 0 || x > 100) return;
-       // Now Kint knows 0 <= x <= 100
-       int y = x + 50;  // No overflow warning
-   }
-
-**Q: How do I reduce false positives?**
-
-A:
-
-1. Use preprocessing:
-
-.. code-block:: bash
-
-   ./build/bin/clam-pp --clam-lower-unsigned-icmp input.bc -o prep.bc
-
-2. Use more precise analysis
-3. Add annotations/assertions
-4. Validate with dynamic analysis (DynAA)
-
-**Q: Can I output results in JSON/SARIF?**
-
-A: Yes:
-
-.. code-block:: bash
-
-   # CLAM JSON output
-   ./build/bin/clam -ojson=results.json input.bc
-   
-   # Kint with SARIF (via BugReportMgr)
-   ./build/bin/lotus-check --engine=kint input.ll --checks=all --report-sarif=results.sarif
-
-Compilation Questions
-~~~~~~~~~~~~~~~~~~~~~
-
-**Q: How do I compile multi-file projects?**
-
-A:
-
-.. code-block:: bash
-
-   # Compile each file
-   clang -emit-llvm -c file1.c -o file1.bc
-   clang -emit-llvm -c file2.c -o file2.bc
-   
-   # Link into single module
-   llvm-link file1.bc file2.bc -o program.bc
-   
-   # Analyze
-   ./build/bin/tool program.bc
-
-**Q: Should I use .bc or .ll files?**
-
-A:
-
-- ``.bc``: Binary format, faster to load, smaller
-- ``.ll``: Text format, human-readable, easier to debug
-
-Both work with Lotus. Use ``.bc`` for production, ``.ll`` for debugging.
-
-**Q: What optimization level should I use?**
-
-A:
-
-.. code-block:: bash
-
-   # For analysis, usually no optimization or -O1
-   clang -emit-llvm -c -O0 code.c -o code.bc  # No optimization
-   clang -emit-llvm -c -O1 code.c -o code.bc  # Light optimization
-   
-   # Higher optimization may complicate analysis
-   clang -emit-llvm -c -O3 code.c -o code.bc  # Not recommended
+   ./build/bin/lotus-check --engine=taint-ifds input.bc
 
 Common Error Messages
 ---------------------
 
 "Module verification failed"
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Error**:
-
-.. code-block:: text
-
-   Module verification failed: <details>
 
 **Solution**: Your LLVM IR is malformed. Verify with:
 
@@ -753,12 +424,6 @@ Fix the IR or recompile from source.
 
 "Pass 'X' is not initialized"
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**Error**:
-
-.. code-block:: text
-
-   Pass 'X' is not initialized
 
 **Solution**: Initialize pass registry:
 
@@ -791,81 +456,36 @@ Fix the IR or recompile from source.
    clang -emit-llvm -c minimal.c -o minimal.bc
    ./build/bin/tool minimal.bc
 
+Frequently Asked Questions
+--------------------------
+
+- **Which alias analysis?** Start with SparrowAA or DyckAA; use AserPTA
+  (``-analysis-mode=1-cfa``) for callsite sensitivity, or Sea-DSA for memory graphs.
+- **C++ input?** Compile with ``clang++ -emit-llvm -c -g`` and analyze the bitcode.
+- **Multiple source files?** Compile each to bitcode, then combine them with
+  ``llvm-link file1.bc file2.bc -o program.bc``.
+- **Bitcode or text IR?** Use ``.bc`` for compact input, ``.ll`` for inspection.
+- **Flow sensitivity?** Flow-sensitive analyses distinguish program points;
+  flow-insensitive analyses combine information across a function or program.
+- **Context sensitivity?** Distinguishes calls to the same function by their
+  calling context, usually at additional analysis cost.
+- **Which CLAM domain?** Start with ``int`` (intervals); try ``zones``, ``oct``,
+  or ``pk`` when relational precision is needed. See :doc:`../tools/verifier/clam/index`.
+- **How reliable are findings?** Review engine assumptions, unsupported features,
+  and resource limits. Dynamic validation only covers executed paths.
+- **How do I extend Lotus?** See :doc:`../developer/developer_guide` and
+  :doc:`../developer/api_reference`.
+
 Getting Help
 ------------
 
-Documentation
-~~~~~~~~~~~~~
+Check :doc:`installation`, :doc:`quickstart`, :doc:`tutorials`, and
+:doc:`../tools/index` for setup and tool usage.
+Report bugs at https://github.com/ZJU-PL/lotus/issues with:
 
-- :doc:`../index` - Main documentation
-- :doc:`architecture` - Framework architecture
-- :doc:`../developer/api_reference` - API documentation
-- :doc:`tutorials` - Usage examples
-- :doc:`../developer/developer_guide` - Extending Lotus
+- Lotus commit (``git rev-parse HEAD``), LLVM version (``llvm-config --version``),
+  OS, and compiler version;
+- a minimal reproducer, exact command, and complete error output;
+- a debugger backtrace for crashes.
 
-Support Channels
-~~~~~~~~~~~~~~~~
-
-1. **GitHub Issues**: https://github.com/ZJU-PL/lotus/issues
-
-   - Bug reports
-   - Feature requests
-   - Help with errors
-
-2. **GitHub Discussions**: https://github.com/ZJU-PL/lotus/discussions
-
-   - General questions
-   - Best practices
-   - Show and tell
-
-3. **Stack Overflow**: Tag questions with ``[lotus-analysis]`` and ``[llvm]``
-
-Reporting Bugs
-~~~~~~~~~~~~~~
-
-When reporting bugs, include:
-
-1. **Lotus version**: ``git rev-parse HEAD``
-2. **LLVM version**: ``llvm-config --version``
-3. **System**: OS, compiler version
-4. **Input file**: Minimal reproducible example
-5. **Command**: Exact command that fails
-6. **Output**: Full error message
-7. **Backtrace**: If crashed, GDB backtrace
-
-Example bug report:
-
-.. code-block:: text
-
-   **Description**: DyckAA crashes on input file
-   
-   **Environment**:
-   - Lotus: commit abc123def
-   - LLVM: 14.0.0
-   - OS: Ubuntu 22.04
-   - GCC: 11.3.0
-   
-   **To Reproduce**:
-   1. Compile: clang -emit-llvm -c test.c -o test.bc
-   2. Run: ./build/bin/lotus-alias-dyck-aa test.bc
-   
-   **Error**:
-   Segmentation fault (core dumped)
-   
-   **Backtrace**:
-   #0 DyckGraph::addEdge (this=0x0, ...)
-   ...
-   
-   **Input file**: [attach test.c]
-
-Contributing
-~~~~~~~~~~~~
-
-See :doc:`../developer/developer_guide` for how to contribute code, documentation, or tests.
-
-See Also
---------
-
-- :doc:`installation` - Installation guide
-- :doc:`quickstart` - Quick start guide  
-- :doc:`../tools/index` - Tool documentation
+Use https://github.com/ZJU-PL/lotus/discussions for general questions.

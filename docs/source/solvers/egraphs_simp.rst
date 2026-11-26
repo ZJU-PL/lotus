@@ -82,35 +82,21 @@ Stores quantifier metadata including:
 Main Functions
 --------------
 
-ExprToEGraph
-~~~~~~~~~~~~~
-
-Parses a Z3 expression and builds an E-graph representation.
-
-.. code-block:: cpp
-
-   z3::expr expr = /* ... */;
-   EGraph *graph = EGraph::ExprToEGraph(expr, &ctx);
-
-ToFormula
-~~~~~~~~~
-
-Converts an E-graph back to a Z3 formula.
-
-.. code-block:: cpp
-
-   std::map<Function *, Function *> repr;
-   std::set<Function *> core;
-   z3::expr formula = graph->ToFormula(&repr, &core);
-
 Simplify (Static)
 ~~~~~~~~~~~~~~~~~~
 
-High-level simplification interface.
+``EGraph::Simplify`` is the only public entry point of ``EGraph``. It parses a
+Z3 expression into an E-graph, simplifies it, and converts the result back to a
+Z3 formula.
 
 .. code-block:: cpp
 
    z3::expr simplified = EGraph::Simplify(formula, &ctx);
+
+Internally the implementation uses ``EGraph::ExprToEGraph`` (Z3 expression to
+E-graph conversion) and ``EGraph::ToFormula`` (E-graph to Z3 formula
+conversion). These helpers, along with the ``EGraph`` constructor, are private
+implementation details and are not part of the public API.
 
 Algorithms
 ----------

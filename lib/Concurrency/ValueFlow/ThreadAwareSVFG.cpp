@@ -4,6 +4,7 @@
 #include "Concurrency/MHP/IMHPAnalysis.h"
 #include "Concurrency/Thread/ThreadCreationTree.h"
 #include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/ValueFlow/LockSpanReasoner.h"
 
 #include <algorithm>
 #include <cassert>
@@ -16,14 +17,36 @@ using namespace llvm;
 
 namespace lotus::analysis {
 
+namespace {
+
+/// Edges of the underlying, thread-agnostic value-flow graph. Interference
+/// edges (this overlay's own product) are excluded so every span query is
+/// answered against the base graph only.
+bool isBaseValueFlowEdge(const SVFGEdge *edge) {
+  if (!edge)
+    return false;
+  const SVFGEdgeK kind = edge->getEdgeKind();
+  return isIndirectVFGEdge(kind) && !isThreadMHPVFGEdge(kind);
+}
+
+} // namespace
+
 ThreadAwareSVFGBuilder::ThreadAwareSVFGBuilder(
     SVFG &graph, const mhp::IMHPAnalysis &mhp,
     const mhp::LockSetAnalysis *locks, const FilteredSVFGView *scope,
     const ThreadCreationTree *threadTree)
+    : ThreadAwareSVFGBuilder(graph, mhp, locks, scope, threadTree, Config{}) {}
+
+ThreadAwareSVFGBuilder::ThreadAwareSVFGBuilder(
+    SVFG &graph, const mhp::IMHPAnalysis &mhp,
+    const mhp::LockSetAnalysis *locks, const FilteredSVFGView *scope,
+    const ThreadCreationTree *threadTree, Config config)
     : graph_(&graph), mhp_(&mhp), locks_(locks), scope_(scope),
-      threadTree_(threadTree) {
+      threadTree_(threadTree), config_(config) {
   assert((!scope_ || &scope_->source() == graph_) &&
          "filtered SVFG scope must view the overlay's base graph");
+  if (locks_)
+    spans_ = std::make_unique<LockSpanReasoner>(*locks_);
 }
 
 ThreadAwareSVFGBuilder::~ThreadAwareSVFGBuilder() { clear(); }
@@ -229,9 +252,187 @@ void ThreadAwareSVFGBuilder::connectForkJoinMemoryFlow() {
   connectJoinFlow();
 }
 
+const std::vector<StoreSVFGNode *> &
+ThreadAwareSVFGBuilder::baseSuccessorStores(SVFGNode &node) {
+  auto cached = baseSuccessorStores_.find(&node);
+  if (cached != baseSuccessorStores_.end())
+    return cached->second;
+
+  std::vector<StoreSVFGNode *> stores;
+  std::unordered_set<SVFGNode *> visited{&node};
+  std::vector<SVFGNode *> worklist;
+  auto push = [&](const SVFGEdge *edge) {
+    SVFGNode *next = edge ? edge->getDstNode() : nullptr;
+    if (next && !visited.count(next) && inScope(next)) {
+      visited.insert(next);
+      worklist.push_back(next);
+    }
+  };
+  for (SVFGEdge *edge : node.getOutEdges())
+    if (isBaseValueFlowEdge(edge))
+      push(edge);
+
+  while (!worklist.empty()) {
+    SVFGNode *current = worklist.back();
+    worklist.pop_back();
+    if (auto *store = dyn_cast<StoreSVFGNode>(current)) {
+      stores.push_back(store);
+      // Statement nodes terminate the walk: the value-flow chain stops where
+      // the memory version becomes a plain SSA value again.
+      continue;
+    }
+    if (isa<LoadSVFGNode>(current))
+      continue;
+    for (SVFGEdge *edge : current->getOutEdges())
+      if (isBaseValueFlowEdge(edge))
+        push(edge);
+  }
+
+  return baseSuccessorStores_.emplace(&node, std::move(stores)).first->second;
+}
+
+const std::vector<StoreSVFGNode *> &
+ThreadAwareSVFGBuilder::basePredecessorStores(SVFGNode &node) {
+  auto cached = basePredecessorStores_.find(&node);
+  if (cached != basePredecessorStores_.end())
+    return cached->second;
+
+  std::vector<StoreSVFGNode *> stores;
+  std::unordered_set<SVFGNode *> visited{&node};
+  std::vector<SVFGNode *> worklist;
+  auto push = [&](const SVFGEdge *edge) {
+    SVFGNode *previous = edge ? edge->getSrcNode() : nullptr;
+    if (previous && !visited.count(previous) && inScope(previous)) {
+      visited.insert(previous);
+      worklist.push_back(previous);
+    }
+  };
+  for (SVFGEdge *edge : node.getInEdges())
+    if (isBaseValueFlowEdge(edge))
+      push(edge);
+
+  while (!worklist.empty()) {
+    SVFGNode *current = worklist.back();
+    worklist.pop_back();
+    if (auto *store = dyn_cast<StoreSVFGNode>(current)) {
+      stores.push_back(store);
+      continue;
+    }
+    if (isa<LoadSVFGNode>(current))
+      continue;
+    for (SVFGEdge *edge : current->getInEdges())
+      if (isBaseValueFlowEdge(edge))
+        push(edge);
+  }
+
+  return basePredecessorStores_.emplace(&node, std::move(stores)).first->second;
+}
+
+const SVFGNodeBS &ThreadAwareSVFGBuilder::baseIncomingObjects(SVFGNode &node) {
+  auto cached = baseIncomingObjects_.find(&node);
+  if (cached != baseIncomingObjects_.end())
+    return cached->second;
+
+  SVFGNodeBS objects;
+  for (SVFGEdge *edge : node.getInEdges())
+    if (isBaseValueFlowEdge(edge)) {
+      const SVFGNodeBS &guard = edge->getPointsTo();
+      objects.insert(guard.begin(), guard.end());
+    }
+  return baseIncomingObjects_.emplace(&node, std::move(objects)).first->second;
+}
+
+SVFGNodeBS ThreadAwareSVFGBuilder::refineGuardForSpan(StoreSVFGNode &source,
+                                                      SVFGNode &destination,
+                                                      const SVFGNodeBS &guard) {
+  if (!spans_ || guard.empty())
+    return guard;
+
+  const Instruction *sourceInst = source.getInstruction();
+  const Instruction *destinationInst = destination.getInstruction();
+  if (!sourceInst || !destinationInst)
+    return guard;
+
+  SVFGNodeBS pruned;
+
+  // (1) Source side: the stored value dies inside its own critical section.
+  //
+  //     If a later store `killer` in the same span overwrites object `o`, and
+  //     every path leaving `source` executes `killer` before the lock is
+  //     released, then no other span can ever observe the value `source` wrote
+  //     to `o`: the next holder of the lock necessarily sees `killer`'s value.
+  //     The edge is redundant rather than wrong, because `killer` is itself a
+  //     legal interference source for `destination` (it aliases `o` and may run
+  //     in parallel with it), so `killer --> destination` is added by this very
+  //     loop. Following that chain of overwrites ends at the last store of the
+  //     span, which is never pruned here.
+  if (config_.pruneOverwrittenStores) {
+    for (StoreSVFGNode *killer : baseSuccessorStores(source)) {
+      if (!killer || killer == &source || killer == &destination)
+        continue;
+      const Instruction *killerInst = killer->getInstruction();
+      const SVFGNodeBS *killerObjects = killer->getPointsTo();
+      if (!killerInst || !killerObjects || killerObjects->empty())
+        continue;
+      // Unconditional overwrite: every path from the source reaches it.
+      if (!spans_->mustExecuteAfter(sourceInst, killerInst))
+        continue;
+      if (!spans_->inSameSpan(sourceInst, killerInst))
+        continue;
+      // The overwrite is only a replacement witness if the killer can itself
+      // be observed by the destination.
+      if (!mhp_->mayHappenInParallel(killerInst, destinationInst))
+        continue;
+      for (uint32_t id : guard)
+        if (killerObjects->count(id) != 0)
+          pruned.insert(id);
+    }
+  }
+
+  // (2) Sink side: the destination already observes a store from its own span.
+  //
+  //     If a store `shadow` that dominates `destination` writes object `o`
+  //     inside the destination's own span, then every execution of the
+  //     destination reads `shadow`'s version of `o` (or a later one), never the
+  //     one published by `source`. Dropping the label is only safe when the
+  //     base graph already carries an incoming value-flow edge for `o`, which
+  //     is exactly what makes the in-span flow explicit.
+  if (config_.pruneShadowedSinks) {
+    const SVFGNodeBS &incoming = baseIncomingObjects(destination);
+    for (StoreSVFGNode *shadow : basePredecessorStores(destination)) {
+      if (!shadow || shadow == &destination || incoming.empty())
+        continue;
+      const Instruction *shadowInst = shadow->getInstruction();
+      const SVFGNodeBS *shadowObjects = shadow->getPointsTo();
+      if (!shadowInst || !shadowObjects || shadowObjects->empty())
+        continue;
+      if (!spans_->mustExecuteBefore(shadowInst, destinationInst))
+        continue;
+      if (!spans_->inSameSpan(shadowInst, destinationInst))
+        continue;
+      for (uint32_t id : guard)
+        if (shadowObjects->count(id) != 0 && incoming.count(id) != 0)
+          pruned.insert(id);
+    }
+  }
+
+  if (pruned.empty())
+    return guard;
+
+  stats_.spanPrunedObjects += pruned.size();
+  SVFGNodeBS surviving;
+  for (uint32_t id : guard)
+    if (!pruned.count(id))
+      surviving.insert(id);
+  return surviving;
+}
+
 const ThreadAwareSVFGBuilder::Statistics &ThreadAwareSVFGBuilder::build() {
   clear();
   stats_ = {};
+  baseSuccessorStores_.clear();
+  basePredecessorStores_.clear();
+  baseIncomingObjects_.clear();
   connectForkJoinMemoryFlow();
 
   std::vector<StoreSVFGNode *> stores;
@@ -255,7 +456,7 @@ const ThreadAwareSVFGBuilder::Statistics &ThreadAwareSVFGBuilder::build() {
     if (!sourceInst || !destinationInst || sourceInst == destinationInst)
       return;
 
-    const SVFGNodeBS guard = intersectTargets(source, destination);
+    SVFGNodeBS guard = intersectTargets(source, destination);
     if (guard.empty())
       return;
     ++stats_.aliasCandidates;
@@ -264,14 +465,19 @@ const ThreadAwareSVFGBuilder::Statistics &ThreadAwareSVFGBuilder::build() {
       return;
     ++stats_.parallelCandidates;
 
-    // A common lock prevents a race, but it does not prevent a value written
-    // in one critical section from becoming visible to another thread later.
-    // Keep the conservative flow edge until lock-span head/tail reasoning is
-    // available, while recording the candidate for diagnostics.
+    // A common exclusive lock serializes the two accesses, so a race is
+    // impossible; the only flow left is the value published by the critical
+    // section and observed by a later one. Lock-span reasoning removes the
+    // pairs where the published value provably cannot survive that far.
     if (locks_ &&
         locks_->mustMutuallyExclude(sourceInst, mhp::MemoryAccessKind::Write,
                                     destinationInst, destinationKind)) {
-      ++stats_.mutuallyExcludedCandidates;
+      ++stats_.lockProtectedCandidates;
+      guard = refineGuardForSpan(source, destination, guard);
+      if (guard.empty()) {
+        ++stats_.spanPrunedPairs;
+        return;
+      }
     }
     addInterferenceEdge(source, destination, guard);
   };

@@ -83,9 +83,28 @@ void MemoryRegionPartitioner::freeze() {
   }
 }
 
-SVFGNodeBS
-MemoryRegionPartitioner::canonicalize(const llvm::Function *scope,
-                                      const SVFGNodeBS &pointsTo) const {
+void MemoryRegionPartitioner::remapObjectIds(
+    const std::unordered_map<uint32_t, uint32_t> &oldToNew) {
+  auto remap = [&](SVFGNodeBS &set) {
+    set.remapIds([&](uint32_t id) {
+      const auto it = oldToNew.find(id);
+      return it == oldToNew.end() ? id : it->second;
+    });
+  };
+  if (unknownObject_ != 0) {
+    const auto it = oldToNew.find(unknownObject_);
+    if (it != oldToNew.end())
+      unknownObject_ = it->second;
+  }
+  for (auto &[scope, pointsTo] : observations_)
+    remap(pointsTo);
+  for (auto &entry : partitions_)
+    for (SVFGNodeBS &region : entry.second)
+      remap(region);
+}
+
+SVFGNodeBS MemoryRegionPartitioner::canonicalize(
+    const llvm::Function *scope, const SVFGNodeBS &pointsTo) const {
   if (pointsTo.empty() || strategy_ == MemoryRegionPartitionStrategy::Distinct)
     return pointsTo;
   if (unknownObject_ != 0 && pointsTo.count(unknownObject_) != 0)

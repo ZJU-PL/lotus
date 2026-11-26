@@ -1,5 +1,4 @@
-#ifndef LOTUS_UNITTEST_TESTUTILS_LLVMHELPERS_H_
-#define LOTUS_UNITTEST_TESTUTILS_LLVMHELPERS_H_
+#pragma once
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Function.h"
@@ -188,5 +187,3 @@ protected:
 
 } // namespace unittest
 } // namespace lotus
-
-#endif // LOTUS_UNITTEST_TESTUTILS_LLVMHELPERS_H_

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Type.h>
 

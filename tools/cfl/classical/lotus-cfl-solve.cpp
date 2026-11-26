@@ -53,7 +53,7 @@ void usage(std::ostream &stream) {
   stream
       << "Usage: lotus-cfl-solve --grammar FILE --graph FILE [options]\n"
          "Options:\n"
-         "  --solver sparse-set|sparse-bitvector|graspan|sqid|pearl|"
+         "  --solver sparse-set|sparse-bitvector|sparse-subset|graspan|sqid|"
          "skewed|stg|cat|iea|iea-ocr|transitive-closure|pocr|hpocr|focr|"
          "endpoint-quotient|cert\n"
          "  --graph-mode plain|matrix|pag-matrix\n"

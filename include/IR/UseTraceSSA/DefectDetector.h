@@ -1,5 +1,4 @@
-#ifndef LOTUS_IR_USETRACESSA_DEFECTDETECTOR_H
-#define LOTUS_IR_USETRACESSA_DEFECTDETECTOR_H
+#pragma once
 
 #include "IR/UseTraceSSA/Models.h"
 
@@ -86,4 +85,3 @@ private:
 
 } // namespace usetracessa
 } // namespace lotus
-#endif

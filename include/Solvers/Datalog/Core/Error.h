@@ -36,8 +36,8 @@ inline const char *toString(EvaluationErrorCode code) {
 class EvaluationError : public std::runtime_error {
 public:
   EvaluationError(EvaluationErrorCode code, std::string expression,
-                  std::string message)
-      : std::runtime_error(std::move(message)), code_(code),
+                  const std::string &message)
+      : std::runtime_error(message), code_(code),
         expression_(std::move(expression)) {}
 
   EvaluationErrorCode code() const { return code_; }

@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h"
 
 namespace lotus::analysis {
 

@@ -1,3 +1,4 @@
+#include "IR/PDG/Core/DebugInfoUtils.h"
 /**
  * @file FunctionWrapper.cpp
  * @brief Implementation of FunctionWrapper class for function representation in
@@ -21,8 +22,8 @@
  */
 
 #include "IR/PDG/Core/FunctionWrapper.h"
-
-#include "IR/PDG/Support/PDGCommandLineOptions.h"
+#include "IR/PDG/Core/PDGCommandLineOptions.h"
+#include "IR/PDG/Core/PDGUtils.h"
 
 using namespace llvm;
 

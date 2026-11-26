@@ -5,7 +5,8 @@
 
 if(TARGET lotus-cfl-solve)
     foreach(classical_backend
-            sparse-set sparse-bitvector graspan sqid pearl skewed cat iea iea-ocr
+            sparse-set sparse-bitvector sparse-subset graspan sqid pearl skewed cat
+            iea iea-ocr
             transitive-closure pocr hpocr
             focr endpoint-quotient cert)
         add_test(NAME classical_cfl_cli_${classical_backend}
@@ -153,7 +154,8 @@ if(TARGET lotus-cfl-alias)
             --json-stats
             ${CMAKE_SOURCE_DIR}/tests/regress/Alias/PTA/funptr-simple.ll)
     set_tests_properties(classical_cfl_alias_export PROPERTIES
-        PASS_REGULAR_EXPRESSION "\"encoding\":\"cfl-peg\"")
+        PASS_REGULAR_EXPRESSION
+        "\"encoding\":\"cfl-peg\".*\"relation_edges\":213")
     add_test(NAME classical_cfl_alias_export_roundtrip
         COMMAND $<TARGET_FILE:lotus-cfl-solve>
             --grammar ${classical_alias_export_grammar}
@@ -162,7 +164,9 @@ if(TARGET lotus-cfl-alias)
             --json-stats)
     set_tests_properties(classical_cfl_alias_export_roundtrip PROPERTIES
         DEPENDS classical_cfl_alias_export
-        PASS_REGULAR_EXPRESSION "\"relation_edges\":228")
+        # Must equal the closure the alias client itself reports for the
+        # exported instance (relation_edges in classical_cfl_alias_export).
+        PASS_REGULAR_EXPRESSION "\"relation_edges\":213")
 
     set(classical_alias_annotation_cases
         funptr-simple
@@ -191,7 +195,8 @@ endif()
 
 if(TARGET lotus-cfl-vf)
     foreach(classical_backend
-            sparse-set sparse-bitvector graspan sqid pearl skewed cat iea iea-ocr
+            sparse-set sparse-bitvector sparse-subset graspan sqid pearl skewed cat
+            iea iea-ocr
             transitive-closure pocr hpocr
             focr endpoint-quotient cert)
         add_test(NAME classical_cfl_vf_${classical_backend}
@@ -217,7 +222,8 @@ if(TARGET lotus-cfl-vf)
             --json-stats
             ${CMAKE_SOURCE_DIR}/tests/regress/CFL/Classical/value-flow.ll)
     set_tests_properties(classical_cfl_vf_export PROPERTIES
-        PASS_REGULAR_EXPRESSION "\"encoding\":\"classical-cfl\"")
+        PASS_REGULAR_EXPRESSION
+        "\"encoding\":\"classical-cfl\".*\"relation_edges\":28")
     add_test(NAME classical_cfl_vf_export_roundtrip
         COMMAND $<TARGET_FILE:lotus-cfl-solve>
             --grammar ${classical_vf_export_grammar}
@@ -226,7 +232,9 @@ if(TARGET lotus-cfl-vf)
             --json-stats)
     set_tests_properties(classical_cfl_vf_export_roundtrip PROPERTIES
         DEPENDS classical_cfl_vf_export
-        PASS_REGULAR_EXPRESSION "\"relation_edges\":29")
+        # Must equal the closure the value-flow client itself reports for the
+        # exported instance (relation_edges in classical_cfl_vf_export).
+        PASS_REGULAR_EXPRESSION "\"relation_edges\":28")
 endif()
 
 if(TARGET lotus-cfl-subcubic-aa)

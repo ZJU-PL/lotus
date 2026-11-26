@@ -38,6 +38,9 @@ public:
     std::size_t threadContextLimit = 2;
     lotus::alias::PointsToSetBackend pointsToSetBackend =
         lotus::alias::PointsToSetBackend::Mutable;
+    /// Lock-span pruning of interference edges whose value cannot survive to
+    /// the reading span (see ThreadAwareSVFGBuilder::Config).
+    bool pruneLockSpanFlow = true;
   };
 
   struct Statistics {

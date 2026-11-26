@@ -14,8 +14,9 @@ semantic effects of library and external functions. It consolidates multiple
 spec-file formats (pointer specs, mod/ref specs, etc.) into a single structured
 representation that can be consumed by alias analyses, checkers, and optimisers.
 
-The specification system is designed to be lightweight (no LLVM header
-dependencies in the public interface) and extensible.
+The specification system is designed to be lightweight and extensible: LLVM
+types in the public interface are forward-declared, with the sole exception of
+``llvm/ADT/StringRef.h`` used by the string-loading entry point.
 
 Components
 ----------

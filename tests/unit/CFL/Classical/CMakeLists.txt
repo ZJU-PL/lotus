@@ -10,4 +10,5 @@ lotus_collect_test_sources(cfl_tests
   EndpointQuotientEngineTest.cpp
   EndpointQuotientStagingTest.cpp
   SkewedTabulationEngineTest.cpp
+  SparseSubsetEngineTest.cpp
   SubcubicAATest.cpp)

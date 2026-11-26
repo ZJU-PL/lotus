@@ -5,6 +5,7 @@
 #include <atomic>
 #include <sstream>
 
+using namespace llvm;
 using namespace SymbolicExecution;
 
 SMTCondition::SMTCondition(bool V) {

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Checker/AE/AbstractState.h"
+#include "Checker/AE/AbstractStateStore.h"
 
 #include <functional>
 #include <map>
@@ -49,7 +50,7 @@ public:
     STRTO       // String to number conversion
   };
 
-  AEExtAPI(std::map<const llvm::Instruction *, AbstractState> &traces);
+  explicit AEExtAPI(AbstractStateStore &states);
 
   void initExtFunMap();
 
@@ -111,7 +112,7 @@ protected:
                      const std::vector<std::string> &annotations);
 
   llvm::Module *module_;
-  std::map<const llvm::Instruction *, AbstractState> &abstractTrace;
+  AbstractStateStore &states_;
   std::map<std::string, std::function<void(const llvm::CallBase *)>> func_map;
 
   std::map<std::string, std::vector<std::string>> funcAnnotations;

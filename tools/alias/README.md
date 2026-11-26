@@ -63,9 +63,17 @@ build/bin/lotus-alias-fspta test.bc --print-pts --dump-stats
 build/bin/lotus-alias-fspta test.bc --points-to-sets=hash-consed
 build/bin/lotus-alias-fspta test.bc --analysis=vfpta --print-pts
 build/bin/lotus-alias-fspta test.bc --dump-svfg=fspta.dot --print-memory
+build/bin/lotus-alias-fspta test.bc --dump-mssa --dump-mssa-function=main
 build/bin/lotus-alias-bootstrap test.bc --all-contexts --detailed-stats
 build/bin/lotus-alias-sparrow-aa test.bc --andersen-k-cs=1 --print-pts
 build/bin/lotus-alias-tpa test.bc --k-limit=1 --print-indirect-calls
+```
+
+AserPTA result caching follows SVF's opt-in workflow:
+
+```bash
+build/bin/lotus-alias-aser-aa test.bc --write-ander=/tmp/pta.cache
+build/bin/lotus-alias-aser-aa test.bc --read-ander=/tmp/pta.cache
 ```
 
 ### Inspect indirect-call targets

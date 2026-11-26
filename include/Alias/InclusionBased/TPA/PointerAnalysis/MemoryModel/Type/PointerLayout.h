@@ -3,6 +3,7 @@
 #include "Alias/InclusionBased/TPA/Util/DataStructure/VectorSet.h"
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 
+#include <cstddef>
 #include <unordered_set>
 
 namespace tpa {

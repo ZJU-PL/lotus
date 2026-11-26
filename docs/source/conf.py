@@ -7,7 +7,7 @@ copyright = "2024-2026, ZJU Programming Languages and Automated Reasoning Group"
 author = "ZJU Programming Languages and Automated Reasoning Group"
 
 # The full version, including alpha/beta/rc tags
-release = "v0.3"
+release = "v1.0.3"
 
 # General configuration
 extensions = [
@@ -28,7 +28,7 @@ extensions = [
 # For nature theme (built-in)
 # html_theme = 'nature'
 
-templates_path = ['_templates']
+templates_path = []  # No custom templates directory; keep Sphinx from warning
 exclude_patterns = []
 
 # HTML output options

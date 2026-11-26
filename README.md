@@ -5,7 +5,7 @@
 # Lotus: LLVM-based Static Analysis Framework
 
 [![Documentation](https://img.shields.io/badge/docs-zju--pl.github.io-blue.svg)](https://zju-pl.github.io/lotus)
-[![DeepWiki Docs](https://img.shields.io/badge/deepwiki-ZJU--PL%2Flotus-blueviolet)](https://deepwiki.com/ZJU-PL/lotus)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ZJU-PL/lotus)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![C++](https://img.shields.io/badge/c++-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![LLVM](https://img.shields.io/badge/LLVM-14.x-purple.svg)](https://llvm.org/)
@@ -26,7 +26,7 @@
 ### System Requirements
 - **OS**: x86/ARM Linux, ARM macOS
 - **Compiler**: C++17 compatible (GCC 7+ or Clang 5+)
-- **Dependencies**: LLVM 14.x, Z3 4.8.1+ (4.11 tested), CMake 3.18+, (Optional: Boost 1.80+)
+- **Dependencies**: LLVM 14.x, Z3 4.8.1+ (4.11 tested), CMake 3.18+, (Optional: Boost 1.65+; 1.80+ for CLAM's Boost.JSON)
 
 ### Building from Source
 

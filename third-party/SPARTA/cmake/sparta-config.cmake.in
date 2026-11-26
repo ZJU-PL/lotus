@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+include("${CMAKE_CURRENT_LIST_DIR}/sparta_target.cmake")
+if(NOT TARGET SPARTA::SPARTA)
+  add_library(SPARTA::SPARTA ALIAS sparta::sparta)
+endif()

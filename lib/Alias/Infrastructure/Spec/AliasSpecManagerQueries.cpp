@@ -316,6 +316,8 @@ AliasSpecManager::buildAllocatorInfo(const std::string &name,
 
   if (!spec.allocs.empty()) {
     info.sizeArgIndex = spec.allocs[0].sizeArgIndex;
+    info.ptrOutArgIndex = spec.allocs[0].destinationArgIndex;
+    info.returnsPointer = info.ptrOutArgIndex < 0;
   } else {
     info.sizeArgIndex = -1;
   }

@@ -97,6 +97,7 @@ HistoryObserver::directSum(const std::vector<HistoryObserver> &observers) {
   }
   for (const auto &edge : edges) {
     std::vector<Matrix> blocks;
+    blocks.reserve(observers.size());
     for (const auto &o : observers)
       blocks.push_back(o.matrix(edge));
     result.set(edge, Matrix::directSum(blocks));
@@ -140,6 +141,7 @@ HistoryObserver HistoryObserver::automatic(const Graph &graph,
   for (const auto &edge : sorted)
     select(edge);
   std::vector<HistoryObserver> components;
+  components.reserve(count + pair_count);
   for (const auto &edge : selected)
     components.push_back(parity({edge}));
   std::size_t pairs = 0;

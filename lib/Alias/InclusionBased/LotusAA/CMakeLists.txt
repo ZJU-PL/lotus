@@ -47,3 +47,4 @@ target_link_libraries(LotusAA PUBLIC
   CanaryGSA
   CanaryParallel
 )
+add_library(Lotus::LotusAA ALIAS LotusAA)

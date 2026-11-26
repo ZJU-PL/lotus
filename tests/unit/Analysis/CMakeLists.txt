@@ -185,13 +185,13 @@ lotus_add_test_group(analysis cfg CFG analysis_tests LINK_LIBS CanaryCFG CanaryI
 lotus_add_test_group(analysis controldependence ControlDependence analysis_tests
   LINK_LIBS CanaryICFGControlDependence CanaryICFG)
 lotus_add_test_group(analysis debuginfo DebugInfo analysis_tests LINK_LIBS CanaryDebugInfo)
-lotus_add_test_group(analysis multiplicity Multiplicity analysis_tests LINK_LIBS CanaryMultiplicity)
+lotus_add_test_group(analysis multiplicity Summary/Multiplicity analysis_tests LINK_LIBS CanaryMultiplicity)
 lotus_add_test_group(analysis nullpointer NullPointer analysis_tests
   LINK_LIBS CanaryNullPointer CanaryDyckAA)
-lotus_add_test_group(analysis parametersummary ParameterSummary analysis_tests
+lotus_add_test_group(analysis parametersummary Summary/ParameterSummary analysis_tests
   LINK_LIBS CanaryParameterSummary)
 lotus_add_test_group(analysis profile Profile analysis_tests LINK_LIBS CanaryProfile)
-lotus_add_test_group(analysis purity Purity analysis_tests
+lotus_add_test_group(analysis purity Summary/Purity analysis_tests
   LINK_LIBS CanaryPurityAnalysis CanaryShadowMemSSA AliasSpecManager LLVMAnalysis)
 lotus_add_test_group(analysis sccp SCCP analysis_tests LINK_LIBS CanarySCCP)
 
@@ -219,7 +219,7 @@ lotus_collect_test_sources(analysis_tests
   Loop/LoopParityIterationSpaceTest.cpp
   Loop/LoopParitySCCDAGAttrsTest.cpp)
 set_property(GLOBAL APPEND PROPERTY LOTUS_TEST_SUITE_analysis_tests_LINK_LIBS
-  CanaryLoopAnalysis CanaryPDG LLVMAnalysis LLVMTransformUtils LLVMPasses)
+  CanaryLoopAnalysis CanaryPDGConstruction LLVMAnalysis LLVMTransformUtils LLVMPasses)
 endif()
 
 get_property(analysis_test_libs GLOBAL PROPERTY LOTUS_TEST_SUITE_analysis_tests_LINK_LIBS)

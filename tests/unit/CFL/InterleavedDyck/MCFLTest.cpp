@@ -6,8 +6,12 @@
 
 #include <algorithm>
 #include <array>
+#include <queue>
+#include <random>
+#include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -324,13 +328,203 @@ TEST(MCFLInterleavedSolverTest,
   EXPECT_EQ(result.reachablePairs().count({1, 0}), 1U);
 }
 
-TEST(MCFLArtifactRegressionTest, ReproducesFaketaobaoPairCounts) {
-  const interleaved_dyck::Graph graph = interleaved_dyck::Graph::parseDotFile(
-      std::string(MCFL_DATASET_DIR) + "/faketaobao.dot");
-  const InterleavedAnalysisResult result = InterleavedDyckSolver{}.solve(graph);
+TEST(MCFLInterleavedSolverTest, DimensionTwoCollapsesAdjacentUnreachableGap) {
+  Graph graph;
+  graph.addEdge(0, 1, "op--0");
+  graph.addEdge(1, 2, "cp--0");
+  graph.addEdge(10, 11, "ob--0");
+  graph.addEdge(11, 12, "cb--0");
+  InterleavedOptions options;
+  options.max_dimension = 2;
+  options.condense = false;
+  const InterleavedAnalysisResult result =
+      InterleavedDyckSolver{}.solve(graph, options);
   ASSERT_EQ(result.dimensions.size(), 2U);
-  EXPECT_EQ(result.dimensions[0].reachable_pairs.size(), 57U);
-  EXPECT_EQ(result.dimensions[1].reachable_pairs.size(), 59U);
+  EXPECT_EQ(result.dimensions[1].reachable_pairs.count({0, 2}), 1U);
+  EXPECT_EQ(result.dimensions[1].reachable_pairs.count({10, 12}), 1U);
+}
+
+TEST(MCFLInterleavedSolverTest,
+     DirectedNeutralEdgeDoesNotCertifyUnreachableReversePair) {
+  // Audit counterexample 1 (d=1): 0->1 [normal], 1->0 [op--0], 1->2 [cp--0].
+  // Pair (1, 0) has only unmatched op--0 paths and must NOT be certified.
+  {
+    Graph g1;
+    g1.addEdge(0, 1, "normal");
+    g1.addEdge(1, 0, "op--0");
+    g1.addEdge(1, 2, "cp--0");
+
+    InterleavedOptions opts;
+    opts.max_dimension = 1;
+    opts.condense = true;
+    const InterleavedAnalysisResult res = InterleavedDyckSolver{}.solve(g1, opts);
+    ASSERT_EQ(res.dimensions.size(), 1U);
+    EXPECT_EQ(res.dimensions[0].reachable_pairs.count({1, 0}), 0U);
+    EXPECT_EQ(res.dimensions[0].reachable_pairs.count({0, 1}), 1U);
+    EXPECT_EQ(res.dimensions[0].reachable_pairs.count({1, 2}), 1U);
+    EXPECT_EQ(res.dimensions[0].reachable_pairs.count({0, 2}), 1U);
+  }
+
+  // Audit counterexample 2 (d=2, both alphabets active + balanced loop at 1).
+  {
+    Graph g2;
+    g2.addEdge(0, 1, "normal");
+    g2.addEdge(1, 0, "op--0");
+    g2.addEdge(1, 2, "cp--0");
+    g2.addEdge(1, 3, "ob--0");
+    g2.addEdge(3, 1, "cb--0");
+
+    InterleavedOptions opts;
+    opts.max_dimension = 2;
+    opts.condense = true;
+    const InterleavedAnalysisResult res = InterleavedDyckSolver{}.solve(g2, opts);
+    ASSERT_EQ(res.dimensions.size(), 2U);
+    EXPECT_EQ(res.dimensions[0].reachable_pairs.count({1, 0}), 0U);
+    EXPECT_EQ(res.dimensions[1].reachable_pairs.count({1, 0}), 0U);
+    EXPECT_EQ(res.dimensions[1].reachable_pairs.count({0, 2}), 1U);
+  }
+
+  // Mutual neutral cycle 0 <-> 1 MUST still be contracted and expanded soundly.
+  {
+    Graph g_cycle;
+    g_cycle.addEdge(0, 1, "normal");
+    g_cycle.addEdge(1, 0, "normal");
+    g_cycle.addEdge(1, 2, "op--0");
+    g_cycle.addEdge(2, 0, "cp--0");
+
+    InterleavedOptions opts;
+    opts.max_dimension = 2;
+    opts.condense = true;
+    const InterleavedAnalysisResult res =
+        InterleavedDyckSolver{}.solve(g_cycle, opts);
+    EXPECT_EQ(res.reachablePairs().count({0, 1}), 1U);
+    EXPECT_EQ(res.reachablePairs().count({1, 0}), 1U);
+  }
+}
+
+TEST(MCFLInterleavedSolverTest,
+     SoundCondensationMatchesExactOracleOnRandomNeutralGraphs) {
+  const std::array<std::string, 7> labels = {
+      "normal", "op--0", "cp--0", "op--1", "cp--1", "ob--0", "cb--0"};
+
+  auto exactReachableBounded = [](const Graph &g, Vertex src, Vertex dst) {
+    using State =
+        std::tuple<Vertex, std::vector<unsigned>, std::vector<unsigned>>;
+    constexpr std::size_t kMaxDepth = 8;
+    std::set<State> visited;
+    std::queue<State> q;
+    State init{src, {}, {}};
+    visited.insert(init);
+    q.push(std::move(init));
+    while (!q.empty()) {
+      auto [u, ps, bs] = q.front();
+      q.pop();
+      if (u == dst && ps.empty() && bs.empty()) {
+        return true;
+      }
+      for (const Edge &e : g.edges()) {
+        if (e.source != u) {
+          continue;
+        }
+        auto nps = ps;
+        auto nbs = bs;
+        if (e.label == "normal") {
+          // neutral
+        } else if (e.label.rfind("op--", 0) == 0) {
+          if (nps.size() >= kMaxDepth)
+            continue;
+          nps.push_back(static_cast<unsigned>(std::stoul(e.label.substr(4))));
+        } else if (e.label.rfind("cp--", 0) == 0) {
+          const auto id = static_cast<unsigned>(std::stoul(e.label.substr(4)));
+          if (nps.empty() || nps.back() != id)
+            continue;
+          nps.pop_back();
+        } else if (e.label.rfind("ob--", 0) == 0) {
+          if (nbs.size() >= kMaxDepth)
+            continue;
+          nbs.push_back(static_cast<unsigned>(std::stoul(e.label.substr(4))));
+        } else if (e.label.rfind("cb--", 0) == 0) {
+          const auto id = static_cast<unsigned>(std::stoul(e.label.substr(4)));
+          if (nbs.empty() || nbs.back() != id)
+            continue;
+          nbs.pop_back();
+        }
+        State next{e.target, std::move(nps), std::move(nbs)};
+        if (visited.insert(next).second) {
+          q.push(std::move(next));
+        }
+      }
+    }
+    return false;
+  };
+
+  std::mt19937 rng(0xC0FFEEU);
+  for (unsigned trial = 0; trial < 60; ++trial) {
+    Graph g;
+    constexpr int kVertices = 5;
+    for (int v = 0; v < kVertices; ++v) {
+      g.addVertex(v);
+    }
+    std::uniform_int_distribution<int> vdist(0, kVertices - 1);
+    std::uniform_int_distribution<std::size_t> ldist(0, labels.size() - 1);
+    for (int e = 0; e < 9; ++e) {
+      g.addEdge(vdist(rng), vdist(rng), labels[ldist(rng)]);
+    }
+
+    InterleavedOptions cond_opts;
+    cond_opts.max_dimension = 2;
+    cond_opts.condense = true;
+
+    InterleavedOptions raw_opts;
+    raw_opts.max_dimension = 2;
+    raw_opts.condense = false;
+
+    const auto cond_res = InterleavedDyckSolver{}.solve(g, cond_opts);
+    const auto raw_res = InterleavedDyckSolver{}.solve(g, raw_opts);
+
+    for (unsigned d = 0; d < 2; ++d) {
+      // Every uncondensed pair must remain certified after condensation.
+      for (const Pair &p : raw_res.dimensions[d].reachable_pairs) {
+        EXPECT_NE(cond_res.dimensions[d].reachable_pairs.count(p), 0U)
+            << "trial=" << trial << " dim=" << (d + 1) << " pair=(" << p.source
+            << "," << p.target << ")";
+      }
+      // Every condensed pair must be genuinely Interleaved-Dyck reachable.
+      for (const Pair &p : cond_res.dimensions[d].reachable_pairs) {
+        EXPECT_NE(p.source, p.target);
+        EXPECT_TRUE(exactReachableBounded(g, p.source, p.target))
+            << "trial=" << trial << " dim=" << (d + 1)
+            << " UNSOUND condensed pair=(" << p.source << "," << p.target
+            << ")";
+      }
+    }
+  }
+}
+
+TEST(MCFLArtifactRegressionTest, ReproducesSmallPublicTaintPairCounts) {
+  struct ExpectedCounts {
+    const char *filename;
+    std::size_t d1;
+    std::size_t d2;
+  };
+  constexpr std::array<ExpectedCounts, 5> kCases{{
+      {"fakebanker.dot", 249U, 251U},
+      {"faketaobao.dot", 57U, 59U},
+      {"jollyserv.dot", 155U, 164U},
+      {"loozfon.dot", 76U, 93U},
+      {"uranai.dot", 143U, 143U},
+  }};
+  for (const ExpectedCounts &test_case : kCases) {
+    const interleaved_dyck::Graph graph = interleaved_dyck::Graph::parseDotFile(
+        std::string(MCFL_DATASET_DIR) + "/" + test_case.filename);
+    const InterleavedAnalysisResult result =
+        InterleavedDyckSolver{}.solve(graph);
+    ASSERT_EQ(result.dimensions.size(), 2U) << test_case.filename;
+    EXPECT_EQ(result.dimensions[0].reachable_pairs.size(), test_case.d1)
+        << test_case.filename;
+    EXPECT_EQ(result.dimensions[1].reachable_pairs.size(), test_case.d2)
+        << test_case.filename;
+  }
 }
 
 } // namespace

@@ -68,7 +68,10 @@ struct CopyEffect {
 struct AllocEffect {
   // Optional argument index that influences allocation size (if provided by
   // spec)
-  int sizeArgIndex; // -1 if unspecified
+  int sizeArgIndex = -1; // -1 if unspecified
+  // -1: pointer return; otherwise write the allocation through this argument.
+  // This is independent of the argument(s) describing allocation size.
+  int destinationArgIndex = -1;
 };
 
 struct ModRefEffect {

@@ -6,6 +6,8 @@
 # Framework core
 set(IFDS_FRAMEWORK_SOURCES
   AnalysisSession.cpp
+  SharedAnalysisServices.cpp
+  Solver/DFI/DFIExplodedSupergraph.cpp
   Debug/IFDSDebugUtils.cpp
 )
 
@@ -17,8 +19,11 @@ set(IFDS_CLIENT_SOURCES
   Analyses/IFDSReachingDefinitions.cpp
   Analyses/IDEConstantPropagation.cpp
   Analyses/IDETypeState.cpp
+  Analyses/TypeStateDescriptions.cpp
   Analyses/IDEProtoAnalysis.cpp
   Analyses/IDEExtendedTaintAnalysis.cpp
+  Analyses/AbstractMemoryLocation.cpp
+  Analyses/IDEExtendedTaintMemoryAnalysis.cpp
   Analyses/IDEFeatureTaintAnalysis.cpp
   Analyses/IDESecureHeapPropagation.cpp
   Analyses/IDEInstInteractionAnalysis.cpp

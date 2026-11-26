@@ -12,7 +12,8 @@ add_executable(lotus-check
   lotus-check-generic.cpp
   lotus-check-gsaf.cpp
   lotus-check-kint.cpp
-  lotus-check-taint.cpp
+  lotus-check-taint-ifds.cpp
+  lotus-check-taint-tpa.cpp
   lotus-check-concur.cpp
   lotus-check-pulse.cpp
   lotus-check-fitx.cpp
@@ -32,6 +33,7 @@ target_link_libraries(lotus-check PRIVATE
   ConcurrencyChecker
   FiTxChecker
   IFDS
+  TPATaint
   PulseChecker
   ${LLVM_LINK_COMPONENTS}
   ${Z3_LIBRARIES}
@@ -51,3 +53,10 @@ install(TARGETS lotus-check
 # option accessors, so normal static-library extraction retains the required
 # objects without platform-specific whole-archive linker flags.
 target_link_libraries(lotus-check PRIVATE Saber AE)
+
+target_compile_definitions(lotus-check PRIVATE
+  LOTUS_SOURCE_TPA_CONFIG_DIR="${PROJECT_SOURCE_DIR}/config"
+  LOTUS_INSTALL_TPA_CONFIG_DIR="${CMAKE_INSTALL_FULL_DATADIR}/lotus/config")
+install(FILES ${PROJECT_SOURCE_DIR}/config/ptr.spec
+  ${PROJECT_SOURCE_DIR}/config/modref.spec ${PROJECT_SOURCE_DIR}/config/taint.spec
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/lotus/config)

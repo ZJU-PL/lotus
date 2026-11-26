@@ -117,20 +117,20 @@ The staged ``InterleavedDyckSolver`` accepts artifact-compatible DOT labels:
      - Neutral edge accepted by both projections.
 
 For dimensions ``1`` through ``d``, the driver filters unmatched delimiter
-types, performs the artifact's neutral-edge and mutual-reachability
-condensation, splits weak components, computes projected Dyck feasibility,
-runs MCFL saturation, and expands pairs to the original graph. Staged results
-omit reflexive pairs.
+types, contracts strongly connected components of ``normal`` edges and
+mutually reachable pairs from the previous dimension, splits weak components,
+computes projected Dyck feasibility, runs MCFL saturation, and expands pairs
+to the original graph. Staged results omit reflexive pairs.
 
 Every reported pair is certified typed interleaved-Dyck reachable. A missing
 pair is unresolved rather than certified unreachable: it may require a larger
 dimension or a path outside the selected grammar family.
 
-The default expansion filters the Cartesian product of condensed vertices by
-plain reachability in the original graph. This avoids a reference-artifact
-quirk where contracting a one-way ``normal`` edge reports its reverse pair.
-Set ``CondensationExpansionPolicy::ArtifactCompatible`` for exact reproduction
-of that cross-product behavior.
+The reference artifact additionally contracts degree-one directed ``normal``
+edges and expands every condensed class as a full Cartesian product, which can
+report unreachable reverse pairs. Set
+``CondensationExpansionPolicy::ArtifactCompatible`` only when exact
+reproduction of that reference-artifact behavior is required.
 
 Shared typed graph adapter
 --------------------------
@@ -158,8 +158,8 @@ elimination, ``--artifact-compatible`` selects the artifact's condensed
 cross-product expansion, ``--stats`` prints saturation counters, and
 ``--print-pairs`` emits the final endpoint relation.
 
-The exact unary algorithms share the separate
-``lotus-cfl-interleaved-dyck unary`` executable documented in
+The exact unary algorithms are exposed through the ``unary`` subcommand of
+``lotus-cfl-interleaved-dyck``, documented in
 :doc:`/cfl/interleaved_dyck/unary`.
 
 Validation and Complexity

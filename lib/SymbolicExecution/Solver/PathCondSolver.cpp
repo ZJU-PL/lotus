@@ -1,12 +1,13 @@
 #include "SymbolicExecution/Solver/PathCondSolver.h"
 
-#include "llvm/ADT/StringExtras.h"
+#include "SymbolicExecution/Domain/PropertyInteger.h"
+#include "SymbolicExecution/Domain/PropertySym.h"
 
-#include "SymbolicExecution/Core/PropertyInteger.h"
-#include "SymbolicExecution/Core/PropertySym.h"
+#include "llvm/ADT/StringExtras.h"
 
 #include <vector>
 
+using namespace llvm;
 using namespace SymbolicExecution;
 
 namespace {
@@ -30,16 +31,11 @@ void extendExprWidth(SMTExpr &Expr, unsigned ExtWidth, bool SignExtend) {
 
 } // namespace
 
-std::atomic<uint32_t> PathCondSolver::ID;
+std::atomic<uint32_t> PathCondSolver::ID{0};
 
-// caution: init order! gvfg_utility should be initialized before construction
-PathCondSolver::PathCondSolver() {
-  SolverID = ID++;
-  assert(gvfg_utility::getDL() &&
-         "PathCondSolver requires initialized DataLayout");
-  GraphSolver = std::unique_ptr<GuardedValueFlowSolver>(
-      new GuardedValueFlowSolver(Fctry, *gvfg_utility::getDL()));
-}
+PathCondSolver::PathCondSolver(const llvm::DataLayout &DL)
+    : DL(DL), SolverID(ID++),
+      GraphSolver(std::make_unique<GuardedValueFlowSolver>(Fctry, DL)) {}
 
 SMTExpr PathCondSolver::buildRegionCondition(GuardedValueFlowRegionNode *Cond) {
   resetSolverState();
@@ -66,7 +62,8 @@ SMTExpr PathCondSolver::getExpr(Var V) {
         Val.getAs<GuardedValueFlowNodeValue>()->getNode());
   } else {
     std::string Symbol = Val.getAs<AuxValue>()->getName();
-    auto ValTySize = gvfg_utility::getTypeSizeInBits(Val.getType());
+    Type *ValTy = Val.getType();
+    uint64_t ValTySize = (ValTy && ValTy->isSized()) ? DL.getTypeSizeInBits(ValTy) : 0;
     // could happen for e.g., %struct.kwset_t = type opaque
     if (!ValTySize) {
       ValTySize = 8;

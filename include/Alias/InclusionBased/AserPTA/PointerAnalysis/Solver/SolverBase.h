@@ -3,6 +3,7 @@
 #pragma once
 
 #define DEBUG_TYPE "pta"
+#include "Alias/InclusionBased/AserPTA/AnalysisOptions.h"
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Graph/CallGraph.h"
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Graph/ConstraintGraph/ConstraintGraph.h"
 #include "Alias/InclusionBased/AserPTA/PointerAnalysis/Models/MemoryModel/MemModelTrait.h"
@@ -13,6 +14,14 @@
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Pass.h>
+
+#include <algorithm>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 extern llvm::cl::opt<bool> ConfigPrintConstraintGraph;
 extern llvm::cl::opt<bool> ConfigPrintCallGraph;
@@ -40,6 +49,15 @@ private:
   LOCAL_STATISTIC(EffectiveLoad, "Number of Effective Load Edges");
   LOCAL_STATISTIC(EffectiveStore, "Number of Effective Store Edges");
   LOCAL_STATISTIC(EffectiveOffset, "Number of Effective Offset Edges");
+
+  static constexpr const char *PointsToCacheMagic = "LOTUS_ASER_PTS";
+  static constexpr unsigned PointsToCacheVersion = 1;
+
+  struct PointsToCache {
+    std::size_t nodeCount = 0;
+    std::uint64_t layoutHash = 0;
+    std::vector<std::vector<NodeID>> pointsTo;
+  };
 
 public:
   using LMT = LangModelTrait<LangModel>;
@@ -76,6 +94,213 @@ protected:
     updatedFunPtrs.clear();
 
     return reanalyze;
+  }
+
+  std::string cacheNodeSignature(CGNodeTy *node) const {
+    std::string signature;
+    llvm::raw_string_ostream stream(signature);
+    stream << static_cast<unsigned>(node->getType()) << ':';
+    if (auto *object = llvm::dyn_cast<ObjNodeTy>(node)) {
+      stream << object->getObject()->toString(false);
+    } else if (auto *pointer = llvm::dyn_cast<PtrNodeTy>(node)) {
+      const auto *value = pointer->getPointer();
+      if (!value) {
+        stream << "<anonymous>";
+      } else {
+        stream << CT::toString(value->getContext(), false) << ':';
+        if (const llvm::Value *llvmValue = value->getValue()) {
+          if (llvmValue->hasName())
+            stream << llvmValue->getName();
+          else
+            llvmValue->printAsOperand(stream, false);
+        }
+      }
+    } else {
+      stream << "<scc-representative>";
+    }
+    return stream.str();
+  }
+
+  std::uint64_t pointsToCacheLayoutHash() const {
+    // FNV-1a keeps the cache validation independent of libc++'s std::hash.
+    std::uint64_t hash = 1469598103934665603ULL;
+    auto addByte = [&](unsigned char byte) {
+      hash ^= byte;
+      hash *= 1099511628211ULL;
+    };
+    auto addText = [&](llvm::StringRef text) {
+      for (unsigned char byte : text)
+        addByte(byte);
+      addByte(0xff);
+    };
+    for (CGNodeTy *node : *consGraph) {
+      addByte(static_cast<unsigned char>(node->getType()));
+      addText(cacheNodeSignature(node));
+    }
+    return hash;
+  }
+
+  PointsToCache readPointsToCache(const std::string &path) const {
+    std::ifstream input(path);
+    if (!input)
+      throw std::runtime_error("cannot open AserPTA points-to cache '" + path +
+                               "' for reading");
+
+    std::string magic;
+    unsigned version = 0;
+    PointsToCache cache;
+    std::string line;
+    if (!(input >> magic >> version) || magic != PointsToCacheMagic ||
+        version != PointsToCacheVersion)
+      throw std::runtime_error("unsupported AserPTA points-to cache header in '" +
+                               path + "'");
+    std::string layoutText;
+    if (!(input >> line >> cache.nodeCount) || line != "node_count" ||
+        !(input >> line >> layoutText) || line != "layout_hash" ||
+        !(input >> line) || line != "data")
+      throw std::runtime_error("malformed AserPTA points-to cache metadata in '" +
+                               path + "'");
+    try {
+      cache.layoutHash = std::stoull(layoutText, nullptr, 0);
+    } catch (const std::exception &) {
+      throw std::runtime_error("invalid AserPTA cache layout hash '" +
+                               layoutText + "' in '" + path + "'");
+    }
+
+    cache.pointsTo.resize(cache.nodeCount);
+    for (NodeID id = 0; id < cache.nodeCount; ++id) {
+      NodeID parsedId = 0;
+      if (!(input >> parsedId) || parsedId != id)
+        throw std::runtime_error("non-contiguous AserPTA cache node ID in '" +
+                                 path + "'");
+      std::string targetText;
+      if (!(input >> targetText))
+        throw std::runtime_error("truncated AserPTA points-to cache '" + path +
+                                 "'");
+      if (targetText != "-") {
+        std::istringstream targets(targetText);
+        std::string item;
+        while (std::getline(targets, item, ',')) {
+          if (item.empty())
+            throw std::runtime_error("empty points-to target in AserPTA cache '" +
+                                     path + "'");
+          try {
+            const NodeID target = std::stoull(item);
+            if (target >= cache.nodeCount)
+              throw std::runtime_error(
+                  "out-of-range points-to target " + item +
+                  " for node " + std::to_string(id) + " in '" + path + "'");
+            cache.pointsTo[id].push_back(target);
+          } catch (const std::invalid_argument &) {
+            throw std::runtime_error("invalid points-to target '" + item +
+                                     "' in AserPTA cache '" + path + "'");
+          } catch (const std::out_of_range &) {
+            throw std::runtime_error("points-to target is too large in AserPTA "
+                                     "cache '" +
+                                     path + "'");
+          }
+        }
+      }
+    }
+    if (!(input >> line) || line != "end")
+      throw std::runtime_error("missing end marker in AserPTA cache '" + path +
+                               "'");
+    return cache;
+  }
+
+  void validatePointsToCache(const PointsToCache &cache,
+                             const std::string &context) const {
+    const std::size_t actualNodes = consGraph->getNodeNum();
+    if (actualNodes != cache.nodeCount)
+      throw std::runtime_error(
+          context + ": AserPTA node-count mismatch (cache=" +
+          std::to_string(cache.nodeCount) + ", reconstructed=" +
+          std::to_string(actualNodes) + ")");
+    const std::uint64_t actualLayout = pointsToCacheLayoutHash();
+    if (actualLayout != cache.layoutHash) {
+      std::ostringstream message;
+      message << context << ": AserPTA node-layout mismatch (cache=0x"
+              << std::hex << cache.layoutHash << ", reconstructed=0x"
+              << actualLayout << ')';
+      throw std::runtime_error(message.str());
+    }
+  }
+
+  void installPointsToCache(const PointsToCache &cache,
+                            const std::string &context) const {
+    validatePointsToCache(cache, context);
+    for (NodeID id = 0; id < cache.nodeCount; ++id) {
+      PT::clear(id);
+      for (NodeID target : cache.pointsTo[id]) {
+        if (target >= cache.nodeCount)
+          throw std::runtime_error(context +
+                                   ": out-of-range cached points-to target");
+        PT::insert(id, target);
+      }
+    }
+  }
+
+  void installPointsToCachePrefix(const PointsToCache &cache,
+                                  std::size_t nodeLimit) const {
+    const std::size_t limit = std::min(nodeLimit, cache.nodeCount);
+    for (NodeID id = 0; id < limit; ++id) {
+      PT::clear(id);
+      for (NodeID target : cache.pointsTo[id])
+        if (target < limit)
+          PT::insert(id, target);
+    }
+  }
+
+  void writePointsToCache(const std::string &path) const {
+    std::ofstream output(path, std::ios::trunc);
+    if (!output)
+      throw std::runtime_error("cannot open AserPTA points-to cache '" + path +
+                               "' for writing");
+    output << PointsToCacheMagic << ' ' << PointsToCacheVersion << '\n'
+           << "node_count " << consGraph->getNodeNum() << '\n'
+           << "layout_hash 0x" << std::hex << pointsToCacheLayoutHash()
+           << std::dec << "\ndata\n";
+    for (CGNodeTy *node : *consGraph) {
+      output << node->getNodeID() << ' ';
+      bool first = true;
+      // Child pointers collapsed into an SCC no longer own a points-to set.
+      // Persist the representative's complete set for every original pointer
+      // so a staged load can answer queries before replaying SCC collapsing.
+      const NodeID representative = node->getSuperNode()->getNodeID();
+      for (NodeID target : PT::getPointsTo(representative)) {
+        if (!first)
+          output << ',';
+        output << target;
+        first = false;
+      }
+      if (first)
+        output << '-';
+      output << '\n';
+    }
+    output << "end\n";
+    if (!output)
+      throw std::runtime_error("failed while writing AserPTA points-to cache '" +
+                               path + "'");
+  }
+
+  bool resolveAllLoadedFunctionPointers() {
+    for (CGNodeTy *node : *consGraph)
+      if (node->isFunctionPtr())
+        updateFunPtr(node->getNodeID());
+
+    bool reanalyzed = false;
+    while (resolveFunPtrs()) {
+      reanalyzed = true;
+      static_cast<SubClass *>(this)->runSolver(*langModel);
+    }
+    return reanalyzed;
+  }
+
+  bool resolveLoadedFunctionPointersOnce() {
+    for (CGNodeTy *node : *consGraph)
+      if (node->isFunctionPtr())
+        updateFunPtr(node->getNodeID());
+    return resolveFunPtrs();
   }
 
   // Hook for subclasses to populate call graph with pre-built results (e.g.,
@@ -376,13 +601,19 @@ public:
     return langModel.get();
   }
 
-  // analyze the give module with specified entry function
-  bool analyze(llvm::Module *module, llvm::StringRef entry = "main") {
+  // Analyze the given module with an optional persistent points-to cache.
+  bool analyze(llvm::Module *module, llvm::StringRef entry = "main",
+               const AnalysisOptions &options = AnalysisOptions()) {
     assert(langModel == nullptr && "can not run pointer analysis twice");
     // ensure the points to set are cleaned.
     // TODO: support different point-to set instance for different PTA instance
     // new they all share a global vector to store it.
     PT::clearAll();
+
+    PointsToCache cachedPointsTo;
+    const bool haveCachedPointsTo = !options.readPointsToPath.empty();
+    if (haveCachedPointsTo)
+      cachedPointsTo = readPointsToCache(options.readPointsToPath);
 
     // using language model to construct language model
     langModel.reset(LMT::buildInitModel(module, entry));
@@ -411,8 +642,90 @@ public:
                        *this->getConsGraph());
     }
 
-    // subclass might override solve() directly for more aggressive overriding
-    static_cast<SubClass *>(this)->solve();
+    bool installedDirectly = false;
+    if (haveCachedPointsTo) {
+      const std::size_t initialNodes = consGraph->getNodeNum();
+      const std::uint64_t initialLayout = pointsToCacheLayoutHash();
+      if (initialNodes == cachedPointsTo.nodeCount &&
+          initialLayout == cachedPointsTo.layoutHash) {
+        installPointsToCache(cachedPointsTo,
+                             "read cache during initial graph construction");
+        resolveLoadedFunctionPointersOnce();
+        installedDirectly =
+            consGraph->getNodeNum() == cachedPointsTo.nodeCount &&
+            pointsToCacheLayoutHash() == cachedPointsTo.layoutHash;
+        if (installedDirectly) {
+          llvm::errs() << "AserPTA points-to cache loaded and installed ("
+                       << cachedPointsTo.nodeCount << " nodes)\n";
+        } else {
+          llvm::errs() << "AserPTA points-to cache changed the initial graph "
+                          "during indirect-call rebuilding; falling back to "
+                          "constraint solving\n";
+        }
+      } else if (initialNodes < cachedPointsTo.nodeCount) {
+        // Indirect-call expansion can create nodes after the initial graph is
+        // built. Restore the cached facts available at each layout frontier,
+        // resolve the newly enabled calls, and repeat. This avoids a second
+        // full solve for the common cache-with-indirect-calls case.
+        std::size_t currentNodes = initialNodes;
+        for (std::size_t attempt = 0;
+             currentNodes < cachedPointsTo.nodeCount; ++attempt) {
+          installPointsToCachePrefix(cachedPointsTo, currentNodes);
+          const bool changed = resolveLoadedFunctionPointersOnce();
+          const std::size_t expandedNodes = consGraph->getNodeNum();
+          if (expandedNodes == currentNodes && !changed)
+            break;
+          if (expandedNodes == currentNodes)
+            break;
+          currentNodes = expandedNodes;
+          if (attempt > cachedPointsTo.nodeCount)
+            break;
+        }
+        if (consGraph->getNodeNum() == cachedPointsTo.nodeCount &&
+            pointsToCacheLayoutHash() == cachedPointsTo.layoutHash) {
+          installPointsToCache(cachedPointsTo, "read cache after staged merge");
+          installedDirectly = true;
+          llvm::errs() << "AserPTA points-to cache merged through staged "
+                          "indirect-call reconstruction ("
+                       << initialNodes << " -> " << consGraph->getNodeNum()
+                       << " nodes)\n";
+        } else {
+          llvm::errs() << "AserPTA points-to cache staged merge stopped at "
+                          "node-count mismatch (cache="
+                       << cachedPointsTo.nodeCount << ", reconstructed="
+                       << consGraph->getNodeNum()
+                       << "); falling back to constraint solving\n";
+        }
+      } else {
+        llvm::errs() << "AserPTA points-to cache layout does not match the "
+                        "initial graph (cache nodes="
+                     << cachedPointsTo.nodeCount << ", initial nodes="
+                     << initialNodes
+                     << "); falling back to constraint solving\n";
+      }
+    }
+
+    if (!installedDirectly) {
+      // subclass might override solve() directly for more aggressive overriding
+      static_cast<SubClass *>(this)->solve();
+      if (haveCachedPointsTo) {
+        installPointsToCache(cachedPointsTo,
+                             "read cache after graph reconstruction");
+        if (resolveAllLoadedFunctionPointers())
+          validatePointsToCache(cachedPointsTo,
+                                "read cache after indirect-call rebuilding");
+        llvm::errs() << "AserPTA points-to cache loaded after graph "
+                        "reconstruction ("
+                     << cachedPointsTo.nodeCount << " nodes)\n";
+      }
+    }
+
+    if (!options.writePointsToPath.empty()) {
+      writePointsToCache(options.writePointsToPath);
+      llvm::errs() << "AserPTA points-to cache written to '"
+                   << options.writePointsToPath << "' ("
+                   << consGraph->getNodeNum() << " nodes)\n";
+    }
 
     LOG_DEBUG("PTA constraint graph node number {}, "
               "callgraph node number {}",

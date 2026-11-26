@@ -2,6 +2,7 @@
 
 #include "Annotation/ModRef/ModRefEffectSummary.h"
 
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 

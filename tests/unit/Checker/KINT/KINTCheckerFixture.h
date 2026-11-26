@@ -8,8 +8,7 @@
  * KINTCheckerFixture.cpp. PassBuilder is kept out of this shared header.
  */
 
-#ifndef LOTUS_UNITTEST_CHECKER_KINT_CHECKER_FIXTURE_H_
-#define LOTUS_UNITTEST_CHECKER_KINT_CHECKER_FIXTURE_H_
+#pragma once
 
 #include "Checker/KINT/BugDetection.h"
 #include "Checker/KINT/KINTTaintAnalysis.h"
@@ -59,5 +58,3 @@ protected:
     return false;
   }
 };
-
-#endif // LOTUS_UNITTEST_CHECKER_KINT_CHECKER_FIXTURE_H_

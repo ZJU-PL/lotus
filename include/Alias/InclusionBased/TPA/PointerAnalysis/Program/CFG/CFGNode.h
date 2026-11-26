@@ -4,6 +4,8 @@
 #include "Alias/InclusionBased/TPA/Util/DataStructure/VectorSet.h"
 #include "Alias/InclusionBased/TPA/Util/Iterator/IteratorRange.h"
 
+#include <cstddef>
+
 namespace llvm {
 class Function;
 } // namespace llvm

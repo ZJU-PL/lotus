@@ -56,9 +56,11 @@
 #include "IR/SVFG/MemoryRegionPartitioner.h"
 #include "IR/SVFG/PointsToSetHash.h"
 #include "IR/SVFG/SVFG.h"
+#include "Utils/ADT/HierarchicalClusterer.h"
 
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -69,8 +71,15 @@ namespace analysis {
 
 /// @brief SVFGBuilder configuration
 struct SVFGBuilderConfig {
-  /// @brief Only include pointer-typed value flows (aligns with SVF PTROnlySVFG)
+  /// @brief Only include pointer-typed value flows (aligns with SVF PTROnlySVFG).
+  ///
+  /// This is the default because pointer analyses only need top-level pointer
+  /// definitions, pointer-typed loads/stores and their concrete memory. It
+  /// reduces the SVFG by roughly 3x on SPEC workloads compared with
+  /// `pointerOnly = false`. Abstract Execution is the one analysis that opts
+  /// out: its interval domain needs non-pointer loads/stores.
   bool pointerOnly = true;
+
 
   /// @brief Enable Memory SSA construction
   bool buildMSSA = true;
@@ -107,6 +116,16 @@ struct SVFGBuilderConfig {
   /// Memory-region cover used by sparse MemorySSA.
   MemoryRegionPartitionStrategy memoryPartition =
       MemoryRegionPartitionStrategy::Distinct;
+
+  /// @brief Abstract-object ID renumbering (SVF's OOPSLA'21 clustering).
+  ///
+  /// `None` keeps the builder's allocation order. `Hierarchical` runs the
+  /// fastcluster agglomerative pass over the pre-analysis points-to sets
+  /// before MemorySSA nodes are created; it permutes IDs only, so points-to
+  /// precision and strong updates are unchanged.
+  enum class ObjectIdClustering { None, Hierarchical };
+  ObjectIdClustering objectIdClustering = ObjectIdClustering::None;
+  utils::ClusterLinkage objectIdLinkage = utils::ClusterLinkage::Best;
 
   /// @brief Constructor with defaults
   SVFGBuilderConfig() = default;
@@ -207,6 +226,16 @@ private:
   /// solve-time object creation (field-insensitive collapse) cannot collide
   /// with builder IDs.
   uint32_t allocateObjectId();
+
+  /// @brief Renumber abstract-object IDs using hierarchical clustering.
+  ///
+  /// Runs after the points-to observations in
+  /// prepareMemoryRegionPartitioning() and before MemorySSA construction, so
+  /// every later object allocation uses the new dense floor.
+  bool clusterObjectIds();
+
+  /// @brief Statistics of the last clusterObjectIds() run.
+  utils::ClusterStatistics objectIdClusteringStats;
 
   /// @brief Next top-level value-symbol ID.
   uint32_t nextValueId = kValueIdBase;
@@ -323,6 +352,11 @@ private:
   /// @brief Last graph returned by build(); used for compatibility accessors.
   SVFG *lastBuiltSVFG = nullptr;
   std::unique_ptr<lotus::alias::AliasSpecManager> externalSpecs;
+  std::unordered_map<const llvm::CallBase *,
+                     std::vector<ActualOutSVFGNode::Allocation>>
+      externalAllocations;
+
+  void prepareExternalAllocations();
 
   // Materialize library return summaries as ordinary address/copy edges so
   // sparse, versioned and demand solvers share the same external semantics.
@@ -404,11 +438,21 @@ public:
   /// @brief Get indirect call targets using pointer analysis
   std::vector<const llvm::Function *>
   getIndirectCallTargets(const llvm::CallBase *call);
+  /// nullopt means no auxiliary PTA is available; false includes a known
+  /// empty candidate set, which must not silently disable the bound.
+  std::optional<bool> isIndirectCallTargetAllowed(
+      const llvm::CallBase *call, const llvm::Function *target);
 
   /// @brief Build SVFG with configuration
   ///
   /// Convenience overload that applies \p cfg then performs build().
   SVFG *build(const ICFG *icfg, const SVFGBuilderConfig &cfg);
+
+  /// @brief Statistics from the last hierarchical object-ID pass.
+  /// Zeroed when `objectIdClustering == None`.
+  const utils::ClusterStatistics &getObjectIdClusteringStatistics() const {
+    return objectIdClusteringStats;
+  }
 
   /// @brief Mark newly materialized indirect-call edges as feasible.
   ///
@@ -518,6 +562,7 @@ private:
   //===------------------------------------------------------------------===
 
   void buildCopyEdges();
+  void buildAggregateEdges();
   void buildDirectEdges();
   void buildLoadEdges();
   void buildStoreEdges();

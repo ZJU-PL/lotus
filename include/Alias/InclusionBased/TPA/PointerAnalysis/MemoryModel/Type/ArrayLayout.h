@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <initializer_list>
 #include <unordered_set>
 #include <vector>

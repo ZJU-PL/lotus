@@ -75,7 +75,7 @@ Full pipeline: SMT-LIB 2 to LLVM IR, optimize, LLVM IR back to SMT-LIB 2.
 
 .. code-block:: bash
 
-   ./slot -m -s problem.smt2 -lu before.ll -lo after.ll -o simplified.smt2 -p ../passes-run.txt
+   ./slot -m -s problem.smt2 -lu before.ll -lo after.ll -o simplified.smt2 -pall
 
 Options (verified in ``lib/Solvers/SMT/TUNA/TUNA-Opt/SMT2LLVM/src/tools/main.cpp``):
 
@@ -85,8 +85,13 @@ Options (verified in ``lib/Solvers/SMT/TUNA/TUNA-Opt/SMT2LLVM/src/tools/main.cpp
 - ``-lo <file>``: write LLVM IR after optimization
 - ``-t <file>``: append timing statistics (CSV)
 - ``-m``: convert constant right-shifts to multiplications
-- ``-p <file>``: read the LLVM pass list from a file
+- ``-pall``: enable every supported LLVM pass; individual passes can be
+  selected with ``-instcombine``, ``-reassociate``, ``-sccp``, ``-dce``,
+  ``-adce``, ``-instsimplify``, and ``-gvn``
 - ``-h``: show help
+
+Pass lists stored in a file are a ``fastslot`` feature (see below); ``slot``
+does not accept ``-p <file>``.
 
 fastslot
 ~~~~~~~~
@@ -133,7 +138,7 @@ End-to-end SMT simplification:
 
 .. code-block:: bash
 
-   ./slot -m -s problem.smt2 -o simplified.smt2 -p ../passes-run.txt
+   ./slot -m -s problem.smt2 -o simplified.smt2 -pall
 
 Step-by-step with intermediate IR inspection:
 

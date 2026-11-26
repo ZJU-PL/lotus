@@ -1,15 +1,75 @@
 # PDG: Program Dependence Graph
 
 The **Program Dependence Graph (PDG)** is a fine-grained representation of data
-and control dependences. It is built on top of the ICFG and is used for
-slicing, security analyses, and other dependence-aware queries.
+and control dependences built directly from LLVM IR. It supports slicing,
+security analyses, and other dependence-aware queries.
 
 The PDG is field-sensitive and flow-insensitive. The query layer exposes
 both context-insensitive and call/return-matched context-sensitive traversals
-through focused ``*Query`` headers under ``include/IR/PDG/Analysis/``, with
+through focused ``*Query`` headers under ``include/IR/PDG/Query/``, with
 ``Query.h`` as the umbrella include.
 The Cypher query-language parser and executor live separately under
-``include/IR/PDG/QueryLanguage/`` and ``lib/IR/PDG/QueryLanguage/``.
+``include/IR/PDG/Cypher/`` and ``lib/IR/PDG/Cypher/``.
+
+## Organization and dependencies
+
+Headers and implementations use eight flat directories matching the eight CMake
+targets 1:1. Public headers live under `include/IR/PDG/`; internal query helpers
+(`QuerySupport.h`, `Traversal.h`) live privately under `lib/IR/PDG/Query/`.
+
+| Directory | Responsibility | CMake target |
+| --- | --- | --- |
+| `Core/` | Graph representation, parameter trees, wrappers, core utilities, debug info, options, query diagnostics | `CanaryPDGCore` |
+| `Construction/` | Structural builder, LLVM dependence passes, call graph | `CanaryPDGConstruction` |
+| `Query/` | PDG graph queries: criteria, traversal, slicing, paths, summaries, impact, and diff | `CanaryPDGQuery` |
+| `Models/` | Shared finding/rule types, LLVM facts, and C/C++ library models | `CanaryPDGModels` |
+| `Analyses/` | LLVM IR domain analyses (bounds, lifetime, state, taint, arithmetic, API, contracts, protocols) | `CanaryPDGAnalyses` |
+| `Rules/` | Rule catalog and rule engine dispatch | `CanaryPDGRules` |
+| `Cypher/` | Cypher AST, parser, and executor | `CanaryPDGCypher` |
+| `Visualization/` | LLVM `GraphTraits` and DOT printer pass | `CanaryPDGVisualization` |
+
+Directory and target dependencies form a strict DAG:
+
+```text
+Core          --> LLVM
+Construction  --> Core, alias analysis, control dependence
+Query         --> Core, LLVMAnalysis
+Models        --> LLVM
+Analyses      --> Core, Models
+Rules         --> Query, Analyses
+Cypher        --> Query, Analyses
+Visualization --> Construction
+```
+
+Link only the targets a consumer uses. There is no aggregate `CanaryPDG`
+library or forwarding headers. Graph queries do not depend on the parser,
+IR analyses, or rule catalog. `Query/Query.h` includes only graph queries;
+include `Models/`, `Analyses/`, and `Rules/RuleEngine.h` explicitly.
+`Core/QueryDiagnostics.h` holds shared query diagnostics used by both graph
+queries and IR analyses. `Query/QueryTypes.h` contains shared graph-query
+vocabulary; criteria, resource types, and transform/diff/dataflow-specific
+results have focused headers. `Models/FindingTypes.h` defines the shared
+`AnalysisRuleDescriptor` and `AnalysisFinding` types used by all IR analyses.
+`QuerySupport.h` and `Traversal.h` are private helpers in `lib/IR/PDG/Query/`
+(`query_detail` namespace).
+
+`ProgramGraph` owns nodes, edges, function/call wrappers, and tree wrappers.
+LLVM values and debug metadata remain owned by the module. Construct a local
+graph with `GraphBuilder(graph).build(module)` and optionally annotate it with
+`bindDebugInfo(module)`. Rebuilding replaces its contents and advances the
+query-cache epoch; previously returned nodes, edges, and query results must
+be discarded. Each data-dependence pass starts a fresh construction cycle,
+including after changes to the same module. The legacy LLVM dependence passes use the shared
+`ProgramGraph::getInstance()`; structural builders and queries also support
+independent graph instances. Call graphs are owned by the pass or caller that
+constructs them, with no process-global cached module state.
+
+Cypher is a front end: execute a selector, then pass its nodes through
+`PDGCriteria::nodeSet(...)` to graph queries or rules. This factory preserves
+an explicitly empty selection instead of treating it as omitted criteria.
+Invalid selectors are diagnosed before an analysis runs. The unused,
+unbuilt advanced-extension API has been removed; supported Cypher behavior
+is defined by the parser and executor compiled into `CanaryPDGCypher`.
 
 ## Key Features
 
@@ -19,7 +79,7 @@ The Cypher query-language parser and executor live separately under
 - **Field-Sensitive**: Handles structure fields and array elements separately
 - **Parameter Trees**: Tree structures for field-sensitive parameter analysis
 
-## Query Services
+## Graph queries and semantic services
 
 - **`SliceQuery`**: forward slices, backward slices, chops, and thin slices
 - **`DependenceQuery`**: reachability, shortest paths, all shortest paths, and
@@ -33,34 +93,38 @@ The Cypher query-language parser and executor live separately under
 - **`SummaryQuery`**: source/target relationship buckets with witness paths
 - **`ResourceFlowQuery`**: acquire/use/transfer/release events over resource
   families
-- **`RuleQuery`**: semantic CodeQL migrations with IDs, coverage boundaries,
+- **`RuleEngine`**: semantic CodeQL migrations with IDs, coverage boundaries,
   findings, CWE tags, and evidence; shared LLVM facts live in **`ValueFacts`**
-- **`BoundsQuery`**: allocation/subobject capacity, access widths and offsets,
+- **`BoundsAnalysis`**: allocation/subobject capacity, access widths and offsets,
   symbolic end relations, program-point string termination/length and format
   output bounds; uses LLVM AA and MemorySSA
-- **`LifetimeQuery`**: per-object CFG release/escape states, matched direct
+- **`LifetimeAnalysis`**: per-object CFG release/escape states, matched direct
   calls, realloc alternatives and lock counts; compatible branch predicates
   distinguish double release, use after release and never/may resource leaks
-- **`StateQuery`**: strong local updates, guard-consistent path witnesses,
+- **`StateAnalysis`**: strong local updates, guard-consistent path witnesses,
   null/dereference and conditional output summaries, scanf output effects;
   exposes pre-access pointer/initialization facts
-- **`TaintQuery`**: PDG-owned CFG worklist and context-keyed function summaries,
+- **`TaintAnalysis`**: PDG-owned CFG worklist and context-keyed function summaries,
   matched call/return mappings, field offsets, library transfers,
   parameter-provenance wrapper summaries, flag guards and domain-specific barriers; exposes source and
   concatenation evidence without interpreting arbitrary PDG edges as taint
-- **`ArithmeticQuery`**: promotion/bitwidth-aware mathematical ranges, edge
+- **`ArithmeticAnalysis`**: promotion/bitwidth-aware mathematical ranges, edge
   guards, MemorySSA definitions, allocation provenance and scalar taint
-- **`ApiQuery`**: security settings and CFG API protocols for certificates,
+- **`ApiAnalysis`**: security settings and CFG API protocols for certificates,
   cryptography, XML entities, DACLs and permission masks
-- **`CallContractQuery`**: target-ABI format types, argument contracts and
+- **`CallContractAnalysis`**: target-ABI format types, argument contracts and
   inferred variadic sentinel conventions
+- **`ProtocolAnalysis`**: bounded shared-global race and lock-order candidates
+  across potentially overlapping pthread workers, plus stable-path filesystem
+  check/use protocols. These are Lotus-specific `lotus/` rules with explicit
+  modeling limits, separate from the migrated `cpp/` IDs.
 - **`CppLibraryModels`**: exact standard string API effects with separate opaque
   object contents and bytes; stable object-return aliases and numeric barriers
 - **`PDGCriteriaResolver`**: criteria resolution from nodes, LLVM values,
-  function names, callee names, source locations, property specs, and Cypher
-  selections
+  function names, callee names, source locations, and property specs
 
-Each service consumes a common option/result vocabulary:
+Graph traversal services consume a common option/result vocabulary. Semantic
+analyses expose their own typed facts/results and feed rule evaluation:
 
 - ``PDGQueryOptions``: edge preset, scope, context mode, limits, cache policy,
   and explanation mode
@@ -71,18 +135,19 @@ Each service consumes a common option/result vocabulary:
 ## Usage
 
 ```cpp
-#include "IR/PDG/Analysis/SliceQuery.h"
-#include "IR/PDG/Core/ProgramDependencyGraph.h"
+#include "IR/PDG/Query/SliceQuery.h"
+#include "IR/PDG/Construction/ProgramDependencyGraph.h"
+#include "llvm/IR/LegacyPassManager.h"
 
 // Run PDG passes
-legacy::PassManager PM;
-PM.add(new DataDependencyGraph());
-PM.add(new ControlDependencyGraph());
-auto *pdgPass = new ProgramDependencyGraph();
+llvm::legacy::PassManager PM;
+PM.add(new pdg::DataDependencyGraph());
+PM.add(new pdg::ControlDependencyGraph());
+auto *pdgPass = new pdg::ProgramDependencyGraph();
 PM.add(pdgPass);
 PM.run(module);
 
-ProgramGraph *G = pdgPass->getPDG();
+pdg::ProgramGraph *G = pdgPass->getPDG();
 pdg::SliceQuery slicer(*G);
 
 pdg::PDGCriteria criteria;
@@ -148,12 +213,20 @@ not infer taint or path feasibility from dependence reachability.
 CLI lifetime exploration defaults to 4096 states per object
 (`--lifetime-state-limit`, 0 disables this budget), independently of the
 `--taint-step-limit` worklist budget. Incomplete exploration is reported.
+`--protocol-state-limit` separately controls protocol worker/check/cycle
+searches (default 4096, zero disables the budget).
 Each rule descriptor records retained-IR and source-information limitations.
+Shared callee resolution follows immutable function-pointer globals, unchanged
+local spills and agreeing select/phi targets. Bounds checks also use guarded
+SCEV index ranges for stack/global arrays, and lifetime checks model local
+`unique_ptr` default-deleter cleanup/get/release/reset effects. See
+`tools/ir/examples/README.md` and `COVERAGE.md` for the capability boundaries
+and the catalog-to-example mapping.
 
 ## See Also
 
 - Headers: `include/IR/PDG/`
 - Documentation: `docs/source/ir/pdg.rst`
-- Query API: `include/IR/PDG/Analysis/Query.h`
-- Focused slicing API: `include/IR/PDG/Analysis/SliceQuery.h`
-- Cypher query language: `include/IR/PDG/QueryLanguage/Cypher.h`
+- Query API: `include/IR/PDG/Query/Query.h`
+- Focused slicing API: `include/IR/PDG/Query/SliceQuery.h`
+- Cypher query language: `include/IR/PDG/Cypher/Cypher.h`

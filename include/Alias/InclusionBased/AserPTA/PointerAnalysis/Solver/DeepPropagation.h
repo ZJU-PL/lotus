@@ -29,6 +29,7 @@ public:
   std::vector<typename PT::PtsTy> cachedPTS;
   std::map<Edge, typename PT::PtsTy> edgeCachedPTS;
   std::vector<CGNodeTy *> blackNodes;
+  std::vector<CGNodeTy *> greyNodes;
 
 protected:
   void runSolver(LangModel &langModel) {
@@ -111,6 +112,7 @@ protected:
                                           PT::getPointsTo((*it)->getNodeID()));
           deepPropagate(*it, *it, diffPTS, changed);
           unmarkBlack();
+          unifyGrey();
         }
 
         // for all store constraints
@@ -139,6 +141,7 @@ protected:
             }
           }
           unmarkBlack();
+          unifyGrey();
         }
 
         // for all offset constraints
@@ -184,23 +187,27 @@ protected:
       }
       changed = true;
       // line 10 of algo 7
+      bool reached = false;
       for (auto cit = start->succ_copy_begin(), cie = start->succ_copy_end();
            cit != cie; cit++) {
-        if (*cit == stop || deepPropagate(*cit, stop, newPTS, changed)) {
-          start->setColor(Color::GREY);
-          return true;
-        } else {
-          start->setColor(Color::BLACK);
-          blackNodes.push_back(start);
-          return false;
-        }
+        if (*cit == stop || deepPropagate(*cit, stop, newPTS, changed))
+          reached = true;
       }
+      if (reached) {
+        start->setColor(Color::GREY);
+        greyNodes.push_back(start);
+        return true;
+      }
+      start->setColor(Color::BLACK);
+      blackNodes.push_back(start);
+      return false;
     } else {
       // line 19-21, this seems inefficient
       for (auto cit = start->succ_copy_begin(), cie = start->succ_copy_end();
            cit != cie; cit++) {
         if (*cit == stop) {
           start->setColor(Color::GREY);
+          greyNodes.push_back(start);
           return true;
         }
       }
@@ -215,6 +222,14 @@ protected:
       n->setColor(Color::DEFAULT);
     }
     blackNodes.clear();
+  }
+
+  void unifyGrey() {
+    // a temp solution, actually we should unify the grey nodes into one node
+    for (CGNodeTy *n : greyNodes) {
+      n->setColor(Color::DEFAULT);
+    }
+    greyNodes.clear();
   }
 
   friend super;

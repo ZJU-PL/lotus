@@ -1,5 +1,4 @@
-#ifndef UTILITY_H
-#define UTILITY_H
+#pragma once
 
 #include "llvm/IR/PassManager.h"
 #include <llvm/IR/Function.h>
@@ -15,5 +14,3 @@ bool HasFlag(int argc, char *argv[], const std::string &flag);
 // 优化 Pass 相关的函数声明
 unsigned short ParsePassesFromFile(const std::string &filename, llvm::FunctionPassManager &FPM, llvm::PassBuilder &PB);
 unsigned short RunPasses(int *count, llvm::Function &function, llvm::FunctionPassManager &FPM);
-
-#endif // UTILITY_H

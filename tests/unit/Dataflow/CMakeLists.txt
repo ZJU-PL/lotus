@@ -1,13 +1,16 @@
 # Dataflow Unit Tests
 
 set(dataflow_test_libs)
-foreach(directory IfdsIde Mono WPDS APA DemandAPA NPA VASCO)
+foreach(directory IfdsIde Mono WPDS APA DemandAPA NPA VASCO SPARTA)
   string(TOLOWER "${directory}" group)
   lotus_test_group_enabled(dataflow "${group}" selected)
   if(NOT selected)
     continue()
   endif()
   if(group STREQUAL "demandapa" AND NOT TARGET DemandAPA)
+    continue()
+  endif()
+  if(group STREQUAL "sparta" AND NOT TARGET SPARTA::SPARTA)
     continue()
   endif()
   add_subdirectory(${directory})
@@ -25,6 +28,8 @@ foreach(directory IfdsIde Mono WPDS APA DemandAPA NPA VASCO)
     list(APPEND dataflow_test_libs NPADataFlow CanaryAliasAnalysisWrapper CanaryParallel)
   elseif(group STREQUAL "vasco")
     list(APPEND dataflow_test_libs VASCODataFlow CanaryParallel)
+  elseif(group STREQUAL "sparta")
+    list(APPEND dataflow_test_libs SPARTA::SPARTA GTest::gmock)
   endif()
 endforeach()
 
@@ -33,7 +38,8 @@ endforeach()
 lotus_collect_test_sources(dataflow_tests DataflowTestMain.cpp)
 add_lotus_collected_test_suite(dataflow_tests
   CUSTOM_MAIN
-  LINK_LIBS ${dataflow_test_libs})
+  LINK_LIBS ${dataflow_test_libs}
+  COMPILE_DEFINITIONS LOTUS_PHASAR_CONFIG_DIR="${PROJECT_SOURCE_DIR}/config")
 
 lotus_test_group_enabled(dataflow vasco vasco_selected)
 if(vasco_selected)

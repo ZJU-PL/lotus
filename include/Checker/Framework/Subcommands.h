@@ -6,7 +6,8 @@ namespace lotus::checker::tooling {
 
 llvm::cl::SubCommand &genericSubCommand();
 llvm::cl::SubCommand &kintSubCommand();
-llvm::cl::SubCommand &taintSubCommand();
+llvm::cl::SubCommand &taintIFDSSubCommand();
+llvm::cl::SubCommand &taintTPASubCommand();
 llvm::cl::SubCommand &concurrencySubCommand();
 llvm::cl::SubCommand &pulseSubCommand();
 llvm::cl::SubCommand &fitxSubCommand();

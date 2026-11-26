@@ -2,8 +2,7 @@
    because that name is already taken by a system header on 
    Windows */
 
-#ifndef _STD_TESTCASE_IO_H
-#define _STD_TESTCASE_IO_H
+#pragma once
 
 #include "std_testcase.h" /* needed for the twoint struct */
 
@@ -57,6 +56,4 @@ extern char** globalArgv;
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif

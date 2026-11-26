@@ -2,6 +2,7 @@
 
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/PtsSet.h"
 
+#include <cstddef>
 #include <type_traits>
 #include <unordered_map>
 
@@ -62,6 +63,8 @@ private:
   }
 
 public:
+  bool isOverlay() const { return base != nullptr; }
+
   PtsMap makeOverlay() const {
     PtsMap result;
     result.base = this;

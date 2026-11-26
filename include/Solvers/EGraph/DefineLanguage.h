@@ -31,11 +31,11 @@ public:
 
   DynamicLang() = default;
   DynamicLang(Symbol op, std::vector<Id> children)
-      : op_(std::move(op)), children_(children.begin(), children.end()) {}
+      : op_(op), children_(children.begin(), children.end()) {}
   DynamicLang(Symbol op, std::initializer_list<Id> children)
-      : op_(std::move(op)), children_(children.begin(), children.end()) {}
+      : op_(op), children_(children.begin(), children.end()) {}
 
-  static DynamicLang leaf(Symbol op) { return DynamicLang(std::move(op), {}); }
+  static DynamicLang leaf(Symbol op) { return DynamicLang(op, {}); }
 
   const Symbol &op() const { return op_; }
   const llvm::SmallVector<Id, 2> &children() const { return children_; }

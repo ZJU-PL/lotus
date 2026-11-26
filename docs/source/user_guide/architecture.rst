@@ -23,7 +23,7 @@ The repository is organized into a small number of top-level directories. Every 
    * - ``tests/``
      - Unit and integration tests
    * - ``third-party/``
-     - Bundled third-party libraries (CUDD, WPDS, spdlog)
+     - Bundled third-party libraries (CUDD, WPDS, spdlog, Mosaic)
    * - ``benchmarks/``
      - Benchmark programs for internal evaluation
    * - ``examples/``
@@ -57,16 +57,16 @@ The ``lib/`` directory is divided into 16 CMake subdirectories, each of which co
      - ``IFDSSolver``, ``IDESolver``, ``IntraMonoSolver``, ``InterMonoSolver``, ``WPDS engine``, ``NPA``
      - Interprocedural dataflow solvers
    * - ``lib/Analysis/``
-     - Call graph construction (CHA, RTA, VTA, FPA, OTF), CFG, control dependence, memory, null pointer, purity, SCCP, type hierarchy, feature extraction (``CanaryML``)
+     - Call graph construction (CHA, RTA, VTA, FPA, OTF), CFG, control dependence, memory, null pointer, purity, SCCP, type hierarchy
      - Foundational analysis utilities
    * - ``lib/Checker/``
      - ``Framework``, ``AE``, ``KINT``, ``Pulse``, ``Saber``, ``Concurrency``, ``GSAF``, ``FiTx``, ``TypeQualifier``, ``Tooling``
      - Bug detection engines and linters
    * - ``lib/Solvers/``
-     - ``Datalog``, ``EGraph``, ``SMT`` (LIBSMT, TUNA, STAUB, SymAbs, SMTStabilizer, SMTSampler, QuantSimp)
+     - ``Automata``, ``Datalog``, ``EGraph``, ``SMT`` (LIBSMT, TUNA, STAUB, SymAbs, SMTStabilizer, SMTSampler, QuantSimp)
      - Constraint and reachability solvers
    * - ``lib/Verification/``
-     - ``SymAbsAI``, ``Sifa``, ``Mosaic``, ``TraceAbstraction``, ``Automata``, ``PathProgram``, backend adapters (IKOS)
+     - ``SymAbsAI``, ``Sifa``, backend adapters (IKOS)
      - Formal verification backends
    * - ``lib/CFL/``
      - ``Classical``, ``DynamicDyck``, ``InterleavedDyck``, and ``CSIndex`` (CSR/FLARE indexing) engines
@@ -110,7 +110,7 @@ Each subdirectory under ``tools/`` contains the ``main()`` entry points that lin
    * - ``tools/alias/``
      - ``lotus-alias-sparrow-aa``, ``lotus-alias-aser-aa``, ``lotus-alias-dyck-aa``, ``lotus-alias-lotus-aa``, ``lotus-alias-tpa``, ``lotus-alias-bootstrap``, ``lotus-alias-fspta``, ``lotus-alias-sea-dsa-dg``, ``lotus-alias-seadsa-tool``, ``lotus-alias-call-graph``, ``lotus-alias-cclyzer-aa``
    * - ``tools/checker/``
-     - ``lotus-check`` (unified binary with ``--engine=generic|kint|ae|taint|pulse|concur|saber|fitx|gsaf|symex``)
+     - ``lotus-check`` (unified binary with ``--engine=generic|ae|kint|taint-ifds|taint-tpa|concur|pulse|fitx|saber|gsaf|symex``)
    * - ``tools/dataflow/``
      - ``lotus-dfa``, ``lotus-dfa-apa``, ``lotus-dfa-mono``, ``lotus-dfa-ifds``, ``lotus-dfa-npa``, ``lotus-dfa-wpds``
    * - ``tools/optimization/``
@@ -202,7 +202,9 @@ Core libraries under ``third-party/`` added in standard builds include:
 * **CUDD**: BDD-based symbolic computations used heavily in ``lib/Solvers/``.
 * **WPDS**: Weighted pushdown systems; used by the ``lib/Dataflow/`` WPDS engine.
 * **spdlog**: A fast C++ logging library used for framework diagnostics.
+* **Mosaic**: A theory-modular CHC solver for fixed-size bit-vectors and
+  integer arithmetic, used by the ``lotus-verify-mosaic`` tool.
 
-Additional vendored packages (such as Seal, CLAM, SeaHorn, SMACK, FPsolve, WALi/OpenNWA,
-PDAAAL, Horn-ICE, and FlowCutter) are managed as opt-in components gated by their respective
-``LOTUS_ENABLE_*`` configuration toggles.
+Additional vendored packages (such as SPARTA, Seal, CLAM, SeaHorn, SMACK, FPsolve,
+WALi/OpenNWA, PDAAAL, Horn-ICE, and FlowCutter) are managed as opt-in components gated by
+their respective ``LOTUS_ENABLE_*`` configuration toggles.

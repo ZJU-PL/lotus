@@ -14,8 +14,10 @@ const char *toString(EngineKind kind) {
     return "pulse";
   case EngineKind::KINT:
     return "kint";
-  case EngineKind::Taint:
-    return "taint";
+  case EngineKind::TaintIFDS:
+    return "taint-ifds";
+  case EngineKind::TaintTPA:
+    return "taint-tpa";
   case EngineKind::FiTx:
     return "fitx";
   case EngineKind::Concurrency:

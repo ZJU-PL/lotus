@@ -24,10 +24,12 @@
 #pragma once
 
 #include "Checker/AE/AEDetector.h"
+#include "Checker/AE/AbstractStateStore.h"
 #include "Checker/AE/ICFGWTO.h"
 #include "Checker/AE/RelationSolver.h"
 #include "Checker/AE/SVFIRWrapper.h"
 
+#include <chrono>
 #include <cstdint>
 #include <list>
 #include <map>
@@ -41,6 +43,10 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ErrorHandling.h>
+
+namespace llvm {
+class DominatorTree;
+}
 
 // Forward declarations for AserPTA
 namespace aser {
@@ -200,7 +206,34 @@ public:
   void setEnableDivZeroCheck(bool enable) { enableDivZeroCheck_ = enable; }
   void setEnableOverflowCheck(bool enable) { enableOverflowCheck_ = enable; }
   void setEnableMemLeakCheck(bool enable) { enableMemLeakCheck_ = enable; }
+  /// Legacy spelling of selecting root-SCC entry mode.
   void setAnalyzeAllFunctions(bool enable) { analyzeAllFunctions_ = enable; }
+
+  /// Restricts the analysis to the entry points reachable from `main` (`Main`)
+  /// or starts from each call-graph root SCC (`NoMain`). Mirrors SVF's
+  /// `-ae-fun-entry` option.
+  enum class FunEntryMode { Main, NoMain };
+
+  void setFunEntryMode(FunEntryMode mode) {
+    analyzeAllFunctions_ = (mode == FunEntryMode::NoMain);
+  }
+
+  FunEntryMode getFunEntryMode() const {
+    return analyzeAllFunctions_ ? FunEntryMode::NoMain : FunEntryMode::Main;
+  }
+
+  /// Wall-clock budget for the whole abstract execution in seconds. `0` or a
+  /// negative value disables the budget. On expiry the analysis stops with the
+  /// findings collected so far and reports the truncation through
+  /// `analysisTimedOut()`.
+  ///
+  /// SVF declares the equivalent `-timeout` option but never enforces it; the
+  /// budget here is actually checked in the interpretation loops.
+  void setTimeLimitSeconds(int64_t seconds) { timeLimitSeconds_ = seconds; }
+
+  int64_t getTimeLimitSeconds() const { return timeLimitSeconds_; }
+
+  bool analysisTimedOut() const { return timedOut_; }
   void setPrintStats(bool enable) { printStats_ = enable; }
 
   std::set<const llvm::CallBase *> checkpoints;
@@ -215,17 +248,31 @@ public:
   }
 
   AbstractState &getAbsStateFromTrace(const llvm::Instruction *val) {
-    auto it = abstractTrace.find(val);
-    if (it == abstractTrace.end()) {
+    AbstractState *state = stateStore_.find(val);
+    if (!state) {
       llvm::report_fatal_error(
           "No abstract state in trace for requested instruction");
     }
-    return it->second;
+    return *state;
   }
 
   bool hasAbsStateFromTrace(const llvm::Instruction *val) {
-    return abstractTrace.count(val) != 0;
+    return stateStore_.contains(val);
   }
+
+  /// Selects how per-instruction states are retained. Both layouts answer the
+  /// same queries; `StateLayout::Sparse` only stops retaining states that no
+  /// later reader can observe.
+  void setStateLayout(StateLayout layout) { stateStore_.setLayout(layout); }
+
+  StateLayout getStateLayout() const { return stateStore_.layout(); }
+
+  /// True when the SVFG required by full sparse mode has been constructed.
+  bool isSVFGBackedSparseActive() const;
+  uint32_t getSVFGSparseLoadQueryCount() const {
+    return svfgSparseLoadQueries_;
+  }
+  const AbstractStateStore &getStateStore() const { return stateStore_; }
 
   AEExtAPI *getUtils() const { return utils; }
 
@@ -246,6 +293,7 @@ private:
 
   // Pointer analysis (AserPTA) - for call graph and indirect calls
   class PTAPtr; // Opaque pointer to avoid template dependencies in header
+  class SVFGSparseContext;
   std::unique_ptr<PTAPtr> pta_;
   bool ptaReady_{false};
 
@@ -265,6 +313,9 @@ private:
   std::unordered_map<const llvm::Function *, uint32_t> recursiveSccIdMap_;
   std::unordered_map<uint32_t, std::vector<const llvm::Function *>>
       recursiveSccMembers_;
+  std::vector<const llvm::Function *> rootSccEntries_;
+  std::map<const llvm::Function *, std::unique_ptr<llvm::DominatorTree>>
+      dominatorTrees_;
   HandleRecur recursionMode_; // Recursion handling mode (default: WIDEN_NARROW)
   uint32_t widenDelay_{3};
   bool strictCheckpoint_{true};
@@ -276,21 +327,46 @@ private:
   bool enableOverflowCheck_{false};
   bool enableMemLeakCheck_{false}; // Disabled by default
   bool analyzeAllFunctions_{false};
+  int64_t timeLimitSeconds_{0};
+  bool timedOut_{false};
+  /// Per-return-site slot ids (`returnSlotId`).
+  mutable std::unordered_map<const llvm::Instruction *, uint32_t> retSlotIds_;
+  /// Cache of cycle -> value ids defined inside it (def-site layout only).
+  /// An entry whose vector is empty means "materialize everything".
+  std::map<const ICFGCycleWTO *, std::unordered_set<uint32_t>> cycleValueIds_;
+  std::chrono::steady_clock::time_point deadline_;
   bool printStats_{false};
+  /// During a widening phase, temporary extrapolations such as [0,+inf] can
+  /// expose spurious bugs before narrowing recovers the loop bound. Findings
+  /// stay enabled for the precise pre-widening iterations and for narrowing;
+  /// detectors are suppressed only while the approximation is deliberately
+  /// accelerating toward a fixpoint.
+  bool suppressDetectors_{false};
 
   // Track which checkpoints have been checked
   std::set<const llvm::CallBase *> checkedCheckpoints_;
 
   std::vector<std::unique_ptr<AEDetector>> detectors;
-  std::map<const llvm::Instruction *, AbstractState> abstractTrace;
+  /// SVFG-backed object-value def sites used by StateLayout::Sparse.
+  std::unique_ptr<SVFGSparseContext> svfgSparse_;
+  std::unordered_map<const llvm::Instruction *, AbstractValue>
+      sparseObjectDefs_;
+  uint32_t svfgSparseLoadQueries_{0};
+  /// Per-instruction abstract states, retention policy selected by
+  /// `setStateLayout`. Replaces the historical raw state map so the sparse
+  /// layout can drop unobservable states.
+  AbstractStateStore stateStore_;
   AbstractState globalState; // State for global variables
+  std::map<std::pair<uint32_t, int64_t>, uint32_t> gepFieldObjMap_;
+  uint32_t nextGepFieldId_{0x00800000};
+  std::unordered_map<uint32_t, IntervalValue> gepObjOffsetFromBaseByObjId_;
   std::map<std::string, std::function<void(const llvm::CallBase *)>> func_map;
   std::vector<const llvm::CallBase *> callSiteStack;
 
   // Stable value ID mapping
-  std::unordered_map<const llvm::Value *, uint32_t> valueToIdMap_;
+  mutable std::unordered_map<const llvm::Value *, uint32_t> valueToIdMap_;
   std::unordered_map<uint32_t, const llvm::Value *> idToValueMap_;
-  uint32_t nextValueId_;
+  mutable uint32_t nextValueId_;
   // Dedicated slot for function return summaries (must not collide with
   // NullPtr ID 0 or regular value IDs).
   enum : uint32_t { ReturnValueId = 0xFFFFFFFEu };
@@ -320,9 +396,11 @@ private:
 private:
   void updateStateOnAddr(const llvm::AllocaInst *addr);
   void updateStateOnBinary(const llvm::BinaryOperator *binary);
+  void updateStateOnFNeg(const llvm::UnaryOperator *neg);
   void updateStateOnCmp(const llvm::CmpInst *cmp);
   void updateStateOnLoad(const llvm::LoadInst *load);
   void updateStateOnStore(const llvm::StoreInst *store);
+  void updateStateOnAtomic(const llvm::Instruction *inst);
   void updateStateOnCast(const llvm::CastInst *cast);
   void updateStateOnCall(const llvm::CallBase *call);
   void updateStateOnRet(const llvm::ReturnInst *ret);
@@ -367,6 +445,53 @@ private:
   const llvm::Function *getCallee(const llvm::CallBase *callNode);
   bool shouldApplyNarrowing(const llvm::Function *fun);
 
+  /// Value ids defined inside a WTO cycle. In the def-site layout these are the
+  /// entries that must be materialized out of the run-wide table before
+  /// widening/narrowing a cycle head, and scattered back afterwards
+  /// (SVF: `initCycleValVars` + the `*CycleState` overrides).
+  ///
+  /// Returns `nullptr` when the cycle contains a call to a recursive function:
+  /// the values that matter then live in the callee, so the whole table has to
+  /// be materialized to keep the widened fixpoint identical to the dense one.
+  const std::unordered_set<uint32_t> *cycleValueIds(const ICFGCycleWTO *cycle);
+
+  /// Builds the SVFG used by full sparse mode and initializes object-value
+  /// def-site tracking.
+  void initializeSVFGSparse(llvm::Module *module);
+
+  /// Collects the object value at a load from its SVFG memory predecessors.
+  AbstractValue getSVFGSparseLoadValue(const llvm::LoadInst *load);
+
+  /// Starts the wall-clock budget. Called once per analysis run.
+  void startTimeBudget();
+
+  /// Returns true once the budget is exhausted, and latches `timedOut_`.
+  bool timeBudgetExhausted();
+
+  /// Decides whether a store through a pointer with address set @p targets may
+  /// replace the target object instead of being joined into it.
+  ///
+  /// Completes `AbstractState::allowsStrongUpdate` with the two checks that
+  /// need call-graph and type information, matching SVF's
+  /// `AbstractInterpretation::isStrongUpdate`:
+  /// local variables of recursive functions and array bases.
+  bool isStrongUpdateForStore(const AddressValue &targets,
+                              const AbstractState &state) const;
+
+  /// Whether @p objId denotes a local object of a recursive function.
+  /// Value id under which a `ret` instruction's returned value is recorded.
+  ///
+  /// Every return site gets its own id: the historical shared sentinel
+  /// (`ReturnValueId`) is written at every `ret`, which collides as soon as
+  /// intermediate values are stored once per definition (def-site layout).
+  uint32_t returnSlotId(const llvm::Instruction *ret) const;
+
+  bool isLocalOfRecursiveFun(uint32_t objId) const;
+
+  /// Whether @p objId is the base object of an array allocation. Individual
+  /// (constant-offset) field objects are not array bases and stay updatable.
+  bool isArrayBaseObject(uint32_t objId) const;
+
   void collectCheckPoint();
   void checkPointAllSet();
   void recursiveCallPass(const llvm::CallBase *callNode,
@@ -377,9 +502,16 @@ private:
   bool isBranchFeasible(const llvm::BranchInst *branch, AbstractState &as,
                         bool isTrueEdge);
   bool isCmpBranchFeasible(const llvm::CmpInst *cmpInst, bool succ,
-                           AbstractState &as);
-  bool isSwitchBranchFeasible(const llvm::SwitchInst *switchInst,
-                              int64_t caseValue, AbstractState &as);
+                           AbstractState &as,
+                           const llvm::Instruction *branchPoint);
+  void refineMemoryFromLoad(const llvm::Value *value, AbstractState &as,
+                            const llvm::Instruction *branchPoint);
+  bool refineIntegerExtensions(const llvm::Value *value,
+                               const IntervalValue &range, AbstractState &as,
+                               const llvm::Instruction *guard);
+  bool isSwitchSuccessorFeasible(const llvm::SwitchInst *switchInst,
+                                 const llvm::BasicBlock *successor,
+                                 AbstractState &as);
 
   // Relational solver integration
   bool checkPathFeasibilityWithSolver(const AbstractState &as,
@@ -403,16 +535,26 @@ private:
         {llvm::CmpInst::FCMP_OGE, llvm::CmpInst::FCMP_OLT},
         {llvm::CmpInst::FCMP_OLT, llvm::CmpInst::FCMP_OGE},
         {llvm::CmpInst::FCMP_OLE, llvm::CmpInst::FCMP_OGT},
+        {llvm::CmpInst::FCMP_UGT, llvm::CmpInst::FCMP_ULE},
+        {llvm::CmpInst::FCMP_UGE, llvm::CmpInst::FCMP_ULT},
+        {llvm::CmpInst::FCMP_ULT, llvm::CmpInst::FCMP_UGE},
+        {llvm::CmpInst::FCMP_ULE, llvm::CmpInst::FCMP_UGT},
         {llvm::CmpInst::FCMP_ONE, llvm::CmpInst::FCMP_OEQ},
         {llvm::CmpInst::FCMP_UNE, llvm::CmpInst::FCMP_UEQ},
+        {llvm::CmpInst::FCMP_ORD, llvm::CmpInst::FCMP_UNO},
+        {llvm::CmpInst::FCMP_UNO, llvm::CmpInst::FCMP_ORD},
+        {llvm::CmpInst::FCMP_TRUE, llvm::CmpInst::FCMP_FALSE},
+        {llvm::CmpInst::FCMP_FALSE, llvm::CmpInst::FCMP_TRUE},
         {llvm::CmpInst::ICMP_EQ, llvm::CmpInst::ICMP_NE},
         {llvm::CmpInst::ICMP_NE, llvm::CmpInst::ICMP_EQ},
         {llvm::CmpInst::ICMP_UGT, llvm::CmpInst::ICMP_ULE},
         {llvm::CmpInst::ICMP_ULT, llvm::CmpInst::ICMP_UGE},
         {llvm::CmpInst::ICMP_UGE, llvm::CmpInst::ICMP_ULT},
+        {llvm::CmpInst::ICMP_ULE, llvm::CmpInst::ICMP_UGT},
         {llvm::CmpInst::ICMP_SGT, llvm::CmpInst::ICMP_SLE},
         {llvm::CmpInst::ICMP_SLT, llvm::CmpInst::ICMP_SGE},
         {llvm::CmpInst::ICMP_SGE, llvm::CmpInst::ICMP_SLT},
+        {llvm::CmpInst::ICMP_SLE, llvm::CmpInst::ICMP_SGT},
     };
     return _reverse_predicate;
   }
@@ -425,16 +567,26 @@ private:
         {llvm::CmpInst::FCMP_OGE, llvm::CmpInst::FCMP_OLE},
         {llvm::CmpInst::FCMP_OLT, llvm::CmpInst::FCMP_OGT},
         {llvm::CmpInst::FCMP_OLE, llvm::CmpInst::FCMP_OGE},
+        {llvm::CmpInst::FCMP_UGT, llvm::CmpInst::FCMP_ULT},
+        {llvm::CmpInst::FCMP_UGE, llvm::CmpInst::FCMP_ULE},
+        {llvm::CmpInst::FCMP_ULT, llvm::CmpInst::FCMP_UGT},
+        {llvm::CmpInst::FCMP_ULE, llvm::CmpInst::FCMP_UGE},
         {llvm::CmpInst::FCMP_ONE, llvm::CmpInst::FCMP_ONE},
         {llvm::CmpInst::FCMP_UNE, llvm::CmpInst::FCMP_UNE},
+        {llvm::CmpInst::FCMP_ORD, llvm::CmpInst::FCMP_ORD},
+        {llvm::CmpInst::FCMP_UNO, llvm::CmpInst::FCMP_UNO},
+        {llvm::CmpInst::FCMP_TRUE, llvm::CmpInst::FCMP_TRUE},
+        {llvm::CmpInst::FCMP_FALSE, llvm::CmpInst::FCMP_FALSE},
         {llvm::CmpInst::ICMP_EQ, llvm::CmpInst::ICMP_EQ},
         {llvm::CmpInst::ICMP_NE, llvm::CmpInst::ICMP_NE},
         {llvm::CmpInst::ICMP_UGT, llvm::CmpInst::ICMP_ULT},
         {llvm::CmpInst::ICMP_ULT, llvm::CmpInst::ICMP_UGT},
         {llvm::CmpInst::ICMP_UGE, llvm::CmpInst::ICMP_ULE},
+        {llvm::CmpInst::ICMP_ULE, llvm::CmpInst::ICMP_UGE},
         {llvm::CmpInst::ICMP_SGT, llvm::CmpInst::ICMP_SLT},
         {llvm::CmpInst::ICMP_SLT, llvm::CmpInst::ICMP_SGT},
         {llvm::CmpInst::ICMP_SGE, llvm::CmpInst::ICMP_SLE},
+        {llvm::CmpInst::ICMP_SLE, llvm::CmpInst::ICMP_SGE},
     };
     return _switch_lhsrhs_predicate;
   }
@@ -454,6 +606,13 @@ public:
   // Get all possible callees for a call (direct + indirect resolved via PTA)
   std::vector<const llvm::Function *>
   getCallees(const llvm::CallBase *callNode) const;
+
+  /// Return the run-wide synthetic object id for a GEP (base object, byte
+  /// offset) pair. Sharing this registry across states mirrors SVF's global
+  /// field-object map and prevents branch-local id collisions.
+  uint32_t getOrCreateGepFieldObjId(uint32_t baseObjId, int64_t offset);
+  void recordGepObjOffsetFromBase(uint32_t objId, const IntervalValue &offset);
+  bool getGepObjOffsetFromBase(uint32_t objId, IntervalValue &offset) const;
 };
 
 } // namespace analysis

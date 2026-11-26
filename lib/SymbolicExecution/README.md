@@ -1,111 +1,73 @@
 # Symbolic Execution
 
-This subtree provides Lotus's symbolic bug-checking stack. It builds a
-path-sensitive analysis over the guarded value-flow graph, tracks symbolic
-memory and scalar facts in `AnalysisState`, and uses SMT-backed path-condition
-reasoning to decide whether a reported path is still feasible. The original
-design direction came from the symbolic heap and disjointness work behind the
-ISSTA 2024 BOF paper, but the implementation in Lotus has since grown into a
-more general symbolic execution subsystem that supports additional bug classes.
-
-## What It Builds
-
-At the top level, `SymbolicExecutionWrapper` runs the analysis as a module pass
-and delegates execution to `AnalysisDriver`.
-
-The usual analysis flow is:
-
-1. Initialize shared module context through `gvfg_utility`.
-2. Build or query the per-function GVFG used as the symbolic execution graph.
-3. Run `AnalysisDriver` over functions, usually in a summary-friendly order.
-4. Propagate `AnalysisState` through GVFG nodes, memory operations, branches,
-   and calls.
-5. Represent scalar values with `PropertyValue`, `PropertyInteger`, and
-   `PropertySymExpr`.
-6. Use `PathCondSolver` and `ConstraintRepr` to encode branch and data
-   constraints into SMT queries.
-7. Apply summaries, taint specifications, and memory API models while tracking
-   bug traces.
+This subtree provides Lotus's path-sensitive symbolic bug-checking stack. It executes symbolically over the guarded value-flow graph (GVFG), tracks
+symbolic memory, scalar properties, and taint facts in `AnalysisState`, uses
+SMT-backed path-condition reasoning to check feasibility, and runs bug checkers
+through a decoupled extension layer.
 
 ## Directory Layout
 
-Sources are grouped by architectural responsibility, under both
-`include/SymbolicExecution/` and `lib/SymbolicExecution/`:
+Headers under `include/SymbolicExecution/` and implementations under
+`lib/SymbolicExecution/` mirror one another across seven acyclic layers:
 
-- `Core/`: the symbolic execution engine and its state/value abstractions.
-- `Solver/`: constraint representation, path-condition solving, and summary
-  solver pooling.
-- `Checks/`: query representation and bug-specific checking logic.
-- `Integration/`: adapters to LLVM/Lotus/GVFG.
+- `Support/`: module-scoped `AnalysisContext`, configurable `AnalysisLimit`
+  flags, and hashing/formatting utilities (`HashUtil`).
+- `Domain/`: symbolic scalar values and memory designators (`BigInteger`,
+  `ProgramVar`, `PropertyValue`, `PropertyInteger`, `PropertySym`,
+  `PropertyAllocator`, `SymbolicMemory`).
+- `Models/`: declarative library specifications (`MemoryAPI` for allocators,
+  deallocators, and known libraries; `TaintModel` for taint sources, transfers,
+  and sinks).
+- `Solver/`: SMT path-condition representation and solving (`ConstraintRepr`,
+  `PathCondSolver`, `SummarySolverManager`).
+- `Engine/`: path-sensitive execution engine (`GuardedValue`, `CStringState`,
+  `TaintState`, `AnalysisExtension`, `AnalysisState`, `AnalysisSummary`,
+  `AnalysisDriver`).
+- `Checks/`: bug types, query hierarchy, and bug-checking engine (`BugTypes`,
+  `Query`, `QueryEngine`, `MemoryChecks`, `ArithmeticChecks`).
+- `Integration/`: outer pass-pipeline and reporting adapter
+  (`SymbolicExecutionWrapper`).
 
-`Core` does not depend on `Checks`; `Checks` may inspect `Core` state and use
-`Solver` functionality; `Integration` sits at the outer boundary.
+### Layering Invariants
 
-## Major Components
+Dependencies flow strictly downward with zero cycles:
 
-- `Core/AnalysisDriver.*`: coordinates whole-module execution, collects
-  summaries, and records bug traces.
-- `Core/AnalysisState.*`, `Core/AnalysisStateSummary.*`, and
-  `Core/AnalysisStateTaint.*`: implement the symbolic abstract state, including
-  memory objects, path-sensitive value sets, summary import/export, and
-  taint-aware state updates.
-- `Core/AnalysisSummary.*`: packages the interprocedural portion of a function's
-  state for reuse by callers.
-- `Core/SymbolicMemory.*`, `Core/GuardedValue.*`, `Core/CStringState.*`, and
-  `Core/TaintState.*`: access paths, abstract memory objects, guarded value
-  containers, C-string length state, and taint facts and traces.
-- `Core/ProgramVar.*`: defines the stable symbolic variable layer used to name
-  GVFG nodes and analysis-introduced auxiliary values.
-- `Core/PropertyValue.*`, `Core/PropertyInteger.*`, and `Core/PropertySym.*`:
-  define the scalar property domain used for offsets, sizes, comparisons, and
-  symbolic arithmetic.
-- `Solver/ConstraintRepr.*` and `Solver/PathCondSolver.*`: translate symbolic
-  facts and path predicates into SMT expressions and satisfiability checks.
-- `Solver/SummarySolverManager.*`: pools the solvers that own summary formulas.
-- `Core/MemoryAPI.*` and `Integration/GVFGUtility.*`: provide allocation
-  modeling, library compatibility hooks, data-layout queries, function-order
-  helpers, and access to the active GVFG builder.
-- `Core/TaintModel.*`: stores source, transfer, and sink specifications used
-  when a bug class depends on tainted data reaching sensitive program points.
-- `Checks/Query.*` and `Checks/AnalysisStateQuery.*`: represent numerical
-  queries and implement bug-specific query construction, inlining, evaluation,
-  and reporting.
-- `Integration/SymbolicExecutionWrapper.*`: integrates the subsystem with the
-  legacy LLVM pass pipeline and emits final bug reports.
+- `Support` has no internal dependencies.
+- `Domain` depends only on `Support`.
+- `Models` depends only on `Support` and `Domain`.
+- `Solver` depends only on `Support` and `Domain`.
+- `Engine` depends on `Support`, `Domain`, `Models`, and `Solver` — never on
+  `Checks` or `Integration`. Bug checkers plug into `Engine` through the
+  `StateExtension` / `SummaryExtension` hooks in `Engine/AnalysisExtension.h`.
+- `Checks` depends on `Engine` and lower layers — never on `Integration`.
+- `Integration` sits strictly at the outer boundary, wiring `AnalysisContext`,
+  `TaintModel`, `AnalysisDriver`, `QueryEngine`, and Lotus's `BugReportMgr`.
 
-## Key Concepts
+## Execution Flow
 
-- `ProgramValuePtr` and `Var` are the symbolic names that connect analysis
-  state back to concrete program entities. They may wrap GVFG nodes directly or
-  auxiliary values introduced by the analysis.
-- `PropertySymExpr` models affine expressions over `Var`s. This is the main
-  scalar language used for offsets, sizes, pointer arithmetic summaries, and
-  branch comparisons.
-- `AnalysisState` tracks symbolic memory through access paths, points-to items,
-  guarded value sets, and path conditions rather than through raw LLVM values
-  alone.
-- `gvfg_utility` is the glue layer between the symbolic executor and other Lotus
-  infrastructure. It hides module-global setup, graph lookup, library matching,
-  and shared layout queries behind a narrow interface.
-- `TaintModel` supplies one source of facts that the executor combines with
-  symbolic constraints and memory modeling when checking bug-specific
-  conditions.
+1. `SymbolicExecutionWrapper` constructs an `AnalysisContext` for the module,
+   a `TaintModel`, a `BugReportCollector`, and an `AnalysisDriver` configured
+   with a `QueryEngine` factory.
+2. `AnalysisDriver` computes a bottom-up call-graph order via `AnalysisContext`
+   and analyzes functions in summary-friendly order.
+3. For each function, `AnalysisState` transfers symbolic registers, points-to
+   sets, C-string lengths, freed pointers, and taint facts over the GVFG while
+   notifying `StateExtension` hooks (`onPreInstruction`, `onPostInstruction`,
+   `onCallSummary`, `finalizeSummary`).
+4. `QueryEngine` constructs numerical memory and arithmetic safety queries,
+   inlines callee `QuerySummary` payloads at call sites, batches SMT
+   satisfiability checks via `PathCondSolver`, and records confirmed reports in
+   `BugReportCollector`.
+5. `SymbolicExecutionWrapper` translates collected `BugReportRecord`s into
+   Lotus `BugReportMgr` diagnostics.
 
-## Relation to the BOF Paper
+## Headers & Starting Points
 
-The BOF work motivates the use of symbolic heaps, guarded memory reasoning, and
-disjointness-oriented bug checking in this directory. The current Lotus code is
-broader than that paper's presentation, though. It still uses the same core
-ideas around symbolic state, guarded flow, and SMT-backed feasibility, but the
-implementation now serves as a shared engine for more bug classes than the BOF
-evaluation alone describes.
+All public declarations live in `namespace SymbolicExecution` under
+`include/SymbolicExecution/`. Good starting points for contributors:
 
-## Headers
-
-Public interfaces live under `include/SymbolicExecution/`, grouped into
-`Core/`, `Solver/`, `Checks/`, and `Integration/`. New contributors usually
-want to start with `Integration/SymbolicExecutionWrapper.h`,
-`Core/AnalysisDriver.h`, and `Core/AnalysisState.h`, then read
-`Core/ProgramVar.h`, `Core/PropertyValue.h`, `Core/PropertySym.h`,
-`Integration/GVFGUtility.h`, and `Core/TaintModel.h` to see how symbolic values,
-utility shims, and taint specifications fit together.
+- `Integration/SymbolicExecutionWrapper.h`
+- `Engine/AnalysisDriver.h`, `Engine/AnalysisState.h`, `Engine/AnalysisExtension.h`
+- `Checks/BugTypes.h`, `Checks/Query.h`, `Checks/QueryEngine.h`
+- `Domain/ProgramVar.h`, `Domain/PropertyValue.h`, `Domain/SymbolicMemory.h`
+- `Support/AnalysisContext.h` and `Models/TaintModel.h`

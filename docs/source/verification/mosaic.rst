@@ -4,7 +4,7 @@ Mosaic
 The **Mosaic CHC Verifier** provides facilities for Constrained Horn Clause (CHC) 
 verification with advanced preprocessing and translation techniques.
 
-**Location**: ``include/Verification/Mosaic/``, ``lib/Verification/Mosaic/``
+**Location**: ``third-party/Mosaic/``
 
 **CLI Tool**: ``tools/verifier/mosaic/`` (binary ``lotus-verify-mosaic``)
 

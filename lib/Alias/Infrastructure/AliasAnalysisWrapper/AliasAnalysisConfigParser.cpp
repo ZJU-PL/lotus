@@ -34,6 +34,28 @@ std::string toLower(const std::string &str) {
   return result;
 }
 
+bool parseOptionalKCfaSuffix(const std::string &str, const std::string &prefix,
+                             unsigned &outK) {
+  if (str.size() <= prefix.size() || str.compare(0, prefix.size(), prefix) != 0)
+    return false;
+  std::string kStr = str.substr(prefix.size());
+  if (kStr.size() >= 3 && kStr.compare(kStr.size() - 3, 3, "cfa") == 0) {
+    kStr = kStr.substr(0, kStr.size() - 3);
+  }
+  if (kStr.empty() ||
+      !std::all_of(kStr.begin(), kStr.end(), [](unsigned char ch) {
+        return std::isdigit(ch) != 0;
+      })) {
+    return false;
+  }
+  try {
+    outK = static_cast<unsigned>(std::stoul(kStr));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
 } // namespace
 
 /**
@@ -112,6 +134,27 @@ std::string toLower(const std::string &str) {
 AAConfig lotus::parseAAConfigFromString(const std::string &str,
                                         const AAConfig &fallback) {
   std::string lower = toLower(str);
+
+  // Precision-oriented presets
+  if (lower == "fici") {
+    return AAConfig::FICI();
+  }
+  if (lower == "fics") {
+    return AAConfig::FICS(1);
+  }
+  unsigned presetK = 0;
+  if (parseOptionalKCfaSuffix(lower, "fics-", presetK)) {
+    return AAConfig::FICS(presetK);
+  }
+  if (lower == "fsci") {
+    return AAConfig::FSCI();
+  }
+  if (lower == "fscs") {
+    return AAConfig::FSCS(1);
+  }
+  if (parseOptionalKCfaSuffix(lower, "fscs-", presetK)) {
+    return AAConfig::FSCS(presetK);
+  }
 
   // SparrowAA variants
   if (lower == "andersen" || lower == "sparrow-aa" || lower == "sparrowaa" ||

@@ -1,10 +1,12 @@
 #include "Driver.h"
 
+#include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "IR/PDG/Analysis/PropertySpec.h"
-#include "IR/PDG/Analysis/Query.h"
-#include "IR/PDG/QueryLanguage/Cypher.h"
+#include "IR/PDG/Query/PropertySpec.h"
+#include "IR/PDG/Query/Query.h"
+#include "IR/PDG/Cypher/Cypher.h"
+#include "IR/PDG/Rules/RuleEngine.h"
 #include "Options.h"
 #include "Output.h"
 
@@ -24,7 +26,7 @@ static bool selectedRuleIds(std::vector<std::string> &ids,
                             const Options &config) {
   for (const auto &id : config.ruleIds)
     if (std::none_of(
-            RuleQuery::catalog().begin(), RuleQuery::catalog().end(),
+            RuleEngine::catalog().begin(), RuleEngine::catalog().end(),
             [&](const RuleDescriptor &rule) { return rule.id == id; })) {
       errs() << "Unknown PDG rule: " << id << "\n";
       return false;
@@ -33,7 +35,7 @@ static bool selectedRuleIds(std::vector<std::string> &ids,
     ids.assign(config.ruleIds.begin(), config.ruleIds.end());
     return true;
   }
-  for (const auto &rule : RuleQuery::catalog()) {
+  for (const auto &rule : RuleEngine::catalog()) {
     bool tagged =
         std::any_of(rule.cwes.begin(), rule.cwes.end(), [&](unsigned cwe) {
           return std::find(config.cweIds.begin(), config.cweIds.end(), cwe) !=
@@ -201,19 +203,20 @@ static bool queryIsComplete(const std::string &text) {
          upper.find("LIMIT") != std::string::npos;
 }
 
-static void runBatchMode(CypherQueryExecutor &executor,
+static bool runBatchMode(CypherQueryExecutor &executor,
                          const std::string &filename, const Options &config,
                          const Output &output) {
   std::ifstream file(filename);
   if (!file.is_open()) {
     errs() << "Error: Could not open file " << filename << "\n";
-    return;
+    return false;
   }
 
   std::string pending;
+  bool success = true;
   auto flush = [&]() {
     if (!pending.empty()) {
-      executeQuery(executor, pending, config, output);
+      success = executeQuery(executor, pending, config, output) && success;
       pending.clear();
     }
   };
@@ -237,6 +240,7 @@ static void runBatchMode(CypherQueryExecutor &executor,
       flush();
   }
   flush();
+  return success;
 }
 
 static bool selectNodesWithCypher(CypherQueryExecutor &executor,
@@ -257,9 +261,9 @@ static bool selectNodesWithCypher(CypherQueryExecutor &executor,
   return true;
 }
 
-static PDGQueryOptions buildAnalysisOptions(const Module &module,
-                                            CypherQueryExecutor &executor,
-                                            const Options &config) {
+static Optional<PDGQueryOptions>
+buildAnalysisOptions(const Module &module, CypherQueryExecutor &executor,
+                     const Options &config) {
   PDGQueryOptions options;
   options.edge_preset = parseEdgePreset(config);
   options.context_mode = config.contextSensitive
@@ -270,10 +274,15 @@ static PDGQueryOptions buildAnalysisOptions(const Module &module,
   if (!config.scopeFunction.empty()) {
     if (Function *function = module.getFunction(config.scopeFunction))
       options.scope = PDGQueryScope::functionScope(*function);
+    else {
+      errs() << "Unknown scope function: " << config.scopeFunction << "\n";
+      return None;
+    }
   } else if (!config.scopeQuery.empty()) {
     std::set<Node *> nodes;
-    if (selectNodesWithCypher(executor, config.scopeQuery, nodes))
-      options.scope = PDGQueryScope::nodeSet(nodes);
+    if (!selectNodesWithCypher(executor, config.scopeQuery, nodes))
+      return None;
+    options.scope = PDGQueryScope::nodeSet(nodes);
   } else {
     options.scope = PDGQueryScope::wholeGraph();
   }
@@ -284,20 +293,29 @@ static bool executeAnalysis(ProgramGraph &pdg, const Module &module,
                             CypherQueryExecutor &executor,
                             const Options &config, const Output &output) {
   std::string analysis = config.analysisName;
-  PDGQueryOptions options = buildAnalysisOptions(module, executor, config);
+  auto selected_options = buildAnalysisOptions(module, executor, config);
+  if (!selected_options)
+    return false;
+  PDGQueryOptions options = *selected_options;
   PDGCriteria criteria;
   PDGCriteria targets;
   PDGCriteria baseline;
 
-  if (!config.criteriaQuery.empty())
-    criteria.cypher_selections.push_back(
-        CypherSelection{config.criteriaQuery, ""});
-  if (!config.targetQuery.empty())
-    targets.cypher_selections.push_back(
-        CypherSelection{config.targetQuery, ""});
-  if (!config.baselineQuery.empty())
-    baseline.cypher_selections.push_back(
-        CypherSelection{config.baselineQuery, ""});
+  // Resolve selectors at the front end. Graph queries consume concrete
+  // criteria and never invoke a query-language parser or executor.
+  auto select = [&](const std::string &query, PDGCriteria &selected) {
+    if (query.empty())
+      return true;
+    PDGQueryResult::NodeSet nodes;
+    if (!selectNodesWithCypher(executor, query, nodes))
+      return false;
+    selected = PDGCriteria::nodeSet(std::move(nodes));
+    return true;
+  };
+  if (!select(config.criteriaQuery, criteria) ||
+      !select(config.targetQuery, targets) ||
+      !select(config.baselineQuery, baseline))
+    return false;
 
   if (!config.propertyFile.empty()) {
     PropertySpec spec;
@@ -346,9 +364,10 @@ static bool executeAnalysis(ProgramGraph &pdg, const Module &module,
         return false;
       TaintPolicy taint_policy;
       taint_policy.max_steps = config.taintStepLimit;
-      RuleQueryPolicy rule_policy;
+      RuleEnginePolicy rule_policy;
       rule_policy.lifetime_states_per_object = config.lifetimeStateLimit;
-      output.printRuleResult(RuleQuery(pdg).analyze(
+      rule_policy.protocol_states_per_search = config.protocolStateLimit;
+      output.printRuleResult(RuleEngine(pdg).analyze(
           ids, criteria, options, &module, taint_policy, rule_policy));
       return true;
     } catch (const std::invalid_argument &error) {
@@ -487,7 +506,7 @@ Optional<int> handleCatalogOptions(const Options &config) {
     if (!selectedRuleIds(ids, config))
       return 1;
     std::vector<RuleDescriptor> rules;
-    for (const auto &rule : RuleQuery::catalog())
+    for (const auto &rule : RuleEngine::catalog())
       if (ids.empty() ||
           std::find(ids.begin(), ids.end(), rule.id) != ids.end())
         rules.push_back(rule);
@@ -523,8 +542,7 @@ int runQueries(ProgramGraph &pdg, const Module &module, const Options &config) {
   if (!config.queryString.empty())
     return executeQuery(executor, config.queryString, config, output) ? 0 : 1;
   if (!config.queryFile.empty()) {
-    runBatchMode(executor, config.queryFile, config, output);
-    return 0;
+    return runBatchMode(executor, config.queryFile, config, output) ? 0 : 1;
   }
   errs() << "No mode specified. Use -q, -i, -f, or --analysis\n";
   return 1;

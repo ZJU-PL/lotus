@@ -21,12 +21,45 @@
 #include "IR/SVFG/SVFGNode.h"
 #include "IR/SVFG/SVFGSerializer.h"
 
+#include <limits>
 #include <queue>
+#include <unordered_set>
 
 #include <llvm/Support/Casting.h>
+#include <llvm/IR/Operator.h>
 
 using namespace lotus::analysis;
 using namespace llvm;
+
+SVFGNodeBS SVFG::expandObjectsForAlias(const SVFGNodeBS &objects,
+                                      const Value *pointer) const {
+  // Lotus uses the base ID for offset zero. A direct first-field GEP still
+  // denotes that field, whereas SVF represents it with a separate GepObjVar.
+  // Do not turn that field query into an aggregate-wide query.
+  const Value *origin = pointer;
+  while (origin) {
+    if (const auto *cast = dyn_cast<CastInst>(origin))
+      origin = cast->getOperand(0);
+    else if (const auto *constant = dyn_cast<ConstantExpr>(origin)) {
+      if (!constant->isCast())
+        break;
+      origin = constant->getOperand(0);
+    } else
+      break;
+  }
+  const bool fieldPointer = isa_and_nonnull<GEPOperator>(origin);
+  SVFGNodeBS expanded = objects;
+  for (uint32_t object : objects) {
+    const ObjectInfo *info = getObjectInfo(object);
+    if (isFieldInsensitiveObject(object) ||
+        (!fieldPointer &&
+         (!info || info->baseObjId == 0 || info->baseObjId == object))) {
+      const auto fields = getFieldObjects(object);
+      expanded.insert(fields.begin(), fields.end());
+    }
+  }
+  return expanded;
+}
 
 // Forward declarations for stat helpers defined later in this file.
 static void adjustNodeStat(SVFGStat &stat, SVFGNode *node, int delta);
@@ -338,6 +371,394 @@ SVFGNode *SVFG::getCanonicalDefNodeForDDAId(uint32_t ddaId) const {
     return getDef(inst);
 
   return nullptr;
+}
+
+std::vector<uint32_t> SVFG::collectReferencedObjectIds() const {
+  std::unordered_set<uint32_t> ids;
+  auto add = [&](uint32_t id) {
+    if (id != 0)
+      ids.insert(id);
+  };
+  for (const auto &entry : objIdToInfo) {
+    add(entry.first);
+    add(entry.second.baseObjId);
+  }
+  for (const auto &entry : objectDebug)
+    add(entry.first);
+  for (const auto &entry : objIdToValue)
+    add(entry.first);
+  for (const auto &entry : valueToObjId)
+    add(entry.second);
+  for (const auto &entry : valueToObjIds)
+    for (uint32_t id : entry.second)
+      add(id);
+  for (const auto &entry : baseToFieldObjects) {
+    add(entry.first);
+    for (uint32_t id : entry.second)
+      add(id);
+  }
+  for (const auto &entry : baseOffsetToFieldObject) {
+    add(entry.first.first);
+    add(entry.second);
+  }
+  for (const auto &entry : gepBaseToFieldObject)
+    for (const auto &inner : entry.second) {
+      add(inner.first);
+      add(inner.second);
+    }
+
+  for (const auto &entry : nodeMap) {
+    SVFGNode *node = entry.second;
+    if (!node)
+      continue;
+    if (const SVFGNodeBS *pts = node->getPointsTo())
+      for (uint32_t id : *pts)
+        add(id);
+    if (auto *addr = llvm::dyn_cast<AddrSVFGNode>(node))
+      add(addr->getObjectId());
+    for (const SVFGEdge *edge : node->getOutEdges())
+      for (uint32_t id : edge->getPointsTo())
+        add(id);
+  }
+
+  std::vector<uint32_t> result(ids.begin(), ids.end());
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
+std::vector<SVFGNodeBS> SVFG::collectPointsToSets() const {
+  std::vector<SVFGNodeBS> sets;
+  auto collect = [&](const SVFGNodeBS &set) {
+    if (!set.empty())
+      sets.push_back(set);
+  };
+  for (const auto &entry : valueToObjIds)
+    collect(entry.second);
+  for (const auto &entry : baseToFieldObjects)
+    collect(entry.second);
+  for (const auto &entry : nodeMap) {
+    SVFGNode *node = entry.second;
+    if (!node)
+      continue;
+    if (const SVFGNodeBS *pts = node->getPointsTo())
+      collect(*pts);
+    for (const SVFGEdge *edge : node->getOutEdges())
+      collect(edge->getPointsTo());
+  }
+  return sets;
+}
+
+bool SVFG::remapObjectIds(
+    const std::unordered_map<uint32_t, uint32_t> &oldToNew,
+    std::string *error) {
+  auto fail = [&](std::string message) {
+    if (error)
+      *error = std::move(message);
+    return false;
+  };
+
+  const std::vector<uint32_t> referenced = collectReferencedObjectIds();
+  std::unordered_set<uint32_t> newIds;
+  newIds.reserve(referenced.size() * 2);
+  for (uint32_t id : referenced) {
+    const auto it = oldToNew.find(id);
+    if (it == oldToNew.end())
+      return fail("missing object ID " + std::to_string(id));
+    if (!newIds.insert(it->second).second)
+      return fail("object-ID mapping is not injective at " + std::to_string(id));
+  }
+
+  auto mapId = [&](uint32_t id) -> uint32_t {
+    if (id == 0)
+      return 0;
+    const auto it = oldToNew.find(id);
+    return it == oldToNew.end() ? id : it->second;
+  };
+
+  std::unordered_map<uint32_t, ObjectInfo> newInfo;
+  newInfo.reserve(objIdToInfo.size());
+  for (const auto &entry : objIdToInfo) {
+    ObjectInfo info = entry.second;
+    if (info.baseObjId != 0)
+      info.baseObjId = mapId(info.baseObjId);
+    newInfo.emplace(mapId(entry.first), info);
+  }
+
+  std::unordered_map<uint32_t, std::string> newDebug;
+  newDebug.reserve(objectDebug.size());
+  for (const auto &entry : objectDebug)
+    newDebug.emplace(mapId(entry.first), entry.second);
+
+  std::unordered_map<uint32_t, const llvm::Value *> newObjToValue;
+  newObjToValue.reserve(objIdToValue.size());
+  for (const auto &entry : objIdToValue)
+    newObjToValue.emplace(mapId(entry.first), entry.second);
+
+  std::unordered_map<const llvm::Value *, uint32_t> newValueToObj;
+  newValueToObj.reserve(valueToObjId.size());
+  for (const auto &entry : valueToObjId)
+    newValueToObj.emplace(entry.first, mapId(entry.second));
+
+  std::unordered_map<const llvm::Value *, SVFGNodeBS> newValueToObjs;
+  newValueToObjs.reserve(valueToObjIds.size());
+  for (const auto &entry : valueToObjIds) {
+    SVFGNodeBS set = entry.second;
+    set.remapIds(mapId);
+    newValueToObjs.emplace(entry.first, std::move(set));
+  }
+
+  std::unordered_map<uint32_t, SVFGNodeBS> newBaseToFields;
+  newBaseToFields.reserve(baseToFieldObjects.size());
+  for (const auto &entry : baseToFieldObjects) {
+    SVFGNodeBS set = entry.second;
+    set.remapIds(mapId);
+    newBaseToFields.emplace(mapId(entry.first), std::move(set));
+  }
+
+  std::map<std::pair<uint32_t, uint64_t>, uint32_t> newBaseOffset;
+  for (const auto &entry : baseOffsetToFieldObject)
+    newBaseOffset.emplace(std::make_pair(mapId(entry.first.first),
+                                         entry.first.second),
+                          mapId(entry.second));
+
+  std::unordered_map<const llvm::GetElementPtrInst *,
+                     std::unordered_map<uint32_t, uint32_t>>
+      newGepBaseToField;
+  newGepBaseToField.reserve(gepBaseToFieldObject.size());
+  for (const auto &entry : gepBaseToFieldObject) {
+    std::unordered_map<uint32_t, uint32_t> inner;
+    inner.reserve(entry.second.size());
+    for (const auto &field : entry.second)
+      inner.emplace(mapId(field.first), mapId(field.second));
+    newGepBaseToField.emplace(entry.first, std::move(inner));
+  }
+
+  SVFGNode::ObjectIdRemap remap = [&](uint32_t id) { return mapId(id); };
+  for (const auto &entry : nodeMap)
+    if (entry.second)
+      entry.second->remapObjectIds(remap);
+
+  std::unordered_set<const SVFGEdge *> visitedEdges;
+  for (const auto &entry : nodeMap) {
+    if (!entry.second)
+      continue;
+    for (SVFGEdge *edge : entry.second->getOutEdges()) {
+      if (visitedEdges.insert(edge).second)
+        edge->remapObjectIds(remap);
+    }
+  }
+
+  objIdToInfo = std::move(newInfo);
+  objectDebug = std::move(newDebug);
+  objIdToValue = std::move(newObjToValue);
+  valueToObjId = std::move(newValueToObj);
+  valueToObjIds = std::move(newValueToObjs);
+  baseToFieldObjects = std::move(newBaseToFields);
+  baseOffsetToFieldObject = std::move(newBaseOffset);
+  gepBaseToFieldObject = std::move(newGepBaseToField);
+
+  uint32_t maxNew = 0;
+  for (uint32_t id : newIds)
+    maxNew = std::max(maxNew, id);
+  nextObjectId =
+      std::max<uint32_t>(maxNew == std::numeric_limits<uint32_t>::max()
+                             ? maxNew
+                             : maxNew + 1,
+                         kObjectIdBase);
+
+  objectIdMapping = oldToNew;
+  reverseObjectIdMapping.clear();
+  reverseObjectIdMapping.reserve(oldToNew.size());
+  for (const auto &entry : oldToNew)
+    reverseObjectIdMapping[entry.second] = entry.first;
+  return true;
+}
+
+bool SVFG::objectsOverlap(uint32_t lhs, uint32_t rhs) const {
+  if (lhs == rhs)
+    return true;
+  // Field-insensitive representatives and their base denote the same memory.
+  if (canonicalObjectId(lhs) == canonicalObjectId(rhs))
+    return true;
+  // Unknown objects act as wildcards in either direction.
+  if (isUnknownObject(lhs) || isUnknownObject(rhs))
+    return true;
+
+  auto baseObject = [&](uint32_t object) {
+    const ObjectInfo *info = getObjectInfo(object);
+    return info && info->baseObjId != 0 ? info->baseObjId : object;
+  };
+  if (baseObject(lhs) != baseObject(rhs))
+    return false;
+
+  const ObjectInfo *lhsInfo = getObjectInfo(lhs);
+  const ObjectInfo *rhsInfo = getObjectInfo(rhs);
+  const bool lhsField = lhsInfo && lhsInfo->hasFieldOffset;
+  const bool rhsField = rhsInfo && rhsInfo->hasFieldOffset;
+  // A query for the aggregate covers all of its fields; two distinct fields
+  // only overlap at the same offset.
+  if (!lhsField || !rhsField)
+    return true;
+  return lhsInfo->fieldOffset == rhsInfo->fieldOffset;
+}
+
+bool SVFG::objectSetsOverlap(const SVFGNodeBS &lhs,
+                             const SVFGNodeBS &rhs) const {
+  for (uint32_t lhsObject : lhs)
+    for (uint32_t rhsObject : rhs)
+      if (objectsOverlap(lhsObject, rhsObject))
+        return true;
+  return false;
+}
+
+std::optional<std::pair<SVFGNodeBS, SVFGNodeBS>>
+SVFG::getCallReadWriteObjects(const llvm::CallBase *call) const {
+  if (!call)
+    return std::nullopt;
+
+  const SVFGNodeBS *readOnly = getCallReadOnlyObjects(call);
+  const SVFGNodeBS *writeOnly = getCallWriteObjects(call);
+  if (readOnly || writeOnly)
+    return std::make_pair(readOnly ? *readOnly : SVFGNodeBS{},
+                          writeOnly ? *writeOnly : SVFGNodeBS{});
+
+  const SVFGNodeSet &ins = getActualIns(call);
+  const SVFGNodeSet &outs = getActualOuts(call);
+  if (ins.empty() && outs.empty())
+    return std::nullopt;
+
+  auto unionPointsTo = [](const SVFGNodeSet &nodes) {
+    SVFGNodeBS result;
+    for (SVFGNode *node : nodes) {
+      if (!node)
+        continue;
+      if (const SVFGNodeBS *pts = node->getPointsTo())
+        result.insert(pts->begin(), pts->end());
+    }
+    return result;
+  };
+  return std::make_pair(unionPointsTo(ins), unionPointsTo(outs));
+}
+
+std::optional<SVFG::ModRefInfo>
+SVFG::getModRefInfo(const llvm::CallBase *call,
+                    const SVFGNodeBS &objects) const {
+  if (!call)
+    return std::nullopt;
+  if (objects.empty())
+    return ModRefInfo{};
+
+  auto touchesSet = [&](const SVFGNodeBS &region) {
+    return objectSetsOverlap(objects, region);
+  };
+  auto touchesNodes = [&](const SVFGNodeSet &nodes) {
+    for (SVFGNode *node : nodes) {
+      const SVFGNodeBS *pts = node ? node->getPointsTo() : nullptr;
+      if (pts && touchesSet(*pts))
+        return true;
+    }
+    return false;
+  };
+
+  const SVFGNodeBS *readOnly = getCallReadOnlyObjects(call);
+  const SVFGNodeBS *writeOnly = getCallWriteObjects(call);
+  if (readOnly || writeOnly) {
+    ModRefInfo info;
+    info.reads = readOnly && touchesSet(*readOnly);
+    info.writes = writeOnly && touchesSet(*writeOnly);
+    return info;
+  }
+
+  const SVFGNodeSet &ins = getActualIns(call);
+  const SVFGNodeSet &outs = getActualOuts(call);
+  if (!ins.empty() || !outs.empty()) {
+    // No refined read-only summary (for example after deserialization):
+    // ActualIn also carries may-write regions, so this is conservative.
+    ModRefInfo info;
+    info.reads = touchesNodes(ins);
+    info.writes = touchesNodes(outs);
+    return info;
+  }
+
+  // No MemorySSA summary: fall back to LLVM memory attributes. A call with no
+  // attributes remains unknown rather than being reported as side-effect free.
+  if (call->doesNotAccessMemory())
+    return ModRefInfo{};
+  if (call->onlyReadsMemory())
+    return ModRefInfo{true, false};
+  return std::nullopt;
+}
+
+std::optional<SVFG::ModRefInfo> SVFG::getModRefInfo(const llvm::CallBase *call,
+                                                    uint32_t object) const {
+  if (object == 0)
+    return std::nullopt;
+  return getModRefInfo(call, SVFGNodeBS{object});
+}
+
+std::optional<SVFG::ModRefInfo>
+SVFG::getModRefInfo(const llvm::CallBase *call,
+                    const llvm::Value *pointer) const {
+  if (!call || !pointer || !pointer->getType()->isPointerTy())
+    return std::nullopt;
+
+  SVFGNodeBS objects = getObjectIds(pointer);
+  if (objects.empty()) {
+    if (const uint32_t single = getObjectId(pointer))
+      objects.insert(single);
+  }
+  if (objects.empty())
+    return std::nullopt;
+  return getModRefInfo(call, objects);
+}
+
+std::optional<SVFG::ModRefInfo>
+SVFG::getModRefInfo(const llvm::CallBase *call) const {
+  if (!call)
+    return std::nullopt;
+
+  const SVFGNodeBS *readOnly = getCallReadOnlyObjects(call);
+  const SVFGNodeBS *writeOnly = getCallWriteObjects(call);
+  if (readOnly || writeOnly)
+    return ModRefInfo{readOnly && !readOnly->empty(),
+                      writeOnly && !writeOnly->empty()};
+
+  const SVFGNodeSet &ins = getActualIns(call);
+  const SVFGNodeSet &outs = getActualOuts(call);
+  if (!ins.empty() || !outs.empty())
+    return ModRefInfo{!ins.empty(), !outs.empty()};
+
+  if (call->doesNotAccessMemory())
+    return ModRefInfo{};
+  if (call->onlyReadsMemory())
+    return ModRefInfo{true, false};
+  return std::nullopt;
+}
+
+std::optional<SVFG::ModRefInfo> SVFG::getModRefInfo(
+    const llvm::CallBase *cs1, const llvm::CallBase *cs2) const {
+  if (!cs1 || !cs2)
+    return std::nullopt;
+  if (cs1->doesNotAccessMemory() || cs2->doesNotAccessMemory())
+    return ModRefInfo{};
+
+  const auto first = getCallReadWriteObjects(cs1);
+  const auto second = getCallReadWriteObjects(cs2);
+  if (!first || !second)
+    return std::nullopt;
+
+  const SVFGNodeBS &cs1Reads = first->first;
+  const SVFGNodeBS &cs1Writes = first->second;
+  const SVFGNodeBS &cs2Reads = second->first;
+  const SVFGNodeBS &cs2Writes = second->second;
+
+  ModRefInfo info;
+  // Ref: cs1 reads memory modified by cs2.
+  info.reads = objectSetsOverlap(cs1Reads, cs2Writes);
+  // Mod: cs1 writes memory read or modified by cs2.
+  info.writes = objectSetsOverlap(cs1Writes, cs2Reads) ||
+                objectSetsOverlap(cs1Writes, cs2Writes);
+  return info;
 }
 
 uint32_t SVFG::getCallSiteId(const llvm::CallBase *cs,
@@ -831,6 +1252,8 @@ void SVFG::swapWith(SVFG &other) {
   swap(mssaVerToNodeMap, other.mssaVerToNodeMap);
   swap(callSiteToActualInMap, other.callSiteToActualInMap);
   swap(callSiteToActualOutMap, other.callSiteToActualOutMap);
+  swap(callReadOnlyObjects, other.callReadOnlyObjects);
+  swap(callWriteObjects, other.callWriteObjects);
   swap(callSiteToActualParmMap, other.callSiteToActualParmMap);
   swap(callSiteToActualRetMap, other.callSiteToActualRetMap);
   swap(funcToFormalInMap, other.funcToFormalInMap);
@@ -852,6 +1275,8 @@ void SVFG::swapWith(SVFG &other) {
   swap(gepAccessInfo, other.gepAccessInfo);
   swap(objIdToInfo, other.objIdToInfo);
   swap(baseToFieldObjects, other.baseToFieldObjects);
+  swap(objectIdMapping, other.objectIdMapping);
+  swap(reverseObjectIdMapping, other.reverseObjectIdMapping);
   swap(nodeFunctionDebug, other.nodeFunctionDebug);
   swap(nodeCallSiteDebug, other.nodeCallSiteDebug);
   swap(nodesForUpdate, other.nodesForUpdate);

@@ -1,5 +1,4 @@
-#ifndef LOTUS_UNITTEST_TESTUTILS_NOELLEGOLDEN_H_
-#define LOTUS_UNITTEST_TESTUTILS_NOELLEGOLDEN_H_
+#pragma once
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -355,5 +354,3 @@ inline bool sectionMatches(const GoldenFile &golden,
 } // namespace noelle_golden
 } // namespace unittest
 } // namespace lotus
-
-#endif

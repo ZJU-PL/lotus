@@ -3,6 +3,8 @@
 #include "Alias/InclusionBased/TPA/Context/Context.h"
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 
+#include <cstddef>
+
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
 

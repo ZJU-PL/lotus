@@ -2,6 +2,7 @@
 
 #include "Annotation/Pointer/PointerEffectSummary.h"
 
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 

@@ -25,6 +25,7 @@ private:
   createCopyNode(const llvm::Instruction *inst,
                  const llvm::SmallPtrSetImpl<const llvm::Value *> &srcs);
 
+  CFGNode *translateCall(llvm::CallBase &);
   CFGNode *handleUnsupportedInst(const llvm::Instruction &);
 
 public:
@@ -32,6 +33,7 @@ public:
       : cfg(c), typeMap(t), dataLayout(d) {}
 
   // Default case
+  CFGNode *visitFreezeInst(llvm::FreezeInst &);
   CFGNode *visitInstruction(llvm::Instruction &) { return nullptr; }
 
   // Supported cases
@@ -41,6 +43,8 @@ public:
   CFGNode *visitReturnInst(llvm::ReturnInst &);
   CFGNode *visitCallInst(llvm::CallInst &);
   CFGNode *visitInvokeInst(llvm::InvokeInst &);
+  CFGNode *visitCallBrInst(llvm::CallBrInst &);
+  CFGNode *visitResumeInst(llvm::ResumeInst &);
   CFGNode *visitPHINode(llvm::PHINode &);
   CFGNode *visitSelectInst(llvm::SelectInst &);
   CFGNode *visitGetElementPtrInst(llvm::GetElementPtrInst &);

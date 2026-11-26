@@ -1,5 +1,4 @@
-#ifndef LOTUS_TEST_EAN_BOOLKLEENE_H_
-#define LOTUS_TEST_EAN_BOOLKLEENE_H_
+#pragma once
 
 // A concrete Kleene algebra used as a differential oracle for EAN tests:
 // atoms map deterministically to boolean 3x3 matrices; join = OR, seq = boolean
@@ -75,5 +74,3 @@ inline Mat evalRef(const typename elimination::PathExprFactory<int>::Ref &e) {
 }
 
 } // namespace lotus_test_ean
-
-#endif // LOTUS_TEST_EAN_BOOLKLEENE_H_

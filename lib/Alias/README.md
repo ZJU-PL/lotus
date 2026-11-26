@@ -9,17 +9,21 @@ Lotus.
 |----------|--------------|---------------|----------------|-------------------|-----------------|-------------|-------|
 | **SparrowAA** | `lotus-alias-sparrow-aa` | Inclusion-based | ❌ No | ✅ Yes (CI, 1-CFA, 2-CFA, etc.) | ❌ No | ❌ No | More graph simplification algorithms; no on-the-fly callgraph construction |
 | **AserPTA** | `lotus-alias-aser-aa` | Inclusion-based | ❌ No | ✅ Yes (CI, 1-CFA, 2-CFA, Origin) | ✅ Yes | ✅ Adapted from AserPTA | On-the-fly callgraph construction; supports both field-insensitive and field-sensitive modes |
+| **CclyzerAA** | `lotus-alias-cclyzer-aa` | Inclusion-based / Unification | ❌ No | ✅ Yes (CI, `k-CFA`, `k-Caller`) | ✅ Yes | ✅ Vendored (`cclyzer++`) | Optional Soufflé Datalog backend (`LOTUS_ENABLE_CCLYZER`) |
+| **SparsePTA** | `lotus-alias-fspta` (`fspta` / `vfspta`) | Inclusion-based | ✅ Yes | ❌ No | ✅ Yes | ❌ No | SVFG/MemorySSA sparse (`FlowSensitivePTA`) and object-versioned (`VersionedFlowSensitivePTA`) solvers |
+| **ValueFlowPTA** | `lotus-alias-fspta` (`--analysis=vfpta`) | Inclusion-based | ✅ Yes | ❌ No | ❌ No | ❌ No | Direct LLVM-IR value-flow solver (Li et al., ESEC/FSE'11); no SVFG or pre-analysis |
+| **BootstrapAA** | `lotus-alias-bootstrap` | Inclusion-based (bootstrapped) | ✅ Yes | ✅ Yes (exact call path + all-contexts) | ✅ Yes | ❌ No | PLDI'08 partitioning + guarded backward summaries + optional ROBDD path sensitivity |
 | **CFL (LLVM)** | - | CFL-reachability | ❌ No | ❌ No | - | ✅ Yes (LLVM) | Via alias wrapper (libLLVMAnalysis) |
 | **DDA** | - (library only, `DDAPass`) | Demand-driven value-flow | ✅ Yes | Optional (`FlowDDA` / `ContextDDA`) | ✅ Yes | ❌ No | SVF-style demand-driven value-flow solver implemented natively in Lotus |
 | **DyckAA** | `lotus-alias-dyck-aa` | Unification-based | ❌ No | ❌ No | - | ❌ No | - |
 | **Dynamic** | `dynaa` (optional) | Dynamic | - | - | - | ❌ No | Runtime analysis (`LOTUS_ENABLE_DYNAA`) |
 | **FPA** | `lotus-alias-call-graph` (`-cg-type=fpa-*`) | Type-based | - | - | - | ❌ No | Function pointer analysis |
-| **LotusAA** | `lotus-alias-lotus-aa` | Inclusion-based | ✅ Yes | ✅ Yes | - | ❌ No | Native Lotus analysis; flow- and context-sensitive |
-| **seadsa** | `lotus-alias-sea-dsa-dg`, `lotus-alias-seadsa-tool` | Unification-based | ❌ No | ✅ Yes | - | ✅ Yes (SeaDsa) | Context-sensitive heap (heap cloning) |
+| **LotusAA** | `lotus-alias-lotus-aa` | Inclusion-based | ✅ Yes | ✅ Yes (function summaries) | ✅ Yes | ❌ No | Native Lotus analysis; flow-, context-, field-, and path-sensitive |
+| **seadsa** | `lotus-alias-sea-dsa-dg`, `lotus-alias-seadsa-tool` | Unification-based | ❌ No | ✅ Yes | ✅ Yes | ✅ Yes (SeaDsa) | Context-sensitive heap (heap cloning) |
 | **SRAA** | - | Range-based | ❌ No | ❌ No | - | ❌ No (based on CGO'17 paper) | Flow- and context-insensitive |
 | **UnderApproxAA** | - | Pattern-based | - | - | - | ❌ No | Must-alias analysis |
 | **AllocAA** | - | - | - | - | - | ❌ No | - |
-| **TPA** | `lotus-alias-tpa` | Inclusion-based | ✅ Yes | ✅ Yes (k-limiting) | - | ❌ No | Flow- and context-sensitive with k-limiting |
+| **TPA** | `lotus-alias-tpa` | Inclusion-based | ✅ Yes | ✅ Yes (CI, `k-CFA`, Adaptive) | Partial | ❌ No | Semi-sparse flow- and context-sensitive analysis with k-limiting |
 
 ## Context Sensitivity Variants
 
@@ -45,20 +49,22 @@ Lotus.
 
 | Characteristic | Analyses |
 |----------------|----------|
-| **Inclusion-based** | SparrowAA, AserPTA, LotusAA, TPA |
+| **Inclusion-based** | SparrowAA, AserPTA, CclyzerAA, SparsePTA, ValueFlowPTA, TPA, LotusAA, BootstrapAA |
 | **Demand-driven** | DDA |
 | **Unification-based** | DyckAA, seadsa |
-| **Flow-sensitive** | DDA, LotusAA, TPA |
-| **Context-sensitive** | SparrowAA, AserPTA, DDA (ContextDDA), LotusAA, seadsa, TPA |
-| **Field-sensitive** | AserPTA (optional), DDA, LotusAA, etc. |
+| **Flow-sensitive** | DDA, SparsePTA, ValueFlowPTA, TPA, LotusAA, BootstrapAA |
+| **Context-sensitive** | SparrowAA, AserPTA, CclyzerAA, DDA (ContextDDA), seadsa, TPA, LotusAA, BootstrapAA |
+| **Field-sensitive** | AserPTA (optional), CclyzerAA, SparsePTA, DDA, LotusAA, BootstrapAA, seadsa |
 | **Specialized** | FPA (function pointers), UnderApproxAA (must-alias), Dynamic (runtime), SRAA (range-based) |
 
 ## Subdirectories
 
 `lib/Alias/` is organized by high-level taxonomy:
 
-- `InclusionBased/`: inclusion-style whole-program pointer analyses such as
-  `AserPTA`, `SparrowAA`, `LotusAA`, `TPA`, and `CclyzerAA`.
+- `InclusionBased/`: inclusion-style whole-program pointer analysis engines:
+  `SparrowAA`, `AserPTA`, `CclyzerAA`, `SparsePTA`, `ValueFlowPTA`, `TPA`,
+  `LotusAA`, and `BootstrapAA`. See [`InclusionBased/README.md`](InclusionBased/README.md)
+  for the precision-tier selection guide (`FICI` / `FICS` / `FSCI` / `FSCS`).
 - `UnificationBased/`: unification/CFL-style analyses such as `DyckAA` and
   `seadsa`.
 - `DemandDriven/`: on-demand query-driven analyses such as `DDA`.

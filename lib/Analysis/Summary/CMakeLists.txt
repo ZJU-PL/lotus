@@ -1,0 +1,3 @@
+add_subdirectory(Purity)
+add_subdirectory(ParameterSummary)
+add_subdirectory(Multiplicity)

@@ -7,7 +7,7 @@ This directory now builds a single checker frontend, `lotus-check`, on top of
 
 - registry-backed generic/declarative checking
 - native in-process checker engines such as `ae`, `kint`, `pulse`,
-  `saber`, `fitx`, `concur`, `gsaf`, `symex`, and `taint`
+  `saber`, `fitx`, `concur`, `gsaf`, `symex`, `taint-ifds`, and `taint-tpa`
 
 Each invocation selects exactly one engine with `--engine=<name>`. A native
 engine may run several of its own checker kinds, while generic mode may run
@@ -42,7 +42,8 @@ Use `build/bin/lotus-check --help` or
 | --- | --- | --- |
 | `generic` | Generic checker driver | Resolves specs from `--generic.spec-dir`, `LOTUS_CHECKER_SPEC_DIR`, the installed data directory, or the source tree (in that order). |
 | `kint` | Integer bug detector | Checks integer overflow, division by zero, bad shifts, array bounds, and dead branches. Runs all checks by default; `--checks` selects a subset. |
-| `taint` | Interprocedural taint analysis | IFDS-based taint tracking with selectable alias analysis via `--taint.alias-analysis` and optional micro-benchmark evaluation mode. |
+| `taint-ifds` | IFDS taint analysis | Configurable taint tracking with selectable alias analysis via `--taint.alias-analysis`. Implemented by `tools/checker/lotus-check-taint-ifds.cpp`. |
+| `taint-tpa` | TPA sparse taint baseline | Uses native TPA memory objects and contexts, with precision-loss tracking and `--taint-tpa.*` options. Implemented by `tools/checker/lotus-check-taint-tpa.cpp`. |
 | `concur` | Concurrency checker | Detects races, deadlocks, atomicity issues, condvar misuse, lock mismatches, and OpenMP/MPI bugs. |
 | `pulse` | Pulse-inspired bug finder | Biabductive analysis with optional SMT disabling via `--pulse.smt=off`; can emit JSON findings. |
 | `fitx` | FiTx multi-checker driver | Runs typestate checks such as `double-free`, `double-lock`, `memory-leak`, `null-deref`, and `use-after-free`. |
@@ -88,7 +89,7 @@ build/bin/lotus-check --engine=kint test.bc
 ### Run taint analysis with explicit sources and sinks
 
 ```bash
-build/bin/lotus-check --engine=taint test.bc \
+build/bin/lotus-check --engine=taint-ifds test.bc \
   --taint.alias-analysis=dyck \
   --taint.sources=recv,getenv \
   --taint.sinks=system,execve \
@@ -146,7 +147,7 @@ Sink models additionally support `any-argument`. The generic driver propagates
 these facts through SSA expressions, casts, aggregates, simple memory, and
 direct interprocedural argument/return flow. Calls through pointer casts are
 resolved to their direct function; genuinely indirect calls still require a
-points-to-backed engine such as the native `taint` checker.
+points-to-backed engine such as the native `taint-ifds` or `taint-tpa` engine.
 
 ## Related documentation
 

@@ -171,6 +171,68 @@ TEST_F(IDENewAnalysesTest, FeatureTaintAssignsSourceFeatureBit) {
   EXPECT_NE(V.mask & (1ull << 0), 0ull);
 }
 
+TEST_F(IDENewAnalysesTest, FeatureTaintAcceptsCallbackFeatureSets) {
+  auto M = lotus::unittest::parseModuleChecked(*Ctx, R"(
+    declare i8* @read_secret()
+
+    define i32 @main() {
+    entry:
+      %secret = call i8* @read_secret()
+      ret i32 0
+    }
+  )", "ide_feature_taint_callback");
+  auto *Read = M->getFunction("read_secret");
+  auto *CallRead = llvm::cast<llvm::CallBase>(
+      lotus::unittest::findInstructionByName(*M->getFunction("main"),
+                                             "secret"));
+
+  IDEFeatureTaintAnalysis Problem(
+      [](FeatureTaintGenerator::InstOrGlobal value) {
+        const auto *inst = std::get<const llvm::Instruction *>(value);
+        return inst && inst->getName() == "secret";
+      },
+      [](FeatureTaintGenerator::InstOrGlobal) {
+        return std::set<std::string>{"network", "tenant"};
+      });
+  auto SF = Problem.summary_flow(CallRead, Read, Problem.zero_fact());
+  ASSERT_TRUE(SF.count(CallRead) > 0);
+  auto EF = Problem.summary_edge_function(CallRead, Read, CallRead,
+                                          Problem.zero_fact(), CallRead);
+  auto V = EF(Problem.bottom_value());
+  EXPECT_TRUE(V.has_feature("network"));
+  EXPECT_TRUE(V.has_feature("tenant"));
+}
+
+TEST_F(IDENewAnalysesTest, FeatureTaintSeedsCallbackGlobals) {
+  auto M = lotus::unittest::parseModuleChecked(*Ctx, R"(
+    @config = global i8 0
+
+    define i32 @main() {
+    entry:
+      ret i32 0
+    }
+  )", "ide_feature_taint_global_callback");
+  auto *Config = M->getNamedGlobal("config");
+  ASSERT_NE(Config, nullptr);
+
+  IDEFeatureTaintAnalysis Problem(
+      [](FeatureTaintGenerator::InstOrGlobal value) {
+        const auto *global =
+            std::get<const llvm::GlobalVariable *>(value);
+        return global && global->getName() == "config";
+      },
+      [](FeatureTaintGenerator::InstOrGlobal) {
+        return std::set<std::string>{"configuration"};
+      });
+
+  const auto Seeds = Problem.initial_ide_seeds(*M);
+  ASSERT_EQ(Seeds.get_seeds().size(), 1u);
+  const auto &facts = Seeds.get_seeds().begin()->second;
+  const auto fact = facts.find(Config);
+  ASSERT_NE(fact, facts.end());
+  EXPECT_TRUE(fact->second.has_feature("configuration"));
+}
+
 TEST_F(IDENewAnalysesTest, SecureHeapMarksAllocatorResultAllocated) {
   auto M = lotus::unittest::parseModuleChecked(*Ctx, R"(
     declare i8* @malloc(i64)

@@ -4,6 +4,7 @@
 #include "Alias/InclusionBased/TPA/Util/DataStructure/VectorSet.h"
 #include "Alias/InclusionBased/TPA/Util/Iterator/UniquePtrIterator.h"
 
+#include <cstddef>
 #include <memory>
 #include <vector>
 
@@ -49,6 +50,7 @@ private:
   // Special nodes
   EntryCFGNode *entryNode;
   const ReturnCFGNode *exitNode;
+  std::vector<const ReturnCFGNode *> unwindExitNodes;
 
 public:
   // Iterators over nodes
@@ -75,6 +77,12 @@ public:
     assert(exitNode == nullptr && n != nullptr);
     exitNode = n;
   }
+
+  // Exceptional exits carry memory back to callers, without a return value.
+  void addUnwindExitNode(const ReturnCFGNode *node) {
+    unwindExitNodes.push_back(node);
+  }
+  const auto &getUnwindExitNodes() const { return unwindExitNodes; }
 
   // CFG manipulation
   void removeNodes(const util::VectorSet<CFGNode *> &);

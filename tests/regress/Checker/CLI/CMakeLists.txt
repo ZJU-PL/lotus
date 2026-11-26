@@ -5,6 +5,7 @@ set(CHECKER_CLI_TAINT ${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/taint.ll)
 set(CHECKER_CLI_TAINT_INVOKE
     ${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/taint_invoke.ll)
 set(CHECKER_CLI_AE_LEAK ${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/ae_leak.ll)
+set(CHECKER_CLI_AE_EMPTY ${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/ae_empty.ll)
 
 function(add_checker_cli_test test_name expected_result expected_output)
   set(args ${ARGN})
@@ -49,6 +50,9 @@ endfunction()
 add_checker_cli_test(checker_cli_ae_defaults_include_mem_leak 0
                      "Running memory leak checker"
                      --engine=ae --log-level=info ${CHECKER_CLI_MINIMAL})
+add_checker_cli_test_without_output(checker_cli_ae_empty_module_is_noop 0
+                     "No findings" "Fatal Error|Stack dump"
+                     --engine=ae ${CHECKER_CLI_AE_EMPTY})
 foreach(check IN ITEMS double-free memory-leak use-after-free)
   string(REPLACE "-" "_" check_name ${check})
   add_checker_cli_test(checker_cli_fitx_${check_name}_selection 0
@@ -110,50 +114,50 @@ add_checker_cli_test(checker_cli_concur_analysis_output_io_error 2
                      ${CHECKER_CLI_MINIMAL})
 add_checker_cli_test(checker_cli_taint_micro_bench_evaluates 0
                      "TP: 1  FP: 0  FN: 0"
-                     --engine=taint --taint.micro-bench
+                     --engine=taint-ifds --taint.micro-bench
                      --taint.expected-flows=${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/taint.expected
                      ${CHECKER_CLI_TAINT})
 add_checker_cli_test(checker_cli_taint_trims_function_lists 0
                      "\\[source\\] source"
-                     --engine=taint --log-level=debug
+                     --engine=taint-ifds --log-level=debug
                      "--taint.sources=source, source" --taint.sinks=sink
                      ${CHECKER_CLI_TAINT})
 add_checker_cli_test(checker_cli_taint_fail_on_findings 1
                      "Taint-Style Vulnerability"
-                     --engine=taint --taint.sources=source --taint.sinks=sink
+                     --engine=taint-ifds --taint.sources=source --taint.sinks=sink
                      --fail-on-findings ${CHECKER_CLI_TAINT})
 add_checker_cli_test(checker_cli_taint_invoke_fail_on_findings 1
                      "Taint-Style Vulnerability"
-                     --engine=taint --taint.sources=source --taint.sinks=sink
+                     --engine=taint-ifds --taint.sources=source --taint.sinks=sink
                      --fail-on-findings ${CHECKER_CLI_TAINT_INVOKE})
 add_checker_cli_test_without_output(
     checker_cli_taint_ignores_operand_bundle 1 "via arg0" "arg1"
-    --engine=taint --taint.sources=source --taint.sinks=sink
+    --engine=taint-ifds --taint.sources=source --taint.sinks=sink
     --fail-on-findings
     ${PROJECT_SOURCE_DIR}/tests/regress/Checker/CLI/taint_operand_bundle.ll)
 add_checker_cli_test(checker_cli_taint_honors_min_score 0
                      "No findings"
-                     --engine=taint --taint.sources=source --taint.sinks=sink
+                     --engine=taint-ifds --taint.sources=source --taint.sinks=sink
                      --report-min-score=81 --fail-on-findings
                      ${CHECKER_CLI_TAINT})
 add_checker_cli_test(checker_cli_taint_writes_json 0
                      "JSON report written to"
-                     --engine=taint --taint.sources=source --taint.sinks=sink
+                     --engine=taint-ifds --taint.sources=source --taint.sinks=sink
                      --report-json=${CMAKE_CURRENT_BINARY_DIR}/taint-report.json
                      ${CHECKER_CLI_TAINT})
 add_checker_cli_test(checker_cli_taint_writes_sarif 0
                      "SARIF report written to"
-                     --engine=taint --taint.sources=source --taint.sinks=sink
+                     --engine=taint-ifds --taint.sources=source --taint.sinks=sink
                      --report-sarif=${CMAKE_CURRENT_BINARY_DIR}/taint-report.sarif
                      ${CHECKER_CLI_TAINT})
 add_checker_cli_test(checker_cli_taint_rejects_missing_suppressions 2
                      "Error loading suppressions"
-                     --engine=taint --taint.sources=source --taint.sinks=sink
+                     --engine=taint-ifds --taint.sources=source --taint.sinks=sink
                      --suppressions=${CMAKE_CURRENT_BINARY_DIR}/missing-suppressions.json
                      ${CHECKER_CLI_TAINT})
 add_checker_cli_test(checker_cli_forwards_more_than_eight_arguments 0
                      "Analysis completed successfully"
-                     --engine=taint --taint.sources=source --taint.sinks=sink
+                     --engine=taint-ifds --taint.sources=source --taint.sinks=sink
                      --checks=taint-flow --taint.alias-analysis=dyck
                      --log-level=info --analysis-stats=false
                      --taint.micro-bench=false
@@ -168,7 +172,7 @@ add_checker_cli_test(checker_cli_rejects_out_of_range_min_score 2
                      ${CHECKER_CLI_MINIMAL})
 add_checker_cli_test(checker_cli_rejects_engine_after_option_sentinel 2
                      "Too many positional arguments"
-                     --engine=taint --taint.sources=source --taint.sinks=sink
+                     --engine=taint-ifds --taint.sources=source --taint.sinks=sink
                      --
                      --engine=ae ${CHECKER_CLI_TAINT})
 add_checker_cli_test(checker_cli_report_io_error 2
@@ -246,10 +250,10 @@ add_checker_cli_test(checker_cli_pulse_rejects_flat_smt 2
                      --engine=pulse --smt=off ${CHECKER_CLI_MINIMAL})
 add_checker_cli_test(checker_cli_taint_rejects_old_analysis 2
                      "Unknown command line argument"
-                     --engine=taint --analysis=0 ${CHECKER_CLI_MINIMAL})
+                     --engine=taint-ifds --analysis=0 ${CHECKER_CLI_MINIMAL})
 add_checker_cli_test(checker_cli_taint_rejects_old_print_stats 2
                      "Unknown command line argument"
-                     --engine=taint --print-stats ${CHECKER_CLI_MINIMAL})
+                     --engine=taint-ifds --print-stats ${CHECKER_CLI_MINIMAL})
 foreach(old_option IN ITEMS --aa=dyck --expected=flows.txt
                             --alias-analysis=dyck --sources=source
                             --sinks=sink --micro-bench
@@ -257,7 +261,7 @@ foreach(old_option IN ITEMS --aa=dyck --expected=flows.txt
   string(MAKE_C_IDENTIFIER "${old_option}" old_option_name)
   add_checker_cli_test(checker_cli_taint_rejects_old_${old_option_name} 2
                        "Unknown command line argument"
-                       --engine=taint ${old_option} ${CHECKER_CLI_MINIMAL})
+                       --engine=taint-ifds ${old_option} ${CHECKER_CLI_MINIMAL})
 endforeach()
 add_checker_cli_test(checker_cli_generic_rejects_old_checker 2
                      "Unknown command line argument"
@@ -337,5 +341,22 @@ add_checker_cli_test(checker_cli_fitx_rejects_flat_report_candidates 2
                      "Unknown command line argument"
                      --engine=fitx --report-all-candidates
                      ${CHECKER_CLI_MINIMAL})
+
+add_checker_cli_test(checker_cli_taint_ifds_help 0
+                     "--taint.alias-analysis" --engine=taint-ifds --help)
+add_checker_cli_test_without_output(checker_cli_taint_tpa_help 0
+                     "--taint-tpa.k-limit" "--taint.alias-analysis"
+                     --engine=taint-tpa --help)
+add_checker_cli_test(checker_cli_rejects_ambiguous_taint_engine 2
+                     "unknown engine 'taint'" --engine=taint ${CHECKER_CLI_MINIMAL})
+add_checker_cli_test(checker_cli_taint_ifds_rejects_tpa_options 2
+                     "Unknown command line argument '--taint-tpa.k-limit'"
+                     --engine=taint-ifds --taint-tpa.k-limit=1 ${CHECKER_CLI_MINIMAL})
+add_checker_cli_test(checker_cli_taint_tpa_rejects_ifds_options 2
+                     "Unknown command line argument '--taint.sources'"
+                     --engine=taint-tpa --taint.sources=source ${CHECKER_CLI_MINIMAL})
+add_checker_cli_test(checker_cli_taint_tpa_rejects_unknown_check 2
+                     "unknown taint-tpa check 'foobar'"
+                     --engine=taint-tpa --checks=foobar ${CHECKER_CLI_MINIMAL})
 
 lotus_label_regression_tests(checker)

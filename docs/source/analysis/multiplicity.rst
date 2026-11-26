@@ -5,9 +5,9 @@ Allocation multiplicity classifies each allocation site (global, stack, or
 heap) as either *Unique* (executed at most once per program invocation) or
 *Summary* (potentially executed multiple times).
 
-**Headers**: ``include/Analysis/Multiplicity/``
+**Headers**: ``include/Analysis/Summary/Multiplicity/``
 
-**Implementation**: ``lib/Analysis/Multiplicity/``
+**Implementation**: ``lib/Analysis/Summary/Multiplicity/``
 
 **Public API**:
 
@@ -46,7 +46,7 @@ Usage
 
 .. code-block:: cpp
 
-   #include "Analysis/Multiplicity/MultiplicityClassifier.h"
+   #include "Analysis/Summary/Multiplicity/MultiplicityClassifier.h"
 
    llvm::Module &M = ...;
    auto result = lotus::analysis::multiplicity::

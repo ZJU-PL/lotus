@@ -22,6 +22,9 @@
 
 #include "IR/SVFG/SVFGBuilder.h"
 
+#include <functional>
+#include <map>
+
 using namespace lotus::analysis;
 using namespace llvm;
 
@@ -35,6 +38,171 @@ void SVFGBuilder::buildEdges() {
     buildBranchEdges();
   }
   buildMemoryEdges(); // This calls buildLoadEdges() and buildStoreEdges()
+}
+
+void SVFGBuilder::buildAggregateEdges() {
+  using Path = std::vector<unsigned>;
+  std::map<const Value *, std::map<Path, SVFGNode *>> fields;
+  std::function<SVFGNode *(const Value *, const Path &, const ICFGNode *)> field;
+  field = [&](const Value *value, const Path &path,
+              const ICFGNode *at) -> SVFGNode * {
+    if (path.empty() && value->getType()->isPointerTy())
+      if (auto *node = svfg->getValueNode(value))
+        return node;
+    auto &cached = fields[value][path];
+    if (cached)
+      return cached;
+    // Publish the field definition before visiting operands: aggregate PHIs
+    // can have backedges. A synthetic pointer copy also survives the
+    // pointer-only view without pretending the aggregate itself is a pointer.
+    const bool pointerLeaf = path.empty() && value->getType()->isPointerTy();
+    auto *result = new CopySVFGNode(nextNode(), at,
+                                    pointerLeaf ? value : nullptr);
+    svfg->addNode(result);
+    cached = result;
+    if (pointerLeaf) {
+      result->setValueId(getOrCreateValueId(value));
+      valueToNode.emplace(value, result->getId());
+      svfg->setValueNode(value, result->getId());
+    }
+    auto copy = [&](const Value *operand, const Path &indices) {
+      svfg->addEdge(field(operand, indices, at), result, SVFGEdgeK::IntraCopy);
+    };
+    auto unknown = [&]() {
+      auto *address = new AddrSVFGNode(nextNode(), at, nullptr,
+                                       getOrCreateUnknownObjId());
+      svfg->addNode(address);
+      svfg->addEdge(address, result, SVFGEdgeK::IntraCopy);
+    };
+    if (const auto *insert = dyn_cast<InsertValueInst>(value)) {
+      const auto indices = insert->getIndices();
+      if (path.size() >= indices.size() &&
+          std::equal(indices.begin(), indices.end(), path.begin()))
+        copy(insert->getInsertedValueOperand(),
+             Path(path.begin() + indices.size(), path.end()));
+      else
+        copy(insert->getAggregateOperand(), path);
+    } else if (const auto *extract = dyn_cast<ExtractValueInst>(value)) {
+      Path indices(extract->idx_begin(), extract->idx_end());
+      indices.insert(indices.end(), path.begin(), path.end());
+      copy(extract->getAggregateOperand(), indices);
+    } else if (const auto *phi = dyn_cast<PHINode>(value)) {
+      for (const Value *incoming : phi->incoming_values())
+        copy(incoming, path);
+    } else if (const auto *select = dyn_cast<SelectInst>(value)) {
+      copy(select->getTrueValue(), path);
+      copy(select->getFalseValue(), path);
+    } else if (const auto *freeze = dyn_cast<FreezeInst>(value)) {
+      copy(freeze->getOperand(0), path);
+    } else if (const auto *constant = dyn_cast<Constant>(value)) {
+      if (!path.empty()) {
+        const Constant *element = constant;
+        for (unsigned index : path) {
+          element = element->getAggregateElement(index);
+          if (!element)
+            break;
+        }
+        if (element)
+          copy(element, {});
+        else
+          unknown();
+      } else if (!isa<ConstantPointerNull>(constant)) {
+        const auto objects = getObjectIdsForValue(constant);
+        if (objects.empty())
+          unknown();
+        for (uint32_t object : objects) {
+          auto *address = new AddrSVFGNode(nextNode(), at, nullptr, object);
+          svfg->addNode(address);
+          svfg->addEdge(address, result, SVFGEdgeK::IntraCopy);
+        }
+      }
+    } else if (const auto *call = dyn_cast<CallBase>(value)) {
+      const Function *callee = call->getCalledFunction();
+      if (!callee || callee->isDeclaration()) {
+        unknown();
+      } else {
+        for (const BasicBlock &block : *callee)
+          if (const auto *ret = dyn_cast<ReturnInst>(block.getTerminator()))
+            if (const Value *returned = ret->getReturnValue())
+              copy(returned, path);
+      }
+    } else if (const auto *argument = dyn_cast<Argument>(value)) {
+      // Aggregate formals share field definitions across direct callers,
+      // just as ordinary pointer formals share their points-to sets.
+      const Function *callee = argument->getParent();
+      bool hasCaller = false;
+      for (const Function &caller : *callee->getParent())
+        for (const BasicBlock &block : caller)
+          for (const Instruction &inst : block)
+            if (const auto *call = dyn_cast<CallBase>(&inst))
+              if (call->getCalledFunction() == callee &&
+                  argument->getArgNo() < call->arg_size()) {
+                copy(call->getArgOperand(argument->getArgNo()), path);
+                hasCaller = true;
+              }
+      if (!hasCaller || callee->hasAddressTaken())
+        unknown();
+    } else {
+      // A missing aggregate definition is an unsupported pointer source,
+      // not a proof that the extracted pointer has an empty points-to set.
+      unknown();
+    }
+    return result;
+  };
+  // Resolving constant fields may add public pointer definitions.
+  const auto definitions = valueToNode;
+  std::vector<const ExtractValueInst *> extracts;
+  for (const auto &entry : definitions) {
+    const auto *extract = dyn_cast<ExtractValueInst>(entry.first);
+    if (!extract || !extract->getType()->isPointerTy())
+      continue;
+    extracts.push_back(extract);
+    SVFGNode *destination = svfg->getNode(entry.second);
+    Path path(extract->idx_begin(), extract->idx_end());
+    svfg->addEdge(field(extract->getAggregateOperand(), path,
+                        destination->getICFGNode()),
+                  destination, SVFGEdgeK::IntraCopy);
+  }
+
+  // The auxiliary PTA can miss register aggregates. Seed a conservative
+  // field solution before freezing memory regions, so stores through an
+  // extracted pointer connect to loads of the same concrete slot.
+  std::vector<SVFGNode *> work;
+  std::unordered_map<uint32_t, SVFGNodeBS> targets;
+  for (const auto &value : fields)
+    for (const auto &entry : value.second) {
+      SVFGNode *node = entry.second;
+      work.push_back(node);
+      if (const Value *pointer = node->getValue())
+        if (pointer->getType()->isPointerTy())
+          targets[node->getId()] = getObjectIdsForValue(pointer);
+    }
+  for (const auto *extract : extracts) {
+    SVFGNode *node = svfg->getValueNode(extract);
+    work.push_back(node);
+    targets[node->getId()];
+  }
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (SVFGNode *node : work)
+      for (const SVFGEdge *edge : node->getInEdges()) {
+        const SVFGNode *source = edge->getSrcNode();
+        auto sourceTargets = targets.find(source->getId());
+        SVFGNodeBS values;
+        if (sourceTargets != targets.end())
+          values = sourceTargets->second;
+        else if (const auto *address = dyn_cast<AddrSVFGNode>(source))
+          values.insert(address->getObjectId());
+        else if (const Value *pointer = source->getValue())
+          if (pointer->getType()->isPointerTy())
+            values = getObjectIdsForValue(pointer);
+        changed |= targets[node->getId()].unite(values);
+      }
+  }
+  for (const auto *extract : extracts)
+    svfg->setObjectsForValue(
+        extract, targets[svfg->getValueNode(extract)->getId()]);
 }
 
 void SVFGBuilder::buildDirectEdges() {

@@ -19,7 +19,10 @@ lotus_collect_test_sources(ir_tests
 add_lotus_collected_test_suite(ir_tests
   LINK_LIBS
     CanaryICFG
-    CanaryPDG
+    CanaryPDGConstruction
+    CanaryPDGRules
+    CanaryPDGCypher
+    CanaryPDGVisualization
     CanaryAliasAnalysisWrapper
     CanaryGSA
     CanaryGuardedValueFlow

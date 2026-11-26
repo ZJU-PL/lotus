@@ -1,7 +1,13 @@
-# Third-party libraries (CUDD, WPDS, spdlog)
+if(LOTUS_ENABLE_SPARTA)
+  # Header-only abstract interpretation primitives.
+  add_subdirectory(SPARTA)
+endif()
+
+# Third-party libraries (CUDD, WPDS, spdlog, Mosaic)
 add_subdirectory(CUDD)
 add_subdirectory(WPDS)
 add_subdirectory(spdlog)
+add_subdirectory(Mosaic)
 if(LOTUS_ENABLE_FLOW_CUTTER)
   add_subdirectory(flow-cutter-pace17)
   add_subdirectory(flow-cutter-pace20)

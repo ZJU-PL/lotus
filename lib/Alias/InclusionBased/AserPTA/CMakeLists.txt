@@ -33,3 +33,4 @@ target_link_libraries(AserPTA PUBLIC
     ${aserpta_llvm_libs}
     CanaryAliasPtsSet
 )
+add_library(Lotus::AserPTA ALIAS AserPTA)

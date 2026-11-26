@@ -139,7 +139,9 @@ POPL 2024 is exposed by the same executable, with no separate tool.
 Tests include a Boolean Dyck-grammar oracle, primary-connectivity BFS,
 pre-fixpoint phase invariants, allocation failures, parser checks and
 set-mode comparisons against ``WeightedQuotientSolver``. Instrumented phase hooks
-are compiled into a separate test-only library, never the production target.
+are conditionally compiled into the ``CanaryDynamicDyck`` library via the
+``LOTUS_PRIMARY_COMPONENT_TEST_HOOKS`` build definition when CFL tests are
+enabled; they are absent from a normal tests-off build.
 
 Benchmark workflow
 ------------------

@@ -25,7 +25,7 @@ TEST(EGraphFeatureTest, ExtractorSupportsEggStyleMutableCostFunctionApi) {
   EXPECT_GT(cost_fn.calls, 0u);
 
   Extractor<SymbolLang, NoAnalysis<SymbolLang>, CountingCostFn> extractor(
-      egraph, std::move(cost_fn));
+      egraph, cost_fn);
   auto [cost, best] = extractor.findBest(root);
   EXPECT_EQ(cost, 21u);
   EXPECT_EQ(best.toString(), "(root (cheap a) (expensive b))");

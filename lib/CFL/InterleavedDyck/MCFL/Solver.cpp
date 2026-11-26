@@ -129,6 +129,12 @@ struct State {
         plain_reachability(input_graph),
         facts_by_nonterminal(grammar.nonterminals().size()),
         triggers(grammar.nonterminals().size()) {
+    for (const Edge &edge : graph.edgesForLabel(kEpsilonLabel)) {
+      if (edge.source != edge.target) {
+        has_nontrivial_epsilon_edges = true;
+        break;
+      }
+    }
     for (Vertex vertex : graph.vertices()) {
       graph.addEdge(vertex, vertex, std::string(kEpsilonLabel));
     }
@@ -171,6 +177,27 @@ struct State {
     for (std::size_t i = 1; i < fact.spans.size(); ++i) {
       if (!gapReachable(fact.nonterminal, fact.spans[i - 1].target,
                         fact.spans[i].source)) {
+        if (options.collapse_adjacent_gap &&
+            fact.spans[i - 1].target == fact.spans[i].source) {
+          if (const std::optional<Grammar::Nonterminal> collapsed_nt =
+                  options.collapse_adjacent_gap(fact.nonterminal)) {
+            Fact collapsed;
+            collapsed.nonterminal = *collapsed_nt;
+            collapsed.spans.reserve(fact.spans.size() - 1);
+            for (std::size_t j = 0; j < fact.spans.size(); ++j) {
+              if (j == i - 1) {
+                continue;
+              }
+              if (j == i) {
+                collapsed.spans.push_back(
+                    {fact.spans[j - 1].source, fact.spans[j].target});
+              } else {
+                collapsed.spans.push_back(fact.spans[j]);
+              }
+            }
+            addFact(std::move(collapsed), {});
+          }
+        }
         ++stats.rejected_unreachable_gaps;
         return false;
       }
@@ -193,7 +220,9 @@ struct State {
 
     const std::size_t id = facts.size();
     facts.push_back(std::move(fact));
-    proofs.push_back(std::move(proof));
+    if (options.record_proofs) {
+      proofs.push_back(std::move(proof));
+    }
     worklist.push_back(id);
     facts_by_nonterminal[facts[id].nonterminal].push_back(id);
     for (std::size_t component = 0; component < facts[id].spans.size();
@@ -372,9 +401,11 @@ struct State {
     }
 
     std::vector<std::size_t> premises;
-    premises.reserve(assignment.size());
-    for (const std::optional<std::size_t> &fact : assignment) {
-      premises.push_back(*fact);
+    if (options.record_proofs) {
+      premises.reserve(assignment.size());
+      for (const std::optional<std::size_t> &fact : assignment) {
+        premises.push_back(*fact);
+      }
     }
 
     const auto emit = [&]() {
@@ -466,8 +497,10 @@ struct State {
       const std::size_t fact_id = worklist[next++];
       ++stats.worklist_pops;
       const Grammar::Nonterminal nonterminal = facts[fact_id].nonterminal;
-      processEpsilon(fact_id);
-      const std::vector<Trigger> current_triggers = triggers[nonterminal];
+      if (has_nontrivial_epsilon_edges) {
+        processEpsilon(fact_id);
+      }
+      const std::vector<Trigger> &current_triggers = triggers[nonterminal];
       for (const Trigger &trigger : current_triggers) {
         switch (trigger.kind) {
         case TriggerKind::Prepend:
@@ -501,6 +534,7 @@ struct State {
       endpoint_index;
   std::unordered_map<Pair, std::size_t, PairHash> start_fact;
   std::vector<std::vector<Trigger>> triggers;
+  bool has_nontrivial_epsilon_edges = false;
   SolverStats stats;
 };
 
@@ -623,12 +657,14 @@ ReachabilityResult Solver::solve(const Graph &graph, const Grammar &grammar,
   for (const auto &entry : state.start_fact) {
     result.reachable_pairs_.insert(entry.first);
   }
-  auto witness_data = std::make_shared<detail::WitnessData>();
-  witness_data->grammar = grammar;
-  witness_data->facts = std::move(state.facts);
-  witness_data->proofs = std::move(state.proofs);
-  witness_data->start_fact = std::move(state.start_fact);
-  result.witness_data_ = std::move(witness_data);
+  if (options.record_proofs) {
+    auto witness_data = std::make_shared<detail::WitnessData>();
+    witness_data->grammar = grammar;
+    witness_data->facts = std::move(state.facts);
+    witness_data->proofs = std::move(state.proofs);
+    witness_data->start_fact = std::move(state.start_fact);
+    result.witness_data_ = std::move(witness_data);
+  }
   return result;
 }
 

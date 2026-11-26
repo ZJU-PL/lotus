@@ -94,3 +94,17 @@ Klein, Yves Le Traon, Damien Octeau, and Patrick D. McDaniel.
 - SAS 03: Weighted Pushdown Systems and Their Application to Interprocedural Dataflow Analysis. Thomas Reps, Stefan Schwoon, and Somesh Jha.
 - Precise Interprocedural Dataflow Analysis with Applications to Constant Propagation
 - POPL 95: Precise Interprocedural Dataflow Analysis via Graph Reachability. Thomas Reps, Susan Horwitz, and Mooly Sagiv.
+
+## Imported API protocols
+
+`Analyses/TypeStateDescriptions.h` supplies file-I/O and OpenSSL descriptions
+for `IDETypeState`. See [usage, provenance, and limitations](../../../third-party/phasar/README.md).
+
+## DFI backend
+
+`Dataflow/IFDS/Solver/DFI/DFISolver.h` exposes `DFIIFDSSolver` (alias
+`DFISolver`), an independent experimental backend for existing IFDS clients.
+It uses SCC scheduling and interval-indexed entry/exit summaries, with optional
+forward/backward query indexes. See `docs/source/dataflow/ifds_ide.rst` for API,
+query boundaries, configuration, and lifecycle rules; upstream provenance and
+license are in `third-party/phasar/`. No existing solver core is replaced.

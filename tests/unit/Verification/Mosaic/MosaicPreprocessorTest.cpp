@@ -1,4 +1,4 @@
-#include "Verification/Mosaic/Int2BvPreprocessor.h"
+#include "Mosaic/Int2BvPreprocessor.h"
 
 #include <gtest/gtest.h>
 #include <z3++.h>

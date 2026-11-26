@@ -113,7 +113,13 @@ ExternalModRefTable::buildTableImpl(const StringRef &fileContent, bool &ok) {
   auto commentEntry =
       rule(token(regex("#[^\n]*")), [](auto const &) { return false; });
 
-  auto entry = alt(commentEntry, ignoreEntry, regularEntry);
+  // The shipped modref.spec also uses the original TPA postfix spelling.
+  auto postfixIgnoreEntry =
+      rule(seq(token(id), token(str("IGNORE"))), [&table](auto const &pair) {
+        table.table.try_emplace(std::get<0>(pair).str());
+        return false;
+      });
+  auto entry = alt(commentEntry, ignoreEntry, postfixIgnoreEntry, regularEntry);
   auto ptable = many(entry);
 
   auto parseResult = ptable.parse(fileContent);

@@ -13,6 +13,7 @@
 #include "Checker/AE/SVFIRWrapper.h"
 
 #include <algorithm>
+#include <limits>
 
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Operator.h>
@@ -20,6 +21,23 @@
 
 namespace lotus {
 namespace analysis {
+
+uint32_t AbstractState::getGepFieldObjId(uint32_t baseObjId, int64_t offset) {
+  return AbstractInterpretation::getAEInstance().getOrCreateGepFieldObjId(
+      baseObjId, offset);
+}
+
+void AbstractState::recordGepObjOffsetFromBase(uint32_t objId,
+                                               const IntervalValue &offset) {
+  AbstractInterpretation::getAEInstance().recordGepObjOffsetFromBase(objId,
+                                                                     offset);
+}
+
+bool AbstractState::getGepObjOffsetFromBase(uint32_t objId,
+                                            IntervalValue &offset) const {
+  return AbstractInterpretation::getAEInstance().getGepObjOffsetFromBase(
+      objId, offset);
+}
 
 namespace {
 
@@ -37,6 +55,35 @@ int64_t clampFieldOffset(const BoundedInt &bound) {
   if (bound.is_plus_infinity())
     return static_cast<int64_t>(MaxFieldLimit);
   return clampFieldOffset(bound.getIntNumeral());
+}
+
+bool getConstantIntegerBounds(const llvm::Value *value, int64_t &lower,
+                              int64_t &upper) {
+  if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(value)) {
+    lower = upper = constant->getSExtValue();
+    return true;
+  }
+
+  const auto *fixedVector = llvm::dyn_cast<llvm::FixedVectorType>(
+      value ? value->getType() : nullptr);
+  const auto *constant = llvm::dyn_cast_or_null<llvm::Constant>(value);
+  if (!fixedVector || !constant)
+    return false;
+
+  bool found = false;
+  lower = std::numeric_limits<int64_t>::max();
+  upper = std::numeric_limits<int64_t>::min();
+  for (unsigned lane = 0; lane < fixedVector->getNumElements(); ++lane) {
+    const auto *element = llvm::dyn_cast_or_null<llvm::ConstantInt>(
+        constant->getAggregateElement(lane));
+    if (!element)
+      return false;
+    const int64_t elementValue = element->getSExtValue();
+    lower = std::min(lower, elementValue);
+    upper = std::max(upper, elementValue);
+    found = true;
+  }
+  return found;
 }
 
 std::pair<uint32_t, int64_t>
@@ -69,11 +116,31 @@ resolvePointerBaseAndOffset(AbstractState &as, const llvm::Value *value,
 
 } // namespace
 
+AbstractValue &AbstractState::operator[](uint32_t varId) {
+  auto it = _varToAbsVal.find(varId);
+  if (it != _varToAbsVal.end())
+    return it->second;
+
+  AbstractValue fallback;
+  if (_varToAbsVal.isDefSite()) {
+    fallback = AbstractValue(IntervalValue::top());
+    const llvm::Value *value =
+        AbstractInterpretation::getAEInstance().getValueFromIdStatic(varId);
+    if (value && value->getType()->isPointerTy())
+      fallback = AddressValue(getVirtualMemAddress(BlkPtr));
+  }
+  return _varToAbsVal.emplace(varId, fallback).first->second;
+}
+
 /// Widen interval to ensure termination of analysis
 AbstractState AbstractState::widening(const AbstractState &other) {
   // Match SVF semantics: iterate over existing keys in this, then widen with
   // other
   AbstractState result = *this;
+  // Never widen/narrow a shared def-site table in place: the caller
+  // materializes the cycle's values first, and this keeps a stray call from
+  // corrupting it.
+  result.materializeVarTable();
   for (auto it = result._varToAbsVal.begin(); it != result._varToAbsVal.end();
        ++it) {
     auto key = it->first;
@@ -115,6 +182,10 @@ AbstractState AbstractState::narrowing(const AbstractState &other) {
   // Match SVF semantics: iterate over existing keys in this, then narrow with
   // other
   AbstractState result = *this;
+  // Never widen/narrow a shared def-site table in place: the caller
+  // materializes the cycle's values first, and this keeps a stray call from
+  // corrupting it.
+  result.materializeVarTable();
   for (auto it = result._varToAbsVal.begin(); it != result._varToAbsVal.end();
        ++it) {
     auto key = it->first;
@@ -152,15 +223,27 @@ AbstractState AbstractState::narrowing(const AbstractState &other) {
 
 /// Domain join with other, important! other widen this.
 void AbstractState::joinWith(const AbstractState &other) {
-  // Match SVF semantics: only join with existing keys, otherwise emplace
-  for (auto it = other._varToAbsVal.begin(); it != other._varToAbsVal.end();
-       ++it) {
-    auto key = it->first;
-    auto oit = _varToAbsVal.find(key);
-    if (oit != _varToAbsVal.end()) {
-      oit->second.join_with(it->second);
-    } else {
-      _varToAbsVal.emplace(key, it->second);
+  // A path-local snapshot has SSA values that must not be rebound to the
+  // run-wide table. Materialize the destination before joining it so those
+  // values remain observable on this path.
+  if (other.pathLocalVarTable_)
+    materializeVarTable();
+  // In the def-site layout every intermediate value has exactly one home, so a
+  // join only has to merge the object map. SVF's semi-sparse layout does the
+  // same (`SparseAbstractInterpretation::joinStates`). Cycle heads are the one
+  // exception and are handled by explicitly materializing the cycle's values in
+  // `AbstractInterpretation` before widening.
+  if (!_varToAbsVal.isDefSite()) {
+    // Match SVF semantics: only join with existing keys, otherwise emplace
+    for (auto it = other._varToAbsVal.begin(); it != other._varToAbsVal.end();
+         ++it) {
+      auto key = it->first;
+      auto oit = _varToAbsVal.find(key);
+      if (oit != _varToAbsVal.end()) {
+        oit->second.join_with(it->second);
+      } else {
+        _varToAbsVal.emplace(key, it->second);
+      }
     }
   }
   for (auto it = other._addrToAbsVal.begin(); it != other._addrToAbsVal.end();
@@ -242,7 +325,7 @@ void AbstractState::printAbstractState() const {
 }
 
 bool AbstractState::equals(const AbstractState &other) const {
-  return eqVarToValMap(_varToAbsVal, other._varToAbsVal) &&
+  return eqVarToValMap(_varToAbsVal.map(), other._varToAbsVal.map()) &&
          eqVarToValMap(_addrToAbsVal, other._addrToAbsVal) &&
          _freedAddrs == other._freedAddrs && _heapObjs == other._heapObjs &&
          _objToSize == other._objToSize;
@@ -350,16 +433,23 @@ AbstractValue AbstractState::loadValue(uint32_t varId) {
   return result;
 }
 
-void AbstractState::storeValue(uint32_t varId, uint32_t valId) {
+void AbstractState::storeValue(uint32_t varId, uint32_t valId, StoreKind kind) {
   AbstractValue val = _varToAbsVal[valId];
+
+  // A weak store joins into every target; a strong store replaces it.
+  const auto storeInto = [&](uint32_t addr) {
+    if (!AddressValue::isVirtualMemAddress(addr) || isFreedMem(addr))
+      return;
+    if (kind == StoreKind::Strong)
+      store(addr, val);
+    else
+      weakStore(addr, val);
+  };
 
   // Store to addresses in abstract state
   if (inVarToAddrsTable(varId)) {
-    for (auto addr : _varToAbsVal[varId].getAddrs()) {
-      if (!AddressValue::isVirtualMemAddress(addr) || isFreedMem(addr))
-        continue;
-      store(addr, val);
-    }
+    for (auto addr : _varToAbsVal[varId].getAddrs())
+      storeInto(addr);
   }
 
   const llvm::Value *valPtr =
@@ -369,11 +459,8 @@ void AbstractState::storeValue(uint32_t varId, uint32_t valId) {
         resolvePointerBaseAndOffset(*this, valPtr, varId);
     AddressValue derivedAddrs =
         getGepObjAddrs(resolved.first, IntervalValue(resolved.second));
-    for (uint32_t addr : derivedAddrs) {
-      if (!AddressValue::isVirtualMemAddress(addr) || isFreedMem(addr))
-        continue;
-      store(addr, val);
-    }
+    for (uint32_t addr : derivedAddrs)
+      storeInto(addr);
   }
 
   // Use PTA to get more precise points-to information (matching SVF's behavior)
@@ -396,9 +483,8 @@ void AbstractState::storeValue(uint32_t varId, uint32_t valId) {
         if (objId == 0) // ConstantPointerNull; getVirtualMemAddress(0) asserts
           continue;
         uint32_t objAddr = getVirtualMemAddress(objId);
-        if (!isNullMem(objAddr) && !isFreedMem(objAddr)) {
-          store(objAddr, val);
-        }
+        if (!isNullMem(objAddr) && !isFreedMem(objAddr))
+          storeInto(objAddr);
       }
     }
   }
@@ -433,17 +519,23 @@ AddressValue AbstractState::getGepObjAddrs(uint32_t pointer,
       // Create field-sensitive GEP object ID (matching SVF's getGepObjVar)
       uint32_t gepObjId = getGepFieldObjId(baseObjId, offsetVal);
       uint32_t gepAddr = getVirtualMemAddress(gepObjId);
+      recordGepObjOffsetFromBase(gepObjId, IntervalValue(offsetVal));
       uint32_t objSize = getObjSize(baseObjId);
       if (objSize > 0) {
         setObjSize(gepObjId, objSize);
       }
       result.insert(gepAddr);
     } else {
+      // A non-numeral offset means the field cannot be identified statically:
+      // SVF marks the object field-insensitive and merges its fields into the
+      // base, which also disables strong updates through it.
+      markFieldInsensitiveObject(baseObjId);
       // For interval offset, iterate over the range (limited to MaxFieldLimit)
       for (int64_t i = lb; i <= ub; ++i) {
         // Create field-sensitive GEP object ID for each offset
         uint32_t gepObjId = getGepFieldObjId(baseObjId, i);
         uint32_t gepAddr = getVirtualMemAddress(gepObjId);
+        recordGepObjOffsetFromBase(gepObjId, IntervalValue(i));
         uint32_t objSize = getObjSize(baseObjId);
         if (objSize > 0) {
           setObjSize(gepObjId, objSize);
@@ -466,8 +558,10 @@ IntervalValue AbstractState::getByteOffset(const llvm::GetElementPtrInst *gep) {
 
     // Get index value
     IntervalValue idxVal(0);
-    if (llvm::ConstantInt *cidx = llvm::dyn_cast<llvm::ConstantInt>(idx)) {
-      idxVal = IntervalValue(cidx->getSExtValue());
+    int64_t constantLower = 0;
+    int64_t constantUpper = 0;
+    if (getConstantIntegerBounds(idx, constantLower, constantUpper)) {
+      idxVal = IntervalValue(constantLower, constantUpper);
     } else {
       // Use stable ID from AbstractInterpretation
       uint32_t idxId = AbstractInterpretation::getValueIdStatic(idx);
@@ -554,6 +648,14 @@ uint32_t AbstractState::getAllocaInstByteSize(const llvm::AllocaInst *alloca) {
   const llvm::DataLayout &dl = alloca->getModule()->getDataLayout();
   uint32_t typeSize = dl.getTypeAllocSize(allocType);
 
+  if (alloca->isArrayAllocation()) {
+    if (const auto *count =
+            llvm::dyn_cast<llvm::ConstantInt>(alloca->getArraySize())) {
+      uint64_t total = static_cast<uint64_t>(typeSize) * count->getZExtValue();
+      return static_cast<uint32_t>(std::min<uint64_t>(total, MaxFieldLimit));
+    }
+  }
+
   // Try to get more accurate size from PTA first
   if (svfir_ && svfir_->isPTAReady()) {
     uint32_t ptaSize = getObjectSize(alloca);
@@ -564,15 +666,10 @@ uint32_t AbstractState::getAllocaInstByteSize(const llvm::AllocaInst *alloca) {
 
   // Handle array allocation
   if (alloca->isArrayAllocation()) {
-    const llvm::Value *arraySize = alloca->getArraySize();
-    if (const llvm::ConstantInt *csize =
-            llvm::dyn_cast<llvm::ConstantInt>(arraySize)) {
-      return typeSize * static_cast<uint32_t>(csize->getZExtValue());
-    } else {
-      // Variable-sized array - use MaxFieldLimit as upper bound
-      // This matches SVF's behavior for non-constant array sizes
-      return typeSize * MaxFieldLimit;
-    }
+    // Variable-sized array - use MaxFieldLimit as upper bound
+    // This matches SVF's behavior for non-constant array sizes
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        static_cast<uint64_t>(typeSize) * MaxFieldLimit, MaxFieldLimit));
   }
 
   return typeSize;
@@ -584,6 +681,14 @@ uint32_t AbstractState::getAllocaInstByteSize(const llvm::AllocaInst *alloca,
   const llvm::DataLayout &dl = alloca->getModule()->getDataLayout();
   uint32_t typeSize = dl.getTypeAllocSize(allocType);
 
+  if (alloca->isArrayAllocation()) {
+    if (const auto *count =
+            llvm::dyn_cast<llvm::ConstantInt>(alloca->getArraySize())) {
+      uint64_t total = static_cast<uint64_t>(typeSize) * count->getZExtValue();
+      return static_cast<uint32_t>(std::min<uint64_t>(total, MaxFieldLimit));
+    }
+  }
+
   // Try to get more accurate size from PTA first
   if (svfir_ && svfir_->isPTAReady()) {
     uint32_t ptaSize = getObjectSize(alloca);
@@ -595,44 +700,38 @@ uint32_t AbstractState::getAllocaInstByteSize(const llvm::AllocaInst *alloca,
   // Handle array allocation
   if (alloca->isArrayAllocation()) {
     const llvm::Value *arraySize = alloca->getArraySize();
-    if (const llvm::ConstantInt *csize =
-            llvm::dyn_cast<llvm::ConstantInt>(arraySize)) {
-      // Constant array size
-      return typeSize * static_cast<uint32_t>(csize->getZExtValue());
-    } else {
-      // Variable-sized array - try to get size from abstract state
-      uint32_t arraySizeId =
-          AbstractInterpretation::getValueIdStatic(arraySize);
+    // Variable-sized array - try to get size from abstract state
+    uint32_t arraySizeId = AbstractInterpretation::getValueIdStatic(arraySize);
 
-      if (as.inVarToValTable(arraySizeId)) {
-        // Array size is tracked in abstract state
-        IntervalValue sizeInterval = as[arraySizeId].getInterval();
+    if (as.inVarToValTable(arraySizeId)) {
+      // Array size is tracked in abstract state
+      IntervalValue sizeInterval = as[arraySizeId].getInterval();
 
-        if (!sizeInterval.isBottom() && !sizeInterval.isTop()) {
-          // Use upper bound of interval, clamped to MaxFieldLimit
-          int64_t ub = sizeInterval.ub().getIntNumeral();
-          if (ub < 0) {
-            ub = 0;
-          }
-          if (ub > static_cast<int64_t>(MaxFieldLimit)) {
-            ub = MaxFieldLimit;
-          }
-          // Default element size is 1 (matching SVF's behavior)
-          uint32_t elementSize = typeSize > 0 ? typeSize : 1;
-          uint64_t res =
-              static_cast<uint64_t>(elementSize) * static_cast<uint64_t>(ub);
-          // Clamp result to MaxFieldLimit if needed
-          if (res > MaxFieldLimit) {
-            res = MaxFieldLimit;
-          }
-          return static_cast<uint32_t>(res);
+      if (!sizeInterval.isBottom() && !sizeInterval.isTop()) {
+        // Use upper bound of interval, clamped to MaxFieldLimit
+        int64_t ub = sizeInterval.ub().getIntNumeral();
+        if (ub < 0) {
+          ub = 0;
         }
+        if (ub > static_cast<int64_t>(MaxFieldLimit)) {
+          ub = MaxFieldLimit;
+        }
+        // Default element size is 1 (matching SVF's behavior)
+        uint32_t elementSize = typeSize > 0 ? typeSize : 1;
+        uint64_t res =
+            static_cast<uint64_t>(elementSize) * static_cast<uint64_t>(ub);
+        // Clamp result to MaxFieldLimit if needed
+        if (res > MaxFieldLimit) {
+          res = MaxFieldLimit;
+        }
+        return static_cast<uint32_t>(res);
       }
-
-      // Fallback: use MaxFieldLimit as conservative upper bound
-      // This happens when array size is not tracked in abstract state yet
-      return typeSize * MaxFieldLimit;
     }
+
+    // Fallback: use MaxFieldLimit as conservative upper bound
+    // This happens when array size is not tracked in abstract state yet
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        static_cast<uint64_t>(typeSize) * MaxFieldLimit, MaxFieldLimit));
   }
 
   return typeSize;
@@ -654,8 +753,8 @@ void AbstractState::initObjVar(const llvm::Value *objVar) {
       } else if (const llvm::ConstantFP *cfp =
                      llvm::dyn_cast<llvm::ConstantFP>(gv->getInitializer())) {
         double val = cfp->getValueAPF().convertToDouble();
-        (*this)[varId] = IntervalValue(static_cast<int64_t>(val),
-                static_cast<int64_t>(val));
+        (*this)[varId] =
+            IntervalValue(static_cast<int64_t>(val), static_cast<int64_t>(val));
         return;
       } else if (gv->getInitializer()->isNullValue()) {
         (*this)[varId] =
@@ -692,8 +791,8 @@ void AbstractState::initObjVar(const llvm::Value *objVar) {
   }
   if (const llvm::ConstantFP *cfp = llvm::dyn_cast<llvm::ConstantFP>(objVar)) {
     double val = cfp->getValueAPF().convertToDouble();
-    (*this)[varId] = IntervalValue(static_cast<int64_t>(val),
-                                   static_cast<int64_t>(val));
+    (*this)[varId] =
+        IntervalValue(static_cast<int64_t>(val), static_cast<int64_t>(val));
     return;
   }
   if (llvm::isa<llvm::ConstantPointerNull>(objVar)) {
@@ -748,8 +847,7 @@ AbstractState::getElementIndex(const llvm::GetElementPtrInst *gep) {
     int64_t idxLb, idxUb;
 
     // Get index value bounds
-    if (llvm::ConstantInt *cidx = llvm::dyn_cast<llvm::ConstantInt>(idx)) {
-      idxLb = idxUb = cidx->getSExtValue();
+    if (getConstantIntegerBounds(idx, idxLb, idxUb)) {
     } else {
       // Use stable ID from AbstractInterpretation
       uint32_t idxId = AbstractInterpretation::getValueIdStatic(idx);
@@ -794,11 +892,8 @@ AbstractState::getElementIndex(const llvm::GetElementPtrInst *gep) {
       else
         idxUb *= elemSize;
     } else if (idxType->isArrayTy()) {
-      uint32_t arraySize = idxType->getArrayNumElements();
-      if (idxUb >= static_cast<int64_t>(arraySize) || idxLb < 0) {
-        idxLb = idxUb = 0;
-      }
-      // For arrays, element index is just the index value
+      // Preserve the access index. Collapsing an out-of-range dynamic index to
+      // zero hides real OOB accesses and makes negative indices look safe.
     } else if (idxType->isStructTy()) {
       llvm::StructType *structType = llvm::cast<llvm::StructType>(idxType);
       uint32_t numElements = structType->getNumElements();
@@ -823,8 +918,8 @@ AbstractState::getElementIndex(const llvm::GetElementPtrInst *gep) {
     }
   }
 
-  // Ensure result is within [0, MaxFieldLimit]
-  res.meet_with(IntervalValue(static_cast<int64_t>(0),
+  // Bound field-object expansion while retaining finite negative offsets.
+  res.meet_with(IntervalValue(-static_cast<int64_t>(MaxFieldLimit),
                               static_cast<int64_t>(MaxFieldLimit)));
   if (res.isBottom()) {
     res = IntervalValue(static_cast<int64_t>(0));

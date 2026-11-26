@@ -5,7 +5,7 @@
 // TBD: validate this backend and benchmark it against Z3 before making it a
 // default or exposing it as a separate CLI engine. The CLI accepts
 // `--backend gurobi` only in builds that define LOTUS_HAVE_GUROBI.
-#include "Backend.h"
+#include "CFL/InterleavedDyck/ILP/Backend.h"
 
 #include <stdexcept>
 #include <string>

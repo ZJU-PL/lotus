@@ -1,5 +1,4 @@
-#ifndef LOTUS_IR_UFG_UFG_H
-#define LOTUS_IR_UFG_UFG_H
+#pragma once
 
 #include "IR/UseTraceSSA/Query.h"
 #include "IR/UFG/ID.h"
@@ -49,4 +48,3 @@ private:
 
 } // namespace ufg
 } // namespace lotus
-#endif

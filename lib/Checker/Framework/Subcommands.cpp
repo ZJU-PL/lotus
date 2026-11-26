@@ -13,9 +13,15 @@ llvm::cl::SubCommand &kintSubCommand() {
   return sub;
 }
 
-llvm::cl::SubCommand &taintSubCommand() {
-  static llvm::cl::SubCommand sub("taint",
+llvm::cl::SubCommand &taintIFDSSubCommand() {
+  static llvm::cl::SubCommand sub("taint-ifds",
                                   "Run the IFDS-based taint analysis");
+  return sub;
+}
+
+llvm::cl::SubCommand &taintTPASubCommand() {
+  static llvm::cl::SubCommand sub("taint-tpa",
+                                  "Run the TPA-native sparse taint analysis");
   return sub;
 }
 
@@ -41,8 +47,7 @@ llvm::cl::SubCommand &saberSubCommand() {
 }
 
 llvm::cl::SubCommand &aeSubCommand() {
-  static llvm::cl::SubCommand sub("ae",
-                                  "Run the abstract-execution checker");
+  static llvm::cl::SubCommand sub("ae", "Run the abstract-execution checker");
   return sub;
 }
 

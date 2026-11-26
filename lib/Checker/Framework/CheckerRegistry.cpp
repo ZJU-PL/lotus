@@ -205,8 +205,14 @@ Error registerBuiltinNativeCheckers(CheckerRegistry &registry) {
     return error;
   }
   if (Error error = add_native(
-          "taint", "IFDS Taint Analysis", "security", Severity::High,
-          EngineKind::Taint,
+          "taint-ifds", "IFDS Taint Analysis", "security", Severity::High,
+          EngineKind::TaintIFDS,
+          {CheckerCapability::InterproceduralFlow, CheckerCapability::PTA})) {
+    return error;
+  }
+  if (Error error = add_native(
+          "taint-tpa", "TPA Sparse Taint Analysis", "security", Severity::High,
+          EngineKind::TaintTPA,
           {CheckerCapability::InterproceduralFlow, CheckerCapability::PTA})) {
     return error;
   }
@@ -227,9 +233,10 @@ Error registerBuiltinNativeCheckers(CheckerRegistry &registry) {
                      {CheckerCapability::SVFG, CheckerCapability::SMT})) {
     return error;
   }
-  if (Error error = add_native("gsaf", "Guarded Value-Flow Analysis", "path-sensitive",
-                               Severity::High, EngineKind::GSAF,
-                               {CheckerCapability::InterproceduralFlow, CheckerCapability::SMT}))
+  if (Error error = add_native(
+          "gsaf", "Guarded Value-Flow Analysis", "path-sensitive",
+          Severity::High, EngineKind::GSAF,
+          {CheckerCapability::InterproceduralFlow, CheckerCapability::SMT}))
     return error;
   return Error::success();
 }
@@ -244,7 +251,8 @@ ArrayRef<NativeCheckDescriptor> getBuiltinNativeChecks(EngineKind engine) {
     return PULSE_CHECKS;
   case EngineKind::KINT:
     return KINT_CHECKS;
-  case EngineKind::Taint:
+  case EngineKind::TaintIFDS:
+  case EngineKind::TaintTPA:
     return TAINT_CHECKS;
   case EngineKind::FiTx:
     return FITX_CHECKS;

@@ -10,3 +10,4 @@ add_library(Andersen STATIC
 )
 
 target_link_libraries(Andersen PRIVATE CanaryAliasPtsSet AliasSpecManager)
+add_library(Lotus::SparrowAA ALIAS Andersen)

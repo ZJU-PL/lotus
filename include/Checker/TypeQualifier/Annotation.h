@@ -14,12 +14,9 @@
 // Created by ubuntu on 12/26/17.
 //
 
-#ifndef UBIANALYSIS_ANNOTATION_H
-#define UBIANALYSIS_ANNOTATION_H
-
-#include <cstddef>
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #include <llvm/IR/Instructions.h>
@@ -218,5 +215,3 @@ extern std::string getAnonStructId(llvm::Value *V, llvm::Module *M,
                                    llvm::StringRef Prefix);
 extern std::string getStructId(llvm::Value *PV, llvm::User::op_iterator &IS,
                                llvm::User::op_iterator &IE, llvm::Module *M);
-
-#endif // UBIANALYSIS_ANNOTATION_H

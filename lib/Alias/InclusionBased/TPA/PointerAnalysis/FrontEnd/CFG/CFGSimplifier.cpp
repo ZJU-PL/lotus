@@ -19,6 +19,7 @@
 
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/IR/Instructions.h>
 
 using namespace llvm;
 
@@ -122,7 +123,13 @@ std::vector<CFGNode *> CFGSimplifier::findRedundantNodes(CFG &cfg) {
     if (node->isCopyNode()) {
       auto *copyNode = static_cast<CopyCFGNode *>(node);
       // Copy with 1 source is an identity: Dest == Src
-      if (copyNode->getNumSrc() == 1u) {
+      // Keep value-recovering results materialized for original-IR clients.
+      // Removing the node loses its binding: unlike bitcasts, pointer queries
+      // do not strip freeze instructions when looking up a points-to set.
+      if (copyNode->getNumSrc() == 1u &&
+          !isa<FreezeInst>(copyNode->getDest()) &&
+          !isa<ExtractValueInst>(copyNode->getDest()) &&
+          !isa<ExtractElementInst>(copyNode->getDest())) {
         ret.push_back(copyNode);
         eqMap[copyNode->getDest()] = copyNode->getSrc(0);
       }
@@ -181,8 +188,7 @@ void CFGSimplifier::adjustDefUseChain(
       // Connect definition directly to all uses, bypassing the redundant node.
       for (auto *useNode : node->uses())
         defNode->insertDefUseEdge(useNode);
-    }
-    else if (node->use_size() > 0u) {
+    } else if (node->use_size() > 0u) {
       auto *entryNode = cfg.getEntryNode();
       for (auto *useNode : node->uses())
         entryNode->insertDefUseEdge(useNode);

@@ -41,8 +41,8 @@ GateExpr::GateExpr(Type *type) : m_kind(Kind::Bottom), m_type(type) {
 
 GateExpr::GateExpr(Type *type, GateGuard true_guard, GateGuard false_guard,
                    const GateExpr *true_expr, const GateExpr *false_expr)
-    : m_kind(Kind::Select), m_type(type), m_true_guard(std::move(true_guard)),
-      m_false_guard(std::move(false_guard)), m_true_expr(true_expr),
+    : m_kind(Kind::Select), m_type(type), m_true_guard(true_guard),
+      m_false_guard(false_guard), m_true_expr(true_expr),
       m_false_expr(false_expr) {
   assert(type && "Select expressions require a type");
   assert(true_expr && false_expr && "Select expressions require both arms");
@@ -169,8 +169,8 @@ const GateExpr *GateAnalysisImpl::makeSelect(Type *Ty, GateGuard true_guard,
                                              GateGuard false_guard,
                                              const GateExpr *true_expr,
                                              const GateExpr *false_expr) {
-  auto Expr = std::make_unique<GateExpr>(Ty, std::move(true_guard),
-                                         std::move(false_guard), true_expr,
+  auto Expr = std::make_unique<GateExpr>(Ty, true_guard,
+                                         false_guard, true_expr,
                                          false_expr);
   const GateExpr *Raw = Expr.get();
   m_owned_exprs.push_back(std::move(Expr));
@@ -207,7 +207,7 @@ const GateExpr *GateAnalysisImpl::makeBranchExpr(Type *Ty, GateGuard true_guard,
       return true_expr;
   }
 
-  return makeSelect(Ty, std::move(true_guard), std::move(false_guard),
+  return makeSelect(Ty, true_guard, false_guard,
                     true_expr, false_expr);
 }
 
@@ -318,7 +318,7 @@ GateAnalysisImpl::processIncomingValues(PHINode *PN, Instruction *insertion_pt,
           BI->getSuccessor(1) == CurrentBB ? IncomingExpr : makeBottom(PhiTy);
 
       incoming_block_to_expr[IncomingBlock] =
-          makeBranchExpr(PhiTy, std::move(TrueGuard), std::move(FalseGuard),
+          makeBranchExpr(PhiTy, TrueGuard, FalseGuard,
                          TrueExpr, FalseExpr, false);
       continue;
     }
@@ -461,7 +461,7 @@ void GateAnalysisImpl::processPhi(PHINode *PN, Instruction *insertion_pt) {
       const GateExpr *FalseExpr = succ_to_expr.lookup(BI->getSuccessor(1));
 
       flowing_values[BB] =
-          makeBranchExpr(PhiTy, std::move(TrueGuard), std::move(FalseGuard),
+          makeBranchExpr(PhiTy, TrueGuard, FalseGuard,
                          TrueExpr, FalseExpr, true);
       continue;
     }

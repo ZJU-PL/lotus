@@ -6,8 +6,6 @@
 #pragma once
 #include "IR/PDG/Core/FunctionWrapper.h"
 #include "IR/PDG/Core/Tree.h"
-#include "IR/PDG/Support/LLVMEssentials.h"
-#include "IR/PDG/Support/PDGUtils.h"
 
 namespace pdg {
 /**
@@ -42,23 +40,14 @@ public:
    * @brief Constructor
    * @param ci The CallBase to wrap
    */
-  CallWrapper(llvm::CallBase &ci) {
-    _call_inst = &ci;
-    _called_func = pdgutils::getCalledFunc(ci);
-    _ret_val_actual_in_tree = nullptr;
-    _ret_val_actual_out_tree = nullptr;
-    for (auto *arg_iter = ci.arg_begin(); arg_iter != ci.arg_end();
-         arg_iter++) {
-      _arg_list.push_back(*arg_iter);
-    }
-  }
+  explicit CallWrapper(llvm::CallBase &ci);
 
   ~CallWrapper() {
     releaseTrees();
   }
 
   /**
-   * @brief Release (null out) all Tree pointers without deleting them.
+   * @brief Release owned Tree wrappers and clear their stored pointers.
    *
    * Trees are heap-allocated wrapper objects; their TreeNode contents are owned
    * by the PDG node set and are deleted separately by ProgramGraph::reset().

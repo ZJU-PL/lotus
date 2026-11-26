@@ -5,8 +5,11 @@
 #include "Alias/InclusionBased/BootstrapAA/BootstrapAA.h"
 
 #include <exception>
+#include <unordered_map>
 
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalValue.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -26,9 +29,24 @@ llvm::cl::opt<std::string>
     Entry("entry", llvm::cl::init("main"),
           llvm::cl::desc("Defined program entry function"),
           llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<std::string> SolverKind(
+    "solver", llvm::cl::init("guarded"),
+    llvm::cl::desc("Cluster solver backend: guarded (PLDI'08 Algs. 2-5) or "
+                   "tabulation (reference forward oracle)"),
+    llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<std::string> HavocKind(
+    "havoc-policy", llvm::cl::init("noop"),
+    llvm::cl::desc("Policy for unmodeled external calls & havoc writes: "
+                   "noop (default, treat unmodeled side effects as no-ops) or "
+                   "conservative (soundly havoc to TOP)"),
+    llvm::cl::cat(BootstrapCategory));
 llvm::cl::opt<bool> AllContexts(
     "all-contexts", llvm::cl::init(false),
     llvm::cl::desc("Print the union of reachable contexts in every function"),
+    llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<bool> PrintAliases(
+    "print-aliases", llvm::cl::init(false),
+    llvm::cl::desc("Also print Algorithm 3 may-alias sets per pointer"),
     llvm::cl::cat(BootstrapCategory));
 llvm::cl::opt<unsigned>
     Threshold("andersen-threshold", llvm::cl::init(60),
@@ -37,6 +55,34 @@ llvm::cl::opt<unsigned>
 llvm::cl::opt<bool> AdaptiveThreshold(
     "adaptive-threshold", llvm::cl::init(true),
     llvm::cl::desc("Adapt the Andersen threshold from observed refinement"),
+    llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<bool> AdaptiveGlobalEscalation(
+    "adaptive-global-escalation", llvm::cl::init(false),
+    llvm::cl::desc("Escalate threshold globally upon a rejected partition "
+                   "(false = per-partition rejection only)"),
+    llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<unsigned> HybridTabulationMaxCluster(
+    "hybrid-tabulation-max-cluster", llvm::cl::init(0),
+    llvm::cl::desc("Hybrid mode: use tabulation solver for clusters of size <= N "
+                   "(0 disables)"),
+    llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<bool> OneLevelFlow(
+    "one-level-flow", llvm::cl::init(false),
+    llvm::cl::desc("Enable Das (2000) one-level-flow cascade stage between "
+                   "Steensgaard and Andersen"),
+    llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<bool> PathSensitive(
+    "path-sensitive", llvm::cl::init(false),
+    llvm::cl::desc("Enable ROBDD-based path sensitivity (Kahlon §3 p. 258)"),
+    llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<bool> PathSensitiveInterproc(
+    "path-sensitive-interproc", llvm::cl::init(false),
+    llvm::cl::desc("Propagate ROBDD branching constraints across functions"),
+    llvm::cl::cat(BootstrapCategory));
+llvm::cl::opt<bool> EagerDovetail(
+    "eager-dovetail", llvm::cl::init(false),
+    llvm::cl::desc("Eagerly precompute function summaries per Steensgaard "
+                   "depth (literal Algorithm 2 lines 2 & 8)"),
     llvm::cl::cat(BootstrapCategory));
 llvm::cl::opt<unsigned> MaxAndersenPartition(
     "max-andersen-partition", llvm::cl::init(4096),
@@ -91,8 +137,32 @@ int main(int argc, char **argv) {
   }
   try {
     lotus::bootstrap::Options options;
+    if (SolverKind == "guarded") {
+      options.solver_mode = lotus::bootstrap::SolverMode::GuardedSummary;
+    } else if (SolverKind == "tabulation") {
+      options.solver_mode = lotus::bootstrap::SolverMode::InputStateTabulation;
+    } else {
+      llvm::errs() << "Unknown --solver value: " << SolverKind
+                   << " (expected guarded or tabulation)\n";
+      return 1;
+    }
+    if (HavocKind == "noop") {
+      options.havoc_policy = lotus::bootstrap::HavocPolicy::Noop;
+    } else if (HavocKind == "conservative") {
+      options.havoc_policy = lotus::bootstrap::HavocPolicy::Conservative;
+    } else {
+      llvm::errs() << "Unknown --havoc-policy value: " << HavocKind
+                   << " (expected noop or conservative)\n";
+      return 1;
+    }
     options.andersen_threshold = Threshold;
     options.adaptive_andersen_threshold = AdaptiveThreshold;
+    options.adaptive_global_threshold_escalation = AdaptiveGlobalEscalation;
+    options.hybrid_tabulation_max_cluster_size = HybridTabulationMaxCluster;
+    options.enable_one_level_flow = OneLevelFlow;
+    options.path_sensitive = PathSensitive || PathSensitiveInterproc;
+    options.path_sensitive_interprocedural = PathSensitiveInterproc;
+    options.eager_dovetail_summaries = EagerDovetail;
     options.max_andersen_partition_size = MaxAndersenPartition;
     options.max_andersen_work = MaxAndersenWork;
     options.parallel_clusters = ParallelClusters;
@@ -103,9 +173,70 @@ int main(int argc, char **argv) {
     if (PrecomputeClusters || AllContexts)
       analysis.precomputeAll();
     bool limited = false;
+    std::unordered_map<const llvm::Value *, unsigned> global_slots;
+    {
+      unsigned g_next = 0;
+      for (const llvm::GlobalVariable &gv : module->globals())
+        if (!gv.hasName())
+          global_slots.emplace(&gv, g_next++);
+      for (const llvm::Function &fn : *module)
+        if (!fn.hasName())
+          global_slots.emplace(&fn, g_next++);
+      for (const llvm::GlobalAlias &ga : module->aliases())
+        if (!ga.hasName())
+          global_slots.emplace(&ga, g_next++);
+    }
+    std::unordered_map<const llvm::Value *, unsigned> local_slots;
+    auto printValueFast = [&](llvm::raw_ostream &os, const llvm::Value &v) {
+      if (llvm::isa<llvm::GlobalValue>(&v)) {
+        if (v.hasName()) {
+          os << '@' << v.getName();
+          return;
+        }
+        if (auto it = global_slots.find(&v); it != global_slots.end()) {
+          os << '@' << it->second;
+          return;
+        }
+      }
+      if (v.hasName()) {
+        os << '%' << v.getName();
+        return;
+      }
+      if (auto it = local_slots.find(&v); it != local_slots.end()) {
+        os << '%' << it->second;
+        return;
+      }
+      if (llvm::isa<llvm::ConstantPointerNull>(&v)) {
+        os << "null";
+        return;
+      }
+      if (llvm::isa<llvm::PoisonValue>(&v)) {
+        os << "poison";
+        return;
+      }
+      if (llvm::isa<llvm::UndefValue>(&v)) {
+        os << "undef";
+        return;
+      }
+      os << "<const>";
+    };
     for (const llvm::Function &function : *module) {
       if (!AllContexts && &function != entry)
         continue;
+      if (function.isDeclaration())
+        continue;
+      local_slots.clear();
+      unsigned l_next = 0;
+      for (const llvm::Argument &arg : function.args())
+        if (!arg.hasName())
+          local_slots.emplace(&arg, l_next++);
+      for (const llvm::BasicBlock &block : function) {
+        if (!block.hasName())
+          local_slots.emplace(&block, l_next++);
+        for (const llvm::Instruction &inst : block)
+          if (!inst.getType()->isVoidTy() && !inst.hasName())
+            local_slots.emplace(&inst, l_next++);
+      }
       for (const llvm::BasicBlock &block : function) {
         for (const llvm::Instruction &instruction : block) {
           if (!instruction.getType()->isPointerTy())
@@ -117,24 +248,50 @@ int main(int argc, char **argv) {
                   : analysis.pointsTo(instruction, instruction, {},
                                       lotus::bootstrap::Point::After);
           llvm::outs() << function.getName() << ": ";
-          instruction.printAsOperand(llvm::outs(), false);
+          printValueFast(llvm::outs(), instruction);
           llvm::outs() << " -> ";
           if (!result.reachable()) {
             llvm::outs() << "<unreachable>\n";
             continue;
           }
           llvm::outs() << '{';
-          bool first = true;
-          for (lotus::bootstrap::Id object : result.points_to.objects()) {
-            if (!first)
-              llvm::outs() << ", ";
-            first = false;
-            llvm::outs() << analysis.objectInfo(object).name;
+          if (result.points_to.isTop()) {
+            llvm::outs() << "TOP";
+          } else {
+            bool first = true;
+            for (lotus::bootstrap::Id object : result.points_to.objects()) {
+              if (!first)
+                llvm::outs() << ", ";
+              first = false;
+              llvm::outs() << analysis.objectInfo(object).name;
+            }
           }
           llvm::outs() << '}';
           if (result.status == lotus::bootstrap::QueryStatus::ResourceLimit) {
             limited = true;
             llvm::outs() << " [resource-limit fallback]";
+          }
+          if (PrintAliases) {
+            auto aliasRes =
+                AllContexts
+                    ? analysis.aliasesAllContexts(
+                          instruction, instruction,
+                          lotus::bootstrap::Point::After)
+                    : analysis.aliases(instruction, instruction, {},
+                                       lotus::bootstrap::Point::After);
+            llvm::outs() << " aliases={";
+            bool afirst = true;
+            for (const llvm::Value *av : aliasRes.aliases) {
+              if (!afirst)
+                llvm::outs() << ", ";
+              afirst = false;
+              printValueFast(llvm::outs(), *av);
+            }
+            if (aliasRes.status == lotus::bootstrap::QueryStatus::ResourceLimit)
+              limited = true;
+            if (aliasRes.may_alias_all)
+              llvm::outs() << (afirst ? "*" : ", *");
+            llvm::outs() << '}';
           }
           llvm::outs() << '\n';
         }
@@ -147,6 +304,7 @@ int main(int argc, char **argv) {
                  << " hierarchy-edges=" << stats.hierarchy_edges
                  << " hierarchy-depth=" << stats.hierarchy_max_depth
                  << " cyclic-components=" << stats.hierarchy_cyclic_components
+                 << " one-level-flow-runs=" << stats.one_level_flow_runs
                  << " andersen-runs=" << stats.andersen_runs
                  << " adaptive-skips=" << stats.adaptive_refinement_skips
                  << " adaptive-rejections="
@@ -164,6 +322,15 @@ int main(int argc, char **argv) {
                  << " call-graph-sccs=" << stats.call_graph_sccs
                  << " recursive-sccs=" << stats.recursive_call_graph_sccs
                  << " scc-reschedules=" << stats.scc_reschedules
+                 << " dovetail-levels=" << stats.dovetail_levels
+                 << " fsci-queries=" << stats.fsci_queries
+                 << " summary-tuples=" << stats.summary_tuples
+                 << " guard-atoms=" << stats.guard_atoms_created
+                 << " guards-pruned=" << stats.guards_pruned
+                 << " guards-widened=" << stats.guards_widened
+                 << " skipped-functions=" << stats.skipped_functions
+                 << " path-prunes=" << stats.path_infeasible_prunes
+                 << " bdd-nodes=" << stats.bdd_nodes
                  << " contexts=" << stats.contexts
                  << " context-cache-hits=" << stats.context_cache_hits
                  << " context-cache-misses=" << stats.context_cache_misses

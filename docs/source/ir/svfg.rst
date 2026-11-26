@@ -398,3 +398,105 @@ References
 
 
 * SVF Framework: https://github.com/SVF-tools/SVF
+
+Object-ID Clustering
+====================
+
+``SVFGBuilderConfig::objectIdClustering`` renumbers abstract-object IDs with the
+vendored fastcluster library (SVF's OOPSLA'21 object clustering). The pass runs
+after the points-to observations in ``prepareMemoryRegionPartitioning()`` and
+before MemorySSA nodes are created, so every later allocation uses the new
+dense floor.
+
+* It is a bijection over ``SVFG::collectReferencedObjectIds()``; objects are
+  never merged, so points-to precision and strong updates are unchanged.
+* The ascending allocation order is evaluated as a candidate, so clustering
+  never makes a region's occurrence-weighted word span worse.
+* ``SVFG::remapObjectIds()`` updates node guards, edge guards, field/base maps
+  and value maps atomically, and rejects non-bijective or incomplete mappings.
+* ``SVFGBuilder::getObjectIdClusteringStatistics()`` reports the object and
+  region counts plus the before/after word span.
+
+Enable it from C++:
+
+.. code-block:: cpp
+
+   SVFGBuilderConfig config;
+   config.objectIdClustering =
+       SVFGBuilderConfig::ObjectIdClustering::Hierarchical;
+   config.objectIdLinkage = lotus::utils::ClusterLinkage::Best;
+
+or from the flow-sensitive driver:
+
+.. code-block:: bash
+
+   lotus-alias-fspta program.bc --analysis=fspta --object-clustering=hierarchical
+
+Because object IDs change, ``--read-pts`` result files must be loaded by a
+build that uses the same clustering setting (the same contract as
+``--cluster-objects``).
+
+Mod/Ref Queries
+===============
+
+``SVFG::getModRefInfo`` answers whether a call may read or write an abstract
+object, a points-to set, or the objects pointed to by an LLVM value:
+
+.. code-block:: cpp
+
+   std::optional<SVFG::ModRefInfo> info =
+       svfg.getModRefInfo(call, objectId);
+   if (info) {
+     bool reads = info->reads;
+     bool writes = info->writes;
+     auto kind = info->kind();   // NoModRef / Ref / Mod / ModRef
+   }
+
+   // Whole-call effect.
+   auto whole = svfg.getModRefInfo(call);
+
+   // Directed conflict between two calls (SVF's getModRefInfo(cs1, cs2)):
+   // reads  = cs1 references an object modified by cs2
+   // writes = cs1 modifies an object referenced or modified by cs2
+   auto conflict = svfg.getModRefInfo(call1, call2);
+
+* Both ``reads`` and ``writes`` use the builder-time per-call read/write sets.
+  The read set excludes regions that are only written; ``ActualIn`` also
+  carries those for weak-update ordering.
+* The sets survive ``SVFGOPT`` rewiring, which may remove ActualIn/ActualOut
+  nodes.
+* After deserialization the sets are unavailable and the query falls back to
+  ``ActualIn``/``ActualOut`` (conservative for write-only calls).
+* Calls without MemorySSA nodes fall back to LLVM memory attributes
+  (``readnone``/``readonly``). Otherwise the result is ``std::nullopt`` rather
+  than an unjustified "no effect".
+
+DOT Export
+==========
+
+``Utils/Graph/DotWriter.h`` provides an ordered ``DotGraph`` model with correct
+escaping plus adapters for ICFG, CFG, call graph and SVFG
+(``writeICFGDot``, ``writeCFGDot``, ``writeCallGraphDot``, ``writeSVFGDot``).
+It is a library layer, not a separate driver:
+
+.. code-block:: cpp
+
+   #include "Utils/Graph/DotWriter.h"
+
+   lotus::utils::graphviz::DotOptions options;
+   options.simple = false;
+   options.clusterByFunction = true;
+   options.functionFilter = function;   // nullptr exports everything
+
+   lotus::utils::graphviz::writeSVFGDot(*svfg, "svfg.dot", options);
+
+For a function-restricted view of a large program, set
+``DotOptions::functionFilter``; this avoids exporting whole-program value-flow
+graphs. ``SVFGSerializer::writeDot`` delegates to this layer, so ``SVFG::dump``
+and the existing ``--dump-svfg`` options share the same escaping and attributes.
+The drivers expose the filter directly:
+
+.. code-block:: bash
+
+   lotus-ir-ufg --dump-svfg=main.dot --dump-svfg-function=main program.bc
+   lotus-alias-fspta program.bc --dump-svfg=main.dot --dump-svfg-function=main

@@ -1,8 +1,8 @@
 #pragma once
 
 #include "Analysis/CallGraph/CallGraphAnalysisType.h"
-#include "Analysis/TypeHierarchy/LLVMVFTableProvider.h"
 #include "Analysis/CallGraph/VirtualCallUtils.h"
+#include "Analysis/TypeHierarchy/LLVMVFTableProvider.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"

@@ -1,10 +1,7 @@
 add_subdirectory(Sifa)
-add_subdirectory(Automata)
-add_subdirectory(TraceAbstraction)
 
 lotus_collect_test_sources(verification_tests
   FailureDirectedTrimmingTest.cpp
-  PathProgramTest.cpp
   BooleanProgramFrontendTest.cpp
   Mosaic/MosaicCHCParserTest.cpp
   Mosaic/MosaicPreprocessorTest.cpp
@@ -14,7 +11,6 @@ lotus_collect_test_sources(verification_tests
 add_lotus_collected_test_suite(verification_tests
   LINK_LIBS
     FailureDirectedTrimming
-    VerificationPathProgram
     VerificationFrontend
     VerificationDriver
     MosaicVerification

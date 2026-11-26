@@ -11,6 +11,7 @@ add_library(CanaryClassicalCFL STATIC
     Solvers/Engines/CAT/ContextAwareTabulation.cpp
     Solvers/Engines/IEOCE/IterativeEpoch.cpp
     Solvers/Engines/TransitiveClosure.cpp
+    Solvers/Engines/SparseSubset/SparseSubsetCFL.cpp
     Solvers/Engines/POCR/ClientGrammars.cpp
     Solvers/Engines/POCR/FullyOrderedClosure.cpp
     Solvers/Engines/POCR/PairedTreeClosure.cpp

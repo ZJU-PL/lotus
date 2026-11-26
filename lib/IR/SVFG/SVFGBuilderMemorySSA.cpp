@@ -914,8 +914,11 @@ void SVFGBuilder::buildMemorySSA() {
         if (!call)
           continue;
         const auto *intrinsic = dyn_cast<IntrinsicInst>(call);
-        if (!intrinsic)
+        if (!intrinsic) {
+          for (const auto &effect : externalAllocations[call])
+            recordVisibleAccess(&F, effect.destination, summary, false, true);
           continue;
+        }
         switch (intrinsic->getIntrinsicID()) {
         case Intrinsic::memcpy:
         case Intrinsic::memmove: {
@@ -1199,6 +1202,25 @@ void SVFGBuilder::buildMemorySSA() {
           }
         }
 
+        for (const auto &effect : externalAllocations[call]) {
+          const auto region = getCanonicalRegionForPointer(effect.destination);
+          if (region.first != 0)
+            addRegion(writeRegs, region.first, region.second);
+        }
+
+        // Preserve the true read-only set for ModRef queries before adding
+        // may-write regions to ActualIn for weak-update ordering.
+        if (svfg) {
+          SVFGNodeBS readOnly;
+          for (const auto &entry : readRegs)
+            readOnly.insert(entry.second.begin(), entry.second.end());
+          SVFGNodeBS writeOnly;
+          for (const auto &entry : writeRegs)
+            writeOnly.insert(entry.second.begin(), entry.second.end());
+          svfg->setCallReadOnlyObjects(call, readOnly);
+          svfg->setCallWriteObjects(call, writeOnly);
+        }
+
         // A may-write region is also an input to the callee: weak updates and
         // untouched objects must see the reaching memory version. Model the
         // SVF ActualIn/FormalIn side for MOD regions even when the callee does
@@ -1315,10 +1337,29 @@ void SVFGBuilder::buildMemorySSA() {
               auto *actualOut = new ActualOutSVFGNode(
                   actualOutId, findReturnSiteICFGNode(icfg, call), call,
                   memRegId, pts, actualOutVersion);
+              for (const auto &effect : externalAllocations[call])
+                actualOut->addAllocation(effect);
               svfg->addNode(actualOut);
               svfg->addActualOut(call, actualOut);
               chiVec.push_back(actualOutId);
               svfg->setMSSADef(memRegId, actualOut, actualOutVersion);
+            }
+          }
+
+          if (!externalAllocations[call].empty()) {
+            for (uint32_t chiId : chiVec) {
+              SVFGNode *output = svfg->getNode(chiId);
+              for (uint32_t muId : muVec) {
+                SVFGNode *input = svfg->getNode(muId);
+                const auto guard = intersectPointsToSets(
+                    input->getDefSVFVars(), output->getDefSVFVars(), unknownObjId);
+                if (!guard.empty())
+                  svfg->addEdge(input, output, SVFGEdgeK::IntraIndirect, call,
+                                guard);
+              }
+              for (const auto &effect : externalAllocations[call])
+                if (SVFGNode *pointer = svfg->getValueNode(effect.destination))
+                  svfg->addEdge(pointer, output, SVFGEdgeK::IntraCopy, call);
             }
           }
 
@@ -2574,6 +2615,16 @@ bool SVFGBuilder::connectCallSiteToCalleeOnTheFly(
     if (!g->markConnectedCallee(cs, callee))
       return false;
     connectExternalReturn(g, cs, callee, newEdges);
+    // Activating an indirect external summary must wake its memory defs,
+    // even when the external function has no pointer return.
+    if (SVFGNode *pointer = g->getValueNode(cs->getCalledOperand()))
+      for (SVFGNode *output : g->getActualOuts(cs))
+        if (auto *actualOut = dyn_cast<ActualOutSVFGNode>(output))
+          for (const auto &effect : actualOut->getAllocations())
+            if (effect.callee == callee)
+              if (SVFGEdge *edge = g->addEdge(pointer, output,
+                                              SVFGEdgeK::IntraCopy, cs))
+                newEdges.push_back(edge);
     return true;
   }
 

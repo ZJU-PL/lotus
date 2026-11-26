@@ -421,7 +421,7 @@ public:
 
   RewriteBorrow(Symbol name, std::shared_ptr<const Searcher<L, A>> searcher,
                 std::shared_ptr<const Applier<L, A>> applier)
-      : name_(std::move(name)), searcher_(std::move(searcher)),
+      : name_(name), searcher_(std::move(searcher)),
         applier_(std::move(applier)) {
     validateBoundVars();
   }
@@ -430,7 +430,7 @@ public:
             typename = std::enable_if_t<std::is_base_of_v<Searcher<L, A>, S> &&
                                         std::is_base_of_v<Applier<L, A>, Ap>>>
   RewriteBorrow(Symbol name, const S &searcher, const Ap &applier)
-      : RewriteBorrow(std::move(name), detail::borrowShared(searcher),
+      : RewriteBorrow(name, detail::borrowShared(searcher),
                       detail::borrowShared(applier)) {}
 
   const Symbol &name() const { return name_; }
@@ -455,7 +455,7 @@ public:
 
 protected:
   RewriteBorrow(Symbol name, std::shared_ptr<const Searcher<L, A>> searcher)
-      : name_(std::move(name)), searcher_(std::move(searcher)) {}
+      : name_(name), searcher_(std::move(searcher)) {}
 
   void validateBoundVars() const {
     detail::validateRewriteBoundVars(std::string_view(name_.view()), *searcher_,
@@ -474,9 +474,8 @@ public:
 
   Rewrite(Symbol name, Pattern<L> searcher, Pattern<L> applier,
           std::vector<Condition<L, A>> conditions = {})
-      : RewriteBorrow<L, A>(
-            std::move(name),
-            std::make_shared<PatternSearcher<L, A>>(std::move(searcher))) {
+      : RewriteBorrow<L, A>(name, std::make_shared<PatternSearcher<L, A>>(
+                                      std::move(searcher))) {
     std::shared_ptr<const Applier<L, A>> wrapped =
         std::make_shared<PatternApplier<L, A>>(std::move(applier));
     for (auto it = conditions.rbegin(); it != conditions.rend(); ++it) {
@@ -488,13 +487,12 @@ public:
 
   Rewrite(Symbol name, Pattern<L> searcher, ConditionalApplier<L, A> applier)
       : Rewrite(
-            std::move(name),
-            std::make_shared<PatternSearcher<L, A>>(std::move(searcher)),
+            name, std::make_shared<PatternSearcher<L, A>>(std::move(searcher)),
             std::make_shared<ConditionalApplier<L, A>>(std::move(applier))) {}
 
   Rewrite(Symbol name, MultiPattern<L> searcher, MultiPattern<L> applier)
       : Rewrite(
-            std::move(name),
+            name,
             std::make_shared<MultiPatternSearcher<L, A>>(std::move(searcher)),
             std::make_shared<MultiPatternApplier<L, A>>(std::move(applier))) {}
 
@@ -502,7 +500,7 @@ public:
             typename = std::enable_if_t<std::is_base_of_v<Searcher<L, A>, S> &&
                                         std::is_base_of_v<Applier<L, A>, Ap>>>
   Rewrite(Symbol name, S searcher, Ap applier)
-      : Rewrite(std::move(name), std::make_shared<S>(std::move(searcher)),
+      : Rewrite(name, std::make_shared<S>(std::move(searcher)),
                 std::make_shared<Ap>(std::move(applier))) {}
 };
 
@@ -510,8 +508,8 @@ template <typename L, typename A = NoAnalysis<L>>
 inline Rewrite<L, A> makeRewrite(Symbol name, std::string_view lhs,
                                  std::string_view rhs,
                                  std::vector<Condition<L, A>> conditions = {}) {
-  return Rewrite<L, A>(std::move(name), Pattern<L>::parse(lhs),
-                       Pattern<L>::parse(rhs), std::move(conditions));
+  return Rewrite<L, A>(name, Pattern<L>::parse(lhs), Pattern<L>::parse(rhs),
+                       std::move(conditions));
 }
 
 template <typename L, typename A = NoAnalysis<L>, typename C>
@@ -526,7 +524,7 @@ inline Rewrite<L, A> makeConditionalRewrite(Symbol name, std::string_view lhs,
       throw std::runtime_error("Rewrite condition refers to unbound variable");
     }
   }
-  return Rewrite<L, A>(std::move(name), std::move(searcher),
+  return Rewrite<L, A>(name, std::move(searcher),
                        ConditionalApplierT<L, A, std::decay_t<C>>(
                            std::move(condition), Pattern<L>::parse(rhs)));
 }
@@ -534,8 +532,7 @@ inline Rewrite<L, A> makeConditionalRewrite(Symbol name, std::string_view lhs,
 template <typename L, typename A = NoAnalysis<L>>
 inline Rewrite<L, A> makeMultiRewrite(Symbol name, MultiPattern<L> searcher,
                                       MultiPattern<L> applier) {
-  return Rewrite<L, A>(std::move(name), std::move(searcher),
-                       std::move(applier));
+  return Rewrite<L, A>(name, std::move(searcher), std::move(applier));
 }
 
 template <typename L, typename A = NoAnalysis<L>, typename S, typename Ap,
@@ -543,7 +540,7 @@ template <typename L, typename A = NoAnalysis<L>, typename S, typename Ap,
                                       std::is_base_of_v<Applier<L, A>, Ap>>>
 inline RewriteBorrow<L, A> makeRewriteBorrow(Symbol name, const S &searcher,
                                              const Ap &applier) {
-  return RewriteBorrow<L, A>(std::move(name), searcher, applier);
+  return RewriteBorrow<L, A>(name, searcher, applier);
 }
 
 template <typename L, typename A = NoAnalysis<L>, typename S,
@@ -551,7 +548,7 @@ template <typename L, typename A = NoAnalysis<L>, typename S,
 inline RewriteBorrow<L, A> makeRewriteBorrow(Symbol name, const S &searcher,
                                              Pattern<L> applier) {
   return RewriteBorrow<L, A>(
-      std::move(name), std::make_shared<S>(searcher),
+      name, std::make_shared<S>(searcher),
       std::make_shared<PatternApplier<L, A>>(std::move(applier)));
 }
 
@@ -572,7 +569,7 @@ makeConditionalRewriteBorrow(Symbol name, std::string_view lhs,
       std::make_shared<PatternSearcher<L, A>>(std::move(searcher));
   auto applier = std::make_shared<ConditionalApplierT<L, A, C>>(
       condition, Pattern<L>::parse(rhs));
-  return RewriteBorrow<L, A>(std::move(name), std::move(owned_searcher),
+  return RewriteBorrow<L, A>(name, std::move(owned_searcher),
                              std::move(applier));
 }
 

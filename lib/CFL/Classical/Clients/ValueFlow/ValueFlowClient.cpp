@@ -349,7 +349,7 @@ ValueFlowClient::ValueFlowClient(ValueFlowClient &&other) noexcept
     : state_(std::move(other.state_)),
       node_to_vertex_(std::move(other.node_to_vertex_)),
       vertex_to_node_(std::move(other.vertex_to_node_)),
-      session_(std::move(other.session_)), backend_(std::move(other.backend_)) {
+      session_(std::move(other.session_)), backend_(other.backend_) {
 }
 
 ValueFlowClient &ValueFlowClient::operator=(ValueFlowClient &&other) noexcept {
@@ -361,7 +361,7 @@ ValueFlowClient &ValueFlowClient::operator=(ValueFlowClient &&other) noexcept {
   node_to_vertex_ = std::move(other.node_to_vertex_);
   vertex_to_node_ = std::move(other.vertex_to_node_);
   session_ = std::move(other.session_);
-  backend_ = std::move(other.backend_);
+  backend_ = other.backend_;
   return *this;
 }
 

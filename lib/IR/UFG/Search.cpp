@@ -326,7 +326,8 @@ LaneSearchResult SearchEngine::tabulate(Query query, const TraceFlowGraph &graph
   std::vector<Parent> parent(seen.size());
   std::deque<ID> queue;
   auto encode = [&](ID productID, unsigned phase, bool positive) {
-    return checked(std::size_t(productID) * 4 + phase * 2 + unsigned(positive));
+    return checked(std::size_t(productID) * 4 + std::size_t(phase) * 2 +
+                   unsigned(positive));
   };
   auto enqueue = [&](ID state, ID previous, bool byFact, ID item) {
     if (seen[state]) return;

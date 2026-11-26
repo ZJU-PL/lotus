@@ -4,14 +4,14 @@
  */
 
 #pragma once
+#include "llvm/IR/DebugInfoMetadata.h"
+
 #include "IR/PDG/Core/PDGEnums.h"
 #include "IR/PDG/Core/PDGNode.h"
-#include "IR/PDG/Support/DebugInfoUtils.h"
-#include "IR/PDG/Support/LLVMEssentials.h"
-#include "IR/PDG/Support/PDGUtils.h"
 
 #include <set>
 #include <unordered_set>
+#include <vector>
 
 namespace pdg {
 class Tree;

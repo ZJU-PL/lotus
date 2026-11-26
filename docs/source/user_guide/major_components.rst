@@ -34,10 +34,13 @@ See :doc:`../alias/alias_analysis` for detailed instructions and command example
 * **LotusAA** – Native alias analysis engine with interprocedural,
   flow-sensitive, and field-sensitive reasoning
   (``lib/Alias/InclusionBased/LotusAA``). See :doc:`../alias/lotusaa`.
-* **FlowSensitivePTA** – Flow-sensitive inclusion-based pointer analyses with
-  conventional sparse, object-versioned, and direct value-flow solvers
-  (``lib/Alias/InclusionBased/FlowSensitive``). Includes ValueFlowPTA.
-  See :doc:`../alias/flowsensitive` and :doc:`../alias/valueflowpta`.
+* **SparsePTA** – SVFG-based sparse flow-sensitive inclusion-based pointer
+  analyses with conventional sparse (``FlowSensitivePTA``) and object-versioned
+  (``VersionedFlowSensitivePTA``) solvers
+  (``lib/Alias/InclusionBased/SparsePTA``). See :doc:`../alias/flowsensitive`.
+* **ValueFlowPTA** – Direct LLVM-IR flow-sensitive, field-insensitive
+  value-flow pointer analysis (``lib/Alias/InclusionBased/ValueFlowPTA``).
+  See :doc:`../alias/valueflowpta`.
 * **DDA** – Demand-driven alias-analysis infrastructure that refines alias
   information on demand instead of materializing a full global solution
   (``lib/Alias/DemandDriven/DDA``). See :doc:`../alias/dda`.
@@ -102,19 +105,6 @@ See :doc:`../ir/index` for builder APIs and code snippets.
 * **UseTraceSSA** – Ordered use-history overlay over Lotus SVFG for temporal
   resource defect checking (``lib/IR/UseTraceSSA``). See
   :doc:`../ir/usetracessa`.
-* **PathProgram** – Control-flow abstractions induced by concrete execution
-  paths for verification analyses (``lib/Verification/PathProgram``). See
-  :doc:`../ir/path_program`.
-
-Machine Learning Features
--------------------------
-
-See :doc:`../ml/index` for ML feature extraction APIs.
-
-* **CanaryML** – Memory-related feature extraction using Sea-DSA for ML applications
-  (``lib/Analysis/FeatureExtraction/``). Provides ``MemoryMLFeaturesPass`` for extracting memory access
-  patterns and structural features from call sites, useful for training memory
-  safety predictors.
 
 Abstract Interpretation
 -----------------------

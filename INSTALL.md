@@ -40,6 +40,7 @@ Lotus exposes its build options through `cmake/LotusOptions.cmake` with a consis
 | `LOTUS_ENABLE_DYNAA` | OFF | Dynamic alias-analysis tools |
 | `LOTUS_ENABLE_CFL` | ON | CFL reachability |
 | `LOTUS_ENABLE_CSR` | OFF | CSR tools |
+| `LOTUS_ENABLE_GUROBI` | OFF | Optional Gurobi ILP backend (license + `GUROBI_HOME`) |
 | `LOTUS_ENABLE_OWL` | OFF | OWL integration |
 | `LOTUS_ENABLE_CCLYZER` | OFF | CclyzerAA Datalog alias analysis backend |
 | `LOTUS_ENABLE_SMT_STABILIZER` | OFF | SMTStabilizer SMT-LIB normalization library and tool |

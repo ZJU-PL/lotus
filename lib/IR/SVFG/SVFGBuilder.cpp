@@ -333,6 +333,8 @@ SVFG *SVFGBuilder::build(const ICFG *icfg, const SVFGBuilderConfig &cfg) {
   buildNodes();
   buildEdges();
 
+  prepareExternalAllocations();
+
   if (config.buildMSSA) {
     buildMemorySSA();
     buildMemoryPHINodes();
@@ -368,6 +370,7 @@ void SVFGBuilder::initialize(const ICFG *cfg) {
   ptaSolverWrapper.reset();
 
   valueToNode.clear();
+  externalAllocations.clear();
   objectQueryStack.clear();
   objectQueryResults.clear();
   valueToValueId.clear();
@@ -527,10 +530,115 @@ void SVFGBuilder::prepareMemoryRegionPartitioning() {
     }
   }
 
+  if (config.objectIdClustering ==
+      SVFGBuilderConfig::ObjectIdClustering::Hierarchical) {
+    (void)clusterObjectIds();
+  }
+
   if (unknownObjId != 0)
     memoryRegionPartitioner.setUnknownObject(unknownObjId);
   memoryRegionPartitioner.freeze();
 }
+
+bool SVFGBuilder::clusterObjectIds() {
+  objectIdClusteringStats = utils::ClusterStatistics{};
+  if (!svfg)
+    return false;
+
+  // Object universe: everything the graph references plus builder-side
+  // caches that may not have been materialised in the graph yet.
+  std::vector<uint32_t> universe = svfg->collectReferencedObjectIds();
+  auto addId = [&](uint32_t id) {
+    if (id != 0)
+      universe.push_back(id);
+  };
+  addId(unknownObjId);
+  for (const auto &entry : ptaObjectToObjId)
+    addId(entry.second);
+  for (const auto &entry : objIdToPTAObject)
+    addId(entry.first);
+  for (const auto &entry : baseObjToFIObjId) {
+    addId(entry.first);
+    addId(entry.second);
+  }
+  std::sort(universe.begin(), universe.end());
+  universe.erase(std::unique(universe.begin(), universe.end()), universe.end());
+
+  std::vector<utils::ClusterSet> sets;
+  for (const SVFGNodeBS &set : svfg->collectPointsToSets()) {
+    utils::ClusterSet input;
+    input.objects.assign(set.begin(), set.end());
+    if (!input.objects.empty())
+      sets.push_back(std::move(input));
+  }
+
+  utils::ClusterOptions options;
+  options.idBase = kObjIdBase;
+  options.linkage = config.objectIdLinkage;
+  const utils::ClusterResult result =
+      utils::HierarchicalClusterer::cluster(sets, universe, options);
+  objectIdClusteringStats = result.stats;
+
+  if (result.oldToNew.size() != universe.size()) {
+    objectIdClusteringStats.fellBackToIdentity = true;
+    return false;
+  }
+
+  std::string error;
+  if (!svfg->remapObjectIds(result.oldToNew, &error)) {
+    objectIdClusteringStats.fellBackToIdentity = true;
+    return false;
+  }
+  memoryRegionPartitioner.remapObjectIds(result.oldToNew);
+
+  auto mapId = [&](uint32_t id) -> uint32_t {
+    if (id == 0)
+      return 0;
+    const auto it = result.oldToNew.find(id);
+    return it == result.oldToNew.end() ? id : it->second;
+  };
+
+  for (auto &entry : ptaObjectToObjId)
+    entry.second = mapId(entry.second);
+  std::unordered_map<uint32_t, const void *> newReverse;
+  newReverse.reserve(objIdToPTAObject.size());
+  for (const auto &entry : objIdToPTAObject)
+    newReverse.emplace(mapId(entry.first), entry.second);
+  objIdToPTAObject = std::move(newReverse);
+
+  std::unordered_map<uint32_t, uint32_t> newFieldInsensitive;
+  newFieldInsensitive.reserve(baseObjToFIObjId.size());
+  for (const auto &entry : baseObjToFIObjId)
+    newFieldInsensitive.emplace(mapId(entry.first), mapId(entry.second));
+  baseObjToFIObjId = std::move(newFieldInsensitive);
+
+  unknownObjId = mapId(unknownObjId);
+  // The memoised object queries and provisional memory regions were computed
+  // with the old IDs; both are safe to discard because no memory-SSA node or
+  // edge references them yet.
+  objectQueryResults.clear();
+  objectQueryStack.clear();
+  nextMemRegId = 1;
+  allocaToMemReg.clear();
+  globalToMemReg.clear();
+  heapAllocToMemReg.clear();
+  ptrValToMemReg.clear();
+  objIdToMemReg.clear();
+  memRegToObjId.clear();
+  memRegToPts.clear();
+  ptsToMemReg.clear();
+  memRegVersion.clear();
+
+  uint32_t maxNew = 0;
+  for (const auto &entry : result.oldToNew)
+    maxNew = std::max(maxNew, entry.second);
+  nextObjId = std::max<uint32_t>(maxNew == std::numeric_limits<uint32_t>::max()
+                                     ? maxNew
+                                     : maxNew + 1,
+                                 kObjIdBase);
+  return true;
+}
+
 uint32_t SVFGBuilder::getOrCreateNode(const Value *val) {
   auto it = valueToNode.find(val);
   if (it != valueToNode.end()) {
@@ -843,7 +951,7 @@ SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
   SVFG *graph = getActiveSVFG();
   if (!ptr)
     return result;
-  if (graph && isa<GetElementPtrInst, ConstantExpr>(ptr)) {
+  if (graph && isa<GetElementPtrInst, ConstantExpr, ExtractValueInst>(ptr)) {
     const SVFGNodeBS &mapped = graph->getObjectIds(ptr);
     if (!mapped.empty())
       return mapped;
@@ -882,6 +990,30 @@ SVFGNodeBS SVFGBuilder::getObjectIdsForValue(const Value *ptr) {
       merge = cast->getOperand(0)->getType()->isPointerTy();
       if (merge)
         addOperand(cast->getOperand(0));
+    } else if (const auto *call = dyn_cast<CallBase>(ptr)) {
+      const Function *callee = call->getCalledFunction();
+      const auto *spec = callee && callee->isDeclaration() && externalSpecs
+                             ? externalSpecs->getAPISpec().get(
+                                   callee->getName().str())
+                             : nullptr;
+      if (spec)
+        for (const auto &effect : spec->copies)
+          if (effect.dst.kind == lotus::SelectorKind::Ret &&
+              effect.dstQualifier == lotus::QualifierKind::Value &&
+              effect.src.kind == lotus::SelectorKind::Arg &&
+              effect.srcQualifier == lotus::QualifierKind::Value &&
+              effect.src.index >= 0 &&
+              static_cast<unsigned>(effect.src.index) < call->arg_size()) {
+            merge = true;
+            addOperand(call->getArgOperand(effect.src.index));
+          }
+      if (merge) {
+        // Return aliases (notably realloc's original allocation) must also
+        // bound the graph's memory regions and variant-GEP collapses. The
+        // auxiliary solver may model only the fresh allocation alternative.
+        const auto auxiliary = convertPTAObjectsToObjIDs(getPointsToSet(ptr));
+        result.insert(auxiliary.begin(), auxiliary.end());
+      }
     }
     if (merge && !result.empty()) {
       graph->setObjectsForValue(ptr, result);
@@ -1498,6 +1630,15 @@ SVFGBuilder::getIndirectCallTargets(const CallBase *call) {
   }
 
   return targets;
+}
+
+std::optional<bool> SVFGBuilder::isIndirectCallTargetAllowed(
+    const CallBase *call, const Function *target) {
+  if (!config.usePointerAnalysis || !ptaSolverWrapper ||
+      !ptaSolverWrapper->solver)
+    return std::nullopt;
+  const auto targets = getIndirectCallTargets(call);
+  return std::find(targets.begin(), targets.end(), target) != targets.end();
 }
 
 bool SVFGBuilder::isHeapAllocation(const Instruction *inst) const {

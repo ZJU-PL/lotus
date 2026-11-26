@@ -20,6 +20,7 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/MemoryManager.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/PointerManager.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Program/SemiSparseProgram.h"
+#include "Alias/InclusionBased/TPA/Util/CallCompatibility.h"
 #include "Alias/InclusionBased/TPA/Util/IO/PointerAnalysis/Printer.h"
 
 #include <llvm/Support/raw_ostream.h>
@@ -28,16 +29,14 @@ using namespace llvm;
 
 namespace tpa {
 
-// Helper to count the number of pointer-typed arguments in a function.
-// Used to verify signature matching for indirect calls.
-static inline size_t countPointerArguments(const llvm::Function *f) {
-  size_t ret = 0;
-  for (auto &arg : f->args()) {
-    if (arg.getType()->isPointerTy())
-      ++ret;
-  }
-  return ret;
-};
+// The pointer-only argument representation still needs this count when
+// binding fixed formal parameters; candidate filtering uses the full signature.
+static size_t countPointerArguments(const llvm::Function *function) {
+  size_t count = 0;
+  for (const auto &argument : function->args())
+    count += argument.getType()->isPointerTy();
+  return count;
+}
 
 // Resolves potential target functions from a points-to set of a function
 // pointer. Handles the case where the function pointer points to the "Universal
@@ -49,19 +48,8 @@ TransferFunction::findFunctionInPtsSet(PtsSet pSet,
 
   // Two cases here
   if (pSet.has(MemoryManager::getUniversalObject())) {
-    // If funSet contains unknown location, then we can't really derive callees
-    // based on the points-to set. Instead, guess callees based on the number of
-    // arguments (type-based matching approximation).
     auto defaultTargets = globalState.getSemiSparseProgram().addr_taken_funcs();
-    std::copy_if(defaultTargets.begin(), defaultTargets.end(),
-                 std::back_inserter(callees), [&callNode](const Function *f) {
-                   bool isArgMatch =
-                       f->isVarArg() ||
-                       countPointerArguments(f) == callNode.getNumArgument();
-                   bool isRetMatch = (f->getReturnType()->isPointerTy()) !=
-                                     (callNode.getDest() == nullptr);
-                   return isArgMatch && isRetMatch;
-                 });
+    callees.assign(defaultTargets.begin(), defaultTargets.end());
   } else {
     // Precise resolution: the object in the points-to set IS the function.
     for (const auto *obj : pSet) {
@@ -70,6 +58,14 @@ TransferFunction::findFunctionInPtsSet(PtsSet pSet,
     }
   }
 
+  const auto &call = *llvm::cast<llvm::CallBase>(callNode.getCallSite());
+  if (!llvm::isa<llvm::Function>(call.getCalledOperand()->stripPointerCasts()))
+    callees.erase(std::remove_if(callees.begin(), callees.end(),
+                                 [&](const Function *candidate) {
+                                   return !compatibleCallTarget(call,
+                                                                *candidate);
+                                 }),
+                  callees.end());
   return callees;
 }
 
@@ -229,6 +225,18 @@ void TransferFunction::evalCallNode(const ProgramPoint &pp,
 
   const auto callees = resolveCallTarget(ctx, callNode);
   if (callees.empty()) {
+    // Inline assembly has no resolvable function body. Pointer-valued outputs
+    // must still be queryable, using the same unknown object as externals.
+    const auto *call = llvm::cast<llvm::CallBase>(callNode.getCallSite());
+    if (call->isInlineAsm())
+      if (const auto *destination = callNode.getDest()) {
+        const auto *pointer =
+            globalState.getPointerManager().getOrCreatePointer(ctx,
+                                                               destination);
+        globalState.getEnv().weakUpdate(
+            pointer,
+            PtsSet::getSingletonSet(MemoryManager::getUniversalObject()));
+      }
     // To avoid a premature fixpoint we need two things:
     // 1. Propagate the current store to mem-level successors so that when the
     //    function pointer is resolved (triggering a top-level re-evaluation of

@@ -502,6 +502,8 @@ bool SVFGOPT::canRemoveNode(const SVFGNode *node) {
       return !actualInOfIndCS(ai);
     }
     if (const auto *ao = dyn_cast<ActualOutSVFGNode>(node)) {
+      if (!ao->getAllocations().empty())
+        return false;
       return !actualOutOfIndCS(ao) && !isDefOfAInFOut(node);
     }
     if (const auto *fi = dyn_cast<FormalInSVFGNode>(node)) {

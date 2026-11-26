@@ -23,5 +23,13 @@ endif()
 
 get_property(checker_test_libs GLOBAL PROPERTY LOTUS_TEST_SUITE_checker_tests_LINK_LIBS)
 list(REMOVE_DUPLICATES checker_test_libs)
-add_lotus_collected_test_suite(checker_tests
-  LINK_LIBS ${checker_test_libs} COMPILE_DEFINITIONS USE_Z3)
+get_property(checker_sources GLOBAL PROPERTY LOTUS_TEST_SUITE_checker_tests_SOURCES)
+if(checker_sources)
+  add_lotus_collected_test_suite(checker_tests
+    LINK_LIBS ${checker_test_libs} COMPILE_DEFINITIONS USE_Z3)
+endif()
+
+lotus_test_group_enabled(checker tpa tpa_selected)
+if(tpa_selected)
+  add_subdirectory(TPA)
+endif()

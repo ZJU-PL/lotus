@@ -1,315 +1,133 @@
-# Abstract Execution (AE) Engine
+# Abstract Execution (AE)
 
-## Overview
+AE is Lotus's abstract-interpretation engine for memory-safety checking. Its
+core is migrated from SVF's `AbstractExecution`; use-after-free, invalid-free,
+and memory-leak checks are Lotus extensions.
 
-The Abstract Execution (AE) engine is a static analysis tool that detects memory safety bugs in C/C++ programs through abstract interpretation. It was migrated from SVF's AE implementation and adapted to work with Lotus's infrastructure.
+The design follows *Precise Sparse Abstract Execution via Cross-Domain
+Interaction* (Cheng, Wang, and Sui, ICSE 2024).
 
-The part inherited from SVF is the original AE core: buffer-overflow and
-null-pointer-dereference detection over the abstract-execution engine.
-`UseAfterFreeDetector`, `InvalidFreeDetector`, and `MemLeakDetector` are
-Lotus-specific extensions layered on top of that core.
+## Checks
 
-**Based on the paper:**
-*"Precise Sparse Abstract Execution via Cross-Domain Interaction"*
-Xiao Cheng, Jiawei Wang, Yulei Sui. ICSE 2024.
-
-## Key Features
-
-- **Sparse Analysis**: Only tracks values relevant to bug detection, reducing analysis overhead
-- **Cross-Domain Interaction**: Uses Z3 SMT solver to refine interval domains via constraint solving
-- **Field-Sensitive**: Tracks individual struct fields for precise heap modeling
-- **Flow-Sensitive**: Maintains separate abstract states at each program point
-- **Context-Sensitive**: Handles function calls with calling context
-
-## Supported Bug Types
-
-| Bug Type | Detector | Description | Default |
-|----------|----------|-------------|---------|
-| Buffer Overflow | `BufOverflowDetector` | Detects out-of-bounds array/pointer accesses | Enabled |
-| Null Pointer Dereference | `NullptrDerefDetector` | Detects dereferences of null pointers | Enabled |
-| Use-After-Free | `UseAfterFreeDetector` | Detects accesses to freed memory | Enabled |
-| Invalid Free | `InvalidFreeDetector` | Detects double-free and free of non-heap objects | Enabled |
-| Memory Leak | `MemLeakDetector` | Detects allocated memory that is not freed and not reachable | **Disabled** |
+| Check | Detector | Default |
+|---|---|---|
+| Buffer overflow | `BufOverflowDetector` | enabled |
+| Null dereference | `NullptrDerefDetector` | enabled |
+| Use after free | `UseAfterFreeDetector` | enabled |
+| Invalid free | `InvalidFreeDetector` | enabled |
+| Memory leak | `MemLeakDetector` | disabled |
 
 ## Architecture
 
-### Core Components
-
-```
-AbstractInterpretation (main engine)
-├── AbstractState (program state at each point)
-│   ├── VarToAbsValMap (SSA values → abstract values)
-│   └── AddrToAbsValMap (memory objects → abstract values)
-├── AbstractValue (union of interval and address)
-│   ├── IntervalValue (numeric ranges: [lb, ub])
-│   └── AddressValue (sets of memory object IDs)
-├── ICFGWTO (Weak Topological Order for loops)
-├── RelationSolver (Z3-based constraint refinement)
-├── SVFIRWrapper (pointer analysis interface)
-└── AEDetector (bug detection)
-    ├── BufOverflowDetector
-    ├── NullptrDerefDetector
-    ├── UseAfterFreeDetector
-    ├── InvalidFreeDetector
-    └── MemLeakDetector (disabled by default)
+```text
+AbstractInterpretation
+├── AbstractStateStore       per-instruction states and sparse layouts
+├── AbstractState            SSA values, memory objects, object sizes, frees
+├── AbstractValue
+│   ├── IntervalValue        numeric intervals
+│   └── AddressValue         points-to sets
+├── ICFGWTO                  loop/recursion fixpoint iteration
+├── RelationSolver           Z3 solver utilities (outside normal execution)
+├── SVFIRWrapper             AserPTA interface
+└── AEDetector               bug detectors and reporting
 ```
 
-### Abstract Domains
+The engine analyzes instructions in WTO order, widens cycles, narrows where
+enabled, refines branch facts, and runs detectors at each interpreted
+instruction. Recursive SCCs are iterated to a summary fixpoint.
 
-#### Interval Domain
-Represents numeric values as ranges:
-- `[5, 5]` - constant 5
-- `[0, 100]` - any value between 0 and 100
-- `[-∞, +∞]` - any integer (⊤, top)
-- `⊥` (bottom) - unreachable/infeasible
+## Quick Start
 
-Operations: `+`, `-`, `*`, `/`, `join`, `meet`, `widen`, `narrow`
-
-#### Address Domain
-Represents pointer values as sets of memory object IDs:
-- `{obj_1}` - points to object 1
-- `{obj_1, obj_2}` - may point to object 1 or 2
-- `{0}` - null pointer
-- `∅` - no valid addresses (⊥, bottom)
-
-Operations: `union`, `intersection`, `subset`
-
-### Analysis Algorithm
-
-1. **Initialization**
-   - Run pointer analysis (AserPTA) to get points-to information
-   - Build call graph and detect recursive SCCs
-   - Construct WTO for each function (handles loops)
-
-2. **Abstract Interpretation**
-   ```
-   for each function in topological order:
-       for each WTO component:
-           if singleton block:
-               process instructions sequentially
-           if cycle (loop):
-               apply widening/narrowing iteration
-   ```
-
-3. **Widening/Narrowing**
-   - **Widening**: Accelerates convergence by extrapolating trends
-     - Example: `[0,10] ⊔ [0,20]` → `[0,+∞]`
-   - **Narrowing**: Refines over-approximations after fixpoint
-     - Example: `[0,+∞] ⊓ [0,100]` → `[0,100]`
-
-4. **Cross-Domain Interaction**
-   - Collect path constraints (e.g., `x < 10` from branch conditions)
-   - Encode as Z3 formulas
-   - Solve to refine interval bounds
-   - Example: `x ∈ [-∞,+∞]` + constraint `x < 10` → `x ∈ [-∞,9]`
-
-5. **Bug Detection**
-   - At each program point, run detectors on abstract state
-   - Check for violations (e.g., offset ≥ object size)
-   - Report bugs with source location and trace
-
-## Usage Example
-
-```cpp
-#include "Checker/AE/AbstractInterpretation.h"
-#include "Checker/AE/AEDetector.h"
-
-// Get the singleton AE instance
-AbstractInterpretation &ae = AbstractInterpretation::getAEInstance();
-
-// Configure analysis
-ae.setRecursionMode(AbstractInterpretation::WIDEN_NARROW);
-ae.setWidenDelay(2);
-
-// Add detectors
-ae.addDetector(std::make_unique<BufOverflowDetector>());
-ae.addDetector(std::make_unique<NullptrDerefDetector>());
-ae.addDetector(std::make_unique<UseAfterFreeDetector>());
-ae.addDetector(std::make_unique<InvalidFreeDetector>());
-
-// Memory leak detection (disabled by default - enable explicitly)
-ae.setEnableMemLeakCheck(true);
-ae.addDetector(std::make_unique<MemLeakDetector>());
-
-// Run analysis
-ae.runOnModule(module);
+```bash
+lotus-check --engine=ae --checks=buffer-overflow,null-deref program.bc
 ```
 
-## Configuration Options
+Useful options:
 
-### Recursion Handling
+```text
+--ae.state-store=dense|semi-sparse|sparse   state retention (default: dense)
+--ae.sparsity=...                           alias for --ae.state-store
+--ae.recursion-mode=top|widen-only|widen-narrow
+--ae.widen-delay-iterations=3
+--ae.fun-entry=main|no-main
+--ae.timeout=0                              whole-run seconds; 0 disables
+--ae.checkpoint-policy=permissive|strict
+--ae.state-store-stats
+```
 
-- **TOP** (fastest, least precise)
-  - Sets all recursive function results to ⊤ immediately
-  - Use for quick analysis or when recursion is rare
+`--ae.fun-entry=main` analyzes the `main`-rooted call graph (`svf.main` is also
+accepted). The CLI rejects modules without a defined entry in this mode.
+`no-main` starts from one representative of every call-graph root SCC, using
+resolved indirect-call edges as well as direct calls.
+On timeout, findings collected so far are still reported.
 
-- **WIDEN_ONLY** (moderate)
-  - Applies widening only for recursive functions
-  - Balances precision and performance
+## State Layouts
 
-- **WIDEN_NARROW** (default, most precise)
-  - Applies widening then narrowing
-  - Best precision but slower for deep recursion
+`dense` keeps a full abstract state at every instruction. It is the safest
+choice for clients that inspect arbitrary instruction states.
 
-### Widening Delay
+`semi-sparse` stores SSA definitions once in a run-wide table while keeping
+memory-object maps per instruction. `sparse` additionally uses the SVFG to
+collect reaching object definitions for loads.
 
-Controls how many iterations to perform before applying widening:
-- `0` - Apply widening immediately (fastest convergence)
-- `3` - Default, matches SVF's AE widening delay
-- Higher values increase precision but may slow convergence
+Sparse layouts drop unobservable transient states. Block heads, terminators,
+call sites, allocas, and other query points are pinned. Detector execution is
+suppressed only during widening, where deliberately temporary approximations
+would create spurious findings.
 
-## Implementation Details
+Branch-refined SSA snapshots are path-local. They are not scattered into the
+run-wide definition table, because that would leak one edge's facts into a
+sibling edge. Formal parameters are likewise activation-local so recursive
+calls do not overwrite an outer activation's arguments.
 
-### SVFIR Decoupling
+## Analysis Semantics
 
-The original SVF AE used SVFIR (SVF's intermediate representation) for program analysis. The Lotus migration replaces this with:
-
-| SVF Component | Lotus Replacement |
-|---------------|-------------------|
-| `SVFIR` | `SVFIRWrapper` (thin wrapper over AserPTA) |
-| `SVFStmt` | LLVM `Instruction` |
-| `SVFVar` | LLVM `Value` with ID mapping |
-| `PAG` (Pointer Assignment Graph) | AserPTA's pointer analysis |
-| `CallGraph` | AserPTA's call graph |
-
-### Memory Model
-
-- **Virtual Addresses**: Memory objects are encoded as virtual addresses
-  - Format: `0x7f000000 + objID`
-  - Special IDs: `0` (null), `1` (black-hole)
-
-- **Field Sensitivity**: GEP offsets are tracked per-object
-  - `obj[0]`, `obj[4]`, `obj[8]` are separate abstract locations
-  - Field limit: 10000 (configurable via `MaxFieldLimit`)
-
-### Transfer Functions
-
-Each LLVM instruction has a corresponding transfer function:
-
-| Instruction | Transfer Function | Description |
-|-------------|-------------------|-------------|
-| `alloca` | `updateStateOnAddr` | Allocate stack object |
-| `load` | `updateStateOnLoad` | Read from memory |
-| `store` | `updateStateOnStore` | Write to memory |
-| `getelementptr` | `updateStateOnGep` | Compute pointer offset |
-| `add/sub/mul/div` | `updateStateOnBinary` | Arithmetic operations |
-| `icmp/fcmp` | `updateStateOnCmp` | Comparison operations |
-| `call` | `updateStateOnCall` | Function call |
-| `ret` | `updateStateOnRet` | Function return |
-| `phi` | `updateStateOnPhi` | SSA phi node |
+- Stores use SVF's strong-update rule only for a single concrete, non-summary,
+  non-recursive-local object. Other may-alias stores are weak joins.
+- GEP objects are field-sensitive. Their `(base object, byte offset)` identity
+  and offset-from-base are run-wide, matching SVF's global SVFIR objects and
+  preventing branch-local ID collisions.
+- External allocation, reallocation, free, memory, string, formatted-output, and
+  libc APIs are modeled without a separate `extapi.bc` input. Unknown allocation
+  sizes use a conservative field limit.
+- `AbstractInterpretation` is a process-wide singleton, but `runOnModule`
+  recreates the pointer-analysis pass and clears all module-owned registries.
 
 ## Testing
 
-### Checkpoints
+The main suites are:
 
-The AE engine supports checkpoint-based testing via stub functions:
+- `checker_tests`: AE semantics, detectors, interprocedural behavior, sparse
+  equivalence, and instruction parity.
 
-```c
-// Expect safe buffer access
-void SAFE_BUFACCESS(void* data, int size);
+`tests/unit/Checker/AE/AEInstructionParityTest.cpp` covers LLVM cases that
+previously diverged from SVF or between storage layouts, including floating
+binary operators, `addrspacecast`, `freeze`, constant selects/aggregates and
+vectors, signed/unsigned casts and comparisons, switch-default pruning,
+constant call arguments, pointer offsets joined through PHIs, and struct-member
+subobject bounds. Additional regressions cover vector-GEP lane offsets, bounds
+from masks and unsigned remainders, casted branch reloads, bounded-memory libc
+searches, and the no-definition module case.
 
-// Expect buffer overflow
-void UNSAFE_BUFACCESS(void* data, int size);
-
-// Example usage
-int arr[10];
-SAFE_BUFACCESS(arr, 5);    // Should pass
-UNSAFE_BUFACCESS(arr, 15); // Should detect overflow
-```
-
-### Test Cases
-
-See `tests/unit/Checker/AE/` for example test cases covering:
-- Buffer overflows (stack, heap, global)
-- Null pointer dereferences
-- Use-after-free
-- Invalid free (double-free, free of stack)
-
-## Performance Considerations
-
-### Scalability
-
-- **Sparse Analysis**: Only tracks values used in bug-relevant operations
-- **Demand-Driven**: Pointer analysis runs on-demand
-- **Widening**: Ensures termination even for unbounded loops
-
-### Optimization Tips
-
-1. **Reduce Widening Delay**: Set to 0 for faster analysis
-2. **Use TOP Mode**: For recursive-heavy code
-3. **Limit Field Sensitivity**: Reduce `MaxFieldLimit` if analysis is slow
-4. **Disable Unused Detectors**: Only enable detectors you need
-5. **Memory Leak Detection**: Disabled by default due to higher false positive rate
-
-## Detector Details
-
-### Memory Leak Detection
-
-**Status**: Disabled by default (enable with `setEnableMemLeakCheck(true)`)
-
-The memory leak detector identifies allocated memory that is:
-1. Not freed before function return
-2. Not reachable from any live pointer
-3. Not escaped (passed to external functions or stored in globals)
-
-**Detection Strategy**:
-- Tracks allocations: `malloc`, `calloc`, `realloc`, `new`, `new[]`, `strdup`
-- Tracks deallocations: `free`, `delete`, `delete[]`
-- Checks reachability at function returns and when last reference is overwritten
-- Marks objects as "escaped" if passed to external functions (conservative)
-
-**Example**:
-```c
-void leak_example() {
-    int *p = malloc(100);  // Allocation tracked
-    p = NULL;              // Last reference lost → LEAK DETECTED
-}
-
-void no_leak_escaped() {
-    int *p = malloc(100);
-    external_func(p);      // Object escapes → NO LEAK (conservative)
-}
-
-void no_leak_freed() {
-    int *p = malloc(100);
-    free(p);               // Properly freed → NO LEAK
-}
-```
-
-**Limitations**:
-- May miss leaks if object escapes through complex paths
-- May report false positives for intentional long-lived allocations
-- Does not track inter-procedural ownership transfer precisely
-
-**Why disabled by default**:
-Memory leak detection has a higher false positive rate than other detectors because:
-1. Legitimate long-lived allocations may be flagged
-2. Conservative escape analysis may miss some leaks
-3. Inter-procedural analysis is limited
-
-Enable only when specifically looking for memory leaks, and manually review results.
+The [migration audit](MIGRATION_AUDIT.md) records a 223-input differential run
+against the local LLVM 14 SVF build, plus reduced AE-specific bug examples.
+The reusable runner is `scripts/verification/ae_differential.py`. Re-run both
+engines after changing transfer functions, branch refinement, detector precision,
+or external-API models. Output differences alone do not establish a Lotus bug.
 
 ## Limitations
 
-1. **Soundness**: Over-approximation may miss bugs (false negatives)
-2. **Precision**: May report infeasible bugs (false positives)
-3. **Scalability**: Large programs with complex loops may be slow
-4. **External Functions**: Limited modeling of library functions
-
-## Not yet supported
-
-- integer overflow detection
-- richer external-function modeling
-- path-sensitive analysis
-- parallel analysis across functions
-- inter-procedural leak tracking
+- Interval arithmetic is not fully relational or bit-precise.
+- Large programs with deep recursion or many may-alias targets can be slow.
+- Complex ownership transfer can limit memory-leak precision.
+- Unmodeled external functions return conservative unknown values.
+- Findings require manual review.
+- Constant ctype calls use the analyzer host's libc and locale; cross-target
+  libc behavior and program-driven locale changes are not modeled.
 
 ## References
 
-1. Xiao Cheng, Jiawei Wang, Yulei Sui. "Precise Sparse Abstract Execution via Cross-Domain Interaction." ICSE 2024.
-2. Patrick Cousot, Radhia Cousot. "Abstract Interpretation: A Unified Lattice Model for Static Analysis of Programs by Construction or Approximation of Fixpoints." POPL 1977.
-3. François Bourdoncle. "Efficient Chaotic Iteration Strategies with Widenings." FMPA 1993.
-
-## Contact
-
-For questions or issues, please refer to the main Lotus documentation.
+1. X. Cheng, J. Wang, Y. Sui. *Precise Sparse Abstract Execution via
+   Cross-Domain Interaction.* ICSE 2024.
+2. P. Cousot, R. Cousot. *Abstract Interpretation.* POPL 1977.
+3. F. Bourdoncle. *Efficient Chaotic Iteration Strategies with Widenings.* 1993.

@@ -38,8 +38,9 @@ Optimizations
 The implementation supports several optional optimizations (see the README in
 ``lib/Alias/InclusionBased/SparrowAA`` for details):
 
-* **HVN / HU** – Hash-based value numbering and Heintze–Ullman style
-  equivalence to collapse redundant nodes.
+* **HVN / HU** – Hash-based value numbering (HVN) and HVN with deReference
+  and Union (HU) to identify pointer and location equivalences and collapse
+  redundant nodes.
 * **HCD / LCD** – Hybrid and lazy cycle detection to identify strongly
   connected components and speed up convergence.
 

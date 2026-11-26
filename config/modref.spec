@@ -95,12 +95,16 @@ __isoc99_swscanf MOD AfterArg2 D
 __isoc99_swscanf REF Arg0 D
 __isoc99_swscanf REF Arg1 D
 sprintf MOD Arg0 D
-sprintf REF Arg1 D
+sprintf REF AfterArg1 D
 strftime REF Arg2 D
 strftime REF Arg3 R
 strftime MOD Arg0 D
+vsprintf MOD Arg0 D
+vsprintf REF AfterArg1 D
+vsnprintf MOD Arg0 D
+vsnprintf REF AfterArg2 D
 snprintf MOD Arg0 D
-snprintf REF Arg2 D
+snprintf REF AfterArg2 D
 fgetc REF Arg0 D
 fgets MOD Arg0 D
 fgets REF Arg2 D
@@ -249,7 +253,7 @@ atol REF Arg0 D
 btowc IGNORE
 # Miscellaneous
 mktime REF Arg0 R
-mktime MOD Arg1 R
+mktime MOD Arg0 R
 setlocale REF Arg1 D
 setlocale MOD Ret D
 localeconv MOD Ret R

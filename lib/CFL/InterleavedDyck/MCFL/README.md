@@ -68,21 +68,21 @@ The staged solver preserves the artifact's graph-side behavior:
 
 1. discard delimiter IDs that lack either an opening or a closing edge;
 2. add semantic epsilon self-paths;
-3. contract eligible neutral edges and pairs proven mutually reachable by the
-   previous dimension;
+3. contract strongly connected components of neutral (`normal`) edges and
+   pairs proven mutually reachable by the previous dimension;
 4. split weakly connected components;
 5. use projected parenthesis/bracket Dyck reachability to prune tuple gaps;
 6. run MCFL saturation; and
-7. expand condensed results back to original vertices. By default, only pairs
-   connected in the original graph are retained.
+7. expand condensed results back to original vertices.
 
-The reference artifact expands every condensed pair as a full Cartesian
-product. For a one-way neutral edge this also creates the reverse pair, which
-is not graph reachable. Set
+The reference artifact also contracts degree-one directed `normal` edges and
+expands every condensed pair as a full Cartesian product, which can report
+unreachable reverse pairs inside a contracted class. Set
 `CondensationExpansionPolicy::ArtifactCompatible`, or pass
-`--artifact-compatible` to the CLI, when exact reproduction of that observable
-artifact behavior is required. The default reachability-filtered policy avoids
-this false reverse pair.
+`--artifact-compatible` to the CLI, only when exact reproduction of that
+observable artifact behavior is required. The default policy contracts only
+mutually reachable neutral SCCs and mutual underapproximation pairs, preserving
+soundness on all graphs.
 
 `normal` edges are accepted as neutral symbols, matching the artifact's DOT
 benchmarks. Public staged results omit reflexive pairs.

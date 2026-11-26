@@ -17,14 +17,15 @@ The Checker Framework consists of several checker categories, all unified throug
 * **AE Checkers** – Abstract-execution-based memory-safety bug detection
 * **FiTx Checkers** – Daily development-friendly bug detection using typestate analysis (path-insensitive, return-code aware; see Suzuki et al., USENIX ATC 2024)
 * **KINT Checkers** – Numerical bugs (overflow, division by zero, array bounds) using SMT solving and function summaries
-* **IFDS Taint Checker** – Configurable source-to-sink information-flow analysis
+* **IFDS Taint Checker** – Configurable source-to-sink information-flow analysis (``taint-ifds``)
+* **TPA Taint Checker** – Native sparse taint research baseline over TPA memory objects (``taint-tpa``)
 * **Concurrency Checkers** – Thread safety and parallel-runtime issues (data races, deadlocks, atomicity violations, OpenMP bugs, MPI bugs) using MHP, lock set, OpenMP, and MPI analyses
 * **Pulse Checker** – Memory safety and other bugs using biabductive analysis with path-sensitive interprocedural reasoning
 * **Saber Checkers** – Source-sink bug detection over sparse value-flow graphs
 * **GSAF Checkers** – Path-sensitive checks over the guarded value-flow graph (use-after-free and taint)
 * **SymEx Checker** – Symbolic-execution bug checks backed by the top-level ``SymbolicExecution`` engine
 
-All checkers report bugs through the centralized ``BugReportMgr`` system, enabling unified output formats (JSON, SARIF) and consistent bug reporting across all analysis tools. The repository builds a single checker binary, ``lotus-check``; each invocation selects one engine with ``--engine=<name>``.
+The engines exposed through ``lotus-check`` report bugs through the centralized ``BugReportMgr`` system, enabling unified output formats (JSON, SARIF) and consistent bug reporting. The general checker frontend is ``lotus-check``; each invocation selects one engine with ``--engine=<name>``. The :doc:`taint_tpa` research baseline is selected with ``--engine=taint-tpa``; IFDS uses ``--engine=taint-ifds``.
 
 .. _choosing-a-checker:
 
@@ -78,7 +79,7 @@ enables that engine's own checks.
      - ``symex``
      - Initialization-state checking
    * - Tainted data reaches a sink
-     - ``taint``
+     - ``taint-ifds``
      - ``pulse``, ``gsaf``
      - Configurable source-to-sink analysis
    * - Data race, deadlock, or parallel-runtime error
@@ -103,7 +104,7 @@ Quick selection
 * Use ``saber`` for sparse value-flow source/sink checks: memory leaks,
   double frees, and file-descriptor leaks.
 * Use ``kint`` for numerical bugs.  Its taint analysis supports this purpose;
-  it is not a replacement for the configurable ``taint`` source-to-sink tool.
+  it is not a replacement for the configurable ``taint-ifds`` source-to-sink engine.
 
 Running multiple engines
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -252,8 +253,8 @@ Components
 
 **Symbolic Execution Checker** (``lib/SymbolicExecution/``):
 
-* ``Core/AnalysisDriver.cpp`` – Whole-module symbolic execution driver
-* ``Core/AnalysisState*.cpp`` – Symbolic state, summaries, taint updates, and bug queries
+* ``Engine/AnalysisDriver.cpp`` & ``Engine/AnalysisState*.cpp`` – Whole-module driver, symbolic state, taint updates, and summaries
+* ``Checks/QueryEngine.cpp``, ``Checks/MemoryChecks.cpp``, ``Checks/ArithmeticChecks.cpp`` – Decoupled bug query engine and check builders
 * ``Solver/PathCondSolver.cpp`` – SMT-backed feasibility checking for path conditions
 * ``Integration/SymbolicExecutionWrapper.cpp`` – LLVM pass wrapper used by ``lotus-check --engine=symex``
 
@@ -284,7 +285,8 @@ Build Targets
 * ``tools/checker/lotus-check-pulse.cpp`` – Pulse engine runner
 * ``tools/checker/lotus-check-saber.cpp`` – Saber engine runner
 * ``tools/checker/lotus-check-symex.cpp`` – Symbolic-execution engine runner
-* ``tools/checker/lotus-check-taint.cpp`` – Taint-analysis engine runner
+* ``tools/checker/lotus-check-taint-ifds.cpp`` – IFDS taint engine runner
+* ``tools/checker/lotus-check-taint-tpa.cpp`` – TPA-native sparse taint engine runner
 
 Usage
 -----
@@ -374,5 +376,6 @@ See Also
    symex
    gsaf
    taint
+   taint_tpa
    tooling
    typequalifier

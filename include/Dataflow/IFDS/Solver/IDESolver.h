@@ -136,7 +136,20 @@ public:
   void get_summary_edges(std::vector<SummaryEdge<Fact>> &out_edges) const;
   const IFDSIDESolverStatistics &get_statistics() const { return m_statistics; }
 
+  /// Release tabulation-only state after a completed solve while retaining
+  /// computed IDE values and explicitly recorded edge exports.  This is a
+  /// useful memory reclamation point for long-running clients; a subsequent
+  /// solve() rebuilds all of the released state automatically.
+  void release_transient_storage();
+
 protected:
+  /// Whether the solver wants notifications for path edges even when the
+  /// regular (debugging) path-edge table is disabled.  Alternative solver
+  /// backends can use this hook to maintain a compact representation without
+  /// forcing the pointer-rich table to stay alive.
+  virtual bool wants_path_edge_callbacks() const {
+    return m_config.record_edges();
+  }
   virtual void on_path_edge_added(const PathEdgeType &edge) { (void)edge; }
   virtual void on_summary_edge_added(const SummaryEdge<Fact> &edge) {
     (void)edge;

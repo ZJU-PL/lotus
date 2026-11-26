@@ -1,5 +1,5 @@
-#ifndef LOTUS_IR_UFG_SEARCH_H
-#define LOTUS_IR_UFG_SEARCH_H
+#pragma once
+
 
 #include "IR/UFG/UFG.h"
 
@@ -36,4 +36,3 @@ private:
 
 } // namespace ufg
 } // namespace lotus
-#endif

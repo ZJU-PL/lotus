@@ -1,8 +1,7 @@
 //
 // This file is distributed under the MIT License. See LICENSE for details.
 //
-#ifndef PTHREAD_H
-#define PTHREAD_H
+#pragma once
 
 #include "bits/pthreadtypes.h"
 #include "bits/types/struct_timespec.h"
@@ -96,5 +95,3 @@ int pthread_setcancelstate(int state, int *oldstate);
 int pthread_setcanceltype(int type, int *oldtype);
 int pthread_setspecific(pthread_key_t key, const void *value_ptr);
 void pthread_testcancel(void);
-
-#endif // PTHREAD_H

@@ -1,5 +1,4 @@
-#ifndef _STD_TESTCASE_H
-#define _STD_TESTCASE_H
+#pragma once
 
 /* This file exists in order to:
  * 1) Include lots of standardized headers in one place
@@ -125,5 +124,3 @@ extern int globalFive; /* 5 */
 #endif
 
 #include "std_testcase_io.h"
-
-#endif

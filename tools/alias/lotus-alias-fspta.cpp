@@ -2,15 +2,17 @@
  * @file lotus-alias-fspta.cpp
  * @brief Driver for Lotus flow-sensitive pointer analyses.
  */
-#include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
-#include "Alias/InclusionBased/FlowSensitive/Support/ComparisonSampling.h"
-#include "Alias/InclusionBased/FlowSensitive/Support/PointerOnlyView.h"
-#include "Alias/InclusionBased/FlowSensitive/ValueFlow/ValueFlowPTA.h"
-#include "Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Support/ComparisonSampling.h"
+#include "Alias/InclusionBased/SparsePTA/Support/PointerOnlyView.h"
+#include "Alias/InclusionBased/SparsePTA/Versioned/VersionedFlowSensitivePTA.h"
+#include "Alias/InclusionBased/ValueFlowPTA/ValueFlowPTA.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/CLIUtils.h"
 #include "IR/ICFG/ICFGBuilder.h"
+#include "IR/SVFG/MemorySSADump.h"
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/SVFG/SVFGStats.h"
+#include "Utils/Graph/DotWriter.h"
 
 #include <algorithm>
 #include <exception>
@@ -18,7 +20,9 @@
 
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IRReader/IRReader.h>
 #include <llvm/Support/CommandLine.h>
+#include <llvm/Support/Error.h>
 #include <llvm/Support/InitLLVM.h>
 #include <llvm/Support/JSON.h>
 #include <llvm/Support/SourceMgr.h>
@@ -36,6 +40,8 @@ enum class AnalysisOption { FlowSensitive, Versioned, ValueFlow };
 enum class ParallelOrderOption { Reference, Unordered };
 enum class ClusterOption { None, Type, Footprint };
 enum class PrelabelOption { Builder, PreAnalysis };
+enum class ObjectClusteringOption { None, Hierarchical };
+enum class ObjectLinkageOption { Best, Single, Complete, Average, Median };
 
 cl::OptionCategory FsptaCategory("Lotus flow-sensitive pointer analyses");
 cl::opt<bool>
@@ -107,6 +113,29 @@ cl::opt<PartitionOption> MemoryPartition(
                clEnumValN(PartitionOption::InterDisjoint, "inter-disjoint",
                           "Disjoint whole-program regions")),
     cl::init(PartitionOption::InterDisjoint), cl::cat(FsptaCategory));
+cl::opt<ObjectClusteringOption> ObjectClustering(
+    "object-clustering",
+    cl::desc("Renumber abstract-object IDs before solving"),
+    cl::values(clEnumValN(ObjectClusteringOption::None, "none",
+                          "Keep builder allocation order (default)"),
+               clEnumValN(ObjectClusteringOption::Hierarchical,
+                          "hierarchical",
+                          "fastcluster renumbering for bitvector locality")),
+    cl::init(ObjectClusteringOption::None), cl::cat(FsptaCategory));
+cl::opt<ObjectLinkageOption> ObjectLinkage(
+    "object-clustering-linkage",
+    cl::desc("Linkage used by --object-clustering=hierarchical"),
+    cl::values(clEnumValN(ObjectLinkageOption::Best, "best",
+                          "Run single/complete/average and keep the best"),
+               clEnumValN(ObjectLinkageOption::Single, "single",
+                          "Single linkage"),
+               clEnumValN(ObjectLinkageOption::Complete, "complete",
+                          "Complete linkage"),
+               clEnumValN(ObjectLinkageOption::Average, "average",
+                          "Average linkage"),
+               clEnumValN(ObjectLinkageOption::Median, "median",
+                          "Median linkage")),
+    cl::init(ObjectLinkageOption::Best), cl::cat(FsptaCategory));
 cl::opt<bool> PrintPointsTo("print-pts",
                             cl::desc("Print top-level points-to results"),
                             cl::init(false), cl::cat(FsptaCategory));
@@ -155,6 +184,17 @@ cl::opt<std::string> WritePtsFile(
 cl::opt<std::string>
     DumpSVFG("dump-svfg", cl::desc("Write the initialized SVFG as a DOT file"),
              cl::init(""), cl::cat(FsptaCategory));
+cl::opt<std::string> DumpSVFGFunction(
+    "dump-svfg-function",
+    cl::desc("Restrict --dump-svfg to one function (e.g. main)"),
+    cl::init(""), cl::cat(FsptaCategory));
+cl::opt<bool> DumpMSSA(
+    "dump-mssa", cl::desc("Dump sparse MemorySSA MU/CHI/PHI text"),
+    cl::init(false), cl::cat(FsptaCategory));
+cl::opt<std::string> DumpMSSAFunction(
+    "dump-mssa-function",
+    cl::desc("Restrict --dump-mssa to one function (e.g. main)"),
+    cl::init(""), cl::cat(FsptaCategory));
 cl::opt<bool> ValidateAnnotations(
     "validate-annotations",
     cl::desc("Validate __aser_alias__/__aser_no_alias__ calls"),
@@ -204,6 +244,32 @@ MemoryRegionPartitionStrategy partitionStrategy() {
   llvm_unreachable("invalid memory partition");
 }
 
+SVFGBuilderConfig::ObjectIdClustering objectClusteringStrategy() {
+  switch (ObjectClustering) {
+  case ObjectClusteringOption::None:
+    return SVFGBuilderConfig::ObjectIdClustering::None;
+  case ObjectClusteringOption::Hierarchical:
+    return SVFGBuilderConfig::ObjectIdClustering::Hierarchical;
+  }
+  llvm_unreachable("invalid object clustering");
+}
+
+lotus::utils::ClusterLinkage objectLinkageStrategy() {
+  switch (ObjectLinkage) {
+  case ObjectLinkageOption::Best:
+    return lotus::utils::ClusterLinkage::Best;
+  case ObjectLinkageOption::Single:
+    return lotus::utils::ClusterLinkage::Single;
+  case ObjectLinkageOption::Complete:
+    return lotus::utils::ClusterLinkage::Complete;
+  case ObjectLinkageOption::Average:
+    return lotus::utils::ClusterLinkage::Average;
+  case ObjectLinkageOption::Median:
+    return lotus::utils::ClusterLinkage::Median;
+  }
+  llvm_unreachable("invalid object clustering linkage");
+}
+
 void printValue(const Value *value, raw_ostream &os) {
   if (!value) {
     os << "<unknown>";
@@ -236,6 +302,11 @@ int runValueFlowAnalysis(const Module &module) {
               "which builds its own value-flow graph\n";
     return 1;
   }
+  if (DumpMSSA) {
+    errs() << "lotus-alias-fspta: --dump-mssa is unavailable for vfpta, "
+              "which does not use the shared SVFG MemorySSA\n";
+    return 1;
+  }
 
   ValueFlowPTA solver(module);
   try {
@@ -243,6 +314,60 @@ int runValueFlowAnalysis(const Module &module) {
   } catch (const std::exception &error) {
     errs() << "lotus-alias-fspta: vfpta failed: " << error.what() << "\n";
     return 1;
+  }
+
+  if (ComparisonJSON) {
+    std::map<std::string, const Value *> values;
+    auto recordValue = [&](const Value *value) {
+      if (!value || !value->getType()->isPointerTy())
+        return;
+      const Function *function = nullptr;
+      if (const auto *instruction = dyn_cast<Instruction>(value))
+        function = instruction->getFunction();
+      else if (const auto *argument = dyn_cast<Argument>(value))
+        function = argument->getParent();
+      std::string key = function ? function->getName().str() : "@";
+      key += "::";
+      if (value->hasName())
+        key += value->getName().str();
+      else {
+        raw_string_ostream stream(key);
+        value->printAsOperand(stream, false);
+      }
+      values.emplace(std::move(key), value);
+    };
+    for (const GlobalVariable &global : module.globals())
+      recordValue(&global);
+    for (const Function &function : module) {
+      if (function.isDeclaration())
+        continue;
+      for (const Argument &argument : function.args())
+        recordValue(&argument);
+      for (const Instruction &instruction : instructions(function))
+        recordValue(&instruction);
+    }
+    const std::size_t total = values.size();
+    flow_sensitive::sampleComparisonValues(values, ComparisonLimit,
+                                            ComparisonSampleSeed);
+    json::Array observations, aliases;
+    for (auto left = values.begin(); left != values.end(); ++left) {
+      const auto &pointsTo = solver.getPointsTo(left->second);
+      observations.push_back(json::Object{
+          {"key", left->first},
+          {"points_to_size", static_cast<int64_t>(pointsTo.size())}});
+      for (auto right = std::next(left); right != values.end(); ++right) {
+        if (solver.mayAlias(left->second, right->second))
+          aliases.push_back(json::Array{left->first, right->first});
+      }
+    }
+    outs() << "PTA_COMPARISON_JSON "
+           << json::Value(
+                  json::Object{{"schema", 1},
+                               {"total_values", static_cast<int64_t>(total)},
+                               {"truncated", total != values.size()},
+                               {"values", std::move(observations)},
+                               {"may_alias", std::move(aliases)}})
+           << "\n";
   }
 
   if (PrintPointsTo) {
@@ -282,20 +407,33 @@ int runValueFlowAnalysis(const Module &module) {
   if (DumpStats) {
     const auto &stats = solver.getStatistics();
     outs() << "vfpta.objects=" << stats.objects << "\n"
+           << "vfpta.functions=" << stats.functions << "\n"
+           << "vfpta.call-sites=" << stats.callSites << "\n"
            << "vfpta.value-nodes=" << stats.valueNodes << "\n"
            << "vfpta.control-blocks=" << stats.controlBlocks << "\n"
            << "vfpta.call-graph-iterations=" << stats.callGraphIterations
            << "\n"
            << "vfpta.resolved-indirect-targets="
            << stats.resolvedIndirectTargets << "\n"
+           << "vfpta.dynamic-indirect-targets="
+           << stats.solver.dynamicIndirectTargets << "\n"
+           << "vfpta.spec-modeled-calls=" << stats.specModeledCalls << "\n"
            << "vfpta.conservative-external-calls="
            << stats.conservativeExternalCalls << "\n"
+           << "vfpta.global-ctors=" << stats.globalCtors << "\n"
+           << "vfpta.global-dtors=" << stats.globalDtors << "\n"
            << "vfpta.object-traversals=" << stats.solver.objectTraversals
            << "\n"
            << "vfpta.indirect-flow-computations="
            << stats.solver.indirectFlowComputations << "\n"
            << "vfpta.indirect-flow-cache-hits="
            << stats.solver.indirectFlowCacheHits << "\n"
+           << "vfpta.function-flow-computations="
+           << stats.solver.functionFlowComputations << "\n"
+           << "vfpta.function-flow-reuse-hits="
+           << stats.solver.functionFlowReuseHits << "\n"
+           << "vfpta.interprocedural-aux-edges="
+           << stats.solver.interproceduralAuxEdges << "\n"
            << "vfpta.value-flow-join-nodes="
            << stats.solver.valueFlowJoinNodes << "\n"
            << "vfpta.indirect-edges=" << stats.solver.indirectEdges << "\n"
@@ -310,8 +448,11 @@ int runValueFlowAnalysis(const Module &module) {
            << "\n"
            << "vfpta.sparse-graph-edges=" << stats.solver.sparseGraphEdges
            << "\n"
+           << "vfpta.strong-resets=" << stats.solver.strongResets << "\n"
            << "vfpta.used-weak-fallback="
-           << (stats.solver.usedWeakFallback ? "true" : "false") << "\n";
+           << (stats.solver.usedWeakFallback ? "true" : "false") << "\n"
+           << "vfpta.weak-fallback-objects="
+           << stats.solver.weakFallbackObjects << "\n";
     if (stats.solver.usedWeakFallback)
       outs() << "vfpta.weak-fallback-reason=" << stats.solver.fallbackReason
              << "\n";
@@ -392,6 +533,12 @@ int main(int argc, char **argv) {
               "only\n";
     return 1;
   }
+  if (!ReadPtsFile.empty() &&
+      ObjectClustering != ObjectClusteringOption::None) {
+    errs() << "--read-pts stores object IDs from the build that produced the "
+              "file; load it with --object-clustering=none\n";
+    return 1;
+  }
   if (ClusterObjects == ClusterOption::Footprint &&
       Analysis != AnalysisOption::Versioned) {
     errs() << "--cluster-objects=footprint is supported only for "
@@ -416,13 +563,62 @@ int main(int argc, char **argv) {
   }
   LLVMContext context;
   SMDiagnostic diagnostic;
+  if (Analysis == AnalysisOption::ValueFlow) {
+    if (!PrintPointsTo && !ComparisonJSON && !ValidateAnnotations &&
+        !PrintObjectMap) {
+      context.setDiscardValueNames(true);
+    }
+    // Lazy-load debug metadata (never inspected by ValueFlowPTA) and
+    // materialize globals, aliases, and function bodies directly.
+    std::unique_ptr<Module> module = llvm::getLazyIRFileModule(
+        InputFilename, diagnostic, context, /*ShouldLazyLoadMetadata=*/true);
+    if (!module) {
+      diagnostic.print(argv[0], errs());
+      return 1;
+    }
+    for (GlobalVariable &gv : module->globals()) {
+      if (gv.isMaterializable()) {
+        if (llvm::Error err = gv.materialize()) {
+          errs() << argv[0] << ": failed to materialize global " << gv.getName()
+                 << ": " << llvm::toString(std::move(err)) << "\n";
+          return 1;
+        }
+      }
+    }
+    for (GlobalAlias &ga : module->aliases()) {
+      if (ga.isMaterializable()) {
+        if (llvm::Error err = ga.materialize()) {
+          errs() << argv[0] << ": failed to materialize alias " << ga.getName()
+                 << ": " << llvm::toString(std::move(err)) << "\n";
+          return 1;
+        }
+      }
+    }
+    for (GlobalIFunc &gif : module->ifuncs()) {
+      if (gif.isMaterializable()) {
+        if (llvm::Error err = gif.materialize()) {
+          errs() << argv[0] << ": failed to materialize ifunc " << gif.getName()
+                 << ": " << llvm::toString(std::move(err)) << "\n";
+          return 1;
+        }
+      }
+    }
+    for (Function &fn : *module) {
+      if (fn.isMaterializable()) {
+        if (llvm::Error err = fn.materialize()) {
+          errs() << argv[0] << ": failed to materialize function "
+                 << fn.getName() << ": " << llvm::toString(std::move(err))
+                 << "\n";
+          return 1;
+        }
+      }
+    }
+    return runValueFlowAnalysis(*module);
+  }
   std::unique_ptr<Module> module =
       loadIRModule(InputFilename, context, diagnostic, argv[0]);
   if (!module)
     return 1;
-
-  if (Analysis == AnalysisOption::ValueFlow)
-    return runValueFlowAnalysis(*module);
 
   ICFG icfg;
   ICFGBuilder icfgBuilder(&icfg);
@@ -433,23 +629,49 @@ int main(int argc, char **argv) {
   graphConfig.pointerOnly = PointerOnly;
   graphConfig.resolveIndirectCalls = false;
   graphConfig.memoryPartition = partitionStrategy();
+  graphConfig.objectIdClustering = objectClusteringStrategy();
+  graphConfig.objectIdLinkage = objectLinkageStrategy();
   auto graphBuilder = std::make_unique<SVFGBuilder>(graphConfig);
   std::unique_ptr<SVFG> graph(graphBuilder->build(&icfg));
+  if (DumpMSSA) {
+    std::string dumpError;
+    if (!dumpMemorySSA(*graph, *module, outs(), DumpMSSAFunction,
+                       &dumpError)) {
+      errs() << "lotus-alias-fspta: cannot dump MemorySSA: " << dumpError
+             << "\n";
+      return 1;
+    }
+  }
+  if (DumpStats &&
+      graphConfig.objectIdClustering ==
+          SVFGBuilderConfig::ObjectIdClustering::Hierarchical) {
+    const auto &clusterStats =
+        graphBuilder->getObjectIdClusteringStatistics();
+    errs() << "Object-ID clustering: " << clusterStats.objects
+           << " objects, " << clusterStats.clusteredRegions << "/"
+           << clusterStats.regions << " regions clustered, words "
+           << clusterStats.originalWordSpan << " -> "
+           << clusterStats.clusteredWordSpan;
+    if (clusterStats.fellBackToIdentity)
+      errs() << " (identity fallback)";
+    errs() << "\n";
+  }
   if (StatsReport) {
     SVFGStats svfgStats(graph.get());
     svfgStats.performStat();
     svfgStats.printStat("SVFG");
   }
-  if (!DumpSVFG.empty())
-    graph->dump(DumpSVFG);
+  if (!DumpSVFG.empty()) {
+    std::string dumpError;
+    if (!lotus::utils::graphviz::writeSVFGDot(*graph, *module, DumpSVFGFunction,
+                                              DumpSVFG, {}, &dumpError))
+      errs() << "cannot write SVFG DOT: " << dumpError << "\n";
+  }
 
   auto isAllowedIndirectCall = [&](const CallBase *callSite,
                                    const Function *target) {
-    const std::vector<const Function *> allowed =
-        graphBuilder->getIndirectCallTargets(callSite);
-    if (allowed.empty())
-      return true;
-    return std::find(allowed.begin(), allowed.end(), target) != allowed.end();
+    return graphBuilder->isIndirectCallTargetAllowed(callSite, target)
+        .value_or(true);
   };
   auto connectIndirectCall = [&](const CallBase *callSite,
                                  const Function *target) {

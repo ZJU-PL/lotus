@@ -50,6 +50,10 @@ static cl::opt<std::string>
 static cl::opt<std::string> TaintModelOpt("taint-config",
                                           cl::desc("Taint specification file"),
                                           cl::init(""));
+static cl::opt<bool> TaintMainArgsOpt(
+    "taint-main-args",
+    cl::desc("Treat pointer parameters of main as taint sources"),
+    cl::init(false));
 static cl::list<std::string>
     EntryPointsOpt("entry-point",
                    cl::desc("Analysis root (repeatable; default main)"));
@@ -171,7 +175,9 @@ void runUninitialized(raw_ostream &OS, Module &M,
 void runTaint(raw_ostream &OS, Module &M,
               const std::shared_ptr<ifds::AnalysisSession> &session) {
   TaintConfig empty;
-  ifds::TaintAnalysis Problem({}, empty);
+  ifds::TaintAnalysis::Config config;
+  config.taint_main_args = TaintMainArgsOpt;
+  ifds::TaintAnalysis Problem(config, empty);
   ifds::IFDSSolver<ifds::TaintAnalysis> Solver(Problem);
   solve(Solver, M, session);
   Problem.report_vulnerabilities(Solver, OS);

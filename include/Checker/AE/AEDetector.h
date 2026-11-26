@@ -1,4 +1,5 @@
-/** @file AEDetector.h @brief Vulnerability detectors using abstract execution. */
+/** @file AEDetector.h @brief Vulnerability detectors using abstract execution.
+ */
 //===- AEDetector.h -- Vulnerability Detectors-----------------------//
 //
 // Migrated from SVF's AE engine to Lotus.
@@ -142,6 +143,9 @@ public:
                              const IntervalValue &len);
   IntervalValue getAccessOffset(AbstractState &as, uint32_t objId,
                                 const llvm::GetElementPtrInst *gep);
+  void detectConstantExprAccess(AbstractState &as,
+                                const llvm::Instruction *inst,
+                                const llvm::Value *pointer);
   void updateGepObjOffsetFromBase(AbstractState &as, AddressValue gepAddrs,
                                   AddressValue objAddrs, IntervalValue offset);
   void addToGepObjOffsetFromBase(const llvm::GetElementPtrInst *gep,
@@ -164,6 +168,7 @@ private:
   std::map<const llvm::Instruction *, std::string> instToBugInfo;
   std::map<const llvm::GetElementPtrInst *, IntervalValue> gepObjOffsetFromBase;
   std::map<uint32_t, IntervalValue> gepObjOffsetFromBaseByObjId;
+  std::map<uint32_t, uint32_t> gepObjCapacityByObjId;
 };
 
 /// Detector for identifying null pointer dereference issues

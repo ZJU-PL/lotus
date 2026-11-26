@@ -172,3 +172,10 @@ an LLVMContext are outside the supported parallel execution contract.
 
 - Parent README: `lib/Alias/README.md`
 - Documentation: `docs/source/alias/tpa.rst`
+
+## Native sparse taint client
+
+The upstream taint engine is available as `TPATaint` under `Checker/TPA`, with
+the `lotus-check --engine=taint-tpa` engine. It shares TPA memory objects and context
+policy. See `docs/source/checker/taint_tpa.rst` for the research baseline,
+experimental controls, model requirements, and supported IR subset.

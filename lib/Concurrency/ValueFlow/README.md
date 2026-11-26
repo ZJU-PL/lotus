@@ -6,11 +6,24 @@ concurrency checker:
 - `ThreadAwareSVFGBuilder` adds guarded Store-to-Load and symmetric
   Store-to-Store `ThreadMHPIndirectVF` edges for accesses that may run in
   parallel. A `FilteredSVFGView` can restrict construction to an induced
-  subgraph without copying graph nodes.
+  subgraph without copying graph nodes. Pairs that a common exclusive lock must
+  exclude are filtered by `LockSpanReasoner`: an interference edge is only kept
+  when the published value can survive until the reading span starts.
+- `LockSpanReasoner` decides whether two accesses run inside one and the same
+  critical section. It keys the span on the innermost dominating acquire and the
+  nearest post-dominating release of a lock that is must-held in exclusive mode
+  at both accesses, and it answers conservatively when a release of that lock
+  can run in between. That keeps two loop iterations, and two threads running
+  the same worker function, in different spans.
+  `ThreadAwareSVFGBuilder` drops an interference edge when a later store in the
+  source's span unconditionally overwrites the same object (the overwrite then
+  carries the flow instead), or when a store dominating the sink inside the
+  sink's own span already writes the object and the base SVFG carries that flow
+  inward. Disable it with `--concur.lock-span-pruning=false`.
 - `SparseValueFlowRefinement` is a lightweight concurrency-specific diagnostic
   refinement. It is not the alias-analysis oracle and cannot suppress race
   candidates.
-- `Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA` owns the general
+- `Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA` owns the general
   top-level points-to and per-node MemorySSA `IN/OUT` state. `FSMPTA` composes
   that solver with the thread-aware SVFG and sliced solve scope.
 - `WholeProgramSparseRefinement` owns the ICFG, SVFG, overlay, and solver for a

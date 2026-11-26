@@ -23,7 +23,7 @@
 #pragma once
 
 #include "Analysis/Loop/FunctionLoopAnalyses.h"
-#include "IR/PDG/Core/PDGCallGraph.h"
+#include "IR/PDG/Construction/PDGCallGraph.h"
 
 namespace lotus {
 namespace analysis {

@@ -83,11 +83,11 @@ public:
 
   SymbolLang() = default;
   SymbolLang(Symbol op, std::vector<Id> children)
-      : op_(std::move(op)), children_(children.begin(), children.end()) {}
+      : op_(op), children_(children.begin(), children.end()) {}
   SymbolLang(Symbol op, std::initializer_list<Id> children)
-      : op_(std::move(op)), children_(children.begin(), children.end()) {}
+      : op_(op), children_(children.begin(), children.end()) {}
 
-  static SymbolLang leaf(Symbol op) { return SymbolLang(std::move(op), {}); }
+  static SymbolLang leaf(Symbol op) { return SymbolLang(op, {}); }
 
   const Symbol &op() const { return op_; }
   const llvm::SmallVector<Id, 2> &children() const { return children_; }

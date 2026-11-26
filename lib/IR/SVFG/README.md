@@ -153,6 +153,11 @@ config.solverType = SVFGBuilderConfig::SolverType::Andersen;
 config.memModelType = SVFGBuilderConfig::MemModelType::FieldSensitive;
 config.memoryPartition = MemoryRegionPartitionStrategy::InterDisjoint;
 
+// Optional: identity-preserving object-ID renumbering (SVF OOPSLA'21).
+config.objectIdClustering =
+    SVFGBuilderConfig::ObjectIdClustering::Hierarchical;
+config.objectIdLinkage = lotus::utils::ClusterLinkage::Best;
+
 SVFGBuilder builder(config);
 SVFG* svfg = builder.build(icfg);
 ```
@@ -267,3 +272,58 @@ if (auto *store = llvm::dyn_cast<StoreSVFGNode>(node)) {
 
 - Yulei Sui, Ding Ye, Jingling Xue. "Detecting Memory Leaks Statically with Full-Sparse Value-Flow Analysis". TSE'14.
 - Yulei Sui, Jingling Xue. "On-Demand Strong Update Analysis via Value-Flow Refinement". FSE'16.
+
+## Object-ID clustering
+
+`config.objectIdClustering = Hierarchical` runs a fastcluster agglomerative pass
+over the pre-analysis points-to sets after `buildTopLevelNodes()` and before
+MemorySSA construction. Objects that occur together receive adjacent IDs, which
+reduces the number of 64-bit words touched by `SVFGNodeBS` operations.
+
+The pass is a bijection over `SVFG::collectReferencedObjectIds()`; it never
+merges objects, so points-to precision and strong updates are unchanged.
+`SVFGBuilder::getObjectIdClusteringStatistics()` reports the object/region
+counts and the occurrence-weighted word span before and after renumbering.
+The ascending allocation order is always one of the candidates, so a region
+never gets a worse layout than it started with.
+
+Because the graph's IDs change, `--read-pts` result files written by a
+clustered build must be loaded by a build using the same setting. This is the
+same contract as the `--cluster-objects` merge policy in
+`Alias/InclusionBased/SparsePTA`.
+
+## DOT export
+
+`Utils/Graph/DotWriter.h` (`CanaryGraphWriter`) provides a shared DOT layer for
+ICFG, CFG, call graph and SVFG. It is a library API rather than a separate
+binary:
+
+```cpp
+#include "Utils/Graph/DotWriter.h"
+
+lotus::utils::graphviz::DotOptions options;
+options.clusterByFunction = true;
+options.functionFilter = function;  // nullptr exports the whole graph
+lotus::utils::graphviz::writeSVFGDot(*svfg, "svfg.dot", options);
+```
+
+Set `DotOptions::functionFilter` for large programs; whole-program SVFGs are
+too big for Graphviz layout. `SVFGSerializer::writeDot` delegates to this
+layer, so `SVFG::dump` and `--dump-svfg` share the same escaping and attributes.
+The drivers accept `--dump-svfg-function=main` to write only one function:
+
+```bash
+lotus-ir-ufg --dump-svfg=main.dot --dump-svfg-function=main program.bc
+```
+
+## Mod/ref queries
+
+`SVFG::getModRefInfo` has overloads for a whole call, a call vs. an object /
+points-to set / `Value*`, and a directed call-vs-call conflict. All return
+`std::optional<ModRefInfo>` with a `kind()` helper
+(`NoModRef`/`Ref`/`Mod`/`ModRef`). Both directions use the builder's per-call
+read/write sets, which survive `SVFGOPT` rewiring; the read set excludes
+may-write-only regions that `ActualIn` also carries for weak-update ordering.
+After deserialization the query falls back to `ActualIn`/`ActualOut`. Without a
+MemorySSA summary it falls back to LLVM `readnone`/`readonly` attributes, and
+otherwise returns `nullopt` rather than guessing.

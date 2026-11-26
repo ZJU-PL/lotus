@@ -12,4 +12,5 @@ backends, the paper engines, and the alias/value-flow clients built on them.
    cat_ieoce
    pearl_stg_sqid
    cert_cfl
+   sparse_subset
    pocr_migration

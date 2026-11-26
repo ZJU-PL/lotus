@@ -12,7 +12,8 @@ Grammar-driven CFL reachability utilities and solver backends
 **Location**: ``include/CFL/Classical/``, ``lib/CFL/Classical/``. Both trees
 use ``Core/``, ``Solvers/Engines/`` (including ``PEARL/``, ``POCR/``,
 ``SQID/``, ``STG/``, ``Skewed/``, ``EndpointQuotient/``, ``CAT/``,
-``IEOCE/``, ``CERT/``, and ``SubcubicAA/``), ``Solvers/Preprocessing/``, ``Clients/Alias/``,
+``IEOCE/``, ``CERT/``, ``SparseSubset/``, and ``SubcubicAA/``),
+``Solvers/Preprocessing/``, ``Clients/Alias/``,
 and ``Clients/ValueFlow/``.
 The two client implementations consistently use ``AliasClient.*`` and
 ``ValueFlowClient.*`` filenames.
@@ -26,6 +27,8 @@ The two client implementations consistently use ``AliasClient.*`` and
   ordered edge-critical-graph
 * PEARL multi-derivation, Sqid relation chaining, Stg staged solving, and
   CERT-CFL cardinality-certified solving
+* Sparse-subset all-pairs saturation with bit-sliced lane counters and
+  two-sided incremental set-pair reports
 * Native POCR grammar/graph input, unidirectional summarization, client graph
   simplification, and RSM-guided foldability checking
 * Incremental solver sessions for dynamically discovered terminal edges
@@ -39,6 +42,21 @@ See :doc:`/cfl/classical/pearl`, :doc:`/cfl/classical/stg`, and
 walkthroughs, and exact source mappings.
 See :doc:`/cfl/classical/cat_ieoce` for the CAT and IEOCE engines.
 See :doc:`/cfl/classical/cert_cfl` for the CERT-CFL engine.
+See :doc:`/cfl/classical/sparse_subset` for the all-pairs set-pair engine.
+
+Conditional Dyck Library Summarization
+--------------------------------------
+
+ESOP 2017 ConCRA-f and ConCRA-k compute reusable conditional library summaries
+and discharge their premises during client analysis. Bounded summaries retain
+bridging dependencies to preserve whole-program client reachability under the
+paper's boundary assumptions.
+
+**Location**: ``include/CFL/ConditionalDyck/``, ``lib/CFL/ConditionalDyck/``.
+
+The ``CanaryConditionalDyck`` target provides an owning, immutable summary API,
+explicit callback and external-condition premises, and four Dyck query
+languages. See :doc:`/cfl/conditional_dyck` for usage and validation details.
 
 Dynamic Bidirected Dyck Reachability
 ------------------------------------

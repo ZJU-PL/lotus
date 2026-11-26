@@ -9,8 +9,7 @@
  * tests/unit/Checker/Pulse/PulseCheckerFixture.h.
  */
 
-#ifndef LOTUS_UNITTEST_DATAFLOW_NPA_INTERPROCEDURAL_TAINT_TEST_SUPPORT_H_
-#define LOTUS_UNITTEST_DATAFLOW_NPA_INTERPROCEDURAL_TAINT_TEST_SUPPORT_H_
+#pragma once
 
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
 #include "Dataflow/NPA/Analyses/Inter/Taint.h"
@@ -54,5 +53,3 @@ inline std::string writeTempTaintConfig(llvm::StringRef content) {
 }
 
 } // namespace
-
-#endif // LOTUS_UNITTEST_DATAFLOW_NPA_INTERPROCEDURAL_TAINT_TEST_SUPPORT_H_
