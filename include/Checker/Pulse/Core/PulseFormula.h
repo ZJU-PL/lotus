@@ -3,16 +3,196 @@
 
 #include "Checker/Pulse/Core/PulseAbstractValue.h"
 
+#include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
+#include <llvm/ADT/DenseSet.h>
+
 namespace pulse {
+
+namespace detail {
+
+/// Compact sorted flat map backed by a contiguous std::vector.
+/// Zero heap allocation when empty, O(1) append for monotonically growing
+/// AbstractValue IDs, single memcpy on copy, single free on teardown, and
+/// deterministic sorted iteration order.
+template <typename K, typename V> class FlatMap {
+public:
+  using value_type = std::pair<K, V>;
+  using iterator = typename std::vector<value_type>::iterator;
+  using const_iterator = typename std::vector<value_type>::const_iterator;
+  using reverse_iterator = typename std::vector<value_type>::reverse_iterator;
+  using const_reverse_iterator =
+      typename std::vector<value_type>::const_reverse_iterator;
+
+private:
+  std::vector<value_type> data_;
+
+  iterator lowerBound(const K &k) {
+    return std::lower_bound(
+        data_.begin(), data_.end(), k,
+        [](const value_type &elem, const K &key) { return elem.first < key; });
+  }
+
+  const_iterator lowerBound(const K &k) const {
+    return std::lower_bound(
+        data_.begin(), data_.end(), k,
+        [](const value_type &elem, const K &key) { return elem.first < key; });
+  }
+
+public:
+  bool empty() const { return data_.empty(); }
+  size_t size() const { return data_.size(); }
+  void clear() { data_.clear(); }
+  void reserve(size_t n) { data_.reserve(n); }
+  void swap(FlatMap &other) noexcept { data_.swap(other.data_); }
+
+  iterator begin() { return data_.begin(); }
+  iterator end() { return data_.end(); }
+  const_iterator begin() const { return data_.begin(); }
+  const_iterator end() const { return data_.end(); }
+  reverse_iterator rbegin() { return data_.rbegin(); }
+  reverse_iterator rend() { return data_.rend(); }
+  const_reverse_iterator rbegin() const { return data_.rbegin(); }
+  const_reverse_iterator rend() const { return data_.rend(); }
+
+  iterator find(const K &k) {
+    auto it = lowerBound(k);
+    return (it != data_.end() && it->first == k) ? it : data_.end();
+  }
+
+  const_iterator find(const K &k) const {
+    auto it = lowerBound(k);
+    return (it != data_.end() && it->first == k) ? it : data_.end();
+  }
+
+  size_t count(const K &k) const { return find(k) != data_.end() ? 1 : 0; }
+
+  const V &at(const K &k) const {
+    auto it = find(k);
+    assert(it != data_.end());
+    return it->second;
+  }
+
+  V &operator[](const K &k) {
+    if (data_.empty() || data_.back().first < k) {
+      data_.emplace_back(k, V{});
+      return data_.back().second;
+    }
+    auto it = lowerBound(k);
+    if (it != data_.end() && it->first == k) {
+      return it->second;
+    }
+    return data_.emplace(it, k, V{})->second;
+  }
+
+  std::pair<iterator, bool> insert(const value_type &kv) {
+    if (data_.empty() || data_.back().first < kv.first) {
+      data_.push_back(kv);
+      return {std::prev(data_.end()), true};
+    }
+    auto it = lowerBound(kv.first);
+    if (it != data_.end() && it->first == kv.first) {
+      return {it, false};
+    }
+    return {data_.insert(it, kv), true};
+  }
+
+  template <typename... Args>
+  std::pair<iterator, bool> emplace(const K &k, Args &&...args) {
+    if (data_.empty() || data_.back().first < k) {
+      data_.emplace_back(std::piecewise_construct, std::forward_as_tuple(k),
+                         std::forward_as_tuple(std::forward<Args>(args)...));
+      return {std::prev(data_.end()), true};
+    }
+    auto it = lowerBound(k);
+    if (it != data_.end() && it->first == k) {
+      return {it, false};
+    }
+    return {data_.emplace(it, std::piecewise_construct,
+                          std::forward_as_tuple(k),
+                          std::forward_as_tuple(std::forward<Args>(args)...)),
+            true};
+  }
+
+  size_t erase(const K &k) {
+    auto it = find(k);
+    if (it == data_.end())
+      return 0;
+    data_.erase(it);
+    return 1;
+  }
+
+  iterator erase(iterator it) { return data_.erase(it); }
+
+  bool operator==(const FlatMap &other) const { return data_ == other.data_; }
+};
+
+/// Compact sorted flat set backed by a contiguous std::vector.
+template <typename K> class FlatSet {
+public:
+  using value_type = K;
+  using iterator = typename std::vector<K>::iterator;
+  using const_iterator = typename std::vector<K>::const_iterator;
+
+private:
+  std::vector<K> data_;
+
+public:
+  bool empty() const { return data_.empty(); }
+  size_t size() const { return data_.size(); }
+  void clear() { data_.clear(); }
+  void reserve(size_t n) { data_.reserve(n); }
+  void swap(FlatSet &other) noexcept { data_.swap(other.data_); }
+
+  iterator begin() { return data_.begin(); }
+  iterator end() { return data_.end(); }
+  const_iterator begin() const { return data_.begin(); }
+  const_iterator end() const { return data_.end(); }
+
+  const_iterator find(const K &k) const {
+    auto it = std::lower_bound(data_.begin(), data_.end(), k);
+    return (it != data_.end() && *it == k) ? it : data_.end();
+  }
+
+  size_t count(const K &k) const { return find(k) != data_.end() ? 1 : 0; }
+
+  std::pair<iterator, bool> insert(const K &k) {
+    if (data_.empty() || data_.back() < k) {
+      data_.push_back(k);
+      return {std::prev(data_.end()), true};
+    }
+    auto it = std::lower_bound(data_.begin(), data_.end(), k);
+    if (it != data_.end() && *it == k) {
+      return {it, false};
+    }
+    return {data_.insert(it, k), true};
+  }
+
+  size_t erase(const K &k) {
+    auto it = std::lower_bound(data_.begin(), data_.end(), k);
+    if (it == data_.end() || !(*it == k))
+      return 0;
+    data_.erase(it);
+    return 1;
+  }
+
+  iterator erase(iterator it) { return data_.erase(it); }
+
+  bool operator==(const FlatSet &other) const { return data_ == other.data_; }
+};
+
+} // namespace detail
 
 class Substitution;
 class AbstractValueFactory;
@@ -171,26 +351,26 @@ private:
   }
 
   // Track equalities: v1 = v2 via union-find (each value -> representative).
-  std::map<AbstractValue, AbstractValue> equalities_;
+  detail::FlatMap<AbstractValue, AbstractValue> equalities_;
 
   // Track disequalities: v1 != v2 (canonical pairs ordered (min, max)).
-  std::set<std::pair<AbstractValue, AbstractValue>> disequalities_;
+  detail::FlatSet<std::pair<AbstractValue, AbstractValue>> disequalities_;
 
   // Track non-null / non-zero constraints: value != 0.
-  std::set<AbstractValue> non_null_values_;
+  detail::FlatSet<AbstractValue> non_null_values_;
 
   // Track null / zero constraints: value == 0.
-  std::set<AbstractValue> null_values_;
+  detail::FlatSet<AbstractValue> null_values_;
 
   // Track integer constraints (linear arithmetic).
   std::vector<LinearConstraint> linear_constraints_;
 
   // Track integer bounds: lower_bound[v] <= v <= upper_bound[v].
-  std::map<AbstractValue, int64_t> lower_bounds_;
-  std::map<AbstractValue, int64_t> upper_bounds_;
+  detail::FlatMap<AbstractValue, int64_t> lower_bounds_;
+  detail::FlatMap<AbstractValue, int64_t> upper_bounds_;
 
   // Track if a value is known to be an integer.
-  std::set<AbstractValue> integer_values_;
+  detail::FlatSet<AbstractValue> integer_values_;
 
   // Track arithmetic operations for Z3 encoding and summary propagation.
   struct ArithmeticOp {
@@ -204,15 +384,15 @@ private:
   // Incremental Reduced-Row-Echelon (RREF) linear equality tableau:
   // pivot -> (sum(coeff_i * v_i) + constant == 0) with exact integer coeffs.
   struct LinearEqRow {
-    std::map<AbstractValue, int64_t> coeffs;
+    detail::FlatMap<AbstractValue, int64_t> coeffs;
     int64_t constant{0};
   };
-  std::map<AbstractValue, LinearEqRow> linear_tableau_;
+  detail::FlatMap<AbstractValue, LinearEqRow> linear_tableau_;
   bool in_tableau_propagate_{false};
   bool has_linear_inequalities_{false};
 
   // Type / InstanceOf predicates (Infer's PulseFormulaInstanceOf).
-  std::map<AbstractValue, std::string> exact_types_;
+  detail::FlatMap<AbstractValue, std::string> exact_types_;
   std::map<AbstractValue, std::set<std::string>> instanceof_types_;
   std::map<AbstractValue, std::set<std::string>> not_instanceof_types_;
 
@@ -229,12 +409,12 @@ private:
     AbstractValue op2;
     std::string pred; // "==", "!=", "<", "<=", ">", ">="
   };
-  std::map<AbstractValue, double> float_constants_;
+  detail::FlatMap<AbstractValue, double> float_constants_;
   std::vector<FloatOp> float_ops_;
   std::vector<FloatCmp> float_cmps_;
 
   // Integer bit-widths (for width-aware constant folding / unsigned checks).
-  std::map<AbstractValue, unsigned> bit_widths_;
+  detail::FlatMap<AbstractValue, unsigned> bit_widths_;
 
   // Disjunctive equalities produced by PulseJoin (v_join = lhs ∨ v_join = rhs).
   struct DisjunctiveEq {
@@ -255,8 +435,8 @@ private:
     std::string pattern;
     bool positive{true};
   };
-  std::map<AbstractValue, std::string> string_constants_;
-  std::map<AbstractValue, AbstractValue> string_lengths_;
+  detail::FlatMap<AbstractValue, std::string> string_constants_;
+  detail::FlatMap<AbstractValue, AbstractValue> string_lengths_;
   std::vector<StringConcat> string_concats_;
   std::vector<StringRegexMatch> string_regex_matches_;
 
@@ -335,6 +515,9 @@ public:
   void clearNewEqs() { pending_new_eqs_.clear(); }
 
   AbstractValue getCanonical(AbstractValue v) const;
+  AbstractValue getCanonicalReadOnly(AbstractValue v) const {
+    return findRepReadOnly(v);
+  }
 
   bool isNonNull(AbstractValue v) const;
   bool isNull(AbstractValue v) const;
@@ -432,6 +615,7 @@ public:
    */
   std::set<AbstractValue> getReferencedValues() const;
   void collectReferencedValues(std::unordered_set<AbstractValue> &out) const;
+  void collectConstrainedValues(llvm::DenseSet<AbstractValue> &out) const;
   bool hasValueConstraints(AbstractValue v) const;
 
   void addIntegerConstraint(AbstractValue v);

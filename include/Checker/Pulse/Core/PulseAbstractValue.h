@@ -3,6 +3,8 @@
 
 #include <functional>
 
+#include <llvm/ADT/DenseMapInfo.h>
+
 namespace llvm {
 class Value;
 } // namespace llvm
@@ -36,4 +38,24 @@ template <> struct hash<pulse::AbstractValue> {
 };
 
 } // namespace std
+
+namespace llvm {
+
+template <> struct DenseMapInfo<pulse::AbstractValue> {
+  static inline pulse::AbstractValue getEmptyKey() {
+    return pulse::AbstractValue(nullptr, ~0u);
+  }
+  static inline pulse::AbstractValue getTombstoneKey() {
+    return pulse::AbstractValue(nullptr, ~0u - 1u);
+  }
+  static unsigned getHashValue(const pulse::AbstractValue &v) {
+    return DenseMapInfo<unsigned>::getHashValue(v.getId());
+  }
+  static bool isEqual(const pulse::AbstractValue &lhs,
+                      const pulse::AbstractValue &rhs) {
+    return lhs.getId() == rhs.getId();
+  }
+};
+
+} // namespace llvm
 

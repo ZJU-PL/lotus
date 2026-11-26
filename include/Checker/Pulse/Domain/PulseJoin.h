@@ -5,11 +5,14 @@
 #include "Checker/Pulse/Domain/PulseDomain.h"
 #include "Checker/Pulse/Domain/PulseOperations.h"
 
+#include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <tuple>
 
-#include <optional>
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/DenseSet.h>
 
 namespace pulse {
 
@@ -49,21 +52,26 @@ public:
 private:
   // Join state: tracks substitutions during join
   struct JoinState {
-    // Maps (lhs_value, rhs_value) -> joined_value
-    std::map<
-        std::pair<std::optional<AbstractValue>, std::optional<AbstractValue>>,
-        AbstractValue>
-        subst;
+    static constexpr uint32_t kNullOptId = 0xFFFFFFFDu;
+    static uint64_t packOptPair(std::optional<AbstractValue> lhs,
+                                std::optional<AbstractValue> rhs) {
+      const uint64_t l = lhs ? static_cast<uint64_t>(lhs->getId())
+                             : static_cast<uint64_t>(kNullOptId);
+      const uint64_t r = rhs ? static_cast<uint64_t>(rhs->getId())
+                             : static_cast<uint64_t>(kNullOptId);
+      return (l << 32) | r;
+    }
+
+    // Maps packed (lhs_value, rhs_value) -> joined_value
+    llvm::DenseMap<uint64_t, AbstractValue> subst;
 
     // Reverse map: joined_value -> (lhs_value, rhs_value)
-    std::map<AbstractValue, std::pair<std::optional<AbstractValue>,
-                                      std::optional<AbstractValue>>>
+    llvm::DenseMap<AbstractValue, std::pair<std::optional<AbstractValue>,
+                                            std::optional<AbstractValue>>>
         rev_subst;
 
-    // Visited pairs to avoid cycles
-    std::set<
-        std::pair<std::optional<AbstractValue>, std::optional<AbstractValue>>>
-        visited;
+    // Visited packed pairs to avoid cycles
+    llvm::DenseSet<uint64_t> visited;
 
     AbstractValueFactory *factory;
 

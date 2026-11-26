@@ -2451,4 +2451,64 @@ TEST_F(PulseCheckerTest, RobustnessFormulaSmtSlicingAndToggleSoundness) {
         lf.impliesComparison(uninit_u, std::nullopt, "<", uninit_v, std::nullopt);
     EXPECT_FALSE(unrelated.has_value());
   }
+
+  // 4. Exact 3-valued multi-mask bitmask solver and bounded float SMT handling:
+  //    handles multi-mask flag checks without QF_BV bit-blasting and guards
+  //    extreme float exponents (`1e-100`, `1e300`) against bignum rational blowup.
+  {
+    pulse::options::setDisableSMT(false);
+    AbstractValue flags(nullptr, 9201);
+    AbstractValue m10(nullptr, 9202);
+    AbstractValue m20(nullptr, 9203);
+    AbstractValue m03(nullptr, 9204);
+    AbstractValue m02(nullptr, 9205);
+    AbstractValue b1(nullptr, 9206);
+    AbstractValue b2(nullptr, 9207);
+    AbstractValue b3(nullptr, 9208);
+
+    PulseFormula sat_flags;
+    ASSERT_TRUE(sat_flags.addBounds(m10, 0x10, 0x10));
+    ASSERT_TRUE(sat_flags.addBounds(m20, 0x20, 0x20));
+    ASSERT_TRUE(sat_flags.addBounds(m03, 0x03, 0x03));
+    ASSERT_TRUE(sat_flags.addBitwiseAnd(b1, flags, m10));
+    ASSERT_TRUE(sat_flags.addBitwiseAnd(b2, flags, m20));
+    ASSERT_TRUE(sat_flags.addBitwiseAnd(b3, flags, m03));
+    ASSERT_TRUE(sat_flags.addNull(b1));
+    ASSERT_TRUE(sat_flags.addNonNull(b2));
+    ASSERT_TRUE(sat_flags.addBounds(b3, 1, 1));
+    EXPECT_FALSE(sat_flags.isUnsat());
+
+    PulseFormula unsat_flags;
+    ASSERT_TRUE(unsat_flags.addBounds(m03, 0x06, 0x06));
+    ASSERT_TRUE(unsat_flags.addBounds(m02, 0x02, 0x02));
+    ASSERT_TRUE(unsat_flags.addBitwiseAnd(b1, flags, m03));
+    ASSERT_TRUE(unsat_flags.addBitwiseAnd(b2, flags, m02));
+    ASSERT_TRUE(unsat_flags.addNull(b1));
+    ASSERT_TRUE(unsat_flags.addNonNull(b2));
+    EXPECT_TRUE(unsat_flags.isUnsat());
+
+    // Extreme float constants must not blow up Z3 real rational encoding.
+    AbstractValue fx(nullptr, 9210);
+    AbstractValue fy(nullptr, 9211);
+    AbstractValue ftiny(nullptr, 9212);
+    AbstractValue fhuge(nullptr, 9213);
+    PulseFormula extreme_fp;
+    ASSERT_TRUE(extreme_fp.addFloatConstant(ftiny, 1e-100));
+    ASSERT_TRUE(extreme_fp.addFloatConstant(fhuge, 1e300));
+    ASSERT_TRUE(extreme_fp.addFloatOperation(fy, fx, ftiny, "*"));
+    ASSERT_TRUE(extreme_fp.addFloatComparison(fy, fhuge, "<"));
+    EXPECT_FALSE(extreme_fp.isUnsat());
+
+    // Depth-3 equality chain path compression with FlatMap.
+    AbstractValue e0(nullptr, 9220);
+    AbstractValue e1(nullptr, 9221);
+    AbstractValue e2(nullptr, 9222);
+    AbstractValue e3(nullptr, 9223);
+    PulseFormula chain;
+    ASSERT_TRUE(chain.addEquality(e0, e1));
+    ASSERT_TRUE(chain.addEquality(e1, e2));
+    ASSERT_TRUE(chain.addEquality(e2, e3));
+    EXPECT_EQ(chain.getCanonical(e3), chain.getCanonical(e0));
+    EXPECT_TRUE(chain.areEqual(e3, e0));
+  }
 }

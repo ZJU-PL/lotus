@@ -111,21 +111,18 @@ PulseJoin::joinValuesHists(JoinState &state, const AbstractValue &lhs_val,
                            const ValueHistory &lhs_hist,
                            const AbstractValue &rhs_val,
                            const ValueHistory &rhs_hist) {
-  using Key =
+  using OptPair =
       std::pair<std::optional<AbstractValue>, std::optional<AbstractValue>>;
 
   if (lhs_val == rhs_val) {
     // Same value: x↦v ⊔ x↦v = x↦v
-    Key key{std::optional<AbstractValue>(lhs_val),
-            std::optional<AbstractValue>(rhs_val)};
-    state.rev_subst[lhs_val] = key;
+    state.rev_subst[lhs_val] = OptPair{lhs_val, rhs_val};
     return {lhs_val, joinHistories(lhs_hist, rhs_hist)};
   }
 
   // Different values: x↦v ⊔ x↦v' = x↦v''
-  Key key{std::optional<AbstractValue>(lhs_val),
-          std::optional<AbstractValue>(rhs_val)};
-  auto it = state.subst.find(key);
+  const uint64_t packed = JoinState::packOptPair(lhs_val, rhs_val);
+  auto it = state.subst.find(packed);
   if (it != state.subst.end()) {
     // Already joined this pair
     return {it->second, joinHistories(lhs_hist, rhs_hist)};
@@ -133,8 +130,8 @@ PulseJoin::joinValuesHists(JoinState &state, const AbstractValue &lhs_val,
 
   // Create fresh joined value
   AbstractValue v_join = state.factory->createFresh(nullptr);
-  state.subst[key] = v_join;
-  state.rev_subst[v_join] = key;
+  state.subst[packed] = v_join;
+  state.rev_subst[v_join] = OptPair{lhs_val, rhs_val};
 
   return {v_join, joinHistories(lhs_hist, rhs_hist)};
 }
@@ -146,7 +143,7 @@ std::pair<AbstractValue, ValueHistory> PulseJoin::joinValuesHistsOpts(
     const std::optional<std::pair<AbstractValue, ValueHistory>> &rhs_opt) {
   (void)lhs_astate;
   (void)rhs_astate;
-  using Key =
+  using OptPair =
       std::pair<std::optional<AbstractValue>, std::optional<AbstractValue>>;
 
   if (!lhs_opt && !rhs_opt) {
@@ -158,15 +155,18 @@ std::pair<AbstractValue, ValueHistory> PulseJoin::joinValuesHistsOpts(
 
   if (!lhs_opt || !rhs_opt) {
     // One-sided: x↦v ⊔ emp = x↦v' (memoized to prevent fresh-AV blowup)
-    Key key{lhs_opt ? std::optional<AbstractValue>(lhs_opt->first) : std::nullopt,
-            rhs_opt ? std::optional<AbstractValue>(rhs_opt->first) : std::nullopt};
-    auto it = state.subst.find(key);
+    std::optional<AbstractValue> l_av =
+        lhs_opt ? std::optional<AbstractValue>(lhs_opt->first) : std::nullopt;
+    std::optional<AbstractValue> r_av =
+        rhs_opt ? std::optional<AbstractValue>(rhs_opt->first) : std::nullopt;
+    const uint64_t packed = JoinState::packOptPair(l_av, r_av);
+    auto it = state.subst.find(packed);
     if (it != state.subst.end()) {
       return {it->second, ValueHistory()};
     }
     AbstractValue v_join = state.factory->createFresh(nullptr);
-    state.subst[key] = v_join;
-    state.rev_subst[v_join] = key;
+    state.subst[packed] = v_join;
+    state.rev_subst[v_join] = OptPair{l_av, r_av};
     ValueHistory hist_join = joinHistoriesOpts(
         lhs_opt ? std::optional<ValueHistory>(lhs_opt->second) : std::nullopt,
         rhs_opt ? std::optional<ValueHistory>(rhs_opt->second) : std::nullopt);
@@ -176,16 +176,14 @@ std::pair<AbstractValue, ValueHistory> PulseJoin::joinValuesHistsOpts(
   // Both sides have values
   if (lhs_opt->first == rhs_opt->first) {
     // Same value: x↦v ⊔ x↦v = x↦v
-    Key key{std::optional<AbstractValue>(lhs_opt->first),
-            std::optional<AbstractValue>(rhs_opt->first)};
-    state.rev_subst[lhs_opt->first] = key;
+    state.rev_subst[lhs_opt->first] = OptPair{lhs_opt->first, rhs_opt->first};
     return {lhs_opt->first, joinHistories(lhs_opt->second, rhs_opt->second)};
   }
 
   // Different values: use cached join
-  Key key{std::optional<AbstractValue>(lhs_opt->first),
-          std::optional<AbstractValue>(rhs_opt->first)};
-  auto it = state.subst.find(key);
+  const uint64_t packed =
+      JoinState::packOptPair(lhs_opt->first, rhs_opt->first);
+  auto it = state.subst.find(packed);
   if (it != state.subst.end()) {
     return {it->second, joinHistories(lhs_opt->second, rhs_opt->second)};
   }
@@ -204,8 +202,6 @@ void PulseJoin::joinHeaps(
     const AbductiveDomain &rhs_astate,
     const std::optional<std::pair<AbstractValue, ValueHistory>> &root_rhs_opt,
     bool use_pre_heap) {
-  using Key =
-      std::pair<std::optional<AbstractValue>, std::optional<AbstractValue>>;
   using OptVH = std::optional<std::pair<AbstractValue, ValueHistory>>;
 
   if (!root_lhs_opt && !root_rhs_opt) {
@@ -238,11 +234,11 @@ void PulseJoin::joinHeaps(
       continue;
     }
 
-    Key visited_key{
+    const uint64_t visited_key = JoinState::packOptPair(
         item.lhs_opt ? std::optional<AbstractValue>(item.lhs_opt->first)
                      : std::nullopt,
         item.rhs_opt ? std::optional<AbstractValue>(item.rhs_opt->first)
-                     : std::nullopt};
+                     : std::nullopt);
 
     if (state.visited.count(visited_key) > 0) {
       continue;
@@ -281,32 +277,15 @@ void PulseJoin::joinHeaps(
       continue;
     }
 
-    std::set<Access> all_accesses;
-    if (lhs_edges) {
-      for (const auto &edge_kv : *lhs_edges) {
-        all_accesses.insert(edge_kv.first);
-      }
-    }
-    if (rhs_edges) {
-      for (const auto &edge_kv : *rhs_edges) {
-        all_accesses.insert(edge_kv.first);
-      }
-    }
-
-    for (const Access &access : all_accesses) {
+    auto processEdge = [&](const Access &access, const Address *lhs_tgt,
+                           const Address *rhs_tgt) {
       OptVH lhs_target_opt;
       OptVH rhs_target_opt;
-      if (lhs_edges) {
-        auto it = lhs_edges->find(access);
-        if (it != lhs_edges->end()) {
-          lhs_target_opt = {{it->second.addr, it->second.history}};
-        }
+      if (lhs_tgt) {
+        lhs_target_opt = {{lhs_tgt->addr, lhs_tgt->history}};
       }
-      if (rhs_edges) {
-        auto it = rhs_edges->find(access);
-        if (it != rhs_edges->end()) {
-          rhs_target_opt = {{it->second.addr, it->second.history}};
-        }
+      if (rhs_tgt) {
+        rhs_target_opt = {{rhs_tgt->addr, rhs_tgt->history}};
       }
 
       auto target_v_hist = joinValuesHistsOpts(
@@ -323,6 +302,39 @@ void PulseJoin::joinHeaps(
         worklist.push_back(WorkItem{std::move(lhs_target_opt),
                                     std::move(rhs_target_opt), item.depth + 1});
       }
+    };
+
+    // Zero-allocation sorted merge over lhs_edges and rhs_edges.
+    if (lhs_edges && rhs_edges) {
+      auto lit = lhs_edges->begin();
+      auto rit = rhs_edges->begin();
+      while (lit != lhs_edges->end() && rit != rhs_edges->end()) {
+        if (lit->first < rit->first) {
+          processEdge(lit->first, &lit->second, nullptr);
+          ++lit;
+        } else if (rit->first < lit->first) {
+          processEdge(rit->first, nullptr, &rit->second);
+          ++rit;
+        } else {
+          processEdge(lit->first, &lit->second, &rit->second);
+          ++lit;
+          ++rit;
+        }
+      }
+      for (; lit != lhs_edges->end(); ++lit) {
+        processEdge(lit->first, &lit->second, nullptr);
+      }
+      for (; rit != rhs_edges->end(); ++rit) {
+        processEdge(rit->first, nullptr, &rit->second);
+      }
+    } else if (lhs_edges) {
+      for (const auto &kv : *lhs_edges) {
+        processEdge(kv.first, &kv.second, nullptr);
+      }
+    } else if (rhs_edges) {
+      for (const auto &kv : *rhs_edges) {
+        processEdge(kv.first, nullptr, &kv.second);
+      }
     }
   }
 }
@@ -337,38 +349,47 @@ PulseJoin::joinStacks(JoinState &state, const AbductiveDomain &lhs_astate,
   Stack stack_pre_join;
   Heap heap_pre_join;
 
-  // Collect all variables from both pre stacks
-  std::set<const llvm::Value *> all_pre_vars;
-  for (const auto &kv : lhs_astate.getPreStack().getMap()) {
-    all_pre_vars.insert(kv.first);
-  }
-  for (const auto &kv : rhs_astate.getPreStack().getMap()) {
-    all_pre_vars.insert(kv.first);
-  }
-
-  // Join pre stack
-  for (const llvm::Value *var : all_pre_vars) {
-    const Address *lhs_addr = lhs_astate.getPreStack().find(var);
-    const Address *rhs_addr = rhs_astate.getPreStack().find(var);
-
+  auto processVar = [&](const llvm::Value *var, const Address *lhs_addr,
+                        const Address *rhs_addr) {
     std::optional<std::pair<AbstractValue, ValueHistory>> lhs_opt;
     std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt;
-
     if (lhs_addr) {
       lhs_opt = {{lhs_addr->addr, lhs_addr->history}};
     }
     if (rhs_addr) {
       rhs_opt = {{rhs_addr->addr, rhs_addr->history}};
     }
-
     auto v_hist_join =
         joinValuesHistsOpts(state, lhs_astate, lhs_opt, rhs_astate, rhs_opt);
     joinHeaps(state, heap_pre_join, lhs_astate, lhs_opt, rhs_astate, rhs_opt,
               /*use_pre_heap=*/true);
-
     Address joined_addr(v_hist_join.first);
     joined_addr.history = v_hist_join.second;
     stack_pre_join.add(var, joined_addr);
+  };
+
+  const auto &lhs_map = lhs_astate.getPreStack().getMap();
+  const auto &rhs_map = rhs_astate.getPreStack().getMap();
+  auto lit = lhs_map.begin();
+  auto rit = rhs_map.begin();
+  while (lit != lhs_map.end() && rit != rhs_map.end()) {
+    if (lit->first < rit->first) {
+      processVar(lit->first, &lit->second, nullptr);
+      ++lit;
+    } else if (rit->first < lit->first) {
+      processVar(rit->first, nullptr, &rit->second);
+      ++rit;
+    } else {
+      processVar(lit->first, &lit->second, &rit->second);
+      ++lit;
+      ++rit;
+    }
+  }
+  for (; lit != lhs_map.end(); ++lit) {
+    processVar(lit->first, &lit->second, nullptr);
+  }
+  for (; rit != rhs_map.end(); ++rit) {
+    processVar(rit->first, nullptr, &rit->second);
   }
 
   return {std::move(stack_pre_join), std::move(heap_pre_join)};
@@ -594,40 +615,51 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
   Stack stack_post_join;
   Heap heap_post_join;
 
-  // Collect all variables from both post stacks
-  std::set<const llvm::Value *> all_post_vars;
-  for (const auto &kv : lhs.getPostStack().getMap()) {
-    all_post_vars.insert(kv.first);
-  }
-  for (const auto &kv : rhs.getPostStack().getMap()) {
-    all_post_vars.insert(kv.first);
-  }
-
   // Reset visited set for post join (as in Infer)
   join_state.visited.clear();
 
-  // Join post stack
-  for (const llvm::Value *var : all_post_vars) {
-    const Address *lhs_addr = lhs.getPostStack().find(var);
-    const Address *rhs_addr = rhs.getPostStack().find(var);
-
-    std::optional<std::pair<AbstractValue, ValueHistory>> lhs_opt;
-    std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt;
-
-    if (lhs_addr) {
-      lhs_opt = {{lhs_addr->addr, lhs_addr->history}};
+  // Join post stack via zero-allocation sorted merge
+  {
+    auto processPostVar = [&](const llvm::Value *var, const Address *lhs_addr,
+                              const Address *rhs_addr) {
+      std::optional<std::pair<AbstractValue, ValueHistory>> lhs_opt;
+      std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt;
+      if (lhs_addr) {
+        lhs_opt = {{lhs_addr->addr, lhs_addr->history}};
+      }
+      if (rhs_addr) {
+        rhs_opt = {{rhs_addr->addr, rhs_addr->history}};
+      }
+      auto v_hist_join =
+          joinValuesHistsOpts(join_state, lhs, lhs_opt, rhs, rhs_opt);
+      joinHeaps(join_state, heap_post_join, lhs, lhs_opt, rhs, rhs_opt);
+      Address joined_addr(v_hist_join.first);
+      joined_addr.history = v_hist_join.second;
+      stack_post_join.add(var, joined_addr);
+    };
+    const auto &lhs_map = lhs.getPostStack().getMap();
+    const auto &rhs_map = rhs.getPostStack().getMap();
+    auto lit = lhs_map.begin();
+    auto rit = rhs_map.begin();
+    while (lit != lhs_map.end() && rit != rhs_map.end()) {
+      if (lit->first < rit->first) {
+        processPostVar(lit->first, &lit->second, nullptr);
+        ++lit;
+      } else if (rit->first < lit->first) {
+        processPostVar(rit->first, nullptr, &rit->second);
+        ++rit;
+      } else {
+        processPostVar(lit->first, &lit->second, &rit->second);
+        ++lit;
+        ++rit;
+      }
     }
-    if (rhs_addr) {
-      rhs_opt = {{rhs_addr->addr, rhs_addr->history}};
+    for (; lit != lhs_map.end(); ++lit) {
+      processPostVar(lit->first, &lit->second, nullptr);
     }
-
-    auto v_hist_join =
-        joinValuesHistsOpts(join_state, lhs, lhs_opt, rhs, rhs_opt);
-    joinHeaps(join_state, heap_post_join, lhs, lhs_opt, rhs, rhs_opt);
-
-    Address joined_addr(v_hist_join.first);
-    joined_addr.history = v_hist_join.second;
-    stack_post_join.add(var, joined_addr);
+    for (; rit != rhs_map.end(); ++rit) {
+      processPostVar(rit->first, nullptr, &rit->second);
+    }
   }
 
   // Join attributes using rev_subst
@@ -667,6 +699,10 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
   // survive joins (Infer PulseJoin + PulseFormula.join).
   const PulseFormula &lhs_f = lhs.getPathFormula();
   const PulseFormula &rhs_f = rhs.getPathFormula();
+  llvm::DenseSet<AbstractValue> lhs_constrained;
+  llvm::DenseSet<AbstractValue> rhs_constrained;
+  lhs_f.collectConstrainedValues(lhs_constrained);
+  rhs_f.collectConstrainedValues(rhs_constrained);
   for (const auto &kv : join_state.rev_subst) {
     AbstractValue v_join = kv.first;
     const auto &pair_opt = kv.second;
@@ -709,8 +745,8 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
         if (t1 && t2 && *t1 == *t2) {
           (void)joined_formula.addExactType(v_join, *t1);
         }
-        if (lhs_f.hasValueConstraints(l_av) ||
-            rhs_f.hasValueConstraints(r_av)) {
+        if (lhs_constrained.count(lhs_f.getCanonicalReadOnly(l_av)) > 0 ||
+            rhs_constrained.count(rhs_f.getCanonicalReadOnly(r_av)) > 0) {
           (void)joined_formula.addDisjunctiveEquality(v_join, l_av, r_av);
         }
       }

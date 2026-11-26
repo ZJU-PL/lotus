@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -15,25 +16,39 @@
 #include <sstream>
 #include <unordered_map>
 
+#include <llvm/ADT/SmallVector.h>
 #include <z3++.h>
 
 namespace pulse {
 
 namespace {
 // Single thread-local holder guaranteeing strict destruction order:
-// expressions and solver are always destroyed BEFORE `ctx`.
+// expressions, params, and solvers are always destroyed BEFORE `ctx`.
 struct Z3ThreadState {
   z3::context ctx;
   z3::solver simple_solver;
+  z3::solver bv_solver;
+  z3::solver nonlin_solver;
+  z3::params linear_params;
+  z3::params fast_params;
   std::vector<z3::expr> int_pool;
   std::vector<z3::expr> bv_pool;
   std::vector<z3::expr> real_pool;
   unsigned query_count{0};
 
-  Z3ThreadState() : ctx(), simple_solver(ctx, z3::solver::simple()) {
-    z3::params p(ctx);
-    p.set(":timeout", 50u);
-    simple_solver.set(p);
+  Z3ThreadState()
+      : ctx(), simple_solver(ctx, z3::solver::simple()),
+        bv_solver(ctx, "QF_BV"), nonlin_solver(ctx), linear_params(ctx),
+        fast_params(ctx) {
+    // Use deterministic in-memory resource limits (`rlimit`) to bound solver
+    // work without burning CPU in 1000-bit rational/nlsat loops; keep a tight
+    // 3ms timeout on `fast_params` as an additional guard for nlsat.
+    linear_params.set("rlimit", 60000u);
+    fast_params.set("rlimit", 15000u);
+    fast_params.set("timeout", 3u);
+    simple_solver.set(linear_params);
+    bv_solver.set(fast_params);
+    nonlin_solver.set(fast_params);
   }
 };
 
@@ -46,17 +61,33 @@ z3::context &getCachedZ3Context() { return getZ3ThreadState().ctx; }
 
 // Persistent lightweight incremental SMT solver (`Z3_mk_simple_solver`),
 // bypassing `tactic2solver` pipeline setup/teardown on every query.
-// Periodically reset to keep learned clauses bounded.
-z3::solver &getCachedSimpleSolver(z3::context &ctx) {
+// Periodically reset to keep learned clauses bounded without excessive
+// ast_manager::compact_memory() churn.
+z3::solver &getCachedSimpleSolver(z3::context &) {
   auto &st = getZ3ThreadState();
-  if (++st.query_count >= 512) {
+  if (++st.query_count >= 2048) {
     st.query_count = 0;
     st.simple_solver.reset();
-    z3::params p(ctx);
-    p.set(":timeout", 50u);
-    st.simple_solver.set(p);
+    st.simple_solver.set(st.linear_params);
   }
   return st.simple_solver;
+}
+
+// Reusable QF_BV bit-blasting solver (reset without push/pop so tactic2solver
+// stays on the fast bit-blasting path instead of falling back to lazy
+// incremental theory_bv).
+z3::solver &getResetBVSolver() {
+  auto &st = getZ3ThreadState();
+  st.bv_solver.reset();
+  st.bv_solver.set(st.fast_params);
+  return st.bv_solver;
+}
+
+z3::solver &getResetNonlinSolver() {
+  auto &st = getZ3ThreadState();
+  st.nonlin_solver.reset();
+  st.nonlin_solver.set(st.fast_params);
+  return st.nonlin_solver;
 }
 
 struct SolverPushScope {
@@ -146,9 +177,22 @@ z3::expr getZ3RealVar(z3::context &ctx, AbstractValue v,
   return var;
 }
 
+bool isZ3SafeDouble(double d) {
+  return std::isfinite(d) &&
+         (d == 0.0 || (std::abs(d) >= 1e-6 && std::abs(d) <= 1e9));
+}
+
 z3::expr z3RealVal(z3::context &ctx, double d) {
+  if (!std::isfinite(d)) {
+    return ctx.real_val(0);
+  }
+  if (std::floor(d) == d && std::abs(d) <= 1e12) {
+    return ctx.real_val(static_cast<int64_t>(d));
+  }
+  // Keep decimal denominator <= 10^6 so Z3's mpq_manager stays on the fast
+  // 64-bit integer path instead of 1000-bit bignum GCDs (e.g. DBL_MAX/1e-100).
   std::ostringstream oss;
-  oss.precision(17);
+  oss.precision(6);
   oss << std::fixed << d;
   return ctx.real_val(oss.str().c_str());
 }
@@ -242,24 +286,43 @@ bool evalConcreteRel(PathConditionAtom::Kind kind, int64_t l, int64_t r) {
 } // namespace
 
 AbstractValue PulseFormula::findRep(AbstractValue v) {
-  std::vector<AbstractValue> path;
-  AbstractValue cur = v;
+  if (equalities_.empty()) {
+    return v;
+  }
+  auto it = equalities_.find(v);
+  if (it == equalities_.end() || it->second == v) {
+    return v;
+  }
+  AbstractValue next = it->second;
+  auto it2 = equalities_.find(next);
+  if (it2 == equalities_.end() || it2->second == next) {
+    return next; // Fast 1-hop path: zero allocations, zero writes.
+  }
+  llvm::SmallVector<AbstractValue, 8> path;
+  path.push_back(v);
+  AbstractValue cur = next;
   while (true) {
-    auto it = equalities_.find(cur);
-    if (it == equalities_.end() || it->second == cur) {
+    auto cur_it = equalities_.find(cur);
+    if (cur_it == equalities_.end() || cur_it->second == cur) {
       break;
     }
     path.push_back(cur);
-    cur = it->second;
+    cur = cur_it->second;
   }
   AbstractValue rep = cur;
   for (AbstractValue u : path) {
-    equalities_[u] = rep;
+    auto u_it = equalities_.find(u);
+    if (u_it != equalities_.end()) {
+      u_it->second = rep;
+    }
   }
   return rep;
 }
 
 AbstractValue PulseFormula::findRepReadOnly(AbstractValue v) const {
+  if (equalities_.empty()) {
+    return v;
+  }
   AbstractValue cur = v;
   while (true) {
     auto it = equalities_.find(cur);
@@ -488,9 +551,11 @@ bool PulseFormula::addEquality(AbstractValue v1, AbstractValue v2) {
   pending_new_eqs_.push_back(NewEq::makeEqual(rep2, rep1));
 
   // Merge Type / InstanceOf / Float / String / BitWidth metadata onto rep1.
+  // Copy values before mutating FlatMap to avoid reference invalidation.
   if (et2 != exact_types_.end()) {
-    exact_types_[rep1] = et2->second;
+    std::string et2_val = et2->second;
     exact_types_.erase(rep2);
+    exact_types_[rep1] = std::move(et2_val);
   }
   if (io2 != instanceof_types_.end()) {
     instanceof_types_[rep1].insert(io2->second.begin(), io2->second.end());
@@ -502,12 +567,14 @@ bool PulseFormula::addEquality(AbstractValue v1, AbstractValue v2) {
     not_instanceof_types_.erase(rep2);
   }
   if (fc2 != float_constants_.end()) {
-    float_constants_[rep1] = fc2->second;
+    double fc2_val = fc2->second;
     float_constants_.erase(rep2);
+    float_constants_[rep1] = fc2_val;
   }
   if (sc2 != string_constants_.end()) {
-    string_constants_[rep1] = sc2->second;
+    std::string sc2_val = sc2->second;
     string_constants_.erase(rep2);
+    string_constants_[rep1] = std::move(sc2_val);
   }
   auto sl2 = string_lengths_.find(rep2);
   if (sl2 != string_lengths_.end()) {
@@ -522,10 +589,11 @@ bool PulseFormula::addEquality(AbstractValue v1, AbstractValue v2) {
   }
   auto bw2 = bit_widths_.find(rep2);
   if (bw2 != bit_widths_.end()) {
-    if (bit_widths_.find(rep1) == bit_widths_.end()) {
-      bit_widths_[rep1] = bw2->second;
-    }
+    unsigned bw2_val = bw2->second;
     bit_widths_.erase(rep2);
+    if (bit_widths_.find(rep1) == bit_widths_.end()) {
+      bit_widths_[rep1] = bw2_val;
+    }
   }
 
   // Merge null/non-null sets.
@@ -566,43 +634,85 @@ bool PulseFormula::addEquality(AbstractValue v1, AbstractValue v2) {
     non_null_values_.insert(rep1);
   }
 
-  // Re-normalize disequalities and check for violation.
+  // Re-normalize disequalities only when rep2 actually appears in them.
   if (!disequalities_.empty()) {
-    std::set<std::pair<AbstractValue, AbstractValue>> updated;
+    bool touches_rep2 = false;
     for (const auto &p : disequalities_) {
-      AbstractValue a = (p.first == rep2) ? rep1 : findRep(p.first);
-      AbstractValue b = (p.second == rep2) ? rep1 : findRep(p.second);
-      if (a == b) {
-        return false;
+      if (p.first == rep2 || p.second == rep2) {
+        touches_rep2 = true;
+        break;
       }
-      updated.insert(normalizePair(a, b));
     }
-    disequalities_.swap(updated);
+    if (touches_rep2) {
+      detail::FlatSet<std::pair<AbstractValue, AbstractValue>> updated;
+      updated.reserve(disequalities_.size());
+      for (const auto &p : disequalities_) {
+        AbstractValue a = (p.first == rep2) ? rep1 : findRep(p.first);
+        AbstractValue b = (p.second == rep2) ? rep1 : findRep(p.second);
+        if (a == b) {
+          return false;
+        }
+        updated.insert(normalizePair(a, b));
+      }
+      disequalities_.swap(updated);
+    }
   }
 
-  // Re-normalize stored conditions.
+  // Re-normalize stored conditions only when rep2 actually appears in them.
   if (!conditions_.empty()) {
-    std::map<PathConditionAtom, unsigned> updated_conds;
+    bool touches_rep2 = false;
     for (const auto &kv : conditions_) {
-      PathConditionAtom norm = normalizeConditionAtom(kv.first);
-      auto it = updated_conds.find(norm);
-      if (it == updated_conds.end()) {
-        updated_conds.emplace(std::move(norm), kv.second);
-      } else {
-        it->second = std::min(it->second, kv.second);
+      if (kv.first.lhs == rep2 ||
+          (!kv.first.const_rhs && kv.first.rhs == rep2)) {
+        touches_rep2 = true;
+        break;
       }
     }
-    conditions_.swap(updated_conds);
+    if (touches_rep2) {
+      std::map<PathConditionAtom, unsigned> updated_conds;
+      for (const auto &kv : conditions_) {
+        PathConditionAtom norm = normalizeConditionAtom(kv.first);
+        auto it = updated_conds.find(norm);
+        if (it == updated_conds.end()) {
+          updated_conds.emplace(std::move(norm), kv.second);
+        } else {
+          it->second = std::min(it->second, kv.second);
+        }
+      }
+      conditions_.swap(updated_conds);
+    }
   }
 
   if (!in_tableau_propagate_ && !linear_tableau_.empty()) {
-    if (!propagateLinearTableau()) {
+    bool touches_tableau = false;
+    for (const auto &kv : linear_tableau_) {
+      if (kv.second.coeffs.count(rep1) > 0 ||
+          kv.second.coeffs.count(rep2) > 0) {
+        touches_tableau = true;
+        break;
+      }
+    }
+    if (touches_tableau && !propagateLinearTableau()) {
       return false;
     }
   }
   if (!in_tableau_propagate_ && has_linear_inequalities_ &&
       !linear_constraints_.empty()) {
-    if (!propagateLinearInequalities()) {
+    bool touches_ineq = false;
+    for (const auto &lc : linear_constraints_) {
+      if (lc.kind == ConstraintKind::Equal)
+        continue;
+      for (const auto &t : lc.terms) {
+        AbstractValue tr = findRepReadOnly(t.var);
+        if (tr == rep1 || tr == rep2) {
+          touches_ineq = true;
+          break;
+        }
+      }
+      if (touches_ineq)
+        break;
+    }
+    if (touches_ineq && !propagateLinearInequalities()) {
       return false;
     }
   }
@@ -686,7 +796,14 @@ bool PulseFormula::addNull(AbstractValue v) {
     invalidateSatCache();
     pending_new_eqs_.push_back(NewEq::makeEqZero(rep));
     if (!in_tableau_propagate_ && !linear_tableau_.empty()) {
-      if (!propagateLinearTableau()) {
+      bool touches_tableau = false;
+      for (const auto &kv : linear_tableau_) {
+        if (kv.second.coeffs.count(rep) > 0) {
+          touches_tableau = true;
+          break;
+        }
+      }
+      if (touches_tableau && !propagateLinearTableau()) {
         return false;
       }
     }
@@ -785,32 +902,42 @@ bool PulseFormula::isConsistent() const {
     consistent_cache_result_ = res;
     return res;
   };
-  for (AbstractValue null_val : null_values_) {
-    AbstractValue rep = findRepReadOnly(null_val);
-    if (non_null_values_.count(rep) > 0) {
-      return cacheConsistent(false);
-    }
-    auto lo = lower_bounds_.find(rep);
-    auto hi = upper_bounds_.find(rep);
-    if ((lo != lower_bounds_.end() && lo->second > 0) ||
-        (hi != upper_bounds_.end() && hi->second < 0)) {
-      return cacheConsistent(false);
-    }
-  }
-  for (AbstractValue non_null_val : non_null_values_) {
-    AbstractValue rep = findRepReadOnly(non_null_val);
-    auto lo = lower_bounds_.find(rep);
-    auto hi = upper_bounds_.find(rep);
-    if (lo != lower_bounds_.end() && hi != upper_bounds_.end() &&
-        lo->second == 0 && hi->second == 0) {
-      return cacheConsistent(false);
+  if (!null_values_.empty() &&
+      (!non_null_values_.empty() || !lower_bounds_.empty() ||
+       !upper_bounds_.empty())) {
+    for (AbstractValue null_val : null_values_) {
+      AbstractValue rep = findRepReadOnly(null_val);
+      if (non_null_values_.count(rep) > 0) {
+        return cacheConsistent(false);
+      }
+      auto lo = lower_bounds_.find(rep);
+      auto hi = upper_bounds_.find(rep);
+      if ((lo != lower_bounds_.end() && lo->second > 0) ||
+          (hi != upper_bounds_.end() && hi->second < 0)) {
+        return cacheConsistent(false);
+      }
     }
   }
-  for (const auto &kv : lower_bounds_) {
-    AbstractValue rep = findRepReadOnly(kv.first);
-    auto hi = upper_bounds_.find(rep);
-    if (hi != upper_bounds_.end() && kv.second > hi->second) {
-      return cacheConsistent(false);
+  if (!non_null_values_.empty() && !lower_bounds_.empty() &&
+      !upper_bounds_.empty()) {
+    for (AbstractValue non_null_val : non_null_values_) {
+      AbstractValue rep = findRepReadOnly(non_null_val);
+      auto lo = lower_bounds_.find(rep);
+      if (lo != lower_bounds_.end() && lo->second == 0) {
+        auto hi = upper_bounds_.find(rep);
+        if (hi != upper_bounds_.end() && hi->second == 0) {
+          return cacheConsistent(false);
+        }
+      }
+    }
+  }
+  if (!lower_bounds_.empty() && !upper_bounds_.empty()) {
+    for (const auto &kv : lower_bounds_) {
+      AbstractValue rep = findRepReadOnly(kv.first);
+      auto hi = upper_bounds_.find(rep);
+      if (hi != upper_bounds_.end() && kv.second > hi->second) {
+        return cacheConsistent(false);
+      }
     }
   }
   for (const auto &p : disequalities_) {
@@ -819,49 +946,56 @@ bool PulseFormula::isConsistent() const {
     if (rep1 == rep2) {
       return cacheConsistent(false);
     }
-    if (null_values_.count(rep1) > 0 && null_values_.count(rep2) > 0) {
+    if (!null_values_.empty() && null_values_.count(rep1) > 0 &&
+        null_values_.count(rep2) > 0) {
       return cacheConsistent(false);
     }
   }
-  for (const auto &kv : exact_types_) {
-    AbstractValue rep = findRepReadOnly(kv.first);
-    auto nio = not_instanceof_types_.find(rep);
-    if (nio != not_instanceof_types_.end()) {
-      for (const auto &neg_t : nio->second) {
-        if (isSubtypeOf(kv.second, neg_t)) {
-          return cacheConsistent(false);
-        }
-      }
-    }
-  }
-  for (const auto &kv : instanceof_types_) {
-    AbstractValue rep = findRepReadOnly(kv.first);
-    auto nio = not_instanceof_types_.find(rep);
-    if (nio != not_instanceof_types_.end()) {
-      for (const auto &t : kv.second) {
+  if (!not_instanceof_types_.empty()) {
+    for (const auto &kv : exact_types_) {
+      AbstractValue rep = findRepReadOnly(kv.first);
+      auto nio = not_instanceof_types_.find(rep);
+      if (nio != not_instanceof_types_.end()) {
         for (const auto &neg_t : nio->second) {
-          if (isSubtypeOf(t, neg_t)) {
+          if (isSubtypeOf(kv.second, neg_t)) {
             return cacheConsistent(false);
           }
         }
       }
     }
-  }
-  for (const auto &fc : float_cmps_) {
-    auto a = asConstantFloat(fc.op1);
-    auto b = asConstantFloat(fc.op2);
-    if (a && b && !evalFloatCmp(fc.pred, *a, *b)) {
-      return cacheConsistent(false);
+    for (const auto &kv : instanceof_types_) {
+      AbstractValue rep = findRepReadOnly(kv.first);
+      auto nio = not_instanceof_types_.find(rep);
+      if (nio != not_instanceof_types_.end()) {
+        for (const auto &t : kv.second) {
+          for (const auto &neg_t : nio->second) {
+            if (isSubtypeOf(t, neg_t)) {
+              return cacheConsistent(false);
+            }
+          }
+        }
+      }
     }
   }
-  for (const auto &rm : string_regex_matches_) {
-    if (auto s = asConstantString(rm.value)) {
-      try {
-        bool hit = std::regex_search(*s, std::regex(rm.pattern));
-        if (hit != rm.positive) {
-          return cacheConsistent(false);
+  if (!float_cmps_.empty() && !float_constants_.empty()) {
+    for (const auto &fc : float_cmps_) {
+      auto a = asConstantFloat(fc.op1);
+      auto b = asConstantFloat(fc.op2);
+      if (a && b && !evalFloatCmp(fc.pred, *a, *b)) {
+        return cacheConsistent(false);
+      }
+    }
+  }
+  if (!string_regex_matches_.empty() && !string_constants_.empty()) {
+    for (const auto &rm : string_regex_matches_) {
+      if (auto s = asConstantString(rm.value)) {
+        try {
+          bool hit = std::regex_search(*s, std::regex(rm.pattern));
+          if (hit != rm.positive) {
+            return cacheConsistent(false);
+          }
+        } catch (const std::regex_error &) {
         }
-      } catch (const std::regex_error &) {
       }
     }
   }
@@ -1407,72 +1541,71 @@ PulseFormula PulseFormula::join(const PulseFormula &f1,
     }
   }
 
-  // Linear constraints: keep syntactic intersection.
-  auto normalize_constraint =
-      [](const PulseFormula &f, const LinearConstraint &c) -> LinearConstraint {
-    LinearConstraint out_c;
-    out_c.constant = c.constant;
-    out_c.kind = c.kind;
-    out_c.terms = c.terms;
-    for (auto &t : out_c.terms) {
-      t.var = f.findRepReadOnly(t.var);
-    }
-    std::sort(out_c.terms.begin(), out_c.terms.end());
-    return out_c;
-  };
-
-  auto signature = [](const LinearConstraint &c) -> std::string {
-    std::string s;
-    s.reserve(64);
-    s += std::to_string(static_cast<int>(c.kind));
-    s += ":";
-    s += std::to_string(c.constant);
-    for (const auto &t : c.terms) {
-      s += "|";
-      s += std::to_string(t.var.getId());
-      s += ",";
-      s += std::to_string(t.coefficient);
-    }
-    return s;
-  };
-
+  // Linear constraints: keep syntactic intersection without string allocations.
   if (!f1.linear_constraints_.empty() && !f2.linear_constraints_.empty()) {
-    std::multiset<std::string> sigs1;
+    auto normalize_constraint =
+        [](const PulseFormula &f,
+           const LinearConstraint &c) -> LinearConstraint {
+      LinearConstraint out_c;
+      out_c.constant = c.constant;
+      out_c.kind = c.kind;
+      out_c.terms = c.terms;
+      for (auto &t : out_c.terms) {
+        t.var = f.findRepReadOnly(t.var);
+      }
+      std::sort(out_c.terms.begin(), out_c.terms.end());
+      return out_c;
+    };
+    auto same_constraint = [](const LinearConstraint &a,
+                              const LinearConstraint &b) -> bool {
+      return a.kind == b.kind && a.constant == b.constant && a.terms == b.terms;
+    };
+    std::vector<LinearConstraint> norm1;
+    norm1.reserve(f1.linear_constraints_.size());
     for (const auto &c : f1.linear_constraints_) {
-      sigs1.insert(signature(normalize_constraint(f1, c)));
+      norm1.push_back(normalize_constraint(f1, c));
     }
+    std::vector<bool> used(norm1.size(), false);
     for (const auto &c : f2.linear_constraints_) {
       LinearConstraint nc = normalize_constraint(f2, c);
-      std::string sig = signature(nc);
-      auto it = sigs1.find(sig);
-      if (it != sigs1.end()) {
-        sigs1.erase(it);
-        if (!out.addLinearConstraint(nc)) {
-          return PulseFormula::contradiction();
+      for (size_t i = 0; i < norm1.size(); ++i) {
+        if (!used[i] && same_constraint(norm1[i], nc)) {
+          used[i] = true;
+          if (!out.addLinearConstraint(nc)) {
+            return PulseFormula::contradiction();
+          }
+          break;
         }
       }
     }
   }
 
-  // Arithmetic ops: keep syntactic intersection.
+  // Arithmetic ops: keep syntactic intersection without string allocations.
   if (!f1.arithmetic_ops_.empty() && !f2.arithmetic_ops_.empty()) {
-    auto op_sig = [](const PulseFormula &f, const ArithmeticOp &op) {
-      return std::to_string(f.findRepReadOnly(op.result).getId()) + ":" +
-             std::to_string(f.findRepReadOnly(op.op1).getId()) + ":" +
-             std::to_string(f.findRepReadOnly(op.op2).getId()) + ":" + op.op;
+    struct NormArithOp {
+      AbstractValue res;
+      AbstractValue o1;
+      AbstractValue o2;
+      const std::string *op;
     };
-    std::multiset<std::string> op_sigs1;
+    std::vector<NormArithOp> norm1;
+    norm1.reserve(f1.arithmetic_ops_.size());
     for (const auto &op : f1.arithmetic_ops_) {
-      op_sigs1.insert(op_sig(f1, op));
+      norm1.push_back({f1.findRepReadOnly(op.result), f1.findRepReadOnly(op.op1),
+                       f1.findRepReadOnly(op.op2), &op.op});
     }
+    std::vector<bool> used(norm1.size(), false);
     for (const auto &op : f2.arithmetic_ops_) {
-      std::string sig = op_sig(f2, op);
-      auto it = op_sigs1.find(sig);
-      if (it != op_sigs1.end()) {
-        op_sigs1.erase(it);
-        (void)out.addArithmeticOperation(f2.findRepReadOnly(op.result),
-                                         f2.findRepReadOnly(op.op1),
-                                         f2.findRepReadOnly(op.op2), op.op);
+      AbstractValue r = f2.findRepReadOnly(op.result);
+      AbstractValue o1 = f2.findRepReadOnly(op.op1);
+      AbstractValue o2 = f2.findRepReadOnly(op.op2);
+      for (size_t i = 0; i < norm1.size(); ++i) {
+        if (!used[i] && norm1[i].res == r && norm1[i].o1 == o1 &&
+            norm1[i].o2 == o2 && *norm1[i].op == op.op) {
+          used[i] = true;
+          (void)out.addArithmeticOperation(r, o1, o2, op.op);
+          break;
+        }
       }
     }
   }
@@ -2254,6 +2387,37 @@ void PulseFormula::collectReferencedValues(
   }
 }
 
+void PulseFormula::collectConstrainedValues(
+    llvm::DenseSet<AbstractValue> &out) const {
+  const size_t approx = null_values_.size() + non_null_values_.size() +
+                        lower_bounds_.size() + upper_bounds_.size() +
+                        exact_types_.size() + linear_constraints_.size() * 2 +
+                        arithmetic_ops_.size() * 3;
+  if (approx == 0) {
+    return;
+  }
+  out.reserve(out.size() + approx);
+  for (AbstractValue v : null_values_)
+    out.insert(findRepReadOnly(v));
+  for (AbstractValue v : non_null_values_)
+    out.insert(findRepReadOnly(v));
+  for (const auto &kv : lower_bounds_)
+    out.insert(findRepReadOnly(kv.first));
+  for (const auto &kv : upper_bounds_)
+    out.insert(findRepReadOnly(kv.first));
+  for (const auto &kv : exact_types_)
+    out.insert(findRepReadOnly(kv.first));
+  for (const auto &lc : linear_constraints_) {
+    for (const auto &t : lc.terms)
+      out.insert(findRepReadOnly(t.var));
+  }
+  for (const auto &op : arithmetic_ops_) {
+    out.insert(findRepReadOnly(op.result));
+    out.insert(findRepReadOnly(op.op1));
+    out.insert(findRepReadOnly(op.op2));
+  }
+}
+
 bool PulseFormula::hasValueConstraints(AbstractValue v) const {
   AbstractValue rep = findRepReadOnly(v);
   if (null_values_.count(rep) > 0 || non_null_values_.count(rep) > 0 ||
@@ -2278,7 +2442,7 @@ bool PulseFormula::hasValueConstraints(AbstractValue v) const {
 
 bool PulseFormula::equivalentTo(const PulseFormula &other) const {
   auto normalize_value_set = [](const PulseFormula &formula,
-                                const std::set<AbstractValue> &values) {
+                                const auto &values) {
     std::set<AbstractValue> normalized;
     for (AbstractValue v : values) {
       normalized.insert(formula.findRepReadOnly(v));
@@ -2286,9 +2450,7 @@ bool PulseFormula::equivalentTo(const PulseFormula &other) const {
     return normalized;
   };
 
-  auto normalize_pairs = [](const PulseFormula &formula,
-                            const std::set<std::pair<AbstractValue,
-                                                     AbstractValue>> &pairs) {
+  auto normalize_pairs = [](const PulseFormula &formula, const auto &pairs) {
     std::set<std::pair<AbstractValue, AbstractValue>> normalized;
     for (const auto &p : pairs) {
       normalized.insert(normalizePair(formula.findRepReadOnly(p.first),
@@ -2297,15 +2459,13 @@ bool PulseFormula::equivalentTo(const PulseFormula &other) const {
     return normalized;
   };
 
-  auto normalize_bounds =
-      [](const PulseFormula &formula,
-         const std::map<AbstractValue, int64_t> &bounds) {
-        std::map<AbstractValue, int64_t> normalized;
-        for (const auto &kv : bounds) {
-          normalized[formula.findRepReadOnly(kv.first)] = kv.second;
-        }
-        return normalized;
-      };
+  auto normalize_bounds = [](const PulseFormula &formula, const auto &bounds) {
+    std::map<AbstractValue, int64_t> normalized;
+    for (const auto &kv : bounds) {
+      normalized[formula.findRepReadOnly(kv.first)] = kv.second;
+    }
+    return normalized;
+  };
 
   auto normalize_linear_constraints = [](const PulseFormula &formula) {
     std::multiset<std::string> normalized;
@@ -2565,13 +2725,33 @@ bool PulseFormula::addBounds(AbstractValue v, int64_t lower, int64_t upper) {
   }
 
   if (!in_tableau_propagate_ && !linear_tableau_.empty()) {
-    if (!propagateLinearTableau()) {
+    bool touches_tableau = false;
+    for (const auto &kv : linear_tableau_) {
+      if (kv.second.coeffs.count(rep) > 0) {
+        touches_tableau = true;
+        break;
+      }
+    }
+    if (touches_tableau && !propagateLinearTableau()) {
       return false;
     }
   }
   if (!in_tableau_propagate_ && has_linear_inequalities_ &&
       !linear_constraints_.empty()) {
-    if (!propagateLinearInequalities()) {
+    bool touches_ineq = false;
+    for (const auto &lc : linear_constraints_) {
+      if (lc.kind == ConstraintKind::Equal)
+        continue;
+      for (const auto &t : lc.terms) {
+        if (findRepReadOnly(t.var) == rep) {
+          touches_ineq = true;
+          break;
+        }
+      }
+      if (touches_ineq)
+        break;
+    }
+    if (touches_ineq && !propagateLinearInequalities()) {
       return false;
     }
   }
@@ -2580,11 +2760,15 @@ bool PulseFormula::addBounds(AbstractValue v, int64_t lower, int64_t upper) {
 }
 
 bool PulseFormula::isInteger(AbstractValue v) const {
+  if (integer_values_.empty())
+    return false;
   AbstractValue rep = findRepReadOnly(v);
   return integer_values_.count(rep) > 0;
 }
 
 std::optional<int64_t> PulseFormula::getLowerBound(AbstractValue v) const {
+  if (lower_bounds_.empty() && null_values_.empty())
+    return std::nullopt;
   AbstractValue rep = findRepReadOnly(v);
   auto it = lower_bounds_.find(rep);
   if (it != lower_bounds_.end()) {
@@ -2597,6 +2781,8 @@ std::optional<int64_t> PulseFormula::getLowerBound(AbstractValue v) const {
 }
 
 std::optional<int64_t> PulseFormula::getUpperBound(AbstractValue v) const {
+  if (upper_bounds_.empty() && null_values_.empty())
+    return std::nullopt;
   AbstractValue rep = findRepReadOnly(v);
   auto it = upper_bounds_.find(rep);
   if (it != upper_bounds_.end()) {
@@ -2611,10 +2797,19 @@ std::optional<int64_t> PulseFormula::getUpperBound(AbstractValue v) const {
 std::optional<int64_t> PulseFormula::asConstantInt(AbstractValue v) const {
   if (v.getId() == 0)
     return std::nullopt;
-  auto lo = getLowerBound(v);
-  auto hi = getUpperBound(v);
-  if (lo && hi && *lo == *hi) {
-    return *lo;
+  if (lower_bounds_.empty() && null_values_.empty())
+    return std::nullopt;
+  AbstractValue rep = findRepReadOnly(v);
+  auto lo_it = lower_bounds_.find(rep);
+  if (lo_it != lower_bounds_.end()) {
+    auto hi_it = upper_bounds_.find(rep);
+    if (hi_it != upper_bounds_.end() && lo_it->second == hi_it->second) {
+      return lo_it->second;
+    }
+    return std::nullopt;
+  }
+  if (null_values_.count(rep) > 0) {
+    return 0;
   }
   return std::nullopt;
 }
@@ -2937,8 +3132,8 @@ bool PulseFormula::checkSatisfiability() const {
   // and whose result's unary constraint is trivially satisfiable (e.g., C flag
   // checks `if (flags & MASK)` where `flags` has no other constraints).
   if (!active_arith_ops.empty()) {
-    std::map<AbstractValue, unsigned> ext_use;
-    std::map<AbstractValue, unsigned> arith_use;
+    detail::FlatMap<AbstractValue, unsigned> ext_use;
+    detail::FlatMap<AbstractValue, unsigned> arith_use;
     for (const auto &lc : linear_constraints_) {
       for (const auto &t : lc.terms)
         ext_use[findRepReadOnly(t.var)]++;
@@ -3098,6 +3293,111 @@ bool PulseFormula::checkSatisfiability() const {
         }
       }
     }
+
+    // Exact 3-valued bitmask solver for shared flag words: decides
+    // `(flags & M_i) == C_i / == 0 / != 0` across multiple masks on the same
+    // variable in O(k) without invoking Z3 QF_BV bit-blasting.
+    struct MaskUse {
+      size_t op_idx;
+      AbstractValue res;
+      uint64_t mask;
+    };
+    detail::FlatMap<AbstractValue, llvm::SmallVector<MaskUse, 4>> mask_groups;
+    for (size_t i = 0; i < active_arith_ops.size(); ++i) {
+      if (peeled[i])
+        continue;
+      const auto &op = active_arith_ops[i];
+      if (op.op != "&")
+        continue;
+      AbstractValue r = findRepReadOnly(op.result);
+      AbstractValue o1 = findRepReadOnly(op.op1);
+      AbstractValue o2 = findRepReadOnly(op.op2);
+      if (r == o1 || r == o2 || o1 == o2)
+        continue;
+      if (ext_use[r] != 0 || arith_use[r] != 1)
+        continue;
+      if (auto c2 = asConstantInt(o2)) {
+        mask_groups[o1].push_back(MaskUse{i, r, static_cast<uint64_t>(*c2)});
+      } else if (auto c1 = asConstantInt(o1)) {
+        mask_groups[o2].push_back(MaskUse{i, r, static_cast<uint64_t>(*c1)});
+      }
+    }
+    for (const auto &kv : mask_groups) {
+      AbstractValue base = kv.first;
+      const auto &uses = kv.second;
+      uint64_t must0 = 0;
+      uint64_t must1 = 0;
+      llvm::SmallVector<uint64_t, 8> req_nonzero;
+      if (auto cb = asConstantInt(base)) {
+        must1 = static_cast<uint64_t>(*cb);
+        must0 = ~must1;
+      } else if (null_values_.count(base) > 0) {
+        must0 = ~0ULL;
+      } else if (non_null_values_.count(base) > 0) {
+        req_nonzero.push_back(~0ULL);
+      }
+      for (const MaskUse &mu : uses) {
+        if (auto cr = asConstantInt(mu.res)) {
+          uint64_t c = static_cast<uint64_t>(*cr);
+          if ((c & ~mu.mask) != 0) {
+            return cacheAndReturn(false);
+          }
+          must1 |= (c & mu.mask);
+          must0 |= (mu.mask & ~c);
+        } else if (null_values_.count(mu.res) > 0) {
+          must0 |= mu.mask;
+        } else if (non_null_values_.count(mu.res) > 0) {
+          req_nonzero.push_back(mu.mask);
+        } else {
+          auto lo = lower_bounds_.find(mu.res);
+          if (lo != lower_bounds_.end() && lo->second > 0) {
+            req_nonzero.push_back(mu.mask);
+          }
+        }
+      }
+      if ((must0 & must1) != 0) {
+        return cacheAndReturn(false);
+      }
+      for (uint64_t m : req_nonzero) {
+        if ((m & ~must0) == 0) {
+          return cacheAndReturn(false);
+        }
+      }
+      if (ext_use[base] == 0 && arith_use[base] == uses.size()) {
+        uint64_t w_min = must1;
+        uint64_t w_req = must1;
+        for (uint64_t m : req_nonzero) {
+          uint64_t allowed = m & ~must0;
+          if ((w_req & allowed) == 0 && allowed != 0) {
+            w_req |= (allowed & (~allowed + 1ULL));
+          }
+        }
+        uint64_t w_max = must1 | (~must0);
+        uint64_t cands[] = {w_req, w_min, w_max};
+        bool group_sat = false;
+        for (uint64_t w : cands) {
+          if (!satisfiesUnary(base, static_cast<int64_t>(w)))
+            continue;
+          bool all_ok = true;
+          for (const MaskUse &mu : uses) {
+            if (!satisfiesUnary(mu.res, static_cast<int64_t>(w & mu.mask))) {
+              all_ok = false;
+              break;
+            }
+          }
+          if (all_ok) {
+            group_sat = true;
+            break;
+          }
+        }
+        if (group_sat) {
+          for (const MaskUse &mu : uses) {
+            peeled[mu.op_idx] = true;
+          }
+        }
+      }
+    }
+
     std::vector<ArithmeticOp> remaining;
     remaining.reserve(active_arith_ops.size());
     for (size_t i = 0; i < active_arith_ops.size(); ++i) {
@@ -3107,8 +3407,91 @@ bool PulseFormula::checkSatisfiability() const {
     active_arith_ops.swap(remaining);
   }
 
-  if (!needs_linear_smt && active_arith_ops.empty() && float_cmps_.empty() &&
-      active_disj_eqs.empty()) {
+  // Slice and peel floating-point constraints so unrelated float_ops_ /
+  // float_constants_ are never dumped into Z3 and single-use free comparisons
+  // (e.g. `if (x < eps)` over unconstrained `x`) discharge without nlsat.
+  std::vector<const FloatCmp *> active_float_cmps;
+  std::vector<const FloatOp *> active_float_ops;
+  std::set<AbstractValue> real_vars;
+  if (!float_cmps_.empty()) {
+    std::vector<bool> keep_fcmp(float_cmps_.size(), true);
+    std::vector<bool> keep_fop(float_ops_.size(), false);
+    // Iteratively peel trivial single-use float comparisons whose free operand
+    // can satisfy any real relation independently, then peel unused float ops.
+    bool peeled_any = true;
+    while (peeled_any) {
+      peeled_any = false;
+      std::fill(keep_fop.begin(), keep_fop.end(), false);
+      real_vars.clear();
+      for (size_t i = 0; i < float_cmps_.size(); ++i) {
+        if (!keep_fcmp[i])
+          continue;
+        real_vars.insert(findRepReadOnly(float_cmps_[i].op1));
+        real_vars.insert(findRepReadOnly(float_cmps_[i].op2));
+      }
+      bool f_exp = !real_vars.empty();
+      while (f_exp) {
+        f_exp = false;
+        for (size_t i = 0; i < float_ops_.size(); ++i) {
+          if (keep_fop[i])
+            continue;
+          AbstractValue rr = findRepReadOnly(float_ops_[i].result);
+          AbstractValue r1 = findRepReadOnly(float_ops_[i].op1);
+          AbstractValue r2 = findRepReadOnly(float_ops_[i].op2);
+          if (real_vars.count(rr) > 0 || real_vars.count(r1) > 0 ||
+              real_vars.count(r2) > 0) {
+            keep_fop[i] = true;
+            if (real_vars.insert(rr).second)
+              f_exp = true;
+            if (real_vars.insert(r1).second)
+              f_exp = true;
+            if (real_vars.insert(r2).second)
+              f_exp = true;
+          }
+        }
+      }
+      detail::FlatMap<AbstractValue, unsigned> f_refs;
+      for (size_t i = 0; i < float_cmps_.size(); ++i) {
+        if (!keep_fcmp[i])
+          continue;
+        f_refs[findRepReadOnly(float_cmps_[i].op1)]++;
+        f_refs[findRepReadOnly(float_cmps_[i].op2)]++;
+      }
+      for (size_t i = 0; i < float_ops_.size(); ++i) {
+        if (!keep_fop[i])
+          continue;
+        f_refs[findRepReadOnly(float_ops_[i].result)]++;
+        f_refs[findRepReadOnly(float_ops_[i].op1)]++;
+        f_refs[findRepReadOnly(float_ops_[i].op2)]++;
+      }
+      auto isFreeReal = [&](AbstractValue v) -> bool {
+        auto it = f_refs.find(v);
+        return it != f_refs.end() && it->second == 1 &&
+               float_constants_.count(v) == 0;
+      };
+      for (size_t i = 0; i < float_cmps_.size(); ++i) {
+        if (!keep_fcmp[i])
+          continue;
+        AbstractValue o1 = findRepReadOnly(float_cmps_[i].op1);
+        AbstractValue o2 = findRepReadOnly(float_cmps_[i].op2);
+        if (!(o1 == o2) && (isFreeReal(o1) || isFreeReal(o2))) {
+          keep_fcmp[i] = false;
+          peeled_any = true;
+        }
+      }
+    }
+    for (size_t i = 0; i < float_cmps_.size(); ++i) {
+      if (keep_fcmp[i])
+        active_float_cmps.push_back(&float_cmps_[i]);
+    }
+    for (size_t i = 0; i < float_ops_.size(); ++i) {
+      if (keep_fop[i])
+        active_float_ops.push_back(&float_ops_[i]);
+    }
+  }
+
+  if (!needs_linear_smt && active_arith_ops.empty() &&
+      active_float_cmps.empty() && active_disj_eqs.empty()) {
     return cacheAndReturn(true);
   }
 
@@ -3316,12 +3699,53 @@ bool PulseFormula::checkSatisfiability() const {
         }
         key += ";";
       }
+      if (!active_float_cmps.empty()) {
+        std::unordered_map<AbstractValue, unsigned> fnorm_id;
+        auto getFNormId = [&](AbstractValue v) -> unsigned {
+          AbstractValue c = findRepReadOnly(v);
+          auto it = fnorm_id.find(c);
+          if (it != fnorm_id.end())
+            return it->second;
+          unsigned id = static_cast<unsigned>(fnorm_id.size());
+          fnorm_id.emplace(c, id);
+          return id;
+        };
+        for (AbstractValue c : real_vars) {
+          unsigned id = getFNormId(c);
+          auto fit = float_constants_.find(c);
+          if (fit != float_constants_.end()) {
+            uint64_t bits = 0;
+            std::memcpy(&bits, &fit->second, sizeof(bits));
+            key += "F";
+            key += std::to_string(id);
+            key += "=";
+            key += std::to_string(bits);
+            key += ";";
+          }
+        }
+        for (const FloatOp *fop : active_float_ops) {
+          key += "O";
+          key += std::to_string(getFNormId(fop->result));
+          key += "=";
+          key += std::to_string(getFNormId(fop->op1));
+          key += fop->op;
+          key += std::to_string(getFNormId(fop->op2));
+          key += ";";
+        }
+        for (const FloatCmp *fcmp : active_float_cmps) {
+          key += "P";
+          key += std::to_string(getFNormId(fcmp->op1));
+          key += fcmp->pred;
+          key += std::to_string(getFNormId(fcmp->op2));
+          key += ";";
+        }
+      }
       return key;
     };
 
     static thread_local std::unordered_map<std::string, bool> smt_query_cache;
 
-    if (has_bitwise && float_ops_.empty() && float_cmps_.empty()) {
+    if (has_bitwise && active_float_cmps.empty()) {
       // Skip cryptographic / hash / CRC chains (> 6 active bitwise/arith ops
       // or > 8 linear constraints): 64-bit bit-blasting on deep chains always
       // times out and bloats Z3's AST manager.
@@ -3336,12 +3760,9 @@ bool PulseFormula::checkSatisfiability() const {
         return cacheAndReturn(cit->second);
       }
 
-      // Use Z3's bit-blasting QF_BV solver (with pooled variable names to avoid
-      // AST/symbol growth and a tight 5ms timeout).
-      z3::solver bv_solver(ctx, "QF_BV");
-      z3::params bp(ctx);
-      bp.set(":timeout", 5u);
-      bv_solver.set(bp);
+      // Reuse thread-local QF_BV bit-blasting solver (reset without push/pop
+      // to keep fast bit-blasting and avoid per-query solver/params teardown).
+      z3::solver &bv_solver = getResetBVSolver();
       std::unordered_map<AbstractValue, z3::expr> bv_map;
       auto getBV = [&](AbstractValue v) -> z3::expr {
         return getZ3BVVar(ctx, findRepReadOnly(v), bv_map);
@@ -3444,50 +3865,87 @@ bool PulseFormula::checkSatisfiability() const {
         }
       }
       const bool is_sat = (bv_solver.check() != z3::unsat);
-      if (smt_query_cache.size() >= 4096) {
+      if (smt_query_cache.size() >= 8192) {
         smt_query_cache.clear();
       }
       smt_query_cache.emplace(std::move(query_key), is_sat);
       return cacheAndReturn(is_sat);
     }
 
-    const bool has_floats = !float_cmps_.empty();
-    bool has_nonlin_float = false;
+    bool has_floats = !active_float_cmps.empty();
     if (has_floats) {
-      for (const auto &fop : float_ops_) {
-        if (fop.op == "*" || fop.op == "/") {
-          has_nonlin_float = true;
+      // Skip Z3 Real encoding when extreme-magnitude or non-finite constants
+      // (e.g. 1e-100, DBL_MAX, NaN) appear, as rational encoding creates huge
+      // bignum denominators in Z3's theory_lra / nlsat.
+      for (AbstractValue c : real_vars) {
+        auto fit = float_constants_.find(c);
+        if (fit != float_constants_.end() && !isZ3SafeDouble(fit->second)) {
+          has_floats = false;
           break;
+        }
+      }
+      if (!has_floats && active_linear.empty() && active_arith_ops.empty() &&
+          active_disj_eqs.empty()) {
+        return cacheAndReturn(true);
+      }
+    }
+    bool has_nonlin_float = false;
+    unsigned nonlin_float_count = 0;
+    if (has_floats) {
+      for (const FloatOp *fop : active_float_ops) {
+        if (fop->op == "*") {
+          // Multiplying by a known float constant is linear (QF_LRA).
+          if (!asConstantFloat(fop->op1) && !asConstantFloat(fop->op2)) {
+            has_nonlin_float = true;
+            ++nonlin_float_count;
+          }
+        } else if (fop->op == "/") {
+          // Dividing by a known non-zero float constant is linear (QF_LRA).
+          auto c2 = asConstantFloat(fop->op2);
+          if (!c2 || *c2 == 0.0) {
+            has_nonlin_float = true;
+            ++nonlin_float_count;
+          }
         }
       }
     }
     // Use the persistent lightweight simple solver for linear/QF_LIA/QF_LRA;
-    // only instantiate a fresh tactic solver for small nonlinear queries.
+    // only use the reusable nonlinear solver for small nonlinear queries.
+    if (has_nonlin_float &&
+        (nonlin_float_count > 1 || active_float_ops.size() > 4 ||
+         active_float_cmps.size() > 4)) {
+      if (active_linear.empty() && active_arith_ops.empty() &&
+          active_disj_eqs.empty()) {
+        return cacheAndReturn(true);
+      }
+      has_floats = false;
+      has_nonlin_float = false;
+    }
     const bool use_nonlin = has_nonlin_int || has_nonlin_float;
-    if (use_nonlin && (nonlin_op_count > 4 || active_arith_ops.size() > 8 ||
+    if (use_nonlin && (nonlin_op_count > 4 || nonlin_float_count > 1 ||
+                       active_arith_ops.size() > 8 ||
                        active_linear.size() > 8)) {
       return cacheAndReturn(true);
     }
-    std::string nonlin_key;
-    if (use_nonlin && !has_floats) {
-      nonlin_key = buildNormalizedQueryKey('N');
-      auto cit = smt_query_cache.find(nonlin_key);
+    std::string cache_key;
+    if (use_nonlin ||
+        (z3_vars.size() + real_vars.size() <= 16 &&
+         active_linear.size() + active_arith_ops.size() +
+                 active_float_ops.size() + active_float_cmps.size() <=
+             16)) {
+      cache_key = buildNormalizedQueryKey(use_nonlin ? 'N' : 'L');
+      auto cit = smt_query_cache.find(cache_key);
       if (cit != smt_query_cache.end()) {
         return cacheAndReturn(cit->second);
       }
     }
-    std::optional<z3::solver> nonlin_solver;
     std::optional<SolverPushScope> push_scope;
     z3::solver *solver_ptr = nullptr;
     if (!use_nonlin) {
       solver_ptr = &getCachedSimpleSolver(ctx);
       push_scope.emplace(*solver_ptr);
     } else {
-      nonlin_solver.emplace(ctx);
-      z3::params p(ctx);
-      p.set(":timeout", 5u);
-      nonlin_solver->set(p);
-      solver_ptr = &(*nonlin_solver);
+      solver_ptr = &getResetNonlinSolver();
     }
     z3::solver &solver = *solver_ptr;
     std::unordered_map<AbstractValue, z3::expr> var_map;
@@ -3617,29 +4075,50 @@ bool PulseFormula::checkSatisfiability() const {
       }
     }
 
-    // Floating-point constraints encoded in Z3 Real theory.
+    // Floating-point constraints encoded in Z3 Real theory (sliced to
+    // `real_vars` with constant-factor linear scaling for QF_LRA).
     if (has_floats) {
       std::unordered_map<AbstractValue, z3::expr> real_map;
-      for (const auto &kv : float_constants_) {
-        z3::expr rv = getZ3RealVar(ctx, getCanon(kv.first), real_map);
-        solver.add(rv == z3RealVal(ctx, kv.second));
+      for (AbstractValue c : real_vars) {
+        auto fit = float_constants_.find(c);
+        if (fit != float_constants_.end()) {
+          z3::expr rv = getZ3RealVar(ctx, c, real_map);
+          solver.add(rv == z3RealVal(ctx, fit->second));
+        }
       }
-      for (const auto &fop : float_ops_) {
+      for (const FloatOp *fop_ptr : active_float_ops) {
+        const auto &fop = *fop_ptr;
         z3::expr res = getZ3RealVar(ctx, getCanon(fop.result), real_map);
         z3::expr o1 = getZ3RealVar(ctx, getCanon(fop.op1), real_map);
         z3::expr o2 = getZ3RealVar(ctx, getCanon(fop.op2), real_map);
-        if (fop.op == "+")
+        if (fop.op == "+") {
           solver.add(res == o1 + o2);
-        else if (fop.op == "-")
+        } else if (fop.op == "-") {
           solver.add(res == o1 - o2);
-        else if (fop.op == "*")
-          solver.add(res == o1 * o2);
-        else if (fop.op == "/") {
-          solver.add(o2 != ctx.real_val(0));
-          solver.add(res == o1 / o2);
+        } else if (fop.op == "*") {
+          if (auto c1 = asConstantFloat(fop.op1)) {
+            solver.add(res == z3RealVal(ctx, *c1) * o2);
+          } else if (auto c2 = asConstantFloat(fop.op2)) {
+            solver.add(res == o1 * z3RealVal(ctx, *c2));
+          } else {
+            solver.add(res == o1 * o2);
+          }
+        } else if (fop.op == "/") {
+          if (auto c2 = asConstantFloat(fop.op2)) {
+            if (*c2 == 0.0) {
+              solver.add(ctx.bool_val(false));
+            } else {
+              // Linear form `res * c2 == o1` keeps query in pure QF_LRA.
+              solver.add(res * z3RealVal(ctx, *c2) == o1);
+            }
+          } else {
+            solver.add(o2 != ctx.real_val(0));
+            solver.add(res == o1 / o2);
+          }
         }
       }
-      for (const auto &fcmp : float_cmps_) {
+      for (const FloatCmp *fcmp_ptr : active_float_cmps) {
+        const auto &fcmp = *fcmp_ptr;
         z3::expr o1 = getZ3RealVar(ctx, getCanon(fcmp.op1), real_map);
         z3::expr o2 = getZ3RealVar(ctx, getCanon(fcmp.op2), real_map);
         if (fcmp.pred == "==")
@@ -3659,11 +4138,11 @@ bool PulseFormula::checkSatisfiability() const {
 
     z3::check_result result = solver.check();
     const bool is_sat = (result != z3::unsat);
-    if (!nonlin_key.empty()) {
-      if (smt_query_cache.size() >= 4096) {
+    if (!cache_key.empty()) {
+      if (smt_query_cache.size() >= 8192) {
         smt_query_cache.clear();
       }
-      smt_query_cache.emplace(std::move(nonlin_key), is_sat);
+      smt_query_cache.emplace(std::move(cache_key), is_sat);
     }
     return cacheAndReturn(is_sat);
 
@@ -3899,12 +4378,7 @@ std::optional<bool> PulseFormula::impliesComparison(
       }
     }
     if (has_bitwise && float_ops_.empty() && float_cmps_.empty()) {
-      // Use Z3's bit-blasting QF_BV solver (with pooled variable names to avoid
-      // AST/symbol growth and a tight 10ms timeout).
-      z3::solver bv_solver(ctx, "QF_BV");
-      z3::params bp(ctx);
-      bp.set(":timeout", 10u);
-      bv_solver.set(bp);
+      z3::solver &bv_solver = getResetBVSolver();
       std::unordered_map<AbstractValue, z3::expr> bv_map;
       auto getBV = [&](AbstractValue v) -> z3::expr {
         return getZ3BVVar(ctx, findRepReadOnly(v), bv_map);
@@ -4029,18 +4503,13 @@ std::optional<bool> PulseFormula::impliesComparison(
       return std::nullopt;
     }
 
-    std::optional<z3::solver> nonlin_solver;
     std::optional<SolverPushScope> push_scope;
     z3::solver *solver_ptr = nullptr;
     if (!has_nonlin_int) {
       solver_ptr = &getCachedSimpleSolver(ctx);
       push_scope.emplace(*solver_ptr);
     } else {
-      nonlin_solver.emplace(ctx);
-      z3::params p(ctx);
-      p.set(":timeout", 15u);
-      nonlin_solver->set(p);
-      solver_ptr = &(*nonlin_solver);
+      solver_ptr = &getResetNonlinSolver();
     }
     z3::solver &solver = *solver_ptr;
     std::unordered_map<AbstractValue, z3::expr> var_map;
@@ -4527,7 +4996,8 @@ bool PulseFormula::insertLinearEquationRow(LinearEqRow raw_row) {
   }
 
   // Build exact __int128 accumulator over canonical representatives.
-  std::map<AbstractValue, __int128> acc;
+  detail::FlatMap<AbstractValue, __int128> acc;
+  acc.reserve(raw_row.coeffs.size() + 2);
   __int128 cst = raw_row.constant;
 
   for (const auto &kv : raw_row.coeffs) {
@@ -4543,7 +5013,8 @@ bool PulseFormula::insertLinearEquationRow(LinearEqRow raw_row) {
     }
   }
 
-  auto reduceAcc = [](std::map<AbstractValue, __int128> &m, __int128 &c) {
+  auto reduceAcc = [](detail::FlatMap<AbstractValue, __int128> &m,
+                      __int128 &c) {
     __int128 g = abs128(c);
     for (const auto &kv : m) {
       g = (g == 0) ? abs128(kv.second) : gcd128(g, kv.second);
@@ -4735,19 +5206,34 @@ bool PulseFormula::propagateLinearTableau() {
     size_t hi_before = upper_bounds_.size();
     bool bounds_tightened = false;
 
-    // 1. Re-normalize all existing rows against latest union-find reps and
-    //    discovered constant bounds (derives new constants/equalities!).
-    std::vector<LinearEqRow> rows;
-    rows.reserve(linear_tableau_.size());
-    for (auto &kv : linear_tableau_) {
-      rows.push_back(std::move(kv.second));
+    // 1. Re-normalize existing rows only if at least one row mentions a
+    //    non-canonical variable or a newly resolved constant (avoids O(T^2)
+    //    full tableau teardown on every single linear equality).
+    bool needs_renorm = false;
+    for (const auto &kv : linear_tableau_) {
+      for (const auto &ckv : kv.second.coeffs) {
+        AbstractValue r = findRepReadOnly(ckv.first);
+        if (!(r == ckv.first) || asConstantInt(r).has_value()) {
+          needs_renorm = true;
+          break;
+        }
+      }
+      if (needs_renorm)
+        break;
     }
-    linear_tableau_.clear();
+    if (needs_renorm) {
+      std::vector<LinearEqRow> rows;
+      rows.reserve(linear_tableau_.size());
+      for (auto &kv : linear_tableau_) {
+        rows.push_back(std::move(kv.second));
+      }
+      linear_tableau_.clear();
 
-    for (auto &r : rows) {
-      if (!insertLinearEquationRow(std::move(r))) {
-        in_tableau_propagate_ = false;
-        return false;
+      for (auto &r : rows) {
+        if (!insertLinearEquationRow(std::move(r))) {
+          in_tableau_propagate_ = false;
+          return false;
+        }
       }
     }
 
