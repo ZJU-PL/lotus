@@ -116,6 +116,33 @@ TEST(InterleavedDyckStagedBoundsSolverTest,
 }
 
 TEST(InterleavedDyckStagedBoundsSolverTest,
+     PlainMutualRefinementIsOptInAndIsNotAPartialMode) {
+  Graph graph;
+  graph.addEdge(3, 0, Label::closeBracket(0));
+  graph.addEdge(2, 1, Label::openBracket(0));
+  graph.addEdge(4, 3, Label::neutral());
+  graph.addEdge(0, 4, Label::openBracket(0));
+  graph.addEdge(0, 2, Label::closeParenthesis(0));
+  graph.addEdge(3, 4, Label::closeParenthesis(0));
+  graph.addEdge(0, 2, Label::openParenthesis(0));
+  graph.addEdge(2, 0, Label::neutral());
+
+  Solver solver;
+  Options legacy;
+  legacy.method = Method::MutualRefinement;
+  Options plain = legacy;
+  plain.mutual_refinement_mode = MutualRefinementMode::Plain;
+
+  const auto legacy_result = solver.analyze(graph, BenchmarkKind::Taint, legacy);
+  const auto plain_result = solver.analyze(graph, BenchmarkKind::Taint, plain);
+  EXPECT_EQ(legacy_result.mutual_refinement.size(), 3U);
+  EXPECT_EQ(plain_result.mutual_refinement.size(), 4U);
+  EXPECT_TRUE(contains(legacy_result.mutual_refinement, 4, 3));
+  EXPECT_TRUE(contains(plain_result.mutual_refinement, 3, 4));
+  EXPECT_FALSE(contains(legacy_result.mutual_refinement, 3, 4));
+}
+
+TEST(InterleavedDyckStagedBoundsSolverTest,
      FactorizedTracingPreservesTheFullPipeline) {
   Graph graph;
   graph.addEdge(0, 1, Label::openParenthesis(0));

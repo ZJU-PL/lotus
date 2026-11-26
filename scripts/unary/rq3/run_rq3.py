@@ -7,6 +7,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import resource
@@ -22,7 +23,9 @@ from pathlib import Path
 from statistics import fmean, median
 from typing import Any, Iterable, Sequence
 
-import config
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from rq3 import config_rq3 as config
+import provenance
 
 
 CSV_COLUMNS = [
@@ -30,6 +33,9 @@ CSV_COLUMNS = [
     "analysis",
     "dot_name",
     "dot_path",
+    "input_sha256",
+    "binary_sha256",
+    "extra_environment",
     "experiment",
     "tool",
     "configuration",
@@ -40,14 +46,14 @@ CSV_COLUMNS = [
     "statuses",
     "exit_codes",
     "time_ms",
-    "average_time_ms",
     "median_time_ms",
+    "average_time_ms",
     "peak_rss_bytes",
-    "average_peak_rss_bytes",
     "median_peak_rss_bytes",
+    "average_peak_rss_bytes",
     "wall_time_seconds",
-    "average_wall_time_seconds",
     "median_wall_time_seconds",
+    "average_wall_time_seconds",
     "timeout_seconds",
     "memory_limit_bytes",
     "stats_per_run",
@@ -56,6 +62,13 @@ CSV_COLUMNS = [
     "log_files",
     "command",
     "capture_command",
+    "capture_status",
+    "capture_log_file",
+    "capture_stats",
+    "log_sha256",
+    "capture_log_sha256",
+    "performance_source",
+    "source_row_sha256",
 ]
 
 
@@ -76,6 +89,7 @@ class RunResult:
   stderr: str
   stats: dict[str, str]
   log_path: Path
+  started: str = ""
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -158,6 +172,18 @@ def validate_configuration() -> list[dict[str, Any]]:
     names.add(experiment["name"])
     if experiment["tool"] not in config.BINARIES:
       raise ValueError(f"unknown tool: {experiment['tool']}")
+    engine_analyses = experiment.get("engine_analyses", {})
+    if not isinstance(engine_analyses, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in engine_analyses.items()
+    ):
+      raise ValueError(f"invalid engine analysis mapping: {experiment}")
+    supported = set(experiment.get("analyses", ["taint", "value-flow"]))
+    unknown = set(engine_analyses) - supported
+    if unknown:
+      raise ValueError(
+          f"engine analysis mapping has unsupported datasets: {sorted(unknown)}"
+      )
     if experiment["artifact_kind"] == "mcfl":
       if experiment.get("family") not in {"plus", "circ"}:
         raise ValueError(f"invalid MCFL family: {experiment}")
@@ -195,8 +221,14 @@ def discover_benchmarks(selected: set[str]) -> list[Benchmark]:
   return benchmarks
 
 
-def substitute_args(arguments: Sequence[Any], benchmark: Benchmark) -> list[str]:
-  return [str(value).replace("{analysis}", benchmark.analysis) for value in arguments]
+def engine_analysis(experiment: dict[str, Any], analysis: str) -> str:
+  """Translate a dataset analysis name to the selected tool's client name."""
+  mapping = experiment.get("engine_analyses", {})
+  return str(mapping.get(analysis, analysis))
+
+
+def substitute_args(arguments: Sequence[Any], analysis: str) -> list[str]:
+  return [str(value).replace("{analysis}", analysis) for value in arguments]
 
 
 def binary_for(experiment: dict[str, Any]) -> Path:
@@ -218,6 +250,8 @@ def expected_artifacts(
 ) -> list[Path]:
   base = artifact_base(benchmark, experiment)
   kind = experiment["artifact_kind"]
+  if kind == "upper":
+    return [base / "upper.pairs"]
   if kind == "staged":
     return [base / "union.pairs", base / "on-demand.pairs"]
   if kind == "union":
@@ -234,11 +268,17 @@ def make_command(
 ) -> list[str]:
   command = [
       str(binary_for(experiment)),
-      *substitute_args(experiment["args"], benchmark),
+      *substitute_args(
+          experiment["args"], engine_analysis(experiment, benchmark.analysis)
+      ),
   ]
   if capture and config.CAPTURE_RELATIONS:
     base = artifact_base(benchmark, experiment)
-    if experiment["artifact_kind"] in {"staged", "union", "mcfl"}:
+    if experiment["tool"] == "spds":
+      command.append("--pairs")
+    elif experiment["artifact_kind"] == "upper":
+      command.extend(("--print-result", "-o", str(base / "upper.txt")))
+    elif experiment["artifact_kind"] in {"staged", "union", "mcfl"}:
       command.extend(("--dump-relations", str(base)))
     else:
       command.extend(("--dump-components", str(base / "components.map")))
@@ -249,7 +289,7 @@ def make_command(
 def log_path_for(
     benchmark: Benchmark,
     experiment: dict[str, Any],
-    repetition: int,
+    repetition: int | str,
     *,
     warmup: bool,
 ) -> Path:
@@ -273,12 +313,179 @@ def parse_stats(stdout: str) -> dict[str, str]:
   return stats
 
 
+def capture_upper_pairs(lines: Iterable[str], path: Path) -> dict[str, str]:
+  """Extract --print-result pairs, checking the tool's reported count."""
+  lines = iter(lines)
+  header = next(lines, "").strip()
+  label, separator, count = header.partition(":")
+  if not separator or label not in {
+      "regularization", "mutual-refinement upper bound"
+  }:
+    raise ValueError(f"unexpected upper-bound header: {header}")
+  stats = {label: count.strip()}
+  pair_count = 0
+  with path.open("w", encoding="utf-8") as stream:
+    for line in lines:
+      line = line.strip()
+      if line.startswith(("Time (ms):", "process peak RSS (bytes):")):
+        stats.update(parse_stats(line))
+        continue
+      if not line:
+        continue
+      if re.fullmatch(r"-?\d+\s+-?\d+", line) is None:
+        raise ValueError(f"invalid pair output: {line}")
+      stream.write(line + "\n")
+      pair_count += 1
+  if pair_count != int(count):
+    raise ValueError(f"expected {count.strip()} pairs, captured {pair_count}")
+  return stats
+
+
+def valid_stats(stats: dict[str, str]) -> bool:
+  elapsed = parse_integer(stats.get("Time (ms)"))
+  rss = parse_integer(stats.get("process peak RSS (bytes)"))
+  return elapsed is not None and elapsed >= 0 and rss is not None and rss > 0
+
+
+def valid_spds_stats(stats: dict[str, str], analysis: str) -> bool:
+  count = parse_integer(stats.get("candidate-pairs"))
+  return (
+      analysis in {"nonreflexive-taint", "value-flow"}
+      and stats.get("engine") == "spds"
+      and stats.get("analysis") == analysis
+      and stats.get("call-stack") == stats.get("field-stack") == "empty"
+      and count is not None and count >= 0
+  )
+
+
+def capture_spds_pairs(lines: Iterable[str], path: Path, analysis: str) -> dict[str, str]:
+  """Stream SPDS's nonreflexive sorted pairs and verify the reported size."""
+  stats = {}
+  count = 0
+  previous = None
+  with path.open("w", encoding="utf-8") as output:
+    for line in lines:
+      if line.startswith("pair:"):
+        fields = line.removeprefix("pair:").split()
+        if len(fields) != 2:
+          raise ValueError(f"invalid SPDS pair: {line.strip()}")
+        pair = tuple(map(int, fields))
+        if pair[0] == pair[1] or (previous is not None and pair <= previous):
+          raise ValueError("SPDS pairs must be nonreflexive, sorted and unique")
+        output.write(f"{pair[0]} {pair[1]}\n")
+        previous = pair
+        count += 1
+      else:
+        stats.update(parse_stats(line))
+  if (not valid_spds_stats(stats, analysis)
+      or parse_integer(stats.get("candidate-pairs")) != count):
+    raise ValueError("SPDS client or candidate-pairs count mismatch")
+  return stats
+
+
+def load_rq1_adaptive_results(csv_path: Path, expected: dict) -> dict:
+  """Require matching, complete RQ1 samples before any RQ3 execution."""
+  if not Path(csv_path).is_file():
+    raise FileNotFoundError(f"RQ1 source CSV not found: {csv_path}; run RQ1 first")
+  with Path(csv_path).open(encoding="utf-8", newline="") as stream:
+    rows = list(csv.DictReader(stream))
+  indexed = {}
+  for row in rows:
+    if row.get("experiment") != "adaptive":
+      continue
+    key = (row["dataset"], row["dot_path"])
+    if key in indexed:
+      raise RuntimeError(f"duplicate RQ1 adaptive row: {key}")
+    indexed[key] = row
+  reused = {}
+  for key, identity in expected.items():
+    if key not in indexed:
+      raise RuntimeError(f"missing RQ1 adaptive data for {key}; run RQ1 first")
+    row = indexed[key]
+    provenance.validate(row, identity, require_success=True)
+    if row.get("algorithm") != "adaptive" or json.loads(row["extra_arguments"]) != []:
+      raise RuntimeError(f"RQ1 source is not the standard adaptive configuration: {key}")
+    runs = [RunResult(status, code, float(wall), "", "", stats, stored_path(log))
+            for status, code, wall, stats, log in zip(
+                json.loads(row["statuses"]), json.loads(row["exit_codes"]),
+                json.loads(row["wall_time_seconds"]), json.loads(row["stats_per_run"]),
+                json.loads(row["log_files"]))]
+    reused[key] = (runs, row["row_sha256"])
+  return reused
+
+
+def validate_logs(row: dict) -> None:
+  provenance.validate_logs(row)
+  if row.get("capture_log_file"):
+    path = stored_path(row["capture_log_file"])
+    if sha256(path) != row.get("capture_log_sha256"):
+      raise ValueError(f"capture log SHA256 mismatch: {path}")
+
+
+def validate_performance_source(row: dict) -> None:
+  """Check that a reused row still refers to the same RQ1 samples."""
+  if not row.get("performance_source"):
+    return
+  key = (row["dataset"], row["dot_path"])
+  fields = ("input_sha256", "binary_sha256", "command", "extra_environment",
+            "configured_repetitions", "warmup_repetitions", "timeout_seconds",
+            "memory_limit_bytes")
+  source = stored_path(row["performance_source"])
+  runs, digest = load_rq1_adaptive_results(source, {key: {f: "" if row[f] is None else str(row[f]) for f in fields}})[key]
+  if digest != row["source_row_sha256"]:
+    raise ValueError(f"RQ1 source row changed: {key}")
+  expected = {
+      "time_ms": [int(r.stats["Time (ms)"]) for r in runs],
+      "peak_rss_bytes": [int(r.stats["process peak RSS (bytes)"]) for r in runs],
+      "wall_time_seconds": [r.wall_time_seconds for r in runs],
+      "stats_per_run": [r.stats for r in runs],
+      "log_files": relative_paths([r.log_path for r in runs]),
+  }
+  if any(json.loads(row[field]) != values for field, values in expected.items()):
+    raise ValueError(f"RQ3 measurements differ from their RQ1 source: {key}")
+
+
+def valid_measurements(row: dict[str, str]) -> bool:
+  """Require complete samples and summaries that agree with those samples."""
+  try:
+    count = int(row["configured_repetitions"])
+    if (count <= 0 or int(row["completed_repetitions"]) != count
+        or int(row["successful_repetitions"]) != count
+        or json.loads(row["statuses"]) != ["success"] * count
+        or json.loads(row["exit_codes"]) != [0] * count):
+      return False
+    stats = json.loads(row["stats_per_run"])
+    if len(stats) != count or not all(valid_stats(item) for item in stats):
+      return False
+    if row.get("tool") == "spds":
+      configuration = json.loads(row["configuration"])
+      analysis = engine_analysis(configuration, row["analysis"])
+      if not all(valid_spds_stats(item, analysis) for item in stats):
+        return False
+    for field, minimum in (("time_ms", 0), ("peak_rss_bytes", 1),
+                           ("wall_time_seconds", 0)):
+      values = json.loads(row[field])
+      if len(values) != count or any(
+          not isinstance(value, (int, float)) or not math.isfinite(value)
+          or value < minimum for value in values
+      ):
+        return False
+      for prefix, summarize in (("median", median), ("average", fmean)):
+        if not math.isclose(float(row[f"{prefix}_{field}"]), summarize(values),
+                            rel_tol=1e-12, abs_tol=1e-12):
+          return False
+      stat_key = {"time_ms": "Time (ms)", "peak_rss_bytes": "process peak RSS (bytes)"}.get(field)
+      if stat_key and values != [int(item[stat_key]) for item in stats]:
+        return False
+    return True
+  except (KeyError, TypeError, ValueError):
+    return False
+
+
 def is_memory_failure(stderr: str, exit_code: int | None) -> bool:
   lowered = stderr.lower()
   markers = ("std::bad_alloc", "cannot allocate memory", "memoryerror")
-  return any(marker in lowered for marker in markers) or (
-      memory_limit_bytes() is not None and exit_code == -signal.SIGKILL
-  )
+  return any(marker in lowered for marker in markers)
 
 
 def write_log(
@@ -304,7 +511,10 @@ def write_log(
     os.fsync(stream.fileno())
 
 
-def run_once(command: Sequence[str], log_path: Path) -> RunResult:
+def run_once(
+    command: Sequence[str], log_path: Path, *, require_stats: bool = True,
+    stdout_stream=None,
+) -> RunResult:
   limit = memory_limit_bytes()
 
   def apply_limits() -> None:
@@ -322,7 +532,7 @@ def run_once(command: Sequence[str], log_path: Path) -> RunResult:
   try:
     process = subprocess.Popen(
         command,
-        stdout=subprocess.PIPE,
+        stdout=stdout_stream if stdout_stream is not None else subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
@@ -332,7 +542,11 @@ def run_once(command: Sequence[str], log_path: Path) -> RunResult:
         start_new_session=True,
     )
     try:
-      stdout, stderr = process.communicate(timeout=config.TIMEOUT_SECONDS)
+      remaining = (
+          None if config.TIMEOUT_SECONDS is None
+          else max(0.0, config.TIMEOUT_SECONDS - (time.perf_counter() - start))
+      )
+      stdout, stderr = process.communicate(timeout=remaining)
       exit_code = process.returncode
       if exit_code == 0:
         status = "success"
@@ -343,13 +557,17 @@ def run_once(command: Sequence[str], log_path: Path) -> RunResult:
       else:
         status = f"exit-{exit_code}"
     except subprocess.TimeoutExpired:
-      os.killpg(process.pid, signal.SIGKILL)
+      try:
+        os.killpg(process.pid, signal.SIGKILL)
+      except ProcessLookupError:
+        pass  # The process can exit between timeout detection and the kill.
       stdout, stderr = process.communicate()
       exit_code = process.returncode
       status = "timeout"
   except (OSError, subprocess.SubprocessError) as error:
     stderr = f"failed to start process: {error}\n"
 
+  stdout = stdout or ""
   result = RunResult(
       status=status,
       exit_code=exit_code,
@@ -358,7 +576,11 @@ def run_once(command: Sequence[str], log_path: Path) -> RunResult:
       stderr=stderr,
       stats=parse_stats(stdout),
       log_path=log_path,
+      started=started,
   )
+  if result.status == "success" and require_stats and not valid_stats(result.stats):
+    result.status = "stats-error"
+    result.stderr += "\nmissing or invalid time/RSS statistics\n"
   write_log(log_path, command, started, result)
   return result
 
@@ -403,6 +625,8 @@ def completed_csv_row(row: dict[str, str]) -> bool:
   )
   if (
       configured <= 0
+      or not valid_measurements(row)
+      or row.get("capture_status") != "success"
       or row.get("warmup_repetitions") != str(config.WARMUP_REPETITIONS)
       or configured != config.MEASURED_REPETITIONS
       or completed != configured
@@ -476,15 +700,41 @@ def relative_paths(paths: Sequence[Path]) -> list[str]:
   return result
 
 
-def prepare_csv(path: Path, resume: bool) -> set[tuple[str, str, str]]:
+def prepare_csv(
+    path: Path, resume: bool,
+    expected_runs: dict[tuple[str, str, str], dict[str, str]] | None = None,
+) -> set[tuple[str, str, str]]:
   path.parent.mkdir(parents=True, exist_ok=True)
   completed: set[tuple[str, str, str]] = set()
-  if resume and path.exists() and path.stat().st_size:
+  if (resume or expected_runs is not None) and path.exists() and path.stat().st_size:
     with path.open("r", encoding="utf-8", newline="") as stream:
       reader = csv.DictReader(stream)
       if reader.fieldnames != CSV_COLUMNS:
-        raise RuntimeError(f"CSV header mismatch: {path}; use --restart")
+        raise RuntimeError(f"CSV header mismatch: {path}; use a fresh DATA_DIRECTORY")
       rows = list(reader)
+    if expected_runs:
+      environments = {
+          item["extra_environment"]
+          for item in expected_runs.values()
+          if "extra_environment" in item
+      }
+      versions = {(item["binary_sha256"], item["extra_environment"])
+                  for item in expected_runs.values()
+                  if "binary_sha256" in item and "extra_environment" in item}
+      preserved = rows if resume else [
+          row for row in rows
+          if (row["dataset"], row["dot_path"], row["experiment"]) not in expected_runs
+      ]
+      environment_changed = environments and any(
+          row.get("extra_environment") not in environments for row in preserved
+      )
+      binary_changed = config.REQUIRE_BINARY_IDENTITY and versions and any(
+          (row.get("binary_sha256"), row.get("extra_environment")) not in versions
+          for row in preserved
+      )
+      if environment_changed or binary_changed:
+        raise RuntimeError("existing CSV uses a different binary/environment; "
+                           "use a fresh DATA_DIRECTORY or rerun all methods with --restart")
     retained: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
     for row in rows:
@@ -492,6 +742,25 @@ def prepare_csv(path: Path, resume: bool) -> set[tuple[str, str, str]]:
       if key in seen:
         raise RuntimeError(f"duplicate CSV row for {key}; use --restart")
       seen.add(key)
+      if resume or (expected_runs is not None and key not in expected_runs):
+        validate_logs(row)
+      if expected_runs is not None:
+        if key not in expected_runs:
+          retained.append(row)
+          continue
+        if not resume:
+          continue
+        changed = any(
+            row.get(field) != value
+            and not (field == "binary_sha256"
+                     and not config.REQUIRE_BINARY_IDENTITY)
+            for field, value in expected_runs[key].items()
+        )
+        if changed:
+          raise RuntimeError(
+              f"input, binary, analysis, command or environment changed for {key}; "
+              "use a fresh output CSV or --restart"
+          )
       if completed_csv_row(row) or terminal_optional_exclusion(row):
         retained.append(row)
         completed.add(key)
@@ -515,7 +784,7 @@ def prepare_csv(path: Path, resume: bool) -> set[tuple[str, str, str]]:
         os.replace(temporary_name, path)
         temporary_name = None
         print(
-            f"Retrying {len(rows) - len(retained)} incomplete or stale rows",
+            f"Scheduling {len(rows) - len(retained)} selected rows for rerun",
             flush=True,
         )
       finally:
@@ -540,44 +809,102 @@ def append_row(path: Path, row: dict[str, Any]) -> None:
 
 
 def run_experiment(
-    benchmark: Benchmark, experiment: dict[str, Any]
-) -> tuple[list[RunResult], list[Path], list[str]]:
-  for repetition in range(1, config.WARMUP_REPETITIONS + 1):
-    command = make_command(benchmark, experiment, capture=False)
-    print(f"  [warm-up {repetition}] {shlex.join(command)}", flush=True)
-    run_once(
-        command,
-        log_path_for(benchmark, experiment, repetition, warmup=True),
-    )
-
+    benchmark: Benchmark,
+    experiment: dict[str, Any],
+    *, reused_results: Sequence[RunResult] | None = None,
+) -> tuple[list[RunResult], list[Path], RunResult | None]:
+  if experiment["name"] == "acf" and not reused_results:
+    raise ValueError("ACF requires validated RQ1 measurements; run RQ1 first")
+  spds_analysis = engine_analysis(experiment, benchmark.analysis)
   artifacts = expected_artifacts(benchmark, experiment)
   remove_stale_artifacts(artifacts)
   captured: list[Path] = []
-  capture_commands: list[str] = []
   results: list[RunResult] = []
-  for repetition in range(1, config.MEASURED_REPETITIONS + 1):
-    capture = config.CAPTURE_RELATIONS and not captured
-    if capture:
-      artifact_base(benchmark, experiment).mkdir(parents=True, exist_ok=True)
-    command = make_command(benchmark, experiment, capture=capture)
-    if capture:
-      capture_commands.append(shlex.join(command))
-    print(f"  [run {repetition}] {shlex.join(command)}", flush=True)
-    result = run_once(
-        command,
-        log_path_for(benchmark, experiment, repetition, warmup=False),
+
+  if reused_results is not None:
+    print(
+        f"  [reused {len(reused_results)} runs from RQ1] "
+        f"{reused_results[0].log_path.parent}",
+        flush=True,
     )
-    if capture and result.status == "success":
-      missing = [path for path in artifacts if not path.is_file()]
-      if missing:
-        result.status = "artifact-error"
-        result.stderr += "missing artifacts: " + ", ".join(map(str, missing))
-      else:
+    results = list(reused_results)
+  else:
+    for repetition in range(1, config.WARMUP_REPETITIONS + 1):
+      command = make_command(benchmark, experiment, capture=False)
+      print(f"  [warm-up {repetition}] {shlex.join(command)}", flush=True)
+      run_once(
+          command,
+          log_path_for(benchmark, experiment, repetition, warmup=True),
+      )
+
+    for repetition in range(1, config.MEASURED_REPETITIONS + 1):
+      command = make_command(benchmark, experiment, capture=False)
+      print(f"  [run {repetition}] {shlex.join(command)}", flush=True)
+      result = run_once(
+          command,
+          log_path_for(benchmark, experiment, repetition, warmup=False),
+      )
+      if (result.status == "success" and experiment["tool"] == "spds"
+          and not valid_spds_stats(result.stats, spds_analysis)):
+        result.status = "stats-error"
+        result.stderr += "\ninvalid SPDS engine/client/stack mode or candidate count\n"
+        write_log(result.log_path, command, result.started, result)
+      results.append(result)
+      if result.status == "memory-limit" or (
+          result.status == "timeout" and config.SKIP_BENCHMARK_AFTER_TIMEOUT
+      ) or (
+          result.status not in {"success", "timeout"}
+          and config.STOP_REPETITIONS_AFTER_FAILURE
+      ):
+        break
+  capture_result = None
+  if results and all(result.status == "success" for result in results):
+    base = artifact_base(benchmark, experiment)
+    base.mkdir(parents=True, exist_ok=True)
+    command = make_command(benchmark, experiment, capture=True)
+    print(f"  [capture] {shlex.join(command)}", flush=True)
+    capture_log = log_path_for(benchmark, experiment, "capture", warmup=False)
+    if experiment["tool"] == "spds":
+      with (base / "upper.txt").open("w", encoding="utf-8") as stream:
+        capture_result = run_once(command, capture_log, require_stats=False,
+                                  stdout_stream=stream)
+    else:
+      capture_result = run_once(
+          command, capture_log,
+          require_stats=experiment["artifact_kind"] != "upper",
+      )
+    if capture_result.status == "success":
+      try:
+        if experiment["artifact_kind"] == "upper":
+          with (base / "upper.txt").open(encoding="utf-8") as stream:
+            if experiment["tool"] == "spds":
+              capture_result.stats = capture_spds_pairs(
+                  stream, artifacts[0], spds_analysis
+              )
+            else:
+              capture_result.stats = capture_upper_pairs(stream, artifacts[0])
+          capture_result.stdout = "".join(
+              f"{key}: {value}\n" for key, value in capture_result.stats.items()
+          )
+        if not valid_stats(capture_result.stats):
+          raise ValueError("missing or invalid capture time/RSS statistics")
+        missing = [path for path in artifacts if not path.is_file()]
+        if missing:
+          raise ValueError("missing artifacts: " + ", ".join(map(str, missing)))
+        # The capture must agree with the relation sizes from measured runs.
+        for key in ("regularization", "mutual-refinement upper bound", "Components", "candidate-pairs"):
+          if key in capture_result.stats and any(
+              result.stats.get(key) != capture_result.stats[key] for result in results
+          ):
+            raise ValueError(f"capture and measured runs disagree on {key}")
+        if experiment["artifact_kind"] == "upper":
+          (base / "upper.txt").unlink()
         captured = artifacts
-    results.append(result)
-    if result.status != "success" and config.STOP_REPETITIONS_AFTER_FAILURE:
-      break
-  return results, captured, capture_commands
+      except (OSError, ValueError) as error:
+        capture_result.status = "artifact-error"
+        capture_result.stderr += f"\n{error}\n"
+      write_log(capture_result.log_path, command, capture_result.started, capture_result)
+  return results, captured, capture_result
 
 
 def create_row(
@@ -585,18 +912,22 @@ def create_row(
     experiment: dict[str, Any],
     results: Sequence[RunResult],
     artifacts: Sequence[Path],
-    capture_commands: Sequence[str],
+    capture_result: RunResult | None,
+    identity: dict[str, str],
 ) -> dict[str, Any]:
-  successful_results = [result for result in results if result.status == "success"]
   times = [
-      parse_integer(result.stats.get("Time (ms)"))
-      for result in successful_results
+      parse_integer(result.stats.get("Time (ms)")) if result.status == "success" else None
+      for result in results
   ]
   rss = [
-      parse_integer(result.stats.get("process peak RSS (bytes)"))
-      for result in successful_results
+      parse_integer(result.stats.get("process peak RSS (bytes)")) if result.status == "success" else None
+      for result in results
   ]
-  walls = [round(result.wall_time_seconds, 6) for result in successful_results]
+  walls = [round(result.wall_time_seconds, 6) for result in results]
+  complete = (
+      len(results) == config.MEASURED_REPETITIONS
+      and all(result.status == "success" for result in results)
+  )
   relative_dot = str(benchmark.dot.relative_to(config.REPOSITORY_ROOT))
   logs = relative_paths([result.log_path for result in results])
   hashes = {
@@ -624,22 +955,35 @@ def create_row(
       "statuses": json_cell([result.status for result in results]),
       "exit_codes": json_cell([result.exit_code for result in results]),
       "time_ms": json_cell(times),
-      "average_time_ms": average(times),
-      "median_time_ms": median_value(times),
+      "median_time_ms": median_value(times) if complete else None,
+      "average_time_ms": average(times) if complete else None,
       "peak_rss_bytes": json_cell(rss),
-      "average_peak_rss_bytes": average(rss),
-      "median_peak_rss_bytes": median_value(rss),
+      "median_peak_rss_bytes": median_value(rss) if complete else None,
+      "average_peak_rss_bytes": average(rss) if complete else None,
       "wall_time_seconds": json_cell(walls),
-      "average_wall_time_seconds": average(walls),
-      "median_wall_time_seconds": median_value(walls),
+      "median_wall_time_seconds": median_value(walls) if complete else None,
+      "average_wall_time_seconds": average(walls) if complete else None,
       "timeout_seconds": config.TIMEOUT_SECONDS,
       "memory_limit_bytes": memory_limit_bytes(),
       "stats_per_run": json_cell([result.stats for result in results]),
       "relation_files": json_cell(relative_paths(artifacts)),
       "relation_sha256": json_cell(hashes),
       "log_files": json_cell(logs),
+      "log_sha256": json_cell({name: sha256(result.log_path) for name, result in zip(logs, results)}),
+      "capture_log_sha256": sha256(capture_result.log_path) if capture_result else "",
+      "performance_source": "",
+      "source_row_sha256": "",
       "command": shlex.join(base_command),
-      "capture_command": json_cell(list(capture_commands)),
+      "capture_command": json_cell(
+          [shlex.join(make_command(benchmark, experiment, capture=True))]
+          if capture_result is not None else []
+      ),
+      "capture_status": capture_result.status if capture_result else "not-run",
+      "capture_log_file": (
+          relative_paths([capture_result.log_path])[0] if capture_result else ""
+      ),
+      "capture_stats": json_cell(capture_result.stats if capture_result else {}),
+      **identity,
   }
 
 
@@ -673,6 +1017,10 @@ def main() -> int:
         or item.dot.stem in selected_benchmarks
     ]
 
+  experiments = [item for item in experiments
+                 if any(config.supports_analysis(item, b.analysis) for b in benchmarks)]
+  if not experiments:
+    raise ValueError("no applicable experiments for the selected datasets")
   for experiment in experiments:
     binary = binary_for(experiment)
     if not arguments.dry_run and (not binary.is_file() or not os.access(binary, os.X_OK)):
@@ -680,24 +1028,66 @@ def main() -> int:
 
   if arguments.dry_run:
     print(f"Benchmarks: {len(benchmarks)}")
-    print(f"Experiments per benchmark: {len(experiments)}")
+    print(f"Applicable runs: {sum(config.supports_analysis(e, b.analysis) for b in benchmarks for e in experiments)}")
     print(f"Warm-ups/measured: {config.WARMUP_REPETITIONS}/{config.MEASURED_REPETITIONS}")
     print(f"Timeout (s): {config.TIMEOUT_SECONDS}")
     print(f"Memory limit (GiB): {config.MEMORY_LIMIT_GIB}")
+    print(f"Skip benchmark after timeout: {config.SKIP_BENCHMARK_AFTER_TIMEOUT}")
     for benchmark in benchmarks:
       for experiment in experiments:
-        print(shlex.join(make_command(benchmark, experiment, capture=True)))
+        if not config.supports_analysis(experiment, benchmark.analysis):
+          continue
+        if experiment["name"] == "acf":
+          print(f"reuse RQ1 adaptive: {config.RQ1_OUTPUT_CSV} ({benchmark.dataset}/{benchmark.dot.name})")
+        else:
+          print("measure: " + shlex.join(make_command(benchmark, experiment, capture=False)))
+        print("capture: " + shlex.join(make_command(benchmark, experiment, capture=True)))
     return 0
 
   csv_path = Path(config.OUTPUT_CSV).resolve()
+  # Hash inputs and executables once, outside every timed interval. These
+  # identify the actual content used by this invocation, not just its paths.
+  paths = {benchmark.dot for benchmark in benchmarks}
+  paths.update(binary_for(experiment) for experiment in experiments)
+  fingerprints = {path: sha256(path) for path in paths}
+  identities = {
+      (benchmark.dataset, str(benchmark.dot.relative_to(config.REPOSITORY_ROOT)),
+       experiment["name"]): {
+          "input_sha256": fingerprints[benchmark.dot],
+          "binary_sha256": fingerprints[binary_for(experiment)],
+          "analysis": benchmark.analysis,
+          "command": shlex.join(make_command(benchmark, experiment, capture=False)),
+          "extra_environment": json_cell({
+              str(key): str(value) for key, value in sorted(config.EXTRA_ENVIRONMENT.items())
+          }),
+      }
+      for benchmark in benchmarks for experiment in experiments
+      if config.supports_analysis(experiment, benchmark.analysis)
+  }
+  source_expected = {
+      key[:2]: {**{field: value for field, value in identity.items() if field != "analysis"},
+                "configured_repetitions": str(config.MEASURED_REPETITIONS),
+                "warmup_repetitions": str(config.WARMUP_REPETITIONS),
+                "timeout_seconds": "" if config.TIMEOUT_SECONDS is None else str(config.TIMEOUT_SECONDS),
+                "memory_limit_bytes": "" if memory_limit_bytes() is None else str(memory_limit_bytes())}
+      for key, identity in identities.items() if key[2] == "acf"
+  }
+  rq1_reused = load_rq1_adaptive_results(config.RQ1_OUTPUT_CSV, source_expected) if source_expected else {}
+  for key, identity in identities.items():
+    if key[2] == "acf":
+      identity.update(performance_source=relative_paths([Path(config.RQ1_OUTPUT_CSV)])[0],
+                      source_row_sha256=rq1_reused[key[:2]][1])
   completed = prepare_csv(
-      csv_path, config.RESUME_EXISTING_CSV and not arguments.restart
+      csv_path, config.RESUME_EXISTING_CSV and not arguments.restart, identities
   )
-  total = len(benchmarks) * len(experiments)
+  total = len(identities)
   current = 0
+  failed = False
   for benchmark in benchmarks:
     relative_dot = str(benchmark.dot.relative_to(config.REPOSITORY_ROOT))
     for experiment in experiments:
+      if not config.supports_analysis(experiment, benchmark.analysis):
+        continue
       current += 1
       key = (benchmark.dataset, relative_dot, experiment["name"])
       if key in completed:
@@ -708,14 +1098,36 @@ def main() -> int:
           f"{experiment['name']}",
           flush=True,
       )
-      results, artifacts, capture_commands = run_experiment(benchmark, experiment)
+      reused = (
+          rq1_reused[(benchmark.dataset, relative_dot)][0]
+          if experiment["name"] == "acf"
+          else None
+      )
+      provenance.check_files(benchmark.dot, binary_for(experiment), identities[key])
+      results, artifacts, capture_result = run_experiment(
+          benchmark, experiment, reused_results=reused
+      )
+      provenance.check_files(benchmark.dot, binary_for(experiment), identities[key])
       append_row(
           csv_path,
-          create_row(benchmark, experiment, results, artifacts, capture_commands),
+          create_row(benchmark, experiment, results, artifacts, capture_result, identities[key]),
       )
       print(f"  appended and synced: {csv_path}", flush=True)
+      if (any(result.status != "success" for result in results)
+          or capture_result is None or capture_result.status != "success"):
+        failed = True
+      timed_out = (
+          any(result.status == "timeout" for result in results)
+          or (capture_result is not None and capture_result.status == "timeout")
+      )
+      if timed_out and config.SKIP_BENCHMARK_AFTER_TIMEOUT:
+        print(
+            f"  timeout; skipping remaining experiments for {benchmark.dot.name}",
+            flush=True,
+        )
+        break
   print(f"Finished. Results: {csv_path}")
-  return 0
+  return 1 if failed else 0
 
 
 if __name__ == "__main__":

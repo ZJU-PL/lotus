@@ -37,7 +37,8 @@ ReachabilityRun
 runProjected(const Graph &graph, Alphabet balanced, GrammarStrength strength,
              unsigned parity_groups, bool trace = false,
              bool factorized_tracing = false,
-             const std::optional<Pair> &trace_pair = std::nullopt);
+             const std::optional<Pair> &trace_pair = std::nullopt,
+             MutualRefinementMode mode = MutualRefinementMode::Optimized);
 // Stream classic projected pairs through a map/filter. Used by regularization
 // to avoid materializing pairs of product vertices which will be discarded.
 PairSet runClassicProjectedMapped(
@@ -53,10 +54,11 @@ PairSet refinedWithCondensation(const Graph &graph,
                                 const PairSet &underapproximation,
                                 GrammarStrength strength,
                                 unsigned parity_groups, BenchmarkKind benchmark,
-                                bool factorized_tracing);
+                                bool factorized_tracing,
+                                MutualRefinementMode mode);
 PairSet onDemand(const Graph &graph, const PairSet &underapproximation,
                  const PairSet &overapproximation, GrammarStrength strength,
                  unsigned parity_groups, BenchmarkKind benchmark,
-                 bool factorized_tracing);
+                 bool factorized_tracing, MutualRefinementMode mode);
 
 } // namespace lotus::cfl::interleaved_dyck::staged_bounds::detail

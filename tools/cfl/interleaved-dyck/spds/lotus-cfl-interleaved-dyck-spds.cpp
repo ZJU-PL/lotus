@@ -1,21 +1,28 @@
 #include "CFL/InterleavedDyck/SPDS/Solver.h"
 #include "CFL/InterleavedDyck/SPDS/ValueFlow.h"
 
+#include <algorithm>
 #include <charconv>
+#include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#endif
 
 namespace dyck = lotus::cfl::interleaved_dyck;
 namespace spds = dyck::spds;
 
 namespace {
 
-enum class BenchmarkKind { Taint, ValueFlow };
+enum class BenchmarkKind { Taint, NonreflexiveTaint, ValueFlow };
 
 struct CommandLine {
   std::string path;
@@ -46,16 +53,31 @@ template <class T> T number(std::string_view text) {
 BenchmarkKind parseAnalysis(std::string_view text) {
   if (text == "taint")
     return BenchmarkKind::Taint;
+  if (text == "nonreflexive-taint")
+    return BenchmarkKind::NonreflexiveTaint;
   if (text == "value-flow")
     return BenchmarkKind::ValueFlow;
-  throw std::invalid_argument("invalid --analysis; use taint or value-flow");
+  throw std::invalid_argument(
+      "invalid --analysis; use taint, nonreflexive-taint, or value-flow");
+}
+
+std::string_view analysisName(BenchmarkKind analysis) {
+  switch (analysis) {
+  case BenchmarkKind::Taint:
+    return "taint";
+  case BenchmarkKind::NonreflexiveTaint:
+    return "nonreflexive-taint";
+  case BenchmarkKind::ValueFlow:
+    return "value-flow";
+  }
+  return "unknown";
 }
 
 void usage() {
   std::cout
       << "Usage: lotus-cfl-interleaved-dyck spds [options] graph.dot\n"
-         "  --analysis NAME         client analysis: taint (default) or "
-         "value-flow\n"
+         "  --analysis NAME         client analysis: taint (default),\n"
+         "                          nonreflexive-taint, or value-flow\n"
          "  --all-pairs             analyze every source/target pair\n"
          "  --query SOURCE TARGET   one balanced reachability query\n"
          "  --source V              candidate successors of V (post*)\n"
@@ -78,8 +100,13 @@ void usage() {
          "  --max-updates N         weight-update limit per projection\n"
          "  --help                  show this help\n"
          "A query scope is required. Results are a sound upper bound.\n"
-         "value-flow requires bracket-ended balanced paths, excludes self-pairs,\n"
-         "and rejects prefix flags. --direction also applies to its all-pairs scope.\n"
+         "nonreflexive-taint uses balanced projections and excludes "
+         "self-pairs.\n"
+         "nonreflexive-taint and value-flow reject prefix flags.\n"
+         "value-flow requires bracket-ended balanced paths, excludes "
+         "self-pairs,\n"
+         "and rejects prefix flags. --direction also applies to its all-pairs "
+         "scope.\n"
          "Exit codes: 0 = complete; 2 = input error; 3 = resource limit (no "
          "result).\n";
 }
@@ -164,17 +191,20 @@ CommandLine parseCommandLine(int argc, char **argv) {
     if (!positional && arg == "--analysis") {
       cmd.analysis = parseAnalysis(argument(i));
     } else if (!positional && arg == "--all-pairs") {
-      if (cmd.all_pairs || cmd.source || cmd.target || !cmd.queries_path.empty())
+      if (cmd.all_pairs || cmd.source || cmd.target ||
+          !cmd.queries_path.empty())
         throw std::invalid_argument("multiple query scopes");
       cmd.all_pairs = true;
     } else if (!positional && arg == "--query") {
-      if (cmd.all_pairs || cmd.source || cmd.target || !cmd.queries_path.empty())
+      if (cmd.all_pairs || cmd.source || cmd.target ||
+          !cmd.queries_path.empty())
         throw std::invalid_argument("multiple query scopes");
       cmd.source = number<dyck::Vertex>(argument(i));
       cmd.target = number<dyck::Vertex>(argument(i));
       cmd.single_query = true;
     } else if (!positional && (arg == "--source" || arg == "--target")) {
-      if (cmd.all_pairs || cmd.source || cmd.target || !cmd.queries_path.empty())
+      if (cmd.all_pairs || cmd.source || cmd.target ||
+          !cmd.queries_path.empty())
         throw std::invalid_argument("multiple query scopes");
       auto value = number<dyck::Vertex>(argument(i));
       if (arg == "--source")
@@ -182,7 +212,8 @@ CommandLine parseCommandLine(int argc, char **argv) {
       else
         cmd.target = value;
     } else if (!positional && arg == "--queries") {
-      if (cmd.all_pairs || cmd.source || cmd.target || !cmd.queries_path.empty())
+      if (cmd.all_pairs || cmd.source || cmd.target ||
+          !cmd.queries_path.empty())
         throw std::invalid_argument("multiple query scopes");
       cmd.queries_path = argument(i);
     } else if (!positional && arg == "--direction") {
@@ -224,17 +255,24 @@ CommandLine parseCommandLine(int argc, char **argv) {
 
   if (cmd.path.empty())
     throw std::invalid_argument("missing graph.dot; use --help");
+  if ((cmd.analysis == BenchmarkKind::NonreflexiveTaint ||
+       cmd.analysis == BenchmarkKind::ValueFlow) &&
+      (cmd.options.parentheses != spds::StackAcceptance::Empty ||
+       cmd.options.brackets != spds::StackAcceptance::Empty))
+    throw std::invalid_argument(std::string(analysisName(cmd.analysis)) +
+                                " requires empty endpoint stacks");
   if (!cmd.all_pairs && !cmd.source && !cmd.target && cmd.queries_path.empty())
     throw std::invalid_argument(
         "missing query scope; use --all-pairs, --query, --source, "
         "--target, or --queries");
   if (cmd.all_pairs && cmd.analysis == BenchmarkKind::Taint &&
       cmd.demand_direction != spds::DemandDirection::Auto)
-    throw std::invalid_argument(
-        "--direction is only valid for demand queries");
-  if (cmd.source && !cmd.target && cmd.demand_direction == spds::DemandDirection::Pre)
+    throw std::invalid_argument("--direction is only valid for demand queries");
+  if (cmd.source && !cmd.target &&
+      cmd.demand_direction == spds::DemandDirection::Pre)
     throw std::invalid_argument("--source requires post direction");
-  if (cmd.target && !cmd.source && cmd.demand_direction == spds::DemandDirection::Post)
+  if (cmd.target && !cmd.source &&
+      cmd.demand_direction == spds::DemandDirection::Post)
     throw std::invalid_argument("--target requires pre direction");
 
   const bool reverse =
@@ -252,55 +290,71 @@ CommandLine parseCommandLine(int argc, char **argv) {
   return cmd;
 }
 
-int runValueFlow(const CommandLine &cmd, const dyck::Graph &graph) {
-  spds::ValueFlowAnalysis analysis(graph, cmd.options);
-  spds::Result result;
-  std::vector<dyck::Pair> demands;
-
-  if (!cmd.queries_path.empty()) {
-    demands = readDemands(cmd.queries_path);
-    result = analysis.analyzeDemands(demands, cmd.demand_direction);
-  } else if (cmd.single_query) {
-    result = analysis.analyzeDemands({{*cmd.source, *cmd.target}},
-                                    cmd.demand_direction);
-  } else if (cmd.source) {
-    result = analysis.analyzeFrom(*cmd.source);
-  } else if (cmd.target) {
-    result = analysis.analyzeTo(*cmd.target);
-  } else {
-    result = analysis.analyzeAll(cmd.demand_direction);
-  }
-
-  std::cout << "engine: spds\nanalysis: value-flow\n"
-               "semantics: sound upper bound\ncall-stack: "
-               "empty\nfield-stack: empty\n";
+template <class Analysis, class AnalyzeAll>
+spds::Result evaluateClient(const CommandLine &cmd, const Analysis &analysis,
+                            const std::vector<dyck::Pair> &demands,
+                            AnalyzeAll analyze_all) {
   if (!cmd.queries_path.empty())
-    std::cout << "requested-pairs: " << demands.size() << '\n';
+    return analysis.analyzeDemands(demands, cmd.demand_direction);
+  if (cmd.single_query)
+    return analysis.analyzeDemands({{*cmd.source, *cmd.target}},
+                                   cmd.demand_direction);
+  if (cmd.source)
+    return analysis.analyzeFrom(*cmd.source);
+  if (cmd.target)
+    return analysis.analyzeTo(*cmd.target);
+  return analyze_all();
+}
+
+void printClientResult(const CommandLine &cmd, const spds::Result &result,
+                       std::size_t requested_pairs,
+                       std::chrono::steady_clock::time_point started) {
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - started);
+  std::optional<std::uint64_t> peak_rss;
+#if defined(__unix__) || defined(__APPLE__)
+  struct rusage usage {};
+  if (getrusage(RUSAGE_SELF, &usage) == 0) {
+    peak_rss = static_cast<std::uint64_t>(usage.ru_maxrss);
+#if !defined(__APPLE__)
+    *peak_rss *= 1024;
+#endif
+  }
+#endif
+
+  std::cout << "engine: spds\nanalysis: " << analysisName(cmd.analysis)
+            << "\nsemantics: sound upper bound\ncall-stack: empty\n"
+               "field-stack: empty\n";
+  if (!cmd.queries_path.empty())
+    std::cout << "requested-pairs: " << requested_pairs << '\n';
   if (cmd.single_query) {
-    const dyck::Pair p{*cmd.source, *cmd.target};
+    const dyck::Pair pair{*cmd.source, *cmd.target};
     std::cout << "query: "
               << (result.mayReach(*cmd.source, *cmd.target) ? "may-reach"
                                                             : "unreachable")
               << "\ncall-projection: "
-              << (result.parenthesis_pairs.count(p) ? "accept" : "reject")
+              << (result.parenthesis_pairs.count(pair) ? "accept" : "reject")
               << "\nfield-projection: "
-              << (result.bracket_pairs.count(p) ? "accept" : "reject") << '\n';
+              << (result.bracket_pairs.count(pair) ? "accept" : "reject")
+              << '\n';
   }
   std::cout << "candidate-pairs: " << result.upper_bound.size() << '\n';
   printStats(result.statistics, cmd.timings);
+  std::cout << "Time (ms): " << elapsed.count() << '\n';
+  if (peak_rss)
+    std::cout << "process peak RSS (bytes): " << *peak_rss << '\n';
   if (cmd.pairs)
     printPairs(result.upper_bound);
-  return 0;
 }
 
 int runTaint(const CommandLine &cmd, const dyck::Graph &graph) {
   spds::Solver solver(cmd.options);
   auto analysis = solver.prepare(graph);
-
   const bool reverse =
       (cmd.target && !cmd.source) ||
       (cmd.single_query && cmd.demand_direction == spds::DemandDirection::Pre);
 
+  // Do not print result headers until saturation has completed successfully.
   const auto header = [&] {
     std::cout << "engine: spds\nsemantics: sound upper bound\n"
               << "scope: "
@@ -344,18 +398,18 @@ int runTaint(const CommandLine &cmd, const dyck::Graph &graph) {
       printPairs(result.upper_bound);
   } else if (cmd.source || cmd.target) {
     if (cmd.single_query) {
-      auto result =
-          reverse ? analysis.queryTo(*cmd.target) : analysis.queryFrom(*cmd.source);
+      auto result = reverse ? analysis.queryTo(*cmd.target)
+                            : analysis.queryFrom(*cmd.source);
       header();
-      auto v = reverse ? *cmd.source : *cmd.target;
+      auto value = reverse ? *cmd.source : *cmd.target;
       std::cout << "query: "
-                << (result.mayReach(v) ? "may-reach" : "unreachable") << '\n'
-                << "call-projection: "
-                << (result.parenthesisReachable(v) ? "accept" : "reject")
-                << '\n'
-                << "field-projection: "
-                << (result.bracketReachable(v) ? "accept" : "reject") << '\n';
-      if (cmd.pairs && result.mayReach(v))
+                << (result.mayReach(value) ? "may-reach" : "unreachable")
+                << "\ncall-projection: "
+                << (result.parenthesisReachable(value) ? "accept" : "reject")
+                << "\nfield-projection: "
+                << (result.bracketReachable(value) ? "accept" : "reject")
+                << '\n';
+      if (cmd.pairs && result.mayReach(value))
         std::cout << "pair: " << *cmd.source << ' ' << *cmd.target << '\n';
       std::cout << "call-automaton\n";
       printStats(result.callAutomaton().statistics(), cmd.timings);
@@ -381,24 +435,68 @@ int runTaint(const CommandLine &cmd, const dyck::Graph &graph) {
   return 0;
 }
 
+int runNonreflexiveTaint(const CommandLine &cmd, const dyck::Graph &graph) {
+  const auto started = std::chrono::steady_clock::now();
+  const auto demands = cmd.queries_path.empty() ? std::vector<dyck::Pair>{}
+                                                : readDemands(cmd.queries_path);
+  auto analysis = spds::Solver(cmd.options).prepare(graph);
+  auto result = evaluateClient(cmd, analysis, demands, [&] {
+    return cmd.demand_direction == spds::DemandDirection::Pre
+               ? analysis.analyzeBetween(graph.vertices(), graph.vertices(),
+                                         cmd.demand_direction)
+               : analysis.analyzeAll();
+  });
+
+  // RQ3's nonreflexive-taint relation excludes the diagonal. Do this only at
+  // readout:
+  // epsilon/self reachability remains available inside PDS saturation.
+  for (auto *relation :
+       {&result.upper_bound, &result.parenthesis_pairs, &result.bracket_pairs})
+    for (auto it = relation->begin(); it != relation->end();)
+      if (it->source == it->target)
+        it = relation->erase(it);
+      else
+        ++it;
+
+  printClientResult(cmd, result, demands.size(), started);
+  return 0;
+}
+
+int runValueFlow(const CommandLine &cmd, const dyck::Graph &graph) {
+  const auto started = std::chrono::steady_clock::now();
+  const auto demands = cmd.queries_path.empty() ? std::vector<dyck::Pair>{}
+                                                : readDemands(cmd.queries_path);
+  spds::ValueFlowAnalysis analysis(graph, cmd.options);
+  const auto result = evaluateClient(cmd, analysis, demands, [&] {
+    return analysis.analyzeAll(cmd.demand_direction);
+  });
+  printClientResult(cmd, result, demands.size(), started);
+  return 0;
+}
+
 } // namespace
 
 int runInterleavedDyckSPDS(int argc, char **argv) {
   try {
-    CommandLine cmd = parseCommandLine(argc, argv);
+    const CommandLine cmd = parseCommandLine(argc, argv);
     dyck::Graph graph = dyck::Graph::parseDotFile(cmd.path);
     if (cmd.bidirect)
       graph.makeBidirected();
-    for (auto v : cmd.vertices)
-      graph.addVertex(v);
+    for (auto vertex : cmd.vertices)
+      graph.addVertex(vertex);
     if ((cmd.source && !graph.containsVertex(*cmd.source)) ||
         (cmd.target && !graph.containsVertex(*cmd.target)))
       throw std::invalid_argument(
           "query vertex is not in graph; use --vertex for isolated vertices");
 
-    if (cmd.analysis == BenchmarkKind::ValueFlow)
+    switch (cmd.analysis) {
+    case BenchmarkKind::Taint:
+      return runTaint(cmd, graph);
+    case BenchmarkKind::NonreflexiveTaint:
+      return runNonreflexiveTaint(cmd, graph);
+    case BenchmarkKind::ValueFlow:
       return runValueFlow(cmd, graph);
-    return runTaint(cmd, graph);
+    }
   } catch (const spds::ResourceLimit &error) {
     std::cerr << "resource-limit: " << error.what() << "; no result returned\n";
     return 3;
@@ -406,4 +504,5 @@ int runInterleavedDyckSPDS(int argc, char **argv) {
     std::cerr << "error: " << error.what() << '\n';
     return 2;
   }
+  return 2;
 }

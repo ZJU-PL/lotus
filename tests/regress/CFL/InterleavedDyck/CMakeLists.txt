@@ -53,6 +53,13 @@ if(TARGET lotus-cfl-interleaved-dyck)
     set_tests_properties(
         interleaved_dyck_staged_bounds_cli_mutual_refinement PROPERTIES
         PASS_REGULAR_EXPRESSION "mutual-refinement upper bound: 328")
+    add_test(NAME interleaved_dyck_staged_bounds_cli_plain_mr
+        COMMAND $<TARGET_FILE:lotus-cfl-interleaved-dyck>
+            staged-bounds --method mutual-refinement --plain-mr
+            ${CMAKE_SOURCE_DIR}/benchmarks/real-world/CFL/InterleavedDyck/taint/faketaobao.dot)
+    set_tests_properties(
+        interleaved_dyck_staged_bounds_cli_plain_mr PROPERTIES
+        PASS_REGULAR_EXPRESSION "mutual-refinement upper bound: 328")
     add_test(NAME interleaved_dyck_staged_bounds_cli_taint_analysis
         COMMAND $<TARGET_FILE:lotus-cfl-interleaved-dyck>
             staged-bounds --analysis taint --method mutual-refinement --stage-stats

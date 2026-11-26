@@ -227,7 +227,8 @@ EncodedGrammar buildParityGrammar(const Graph &graph, Alphabet balanced,
 
 ReachabilityRun
 runGrammar(EncodedGrammar encoded, bool trace, bool factorized_tracing = false,
-           const std::optional<Pair> &trace_pair = std::nullopt) {
+           const std::optional<Pair> &trace_pair = std::nullopt,
+           MutualRefinementMode mode = MutualRefinementMode::Optimized) {
   if (encoded.dense_to_vertex.size() >
       static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     throw std::overflow_error("too many vertices for the CFL engine");
@@ -256,15 +257,18 @@ runGrammar(EncodedGrammar encoded, bool trace, bool factorized_tracing = false,
       raw_result = engine.runCFLReachabilityCompact(encoded.grammar);
     }
 
-    raw_result.erase(std::remove_if(raw_result.begin(), raw_result.end(),
-                                    [](const mr::Edge &edge) {
-                                      return std::get<0>(edge) ==
-                                             std::get<2>(edge);
-                                    }),
-                     raw_result.end());
+    if (mode == MutualRefinementMode::Optimized) {
+      raw_result.erase(std::remove_if(raw_result.begin(), raw_result.end(),
+                                      [](const mr::Edge &edge) {
+                                        return std::get<0>(edge) ==
+                                               std::get<2>(edge);
+                                      }),
+                       raw_result.end());
+    }
+
     if (trace) {
-      // Reuse the start relation as the all-pairs roots. A targeted trace
-      // needs only a singleton; do not copy the entire relation for either.
+      // Plain MR keeps reflexive start pairs as all-pairs tracing roots. The
+      // optimized mode removes them before this closure reconstruction.
       std::vector<mr::Edge> target_roots;
       if (trace_pair) {
         const auto source = encoded.vertex_to_dense.find(trace_pair->source);
@@ -287,6 +291,17 @@ runGrammar(EncodedGrammar encoded, bool trace, bool factorized_tracing = false,
     }
   }
 
+  if (mode == MutualRefinementMode::Plain) {
+    // Plain MR excludes reflexive pairs from the returned relation only after
+    // tracing; they remain internal roots for provenance reconstruction.
+    raw_result.erase(std::remove_if(raw_result.begin(), raw_result.end(),
+                                    [](const mr::Edge &edge) {
+                                      return std::get<0>(edge) ==
+                                             std::get<2>(edge);
+                                    }),
+                     raw_result.end());
+  }
+
   ReachabilityRun result;
   for (const mr::Edge &edge : raw_result) {
     result.pairs.insert({encoded.dense_to_vertex.at(std::get<0>(edge)),
@@ -307,13 +322,14 @@ runGrammar(EncodedGrammar encoded, bool trace, bool factorized_tracing = false,
 ReachabilityRun runProjected(const Graph &graph, Alphabet balanced,
                              GrammarStrength strength, unsigned parity_groups,
                              bool trace, bool factorized_tracing,
-                             const std::optional<Pair> &trace_pair) {
+                             const std::optional<Pair> &trace_pair,
+                             MutualRefinementMode mode) {
   if (strength == GrammarStrength::Parity) {
     return runGrammar(buildParityGrammar(graph, balanced, parity_groups), trace,
-                      factorized_tracing, trace_pair);
+                      factorized_tracing, trace_pair, mode);
   }
   return runGrammar(buildClassicGrammar(graph, balanced), trace,
-                    factorized_tracing, trace_pair);
+                    factorized_tracing, trace_pair, mode);
 }
 
 PairSet runClassicProjectedMapped(
