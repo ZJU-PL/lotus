@@ -132,4 +132,85 @@ bool InvalidFree::equals(const Diagnostic &other) const {
   return location_ == o->location_ && address_.getId() == o->address_.getId();
 }
 
+// --- MemoryLeak ---
+
+std::string MemoryLeak::getMessage() const { return "Memory leak detected"; }
+
+std::string MemoryLeak::getDescription() const {
+  return "Memory allocated via " + allocator_name_ +
+         " becomes unreachable without being freed";
+}
+
+size_t MemoryLeak::getHash() const {
+  size_t h = std::hash<const llvm::Instruction *>{}(allocation_site_);
+  h = h ^ (std::hash<std::string>{}(allocator_name_) << 1);
+  return h;
+}
+
+bool MemoryLeak::equals(const Diagnostic &other) const {
+  const auto *o = dynamic_cast<const MemoryLeak *>(&other);
+  if (!o)
+    return false;
+  return allocation_site_ == o->allocation_site_ &&
+         allocator_name_ == o->allocator_name_;
+}
+
+// --- ConstRefableParam ---
+
+std::string ConstRefableParam::getMessage() const {
+  return "Parameter " + param_name_ + " can be passed by const reference";
+}
+
+std::string ConstRefableParam::getDescription() const {
+  return "Parameter " + param_name_ + " of type " + type_name_ +
+         " is copied by value and never modified in the function";
+}
+
+std::string ConstRefableParam::getSuggestion() const {
+  return "Pass " + param_name_ + " by const reference (const &) to avoid "
+         "an unnecessary copy.";
+}
+
+size_t ConstRefableParam::getHash() const {
+  size_t h = std::hash<const llvm::Instruction *>{}(location_);
+  h = h ^ (std::hash<std::string>{}(param_name_) << 1);
+  return h;
+}
+
+bool ConstRefableParam::equals(const Diagnostic &other) const {
+  const auto *o = dynamic_cast<const ConstRefableParam *>(&other);
+  if (!o)
+    return false;
+  return location_ == o->location_ && param_name_ == o->param_name_;
+}
+
+// --- MutualRecursionCycle ---
+
+std::string MutualRecursionCycle::getMessage() const {
+  return "Mutual recursion cycle detected";
+}
+
+std::string MutualRecursionCycle::getDescription() const {
+  return "Unbounded recursive call cycle with unchanged arguments: " +
+         cycle_description_;
+}
+
+std::string MutualRecursionCycle::getSuggestion() const {
+  return "Ensure recursive calls make progress toward a terminating base case.";
+}
+
+size_t MutualRecursionCycle::getHash() const {
+  size_t h = std::hash<const llvm::Instruction *>{}(location_);
+  h = h ^ (std::hash<std::string>{}(cycle_description_) << 1);
+  return h;
+}
+
+bool MutualRecursionCycle::equals(const Diagnostic &other) const {
+  const auto *o = dynamic_cast<const MutualRecursionCycle *>(&other);
+  if (!o)
+    return false;
+  return location_ == o->location_ &&
+         cycle_description_ == o->cycle_description_;
+}
+
 } // namespace pulse

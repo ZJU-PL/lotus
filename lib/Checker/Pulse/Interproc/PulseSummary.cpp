@@ -6,28 +6,21 @@
 
 namespace pulse {
 
-//===----------------------------------------------------------------------===//
-// Summaries
-//
-// A summary captures (possibly multiple) witness behaviors of a function.
-//
-// Sound incorrectness note:
-// - Disjunctive entries should preserve *existential* behaviors (there exists a
-//   path satisfying the entry). When compressing/merging, be careful not to
-//   conjoin path conditions, which can drop feasible witnesses.
-// - Latent issues are carried in summaries so callers can make them manifest.
-//===----------------------------------------------------------------------===//
-
-// SummaryEntry implementation
 SummaryEntry::SummaryEntry(std::unique_ptr<AbductiveDomain> pre,
                            PulseFormula pre_formula,
                            std::unique_ptr<AbductiveDomain> post,
                            PulseFormula post_formula,
                            std::optional<AbstractValue> ret_val,
-                           std::optional<LatentIssueSummary> latent_issue)
+                           std::optional<LatentIssueSummary> latent_issue,
+                           bool is_exception_raised,
+                           std::optional<AbstractValue> exception_value,
+                           std::string exception_type)
     : pre_(std::move(pre)), pre_formula_(std::move(pre_formula)),
       post_(std::move(post)), post_formula_(std::move(post_formula)),
-      return_value_(ret_val), latent_issue_(std::move(latent_issue)) {}
+      return_value_(ret_val), latent_issue_(std::move(latent_issue)),
+      is_exception_raised_(is_exception_raised),
+      exception_value_(exception_value),
+      exception_type_(std::move(exception_type)) {}
 
 SummaryEntry SummaryEntry::clone() const {
   std::optional<LatentIssueSummary> latent;
@@ -37,16 +30,18 @@ SummaryEntry SummaryEntry::clone() const {
     copied.address = latent_issue_->address;
     copied.trace = latent_issue_->trace.clone();
     copied.calling_context = latent_issue_->calling_context;
+    copied.is_latent_invalid_access = latent_issue_->is_latent_invalid_access;
+    copied.must_be_valid_reason = latent_issue_->must_be_valid_reason;
     latent = std::move(copied);
   }
   return SummaryEntry(
       pre_ ? std::make_unique<AbductiveDomain>(pre_->clone()) : nullptr,
       pre_formula_.clone(),
       post_ ? std::make_unique<AbductiveDomain>(post_->clone()) : nullptr,
-      post_formula_.clone(), return_value_, std::move(latent));
+      post_formula_.clone(), return_value_, std::move(latent),
+      is_exception_raised_, exception_value_, exception_type_);
 }
 
-// PulseSummary implementation
 PulseSummary::PulseSummary(const llvm::Function *F) : function_(F) {}
 
 PulseSummary::PulseSummary(const llvm::Function *F,
@@ -56,7 +51,6 @@ PulseSummary::PulseSummary(const llvm::Function *F,
                            PulseFormula post_formula,
                            std::optional<AbstractValue> ret_val)
     : function_(F) {
-  // Create a single pre/post entry
   pre_post_list_.emplace_back(std::move(pre), std::move(pre_formula),
                               std::move(post), std::move(post_formula),
                               ret_val);
@@ -79,7 +73,6 @@ void PulseSummary::addPrePost(SummaryEntry entry) {
   pre_post_list_.push_back(std::move(entry));
 }
 
-// Legacy accessors for backward compatibility
 const AbductiveDomain *PulseSummary::getPre() const {
   if (pre_post_list_.empty()) {
     return nullptr;
@@ -121,7 +114,6 @@ PulseSummary PulseSummary::join(const PulseSummary &s1,
                                 const PulseSummary &s2) {
   PulseSummary joined(s1.function_);
 
-  // Merge pre/post lists - clone entries since they're not copyable
   for (const auto &entry : s1.pre_post_list_) {
     joined.pre_post_list_.push_back(entry.clone());
   }
@@ -129,10 +121,10 @@ PulseSummary PulseSummary::join(const PulseSummary &s1,
     joined.pre_post_list_.push_back(entry.clone());
   }
 
-  // Merge non-disjunctive summaries
   joined.non_disj_ = NonDisjunctiveSummary::join(s1.non_disj_, s2.non_disj_);
+  joined.transitive_info_ =
+      TransitiveInfo::merge(s1.transitive_info_, s2.transitive_info_);
 
-  // Merge formal mappings
   joined.formal_to_av_ = s1.formal_to_av_;
   for (const auto &kv : s2.formal_to_av_) {
     if (joined.formal_to_av_.find(kv.first) == joined.formal_to_av_.end()) {
@@ -142,8 +134,6 @@ PulseSummary PulseSummary::join(const PulseSummary &s1,
 
   return joined;
 }
-
-// SummaryManager implementation
 
 void SummaryManager::storeSummary(const llvm::Function *F,
                                   PulseSummary summary) {

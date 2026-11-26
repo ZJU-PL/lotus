@@ -97,7 +97,8 @@ private:
             const AbductiveDomain &lhs_astate,
             std::optional<std::pair<AbstractValue, ValueHistory>> lhs_opt,
             const AbductiveDomain &rhs_astate,
-            std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt);
+            std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt,
+            bool use_pre_heap = false);
 
   /**
    * Join stacks.

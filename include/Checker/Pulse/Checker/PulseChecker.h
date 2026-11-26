@@ -1,9 +1,9 @@
 /** @file PulseChecker.h @brief Main Pulse checker driver for abstract-interpretation-based bug detection. */
 #pragma once
 
-#include "Checker/Pulse/Core/PulseValueHistory.h"
 #include "Checker/Framework/BugReport.h"
 #include "Checker/Framework/BugReportMgr.h"
+#include "Checker/Pulse/Core/PulseValueHistory.h"
 #include "Checker/Pulse/Domain/PulseDisjunctiveDomain.h"
 #include "Checker/Pulse/Domain/PulseDomain.h"
 #include "Checker/Pulse/Domain/PulseLoopAbstraction.h"
@@ -15,6 +15,7 @@
 #include "Checker/Pulse/Report/PulseDiagnostic.h"
 #include "Checker/Pulse/Report/PulseLatentIssue.h"
 
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -25,6 +26,7 @@
 #include <vector>
 
 #include <llvm/IR/Function.h>
+#include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
@@ -45,21 +47,7 @@ namespace pulse {
 class PulseModels;
 
 /**
- * PulseChecker: main bug finder using biabductive analysis.
- *
- * High-level model (Infer Pulse-inspired, "incorrectness logic"):
- * - The analysis is geared toward producing *witnessable* bug reports: an issue
- *   is interesting only if there exists a feasible execution reaching it.
- * - The abstract state is biabductive (`AbductiveDomain`): a post-state plus an
- *   inferred precondition that records missing heap facts required for a
- *   witness (materialized at call sites).
- * - Control-flow merging must not conjoin path conditions; joining two paths is
- *   a disjunction (best-effort) to avoid dropping feasible witnesses.
- *
- * Implementation notes:
- * - Uses CFG traversal with bounded disjunction (`kMaxDisjuncts`) and bounded
- *   interprocedural call depth (`kMaxCallDepth`).
- * - Handles GEP/PHI and common library functions via `PulseModels`.
+ * PulseChecker: main bug finder using biabductive incorrectness analysis.
  */
 class PulseChecker {
 private:
@@ -71,15 +59,18 @@ private:
   static constexpr unsigned kMaxDisjuncts = 10u;
   static constexpr unsigned kMaxCallDepth = 5u;
 
-  int useAfterFreeTypeId_;
-  int nullDerefTypeId_;
-  int uninitializedReadTypeId_;
-  int unnecessaryCopyTypeId_;
-  int constRefableParamTypeId_;
-  int taintErrorTypeId_;
-  int stackAddressEscapeTypeId_;
-  int invalidFreeTypeId_;
-  int outOfBoundsTypeId_;
+  int useAfterFreeTypeId_{-1};
+  int nullDerefTypeId_{-1};
+  int uninitializedReadTypeId_{-1};
+  int unnecessaryCopyTypeId_{-1};
+  int constRefableParamTypeId_{-1};
+  int taintErrorTypeId_{-1};
+  int stackAddressEscapeTypeId_{-1};
+  int invalidFreeTypeId_{-1};
+  int outOfBoundsTypeId_{-1};
+  int memoryLeakTypeId_{-1};
+  int resourceLeakTypeId_{-1};
+  int mutualRecursionTypeId_{-1};
 
   std::map<const llvm::Function *, std::vector<ExecutionDomain>>
       function_states_;
@@ -90,19 +81,25 @@ private:
   int toplTypeId_ = -1;
   std::set<std::pair<std::string, const llvm::Instruction *>> topl_reported_;
 
-  // Disjunctive analysis and loop abstraction (optional, can be nullptr)
   std::map<const llvm::Function *, DisjunctiveDomain> disjunctive_domains_;
   std::map<const llvm::Function *, LoopAbstraction> loop_abstractions_;
-
-  // Transitive information tracking
   std::map<const llvm::Function *, TransitiveInfo> transitive_info_;
 
-  // Latent issues tracking
-  std::vector<LatentIssue> latent_issues_;
+  // std::deque guarantees stable pointers/references for ExecutionDomain's
+  // LatentIssue* across emplace_back calls.
+  std::deque<LatentIssue> latent_issues_;
 
-  // During SCC-based scheduling, we treat calls within the current SCC as
-  // unknown/unstable (no summaries available yet).
+  // During SCC-based scheduling, calls within the current SCC are recorded as
+  // recursive/unknown to prevent unbounded recursion.
   std::unordered_set<const llvm::Function *> current_scc_;
+
+  // Functions currently on the active analysis stack (guards against recursive
+  // on-demand analysis of indirectly resolved callees and Pass-2 SCC cycles).
+  std::unordered_set<const llvm::Function *> active_functions_;
+
+  // Guard against recursive on-demand specialization cycles.
+  std::set<std::pair<const llvm::Function *, SpecializationKey>>
+      active_specializations_;
 
 public:
   void setToplProgram(ToplProgram program) {
@@ -121,6 +118,9 @@ public:
 
   void analyze();
   void analyzeFunction(const llvm::Function *F);
+  const PulseSummary *
+  analyzeFunctionSpecialized(const llvm::Function *F,
+                             const SpecializationKey &key);
 
   std::vector<ExecutionDomain> executeInstruction(const llvm::Instruction *I,
                                                   ExecutionDomain exec_state,
@@ -137,6 +137,10 @@ public:
                                           ExecutionDomain exec_state,
                                           const llvm::BasicBlock *pred,
                                           unsigned call_depth);
+  std::vector<ExecutionDomain> handleCallBase(const llvm::CallBase *CB,
+                                              ExecutionDomain exec_state,
+                                              const llvm::BasicBlock *pred,
+                                              unsigned call_depth);
   ExecutionDomain handleAlloca(const llvm::AllocaInst *AI,
                                ExecutionDomain exec_state);
   ExecutionDomain handleReturn(const llvm::ReturnInst *RI,
@@ -146,69 +150,51 @@ public:
                  AbstractValue addr, const Trace &trace,
                  const AbductiveDomain *astate = nullptr);
 
-  // Rich diagnostic reporting (for models)
   void reportDiagnostic(const llvm::Instruction *loc,
                         const std::string &message, const std::string &type,
                         int confidence);
-
-  // Overload kept for backward compatibility with older model call sites.
-  // Prefer reporting structured diagnostics via DiagnosticManager directly.
   void reportDiagnostic(const Diagnostic &diagnostic);
 
   AbstractValueFactory &getFactory() { return factory_; }
   PulseOperations &getOperations() { return ops_; }
+  const SummaryManager &getSummaryManager() const { return summary_manager_; }
+  const SpecializationManager &getSpecializationManager() const {
+    return specialization_manager_;
+  }
 
   void registerBugTypes();
   ExecutionDomain initializeFunction(const llvm::Function *F);
 
-  /** Run callee from caller state at CI; returns (exit_state, return
-   * AbstractValue) per return. */
   std::vector<std::pair<ExecutionDomain, std::optional<AbstractValue>>>
   runCallee(const llvm::Function *callee, const ExecutionDomain &caller_state,
             const llvm::CallInst *CI, const llvm::BasicBlock *pred,
             unsigned call_depth);
 
-  /**
-   * Create summary from function exit states
-   */
   void createSummary(const llvm::Function *F,
                      const std::vector<ExecutionDomain> &exit_states,
-                     const std::vector<ExecutionDomain> &latent_exit_states);
+                     const std::vector<ExecutionDomain> &latent_exit_states,
+                     const SpecializationKey *spec_key = nullptr);
 
-  /**
-   * Apply summary at call site
-   */
   std::vector<ExecutionDomain> applySummary(const llvm::Function *callee,
                                             const ExecutionDomain &caller_state,
                                             const llvm::CallInst *CI,
                                             const llvm::BasicBlock *pred);
 
-  /**
-   * Improved summary application with materialization
-   */
   std::vector<ExecutionDomain>
   applySummaryImproved(const llvm::Function *callee,
                        const ExecutionDomain &caller_state,
-                       const llvm::CallInst *CI, const llvm::BasicBlock *pred,
+                       const llvm::CallBase *CI, const llvm::BasicBlock *pred,
                        const PulseSummary *summary_override = nullptr);
 
-  /** Handle comparison instructions without assuming their Boolean result. */
   ExecutionDomain handleComparison(const llvm::Instruction *I,
                                    ExecutionDomain exec_state,
                                    const llvm::BasicBlock *pred);
 
-  /**
-   * Handle library function calls (malloc, free, etc.)
-   */
-  std::vector<ExecutionDomain> handleLibraryCall(const llvm::CallInst *CI,
-                                                 ExecutionDomain exec_state,
-                                                 const llvm::BasicBlock *pred);
+  std::vector<ExecutionDomain>
+  handleLibraryCall(const llvm::CallBase *CI, ExecutionDomain exec_state,
+                    const llvm::BasicBlock *pred,
+                    const llvm::Function *resolved_callee = nullptr);
 
-  /**
-   * Apply branch condition for a given successor (then/else).
-   * Forks state: then = condition true, else = condition false.
-   * Returns the resulting state, or None if we don't fork (e.g. can't parse).
-   */
   std::optional<ExecutionDomain>
   applyBranchCondition(ExecutionDomain state, const llvm::BranchInst *BI,
                        unsigned successor_index,
@@ -218,11 +204,10 @@ public:
   void reportConstRefableParams(const llvm::Function *F);
 
 private:
-  /**
-   * Refine a state with the assumption that an i1 condition has the requested
-   * truth value. Returns no state when the selected outcome is infeasible or
-   * cannot be represented without inventing a witness.
-   */
+  void analyzeFunctionInternal(const llvm::Function *F,
+                               ExecutionDomain init_state,
+                               const SpecializationKey *spec_key);
+
   std::optional<ExecutionDomain>
   assumeCondition(ExecutionDomain state, const llvm::Value *condition,
                   bool assumed_true, const llvm::Instruction *location,
@@ -230,7 +215,7 @@ private:
 
   const PulseSummary *resolveSummaryForCall(const llvm::Function *callee,
                                             const ExecutionDomain &caller_state,
-                                            const llvm::CallInst *CI,
+                                            const llvm::CallBase *CI,
                                             const llvm::BasicBlock *pred);
   void materializeSpecializedSummary(const llvm::Function *callee,
                                      const PulseSummary &base_summary,

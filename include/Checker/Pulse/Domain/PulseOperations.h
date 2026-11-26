@@ -70,10 +70,11 @@ public:
                                   const llvm::Instruction *loc);
 
   /**
-   * Allocate memory: mark address as allocated
+   * Allocate memory: mark address as allocated and record allocator metadata.
    */
   void allocate(AbductiveDomain &astate, AbstractValue addr,
-                const llvm::Instruction *loc);
+                const llvm::Instruction *loc,
+                AllocatorKind kind = AllocatorKind::CMalloc);
 
   /**
    * Invalidate memory: mark as freed/out of scope.
@@ -127,6 +128,13 @@ public:
   std::pair<OperationResult, std::optional<Address>>
   deepCopy(AbductiveDomain &astate, Address source,
            const llvm::Instruction *loc, unsigned depth_max = 0);
+
+  /**
+   * Deep-copy bounded heap subgraph from src into dst (for aggregate struct
+   * copies / memcpy).
+   */
+  void copySubgraph(AbductiveDomain &astate, AbstractValue src,
+                    AbstractValue dst, unsigned max_depth = 3);
 
   /**
    * Havoc: model unknown effects by removing edges and attributes

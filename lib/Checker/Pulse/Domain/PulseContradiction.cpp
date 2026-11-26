@@ -117,7 +117,9 @@ std::optional<Contradiction> checkAliasingWithAllAliases(
  */
 std::optional<Contradiction> checkDynamicTypeNeeded(
     const std::map<HeapPath, AbstractValue> &heap_paths_to_values) {
-  (void)heap_paths_to_values;
+  if (!heap_paths_to_values.empty()) {
+    return Contradiction::makeDynamicTypeNeeded(heap_paths_to_values);
+  }
   return std::nullopt;
 }
 
@@ -167,11 +169,15 @@ mergeContradictions(const std::optional<Contradiction> &c1,
       return Contradiction::makeAliasingWithAllAliases(merged_classes);
     }
     case ContradictionKind::DynamicTypeNeeded: {
-      // Merge dynamic type paths
+      // Merge dynamic type paths and resolved dynamic type names
       std::map<HeapPath, AbstractValue> merged_paths = cont1.dynamic_type_paths;
       merged_paths.insert(cont2.dynamic_type_paths.begin(),
                           cont2.dynamic_type_paths.end());
-      return Contradiction::makeDynamicTypeNeeded(merged_paths);
+      Contradiction merged = Contradiction::makeDynamicTypeNeeded(merged_paths);
+      merged.dynamic_type_names = cont1.dynamic_type_names;
+      merged.dynamic_type_names.insert(cont2.dynamic_type_names.begin(),
+                                       cont2.dynamic_type_names.end());
+      return merged;
     }
     case ContradictionKind::PathCondition: {
       // Merge conflicting constraints
@@ -251,6 +257,12 @@ std::optional<Contradiction> checkAliasingWithAllAliases(
 
   // Build alias classes with heap paths if call_state is available
   std::vector<std::vector<HeapPath>> alias_classes;
+  if (call_state && call_state->hasAliases()) {
+    alias_classes = call_state->extractAliasClasses();
+    if (!alias_classes.empty()) {
+      return Contradiction::makeAliasingWithAllAliases(alias_classes);
+    }
+  }
   std::set<AbstractValue> processed;
 
   for (const auto &kv : actual_to_formals_map) {

@@ -1,6 +1,8 @@
 #include "Checker/Pulse/Topl/PulseTopl.h"
+#include "Checker/Pulse/Core/PulseMemory.h"
 
 #include <algorithm>
+#include <queue>
 #include <set>
 #include <sstream>
 
@@ -83,8 +85,46 @@ std::optional<int64_t> concrete(const ToplValue &v,
 
 // Unknown predicates do not produce a violation. The symbolic event remains
 // in the summary so that a caller with stronger facts can resolve it later.
+static std::optional<bool> heapReachable(const ToplValue &src,
+                                         const ToplValue &dst,
+                                         const PulseFormula &f,
+                                         const Heap *post_heap) {
+  if (!post_heap || !src.value || !dst.value)
+    return std::nullopt;
+  AbstractValue start = f.getCanonical(*src.value);
+  AbstractValue target = f.getCanonical(*dst.value);
+  if (start == target)
+    return true;
+  std::set<AbstractValue> visited;
+  std::queue<AbstractValue> q;
+  visited.insert(start);
+  q.push(start);
+  while (!q.empty()) {
+    AbstractValue cur = q.front();
+    q.pop();
+    auto it = post_heap->getEdges().find(cur);
+    if (it == post_heap->getEdges().end())
+      continue;
+    for (const auto &ekv : it->second) {
+      AbstractValue nxt = f.getCanonical(ekv.second.addr);
+      if (nxt == target)
+        return true;
+      if (visited.insert(nxt).second)
+        q.push(nxt);
+    }
+  }
+  return false;
+}
+
 std::optional<bool> compare(const ToplValue &a, const std::string &op,
-                            const ToplValue &b, const PulseFormula &f) {
+                            const ToplValue &b, const PulseFormula &f,
+                            const Heap *post_heap) {
+  if (op == "~~>" || op == "!~>") {
+    auto r = heapReachable(a, b, f, post_heap);
+    if (!r)
+      return std::nullopt;
+    return (op == "~~>") ? *r : !*r;
+  }
   auto x = concrete(a, f), y = concrete(b, f);
   if (x && y) {
     if (op == "==")
@@ -148,7 +188,8 @@ std::optional<bool> compare(const ToplValue &a, const std::string &op,
     if (op == "!=")
       return true;
   }
-  return std::nullopt;
+  // Fall back to PulseFormula relational / Z3 entailment query.
+  return f.impliesComparison(a.value, x, op, b.value, y);
 }
 } // namespace
 
@@ -169,7 +210,7 @@ llvm::Expected<ToplProgram> ToplProgram::parse(llvm::StringRef text,
   const std::regex call(
       R"topl(^("[^"]*"|[A-Za-z_#][A-Za-z_0-9#]*)(?:\s*(\(([^)]*)\)))?\s*(.*)$)topl");
   const std::regex predicate(
-      R"(^([A-Za-z_][A-Za-z_0-9]*|-?[0-9]+)\s*(==|!=|<=|>=|<|>)\s*([A-Za-z_][A-Za-z_0-9]*|-?[0-9]+)$)");
+      R"(^([A-Za-z_][A-Za-z_0-9]*|-?[0-9]+)\s*(==|!=|<=|>=|<|>|~~>|!~>)\s*([A-Za-z_][A-Za-z_0-9]*|-?[0-9]+)$)");
   const std::regex assignment(
       R"(^([a-z_][A-Za-z_0-9]*)\s*:=\s*([A-Z][A-Za-z_0-9]*)$)");
   while (std::getline(input, line)) {
@@ -314,8 +355,8 @@ bool ToplProgram::observes(ToplEvent::Kind kind, llvm::StringRef name) const {
 }
 
 std::vector<ToplViolation>
-ToplProgram::evaluate(const ToplHistory &history,
-                      const PulseFormula &formula) const {
+ToplProgram::evaluate(const ToplHistory &history, const PulseFormula &formula,
+                      const Heap *post_heap) const {
   // The omitted suffix might contain cleanup transitions out of error.
   // Incomplete histories cannot establish a final-state violation.
   if (history.truncated)
@@ -349,8 +390,8 @@ ToplProgram::evaluate(const ToplHistory &history,
                 continue;
               auto inserted = bindings.emplace(name, event.arguments[i]);
               if (!inserted.second) {
-                auto decision = compare(inserted.first->second,
-                                        "==", event.arguments[i], formula);
+                auto decision = compare(inserted.first->second, "==",
+                                        event.arguments[i], formula, post_heap);
                 uncertain |= !decision.has_value();
                 if (decision && !*decision)
                   valid = false;
@@ -364,7 +405,7 @@ ToplProgram::evaluate(const ToplHistory &history,
               valid = false;
               continue;
             }
-            auto decision = compare(*lhs, g.op, *rhs, formula);
+            auto decision = compare(*lhs, g.op, *rhs, formula, post_heap);
             uncertain |= !decision.has_value();
             if (decision && !*decision)
               valid = false;

@@ -1,4 +1,3 @@
-
 #include "Checker/Pulse/Domain/PulseTaint.h"
 
 #include "Checker/Framework/BugReport.h"
@@ -6,34 +5,27 @@
 #include "Checker/Pulse/Domain/PulseDomain.h"
 #include "Checker/Pulse/Report/PulseDiagnostic.h"
 
+#include <queue>
+#include <set>
+#include <vector>
+
 #include <llvm/IR/Instructions.h>
 
 namespace pulse {
-
-//===----------------------------------------------------------------------===//
-// Taint
-//
-// Taint is an auxiliary analysis used by Pulse to detect source->sink flows.
-//
-// Sound incorrectness note:
-// - A taint report is ideally backed by a concrete feasible witness path.
-// - When modeling is incomplete (e.g., unknown/indirect calls), propagation may
-//   become conservative and can introduce false positives. Tighten behavior via
-//   `PulseTaintConfig` and models.
-//===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
 // TaintDomain Implementation
 //===----------------------------------------------------------------------===//
 
 void TaintDomain::add(AbstractValue v, TaintItem item) {
-  taints_[v].insert(item);
+  taints_[v].insert(std::move(item));
 }
 
 void TaintDomain::remove(AbstractValue v) { taints_.erase(v); }
 
 bool TaintDomain::has(AbstractValue v) const {
-  return taints_.find(v) != taints_.end();
+  auto it = taints_.find(v);
+  return it != taints_.end() && !it->second.empty();
 }
 
 const std::set<TaintItem> &TaintDomain::get(AbstractValue v) const {
@@ -55,9 +47,46 @@ void TaintDomain::join(const TaintDomain &other) {
 unsigned TaintOperations::global_timestamp_ = 1;
 const TaintConfig *TaintOperations::config_ = nullptr;
 
+namespace {
+
+static bool itemSanitizedForPolicy(const TaintItem &item,
+                                   const SinkPolicy &policy) {
+  for (const auto &san : item.sanitizers) {
+    // Only sanitizers applied at or after taint creation count.
+    if (san.sanitizer_timestamp < item.timestamp) {
+      continue;
+    }
+    // Generic Unknown sanitizer clears taint for all policies.
+    if (san.sanitizer_kind == TaintKind::Unknown()) {
+      return true;
+    }
+    if (policy.sanitizer_kinds.empty()) {
+      return true;
+    }
+    for (const auto &pk : policy.sanitizer_kinds) {
+      if (san.sanitizer_kind == pk) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static bool itemSanitizedGeneric(const TaintItem &item) {
+  for (const auto &san : item.sanitizers) {
+    if (san.sanitizer_timestamp >= item.timestamp) {
+      return true;
+    }
+  }
+  return false;
+}
+
+} // namespace
+
 void TaintOperations::taint(AbductiveDomain &astate, AbstractValue v,
                             const std::vector<TaintKind> &kinds,
                             const llvm::Instruction *source) {
+  AbstractValue canon = astate.getCanonical(v);
   const llvm::Function *func = nullptr;
   if (source) {
     if (const llvm::BasicBlock *bb = source->getParent())
@@ -65,87 +94,119 @@ void TaintOperations::taint(AbductiveDomain &astate, AbstractValue v,
   }
   unsigned timestamp = getNextTimestamp();
 
-  // Create value tuple
   TaintValue value(TaintValue::Type::TaintProcedure,
                    func ? func->getName().str() : "");
   TaintValueTuple value_tuple(value, TaintOrigin::ReturnValue);
 
   TaintItem item(kinds, value_tuple, source, func, timestamp);
-  item.history.addEvent(ValueHistory::EventKind::Unknown, source,
-                        func); // Start of taint
-  astate.getTaintDomain().add(v, item);
-  astate.getPostAttrs().add(v, Attribute::Tainted);
+  item.history.addEvent(ValueHistory::EventKind::Unknown, source, func);
+  astate.getTaintDomain().add(canon, std::move(item));
+  astate.getPostAttrs().add(canon, Attribute::Tainted);
 }
 
 void TaintOperations::taint(AbductiveDomain &astate, AbstractValue v,
                             TaintKind kind, const std::string &procedure_name) {
+  AbstractValue canon = astate.getCanonical(v);
   unsigned timestamp = getNextTimestamp();
   TaintValue value(TaintValue::Type::TaintProcedure, procedure_name);
   TaintValueTuple value_tuple(value, TaintOrigin::ReturnValue);
-  TaintItem item({kind}, value_tuple, nullptr, nullptr, timestamp);
-  astate.getTaintDomain().add(v, item);
-  astate.getPostAttrs().add(v, Attribute::Tainted);
+  TaintItem item({std::move(kind)}, value_tuple, nullptr, nullptr, timestamp);
+  astate.getTaintDomain().add(canon, std::move(item));
+  astate.getPostAttrs().add(canon, Attribute::Tainted);
 }
 
 bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
                                 const std::string &sink_name,
                                 const llvm::Instruction *sink_loc) {
-  if (!astate.getTaintDomain().has(v)) {
-    return false;
+  AbstractValue canon_v = astate.getCanonical(v);
+
+  // Collect direct and heap-reachable values (Infer's fold_reachable_values).
+  std::set<AbstractValue> visited;
+  std::queue<AbstractValue> worklist;
+  visited.insert(canon_v);
+  worklist.push(canon_v);
+
+  std::vector<const TaintItem *> candidate_items;
+  while (!worklist.empty()) {
+    AbstractValue cur = worklist.front();
+    worklist.pop();
+    if (astate.getTaintDomain().has(cur)) {
+      for (const auto &item : astate.getTaintDomain().get(cur)) {
+        candidate_items.push_back(&item);
+      }
+    }
+    auto edge_it = astate.getPostHeap().getEdges().find(cur);
+    if (edge_it != astate.getPostHeap().getEdges().end()) {
+      for (const auto &ekv : edge_it->second) {
+        AbstractValue nxt = astate.getCanonical(ekv.second.addr);
+        if (visited.insert(nxt).second) {
+          worklist.push(nxt);
+        }
+      }
+    }
   }
 
-  const auto &taints = astate.getTaintDomain().get(v);
-  if (taints.empty())
+  if (candidate_items.empty()) {
     return false;
+  }
 
   const TaintConfig &config = getConfig();
-  TaintKind sink_kind = TaintKind::Unknown();
-  if (sink_name == "system" || sink_name == "exec" || sink_name == "execl" ||
-      sink_name == "execlp" || sink_name == "execle" ||
-      sink_name == "execv" || sink_name == "execvp" ||
-      sink_name == "execve" || sink_name == "popen" ||
-      sink_name == "eval") {
-    sink_kind = TaintKind::UserInput();
-  } else if (sink_name == "printf" || sink_name == "fprintf" ||
-             sink_name == "sprintf" || sink_name == "snprintf") {
-    sink_kind = TaintKind::UserInput();
+  std::vector<SinkPolicy> policies;
+  auto matched_sinks = config.matchSinksByName(sink_name);
+  std::set<TaintKind> seen_sink_kinds;
+  for (const ProcedureUnit *unit : matched_sinks) {
+    for (const TaintKind &sk : unit->kinds) {
+      if (seen_sink_kinds.insert(sk).second) {
+        const auto &pvec = config.getSinkPolicies(sk);
+        policies.insert(policies.end(), pvec.begin(), pvec.end());
+      }
+    }
   }
-  const auto &policies = config.getSinkPolicies(sink_kind);
+  if (policies.empty() && !seen_sink_kinds.empty()) {
+    const auto &fallback = config.getSinkPolicies(TaintKind::UserInput());
+    policies.insert(policies.end(), fallback.begin(), fallback.end());
+  }
+
+  TaintKind sink_kind =
+      seen_sink_kinds.empty() ? TaintKind::Unknown() : *seen_sink_kinds.begin();
+  (void)sink_kind;
 
   std::vector<const TaintItem *> unsanitized_taints;
-  for (const auto &item : taints) {
+  for (const TaintItem *item_ptr : candidate_items) {
+    const TaintItem &item = *item_ptr;
     if (policies.empty()) {
-      if (!item.isSanitized()) {
+      if (!itemSanitizedGeneric(item)) {
         unsanitized_taints.push_back(&item);
       }
       continue;
     }
 
-    bool sanitized = false;
+    bool matched_policy = false;
     for (const auto &policy : policies) {
-      if (item.isSanitizedBy(policy.sanitizer_kinds)) {
-        sanitized = true;
-        break;
+      if (itemSanitizedForPolicy(item, policy)) {
+        continue;
       }
-    }
-
-    if (!sanitized) {
-      for (const auto &policy : policies) {
-        for (const auto &item_kind : item.kinds) {
-          for (const auto &source_kind : policy.source_kinds) {
-            if (item_kind == source_kind) {
-              unsanitized_taints.push_back(&item);
-              goto next_item;
-            }
+      for (const auto &item_kind : item.kinds) {
+        for (const auto &source_kind : policy.source_kinds) {
+          if (item_kind == source_kind || item_kind == TaintKind::Unknown()) {
+            matched_policy = true;
+            break;
           }
         }
+        if (matched_policy)
+          break;
       }
+      if (matched_policy)
+        break;
     }
-  next_item:;
+
+    if (matched_policy) {
+      unsanitized_taints.push_back(&item);
+    }
   }
 
   if (unsanitized_taints.empty()) {
-    return false; // All taints are sanitized or don't match policies
+    return false;
   }
 
   const TaintItem *critical_item = nullptr;
@@ -153,8 +214,6 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
 
   for (const auto *item : unsanitized_taints) {
     TaintKind primary = item->getPrimaryKind();
-    // Prioritize: Sensitive > Network > UserInput > FileSystem > Environment >
-    // Unknown
     if (!critical_item) {
       critical_item = item;
       critical_kind = primary;
@@ -185,7 +244,6 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
 
   BugReport *report = new BugReport(typeId);
 
-  // Describe the source first so the final step remains the sink/bug site.
   if (critical.source_instruction) {
     std::string src_msg = "Taint source: ";
     TaintKind primary = critical.getPrimaryKind();
@@ -204,11 +262,10 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
     }
 
     report->append_step(
-        const_cast<llvm::Instruction *>(critical.source_instruction), src_msg, 0,
-        {}, "source");
+        const_cast<llvm::Instruction *>(critical.source_instruction), src_msg,
+        0, {}, "source");
   }
 
-  // Add propagation trace from source to sink.
   const auto &events = critical.history.getEvents();
   unsigned step_num = 1;
   for (const auto &event : events) {
@@ -229,7 +286,6 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
                         trace_msg, step_num++, {}, "trace");
   }
 
-  // Add the sink as the final bug step.
   std::string sink_msg = "Tainted data flows into sink '";
   sink_msg += sink_name;
   sink_msg += "'";
@@ -244,7 +300,6 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
   report->append_step(const_cast<llvm::Instruction *>(sink_loc), sink_msg, 0,
                       {}, "sink");
 
-  // Set confidence score based on taint kind and sink type
   int confidence = 80;
   if (critical_kind == TaintKind::Sensitive() ||
       critical_kind == TaintKind::Network()) {
@@ -252,8 +307,6 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
   } else if (critical_kind == TaintKind::UserInput()) {
     confidence = 90;
   }
-
-  // Increase confidence for dangerous sinks
   if (sink_name == "system" || sink_name == "exec") {
     confidence = std::min(95, confidence + 5);
   }
@@ -266,51 +319,57 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
 void TaintOperations::propagate(AbductiveDomain &astate, AbstractValue src,
                                 AbstractValue dest,
                                 const llvm::Instruction *loc) {
-  if (!astate.getTaintDomain().has(src)) {
+  AbstractValue c_src = astate.getCanonical(src);
+  AbstractValue c_dest = astate.getCanonical(dest);
+  if (!astate.getTaintDomain().has(c_src)) {
     return;
   }
 
-  const auto &src_taints = astate.getTaintDomain().get(src);
-  for (const auto &item : src_taints) {
-    // Create a copy and update history
-    TaintItem new_item = item;
-    new_item.history.addEvent(ValueHistory::EventKind::Store, loc,
-                              loc ? loc->getFunction() : nullptr);
-    astate.getTaintDomain().add(dest, new_item);
+  // Copy first in case c_src == c_dest.
+  std::vector<TaintItem> copied(astate.getTaintDomain().get(c_src).begin(),
+                                astate.getTaintDomain().get(c_src).end());
+  for (auto &item : copied) {
+    item.history.addEvent(ValueHistory::EventKind::Store, loc,
+                          loc ? loc->getFunction() : nullptr);
+    astate.getTaintDomain().add(c_dest, std::move(item));
   }
-  astate.getPostAttrs().add(dest, Attribute::Tainted);
+  astate.getPostAttrs().add(c_dest, Attribute::Tainted);
 }
 
 void TaintOperations::sanitize(AbductiveDomain &astate, AbstractValue v,
                                TaintKind sanitizer_kind,
                                const llvm::Instruction *sanitizer_loc) {
-  if (!astate.getTaintDomain().has(v)) {
+  AbstractValue canon = astate.getCanonical(v);
+  if (!astate.getTaintDomain().has(canon)) {
     return;
   }
 
   unsigned sanitizer_timestamp = getNextTimestamp();
-  auto &taints =
-      const_cast<std::set<TaintItem> &>(astate.getTaintDomain().get(v));
-
-  // Add sanitizer to all taint items
-  for (auto &item : taints) {
-    const_cast<TaintItem &>(item).addSanitizer(sanitizer_kind, sanitizer_loc,
-                                               sanitizer_timestamp);
+  // Safe copy-modify-reinsert (avoids UB const_cast on std::set keys).
+  std::vector<TaintItem> updated;
+  const auto &existing = astate.getTaintDomain().get(canon);
+  updated.reserve(existing.size());
+  for (TaintItem item : existing) {
+    item.addSanitizer(sanitizer_kind, sanitizer_loc, sanitizer_timestamp);
+    updated.push_back(std::move(item));
   }
-
-  // Sanitizers are tracked in TaintItem, no separate attribute needed
+  astate.getTaintDomain().remove(canon);
+  for (auto &item : updated) {
+    astate.getTaintDomain().add(canon, std::move(item));
+  }
 }
 
 bool TaintOperations::isSanitized(const AbductiveDomain &astate,
                                   AbstractValue v) {
-  if (!astate.getTaintDomain().has(v)) {
+  AbstractValue canon = astate.getCanonical(v);
+  if (!astate.getTaintDomain().has(canon)) {
     return false;
   }
 
-  const auto &taints = astate.getTaintDomain().get(v);
+  const auto &taints = astate.getTaintDomain().get(canon);
   for (const auto &item : taints) {
-    if (!item.isSanitized()) {
-      return false; // At least one unsanitized taint
+    if (!itemSanitizedGeneric(item)) {
+      return false;
     }
   }
   return true;
@@ -320,7 +379,6 @@ void TaintOperations::propagateThroughLoad(AbductiveDomain &astate,
                                            AbstractValue src_addr,
                                            AbstractValue dest_val,
                                            const llvm::Instruction *loc) {
-  // Propagate taint from memory location to loaded value
   propagate(astate, src_addr, dest_val, loc);
 }
 
@@ -328,73 +386,76 @@ void TaintOperations::propagateThroughStore(AbductiveDomain &astate,
                                             AbstractValue src_val,
                                             AbstractValue dest_addr,
                                             const llvm::Instruction *loc) {
-  // Propagate taint from stored value to memory location
   propagate(astate, src_val, dest_addr, loc);
 }
 
 void TaintOperations::propagateThroughCall(
     AbductiveDomain &astate, const llvm::CallInst *call,
     const std::vector<AbstractValue> &args, AbstractValue ret_val) {
-  // Use TaintConfig for source/sink/sanitizer detection
   const TaintConfig &config = getConfig();
   const llvm::Function *callee = call->getCalledFunction();
 
   if (!callee) {
-    // Indirect call - conservatively propagate all taints
     for (AbstractValue arg : args) {
-      if (astate.getTaintDomain().has(arg)) {
+      if (astate.getTaintDomain().has(astate.getCanonical(arg))) {
         propagate(astate, arg, ret_val, call);
       }
     }
     return;
   }
 
-  // Check for taint sources using config
   std::vector<TaintKind> source_kinds = config.isSource(callee);
   if (!source_kinds.empty()) {
     taint(astate, ret_val, source_kinds, call);
-    return; // Sources introduce new taint, don't propagate from args
+    return;
   }
 
-  // Check for taint sinks using config
   std::vector<TaintKind> sink_kinds;
   if (config.isSink(callee, sink_kinds)) {
-    // Check all pointer arguments for taint
     for (size_t i = 0; i < args.size() && i < call->arg_size(); ++i) {
-      const llvm::Value *arg_val = call->getArgOperand(i);
-      if (arg_val->getType()->isPointerTy()) {
-        AbstractValue arg_av = args[i];
-        if (astate.getTaintDomain().has(arg_av)) {
-          checkSink(astate, arg_av, callee->getName().str(), call);
-        }
+      AbstractValue arg_av = astate.getCanonical(args[i]);
+      if (!checkSink(astate, arg_av, callee->getName().str(), call) &&
+          astate.isInPre(arg_av)) {
+        Trace t;
+        t.addEvent(call, "Taint sink: " + callee->getName().str());
+        astate.abduceMustNotBeTainted(
+            arg_av, MustNotBeTaintedSink(callee->getName().str(), sink_kinds,
+                                         call, std::move(t),
+                                         astate.nextTimestamp()));
       }
     }
   }
 
-  // Check for sanitizers using config
   std::vector<TaintKind> sanitizer_kinds = config.isSanitizer(callee);
   if (!sanitizer_kinds.empty() && !args.empty()) {
-    // Sanitize the first argument
-    for (TaintKind kind : sanitizer_kinds) {
+    for (const TaintKind &kind : sanitizer_kinds) {
       sanitize(astate, args[0], kind, call);
-    }
-    return; // Don't propagate taint from sanitizers
-  }
-
-  // Check for propagators
-  if (config.isPropagator(callee)) {
-    // Propagate taint from all arguments to return value
-    for (AbstractValue arg : args) {
-      if (astate.getTaintDomain().has(arg)) {
-        propagate(astate, arg, ret_val, call);
-      }
+      astate.addTaintSanitized(
+          args[0], SanitizerRecord{kind, call, astate.nextTimestamp()});
     }
     return;
   }
 
-  // Default: conservatively propagate taint from all arguments to return value
+  if (config.isPropagator(callee)) {
+    std::vector<AbstractValue> pre_sources;
+    for (AbstractValue arg : args) {
+      AbstractValue c = astate.getCanonical(arg);
+      if (astate.getTaintDomain().has(c)) {
+        propagate(astate, c, ret_val, call);
+      } else if (astate.isInPre(c)) {
+        pre_sources.push_back(c);
+      }
+    }
+    if (!pre_sources.empty()) {
+      astate.addPropagateTaintFrom(
+          ret_val, PropagateTaintFromInfo{std::move(pre_sources),
+                                          callee->getName().str()});
+    }
+    return;
+  }
+
   for (AbstractValue arg : args) {
-    if (astate.getTaintDomain().has(arg)) {
+    if (astate.getTaintDomain().has(astate.getCanonical(arg))) {
       propagate(astate, arg, ret_val, call);
     }
   }

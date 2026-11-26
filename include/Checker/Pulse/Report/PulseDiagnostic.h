@@ -14,6 +14,7 @@ namespace pulse {
 
 // Issue Type Constants (Aligned with Infer)
 namespace IssueType {
+constexpr const char *MemoryLeak = "Memory Leak";
 constexpr const char *ResourceLeak = "Resource Leak";
 constexpr const char *NullDereference = "Null Pointer Dereference";
 constexpr const char *UseAfterFree = "Use After Free";
@@ -22,8 +23,10 @@ constexpr const char *InvalidFree = "Invalid Free";
 constexpr const char *UninitializedRead = "Uninitialized Read";
 constexpr const char *TaintError = "Taint Error";
 constexpr const char *UnnecessaryCopy = "Unnecessary Copy";
+constexpr const char *ConstRefableParam = "Const-Refable Parameter";
 constexpr const char *StackVariableAddressEscape =
     "Stack Variable Address Escape";
+constexpr const char *MutualRecursionCycle = "Mutual Recursion Cycle";
 } // namespace IssueType
 
 class Diagnostic {
@@ -211,6 +214,77 @@ public:
   }
   std::string getSuggestion() const override { return suggestion_; }
   std::string getIssueType() const override { return IssueType::InvalidFree; }
+  const llvm::Instruction *getLocation() const override { return location_; }
+  const Trace *getTrace() const override { return &trace_; }
+
+  size_t getHash() const override;
+  bool equals(const Diagnostic &other) const override;
+};
+
+class MemoryLeak : public Diagnostic {
+  const llvm::Instruction *location_;
+  const llvm::Instruction *allocation_site_;
+  std::string allocator_name_;
+  Trace trace_;
+
+public:
+  MemoryLeak(const llvm::Instruction *loc, const llvm::Instruction *alloc_site,
+             const std::string &allocator, Trace trace)
+      : location_(loc), allocation_site_(alloc_site),
+        allocator_name_(allocator), trace_(std::move(trace)) {}
+
+  std::string getMessage() const override;
+  std::string getDescription() const override;
+  std::string getSuggestion() const override {
+    return "Free the allocated memory before it becomes unreachable.";
+  }
+  std::string getIssueType() const override { return IssueType::MemoryLeak; }
+  const llvm::Instruction *getLocation() const override { return location_; }
+  const Trace *getTrace() const override { return &trace_; }
+
+  size_t getHash() const override;
+  bool equals(const Diagnostic &other) const override;
+};
+
+class ConstRefableParam : public Diagnostic {
+  const llvm::Instruction *location_;
+  std::string param_name_;
+  std::string type_name_;
+
+public:
+  ConstRefableParam(const llvm::Instruction *loc, const std::string &param,
+                    const std::string &type)
+      : location_(loc), param_name_(param), type_name_(type) {}
+
+  std::string getMessage() const override;
+  std::string getDescription() const override;
+  std::string getSuggestion() const override;
+  std::string getIssueType() const override {
+    return IssueType::ConstRefableParam;
+  }
+  const llvm::Instruction *getLocation() const override { return location_; }
+
+  size_t getHash() const override;
+  bool equals(const Diagnostic &other) const override;
+};
+
+class MutualRecursionCycle : public Diagnostic {
+  const llvm::Instruction *location_;
+  std::string cycle_description_;
+  Trace trace_;
+
+public:
+  MutualRecursionCycle(const llvm::Instruction *loc,
+                       const std::string &cycle_desc, Trace trace)
+      : location_(loc), cycle_description_(cycle_desc),
+        trace_(std::move(trace)) {}
+
+  std::string getMessage() const override;
+  std::string getDescription() const override;
+  std::string getSuggestion() const override;
+  std::string getIssueType() const override {
+    return IssueType::MutualRecursionCycle;
+  }
   const llvm::Instruction *getLocation() const override { return location_; }
   const Trace *getTrace() const override { return &trace_; }
 

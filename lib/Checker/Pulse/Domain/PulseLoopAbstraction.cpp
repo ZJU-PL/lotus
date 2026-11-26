@@ -1,12 +1,82 @@
 #include "Checker/Pulse/Domain/PulseLoopAbstraction.h"
 
 #include "Checker/Pulse/Core/PulseFormula.h"
+#include "Checker/Pulse/Domain/PulseJoin.h"
 
+#include <limits>
 #include <optional>
 
 #include <llvm/Analysis/LoopInfo.h>
 
 namespace pulse {
+
+namespace {
+
+/**
+ * Compute a sound widened invariant between `entry_state` (iteration k) and
+ * `current_state` (iteration k+1) using PulseJoin + monotonic interval
+ * widening on loop-carried integer variables, while preserving `current_state`'s
+ * PHI entry predecessor.
+ */
+static std::optional<ExecutionDomain>
+computeWidenedInvariant(const llvm::BasicBlock *header,
+                        const ExecutionDomain &entry_state,
+                        const ExecutionDomain &current_state) {
+  const AbductiveDomain *entry_a = entry_state.getAstate();
+  const AbductiveDomain *curr_a = current_state.getAstate();
+  if (!entry_a || !curr_a) {
+    return std::nullopt;
+  }
+
+  // Already structurally subsumed by entry state: inductive fixpoint!
+  if (AbductiveDomain::leq(*curr_a, *entry_a)) {
+    ExecutionDomain conv = entry_state.clone();
+    conv.setEntryPred(current_state.getEntryPred());
+    return conv;
+  }
+
+  auto joined_opt = PulseJoin::joinAbductive(*entry_a, *curr_a);
+  if (!joined_opt) {
+    return std::nullopt;
+  }
+
+  // Classic Cousot-Cousot monotonic interval widening for loop-carried
+  // counters that moved strictly upward or downward across the iteration.
+  const PulseFormula &ef = entry_a->getPathFormula();
+  const PulseFormula &cf = curr_a->getPathFormula();
+  PulseFormula &jf = joined_opt->getPathFormula();
+  for (const auto &kv : joined_opt->getPostStack().getMap()) {
+    const llvm::Value *var = kv.first;
+    const Address *e_addr = entry_a->getPostStack().find(var);
+    const Address *c_addr = curr_a->getPostStack().find(var);
+    if (!e_addr || !c_addr) {
+      continue;
+    }
+    auto e_lo = ef.getLowerBound(e_addr->addr);
+    auto e_hi = ef.getUpperBound(e_addr->addr);
+    auto c_lo = cf.getLowerBound(c_addr->addr);
+    auto c_hi = cf.getUpperBound(c_addr->addr);
+    AbstractValue j_av = joined_opt->getCanonical(kv.second.addr);
+    if (e_lo && c_lo && *c_lo > *e_lo) {
+      // Strictly increasing loop variable: keep lower bound, drop tight upper.
+      (void)jf.addBounds(j_av, *e_lo, std::numeric_limits<int64_t>::max());
+    } else if (e_hi && c_hi && *c_hi < *e_hi) {
+      // Strictly decreasing loop variable: keep upper bound, drop tight lower.
+      (void)jf.addBounds(j_av, std::numeric_limits<int64_t>::min(), *e_hi);
+    }
+  }
+
+  // Attach LoopInvariantUnderInference marker so the next header visit checks
+  // whether this candidate invariant is inductive (Infer PulseAbductiveDomain).
+  joined_opt->startLoopInvariantInference(header, entry_a->clone());
+
+  ExecutionDomain out = ExecutionDomain::continueProgram(
+      std::make_unique<AbductiveDomain>(std::move(*joined_opt)));
+  out.setEntryPred(current_state.getEntryPred());
+  return out;
+}
+
+} // namespace
 
 //===----------------------------------------------------------------------===//
 // LoopAbstraction
@@ -79,6 +149,8 @@ bool LoopAbstraction::visitHeader(const llvm::BasicBlock *BB,
   if (it->second.iterations == 1) {
     it->second.header_state = state.clone();
     it->second.entry_state = state.clone();
+    it->second.seen_states.clear();
+    it->second.seen_states.push_back(state.clone());
     auto *astate = state.getAstate();
     if (astate) {
       it->second.local_path_condition = astate->getPathFormula().clone();
@@ -87,22 +159,52 @@ bool LoopAbstraction::visitHeader(const llvm::BasicBlock *BB,
     return false; // First iteration, no widening
   }
 
-  // Record iteration with path stamp
+  // Record iteration with path stamp and bounded seen-state history.
   auto *astate = state.getAstate();
   if (astate) {
     unsigned timestamp = getNextTimestamp();
     PulseFormula path_condition = astate->getPathFormula().clone();
     pushLoopInfo(BB, timestamp, path_condition);
 
-    // Update local path condition
-    // Accumulate information across iterations: this is a join (disjunction)
-    // over different paths, not a conjunction.
+    // Update local path condition (disjunction join across iterations).
     it->second.local_path_condition =
         PulseFormula::join(it->second.local_path_condition, path_condition);
+  }
+  if (it->second.seen_states.size() < kMaxWidenIterations) {
+    it->second.seen_states.push_back(state.clone());
   }
 
   // Check if we should widen
   return it->second.iterations >= kWidenThreshold;
+}
+
+bool LoopAbstraction::hasConverged(const llvm::BasicBlock *BB,
+                                   const ExecutionDomain &state) const {
+  auto it = loop_headers_.find(BB);
+  if (it == loop_headers_.end()) {
+    return false;
+  }
+  const AbductiveDomain *cand = state.getAstate();
+  if (!cand) {
+    return false;
+  }
+  // If we were checking inductiveness of a candidate invariant and the next
+  // iteration is subsumed by it, we have proved convergence.
+  if (cand->isLoopInvariantUnderInference(BB) &&
+      it->second.candidate_invariant &&
+      it->second.candidate_invariant->getAstate()) {
+    if (AbductiveDomain::leq(*cand,
+                             *it->second.candidate_invariant->getAstate())) {
+      return true;
+    }
+  }
+  for (const auto &prev : it->second.seen_states) {
+    if (prev.getEntryPred() == state.getEntryPred() && prev.getAstate() &&
+        AbductiveDomain::leq(*cand, *prev.getAstate())) {
+      return true;
+    }
+  }
+  return false;
 }
 
 ExecutionDomain LoopAbstraction::widen(const llvm::BasicBlock *BB,
@@ -114,15 +216,23 @@ ExecutionDomain LoopAbstraction::widen(const llvm::BasicBlock *BB,
 
   const ExecutionDomain &header_state = it->second.header_state;
 
+  // Hard cap: stop exploring further back-edge unrollings once widened enough.
   if (it->second.iterations > kMaxWidenIterations) {
-    return header_state.clone();
+    ExecutionDomain stopped;
+    stopped.setState(ExecutionState::Stopped);
+    return stopped;
   }
 
-  // Sound incorrectness: widening must not over-approximate by union-merging
-  // heap facts across iterations (which can admit non-witnessable paths).
-  // Under pressure, keep a representative witness state.
-  (void)current_state;
-  return header_state.clone();
+  // Prefer PulseJoin-based invariant widening preserving common loop mutations
+  // and monotonic bounds; fall back to current/header state if join fails.
+  if (auto inv = computeWidenedInvariant(BB, header_state, current_state)) {
+    it->second.candidate_invariant = inv->clone();
+    return std::move(*inv);
+  }
+
+  ExecutionDomain fallback = header_state.clone();
+  fallback.setEntryPred(current_state.getEntryPred());
+  return fallback;
 }
 
 bool LoopAbstraction::isInLoop(const llvm::BasicBlock *BB) const {
@@ -160,17 +270,27 @@ LoopAbstraction::inferInvariant(const llvm::BasicBlock *BB,
     return std::nullopt;
   }
 
-  // Check convergence: if path stamps are the same, we've converged
+  // Check convergence: if path stamps are the same, we've converged.
   if (hasPreviousIterationSamePathStamp(BB)) {
-    // Path condition has stabilized. For sound incorrectness, avoid
-    // constructing a potentially non-witnessable "merged" invariant; keep a
-    // representative witness state.
-    return std::optional<ExecutionDomain>(current_state.clone());
+    ExecutionDomain converged = current_state.clone();
+    if (auto *a = converged.getAstate()) {
+      a->clearLoopInvariantInference();
+    }
+    return converged;
   }
 
-  // If we've exceeded max iterations, use entry state as invariant
+  // Attempt PulseJoin-based invariant inference (entry_state ⊔ current_state)
+  // with LoopInvariantUnderInference tracking.
+  if (auto inv = computeWidenedInvariant(BB, entry_state, current_state)) {
+    it->second.candidate_invariant = inv->clone();
+    return inv;
+  }
+
+  // If we've exceeded max iterations, use entry state as fallback invariant.
   if (it->second.iterations >= kMaxInvariantIterations) {
-    return std::optional<ExecutionDomain>(entry_state.clone());
+    ExecutionDomain fallback = entry_state.clone();
+    fallback.setEntryPred(current_state.getEntryPred());
+    return fallback;
   }
 
   return std::nullopt;

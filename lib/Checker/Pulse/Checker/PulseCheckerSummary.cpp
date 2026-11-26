@@ -2,11 +2,15 @@
 #include "Checker/Pulse/Checker/PulseCheckerUtils.h"
 #include "Checker/Pulse/Core/PulseSubstitution.h"
 #include "Checker/Pulse/Interproc/PulseSummary.h"
+#include "Checker/Pulse/Report/PulseDiagnostic.h"
 #include "Checker/Pulse/Report/PulseLogger.h"
+#include "Checker/Pulse/Report/PulseOptions.h"
+#include "Checker/Pulse/Report/PulseReport.h"
 
 #include <map>
 #include <optional>
 #include <set>
+#include <string>
 #include <vector>
 
 #include <llvm/IR/Instructions.h>
@@ -14,6 +18,41 @@
 namespace pulse {
 
 namespace {
+
+static std::string allocatorName(AllocatorKind kind) {
+  switch (kind) {
+  case AllocatorKind::CMalloc:
+    return "malloc";
+  case AllocatorKind::CRealloc:
+    return "realloc";
+  case AllocatorKind::CppNew:
+    return "operator new";
+  case AllocatorKind::CppNewArray:
+    return "operator new[]";
+  case AllocatorKind::FileHandle:
+    return "File";
+  case AllocatorKind::Socket:
+    return "Socket";
+  case AllocatorKind::CustomResource:
+    return "Resource";
+  case AllocatorKind::Stack:
+    return "stack";
+  case AllocatorKind::Global:
+    return "global";
+  }
+  return "allocation";
+}
+
+static bool isResourceAllocator(AllocatorKind kind) {
+  return kind == AllocatorKind::FileHandle || kind == AllocatorKind::Socket ||
+         kind == AllocatorKind::CustomResource;
+}
+
+static bool isHeapAllocator(AllocatorKind kind) {
+  return kind == AllocatorKind::CMalloc || kind == AllocatorKind::CRealloc ||
+         kind == AllocatorKind::CppNew || kind == AllocatorKind::CppNewArray;
+}
+
 static std::set<AbstractValue>
 computeReachable(const AbductiveDomain &astate, const Heap &heap,
                  const std::set<AbstractValue> &roots) {
@@ -27,6 +66,12 @@ computeReachable(const AbductiveDomain &astate, const Heap &heap,
     if (it == heap.getEdges().end())
       continue;
     for (const auto &edge_kv : it->second) {
+      if (edge_kv.first.kind == AccessKind::ArrayIndex) {
+        AbstractValue idx = astate.getCanonical(edge_kv.first.index);
+        if (reachable.insert(idx).second) {
+          worklist.push_back(idx);
+        }
+      }
       AbstractValue target = astate.getCanonical(edge_kv.second.addr);
       if (reachable.insert(target).second) {
         worklist.push_back(target);
@@ -37,62 +82,181 @@ computeReachable(const AbductiveDomain &astate, const Heap &heap,
   return reachable;
 }
 
-static AbductiveDomain pruneForSummary(const llvm::Function *F,
-                                       const AbductiveDomain &astate,
-                                       std::optional<AbstractValue> ret_val) {
-  AbductiveDomain pruned = astate.clone();
-
-  // Roots: formals, return value (if any), and globals.
+static std::set<AbstractValue>
+collectBoundaryRoots(const llvm::Function *F, const AbductiveDomain &astate,
+                     std::optional<AbstractValue> ret_val) {
   std::set<AbstractValue> roots;
   for (const auto &Arg : F->args()) {
-    if (auto *addr = pruned.getPostStack().find(&Arg)) {
-      roots.insert(pruned.getCanonical(addr->addr));
+    if (const auto *addr = astate.getPostStack().find(&Arg)) {
+      roots.insert(astate.getCanonical(addr->addr));
     }
-    if (auto *addr = pruned.getPreStack().find(&Arg)) {
-      roots.insert(pruned.getCanonical(addr->addr));
+    if (const auto *addr = astate.getPreStack().find(&Arg)) {
+      roots.insert(astate.getCanonical(addr->addr));
     }
   }
   if (ret_val) {
-    roots.insert(pruned.getCanonical(*ret_val));
+    roots.insert(astate.getCanonical(*ret_val));
   }
-  for (const auto &kv : pruned.getPostAttrs().getAttrs()) {
+  for (const auto &kv : astate.getPostAttrs().getAttrs()) {
     if (kv.second.count(Attribute::Global) > 0) {
-      roots.insert(pruned.getCanonical(kv.first));
+      roots.insert(astate.getCanonical(kv.first));
+    }
+  }
+  return roots;
+}
+
+/**
+ * Infer-style leak detection at function exit (PulseAbductiveDomain.check_memory_leaks):
+ * Reports MemoryLeak / ResourceLeak for any heap/resource allocation that is
+ * unreachable from formals, return value, or globals (and not reachable via
+ * derived pointer arithmetic / allocation root, not invalidated, and not passed
+ * to an unknown function).
+ */
+static void checkLeaksOnExit(const llvm::Function *F,
+                             const AbductiveDomain &astate,
+                             const std::set<AbstractValue> &live_post,
+                             const llvm::Instruction *exit_loc) {
+  if (!options::enableMemoryLeaks()) {
+    return;
+  }
+
+  // Only report leaks on manifest paths (Infer checks manifestness before
+  // reporting leaks so caller-conditioned exits don't emit spurious leaks).
+  auto is_allocated = [&astate](AbstractValue v) {
+    return astate.isAllocated(v);
+  };
+  if (!astate.getPathFormula().isManifest(is_allocated) ||
+      astate.preHeapHasAssumptions()) {
+    return;
+  }
+
+  // Compute live allocation roots (Infer's reaches_into for interior pointers).
+  std::set<AbstractValue> live_roots;
+  for (AbstractValue lv : live_post) {
+    live_roots.insert(astate.getCanonical(lv));
+    live_roots.insert(astate.getAllocationRoot(lv));
+  }
+
+  for (const auto &kv : astate.getPostAllocationInfo()) {
+    AbstractValue addr = astate.getCanonical(kv.first);
+    const AllocationInfo &info = kv.second;
+
+    if (!isHeapAllocator(info.kind) && !isResourceAllocator(info.kind)) {
+      continue;
+    }
+    if (astate.getPostAttrs().has(addr, Attribute::Invalid) ||
+        astate.getPostAttrs().has(addr, Attribute::Stack) ||
+        astate.getPostAttrs().has(addr, Attribute::Global)) {
+      continue;
+    }
+    if (astate.getUnknownEffect(addr).has_value()) {
+      continue;
+    }
+    // Check direct reachability or interior-pointer reachability.
+    if (live_post.count(addr) > 0 || live_roots.count(addr) > 0 ||
+        live_roots.count(astate.getAllocationRoot(addr)) > 0) {
+      continue;
+    }
+
+    const llvm::Instruction *alloc_site = info.location;
+    const llvm::Instruction *report_loc =
+        info.unreachable_at ? info.unreachable_at
+                            : (exit_loc ? exit_loc : alloc_site);
+    if (!report_loc && !F->empty()) {
+      report_loc = F->back().getTerminator();
+    }
+    if (!report_loc) {
+      continue;
+    }
+
+    Trace leak_trace = info.trace.clone();
+    if (alloc_site) {
+      leak_trace.addEvent(alloc_site,
+                          "Allocated via " + allocatorName(info.kind));
+    }
+    leak_trace.addEvent(report_loc, "Allocation becomes unreachable here");
+
+    if (isResourceAllocator(info.kind)) {
+      auto diag = std::make_unique<ResourceLeak>(
+          report_loc, alloc_site, allocatorName(info.kind),
+          std::move(leak_trace));
+      DiagnosticManager::getInstance().report(std::move(diag));
+    } else {
+      auto diag = std::make_unique<MemoryLeak>(
+          report_loc, alloc_site, allocatorName(info.kind),
+          std::move(leak_trace));
+      DiagnosticManager::getInstance().report(std::move(diag));
+    }
+  }
+}
+
+static AbductiveDomain pruneForSummary(const llvm::Function *F,
+                                       const AbductiveDomain &astate,
+                                       std::optional<AbstractValue> ret_val,
+                                       bool check_leaks) {
+  AbductiveDomain pruned = astate.clone();
+  pruned.canonicalize();
+
+  const std::set<AbstractValue> roots = collectBoundaryRoots(F, pruned, ret_val);
+
+  std::set<AbstractValue> reachable_post =
+      computeReachable(pruned, pruned.getPostHeap(), roots);
+  std::set<AbstractValue> reachable_pre =
+      computeReachable(pruned, pruned.getPreHeap(), roots);
+
+  // Run leak detection on unreachable heap/resource allocations BEFORE pruning.
+  if (check_leaks) {
+    const llvm::Instruction *exit_loc = nullptr;
+    for (const auto &BB : *F) {
+      if (const auto *RI = llvm::dyn_cast<llvm::ReturnInst>(BB.getTerminator())) {
+        exit_loc = RI;
+        break;
+      }
+    }
+    checkLeaksOnExit(F, pruned, reachable_post, exit_loc);
+  }
+
+  // Keep variables referenced in TOPL history, taint, or MustNotBeTainted alive.
+  std::set<AbstractValue> keep_vars;
+  keep_vars.insert(reachable_post.begin(), reachable_post.end());
+  keep_vars.insert(reachable_pre.begin(), reachable_pre.end());
+  for (const auto &event : pruned.getToplHistory().events) {
+    for (const auto &arg : event.arguments) {
+      if (arg.value) {
+        keep_vars.insert(pruned.getCanonical(*arg.value));
+      }
     }
   }
 
-  const std::set<AbstractValue> reachable_post =
-      computeReachable(pruned, pruned.getPostHeap(), roots);
-  const std::set<AbstractValue> reachable_pre =
-      computeReachable(pruned, pruned.getPreHeap(), roots);
+  // Simplify formula and retain variables connected via live arithmetic.
+  std::set<AbstractValue> live_arith =
+      pruned.getPathFormula().simplifyForSummary(keep_vars, reachable_pre);
+  reachable_post.insert(live_arith.begin(), live_arith.end());
+  reachable_pre.insert(live_arith.begin(), live_arith.end());
 
-  // Prune stacks: keep only formals (and any retained values explicitly).
+  // Prune stacks: keep formals only.
   {
     Stack new_post;
     Stack new_pre;
     for (const auto &Arg : F->args()) {
-      if (auto *addr = pruned.getPostStack().find(&Arg)) {
-        if (reachable_post.count(pruned.getCanonical(addr->addr)) > 0) {
-          new_post.add(&Arg, *addr);
-        }
+      if (const auto *addr = pruned.getPostStack().find(&Arg)) {
+        new_post.add(&Arg, *addr);
       }
-      if (auto *addr = pruned.getPreStack().find(&Arg)) {
-        if (reachable_pre.count(pruned.getCanonical(addr->addr)) > 0) {
-          new_pre.add(&Arg, *addr);
-        }
+      if (const auto *addr = pruned.getPreStack().find(&Arg)) {
+        new_pre.add(&Arg, *addr);
       }
     }
     pruned.getPostStack() = std::move(new_post);
     pruned.getPreStack() = std::move(new_pre);
   }
 
-  // Prune heaps.
+  // Prune post heap.
   {
     Heap new_post;
     for (const auto &kv : pruned.getPostHeap().getEdges()) {
-      if (reachable_post.count(pruned.getCanonical(kv.first)) == 0)
-        continue;
       AbstractValue from = pruned.getCanonical(kv.first);
+      if (reachable_post.count(from) == 0)
+        continue;
       for (const auto &edge_kv : kv.second) {
         AbstractValue to = pruned.getCanonical(edge_kv.second.addr);
         if (reachable_post.count(to) == 0)
@@ -102,46 +266,150 @@ static AbductiveDomain pruneForSummary(const llvm::Function *F,
     }
     pruned.getPostHeap() = std::move(new_post);
   }
+
+  // Prune pre heap (preserving registered pre addresses).
   {
     Heap new_pre;
     for (const auto &kv : pruned.getPreHeap().getEdges()) {
-      if (reachable_pre.count(pruned.getCanonical(kv.first)) == 0)
-        continue;
       AbstractValue from = pruned.getCanonical(kv.first);
+      if (reachable_pre.count(from) == 0)
+        continue;
+      new_pre.registerAddress(from);
       for (const auto &edge_kv : kv.second) {
         AbstractValue to = pruned.getCanonical(edge_kv.second.addr);
         if (reachable_pre.count(to) == 0)
           continue;
         new_pre.addEdge(from, edge_kv.first, edge_kv.second);
+        new_pre.registerAddress(to);
       }
     }
     pruned.getPreHeap() = std::move(new_pre);
   }
 
-  // Prune attrs.
+  // Prune post & pre boolean attributes.
   {
     AddressAttributes new_post_attrs;
     for (const auto &kv : pruned.getPostAttrs().getAttrs()) {
-      if (reachable_post.count(pruned.getCanonical(kv.first)) == 0)
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_post.count(canon) == 0)
         continue;
       for (Attribute a : kv.second) {
-        new_post_attrs.add(pruned.getCanonical(kv.first), a);
+        new_post_attrs.add(canon, a);
+      }
+      // Local stack allocations that escaped via return/out-param go out of
+      // scope at function exit (Infer's invalidate_locals).
+      if (kv.second.count(Attribute::Stack) > 0 &&
+          kv.second.count(Attribute::Global) == 0) {
+        new_post_attrs.add(canon, Attribute::Invalid);
+        new_post_attrs.remove(canon, Attribute::Allocated);
+        pruned.setInvalidationInfo(canon, InvalidationKind::GoneOutOfScope,
+                                   nullptr);
       }
     }
     pruned.getPostAttrs() = std::move(new_post_attrs);
 
     AddressAttributes new_pre_attrs;
     for (const auto &kv : pruned.getPreAttrs().getAttrs()) {
-      if (reachable_pre.count(pruned.getCanonical(kv.first)) == 0)
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_pre.count(canon) == 0)
         continue;
       for (Attribute a : kv.second) {
-        new_pre_attrs.add(pruned.getCanonical(kv.first), a);
+        new_pre_attrs.add(canon, a);
       }
     }
     pruned.getPreAttrs() = std::move(new_pre_attrs);
   }
 
-  // Prune allocation sizes.
+  // Prune parameterized pre attributes.
+  {
+    std::map<AbstractValue, MustBeValidInfo> mbv;
+    for (const auto &kv : pruned.getPreMustBeValid()) {
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_pre.count(canon) > 0) {
+        mbv.emplace(canon, kv.second);
+      }
+    }
+    pruned.getPreMustBeValid() = std::move(mbv);
+
+    std::map<AbstractValue, MustBeInitializedInfo> mbi;
+    for (const auto &kv : pruned.getPreMustBeInitialized()) {
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_pre.count(canon) > 0) {
+        mbi.emplace(canon, kv.second);
+      }
+    }
+    pruned.getPreMustBeInitialized() = std::move(mbi);
+
+    std::map<AbstractValue, std::vector<MustNotBeTaintedSink>> mnt;
+    for (const auto &kv : pruned.getPreMustNotBeTainted()) {
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_pre.count(canon) > 0) {
+        mnt[canon] = kv.second;
+      }
+    }
+    pruned.getPreMustNotBeTainted() = std::move(mnt);
+  }
+
+  // Prune parameterized post attributes.
+  {
+    std::map<AbstractValue, WrittenToInfo> wt;
+    for (const auto &kv : pruned.getPostWrittenTo()) {
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_post.count(canon) > 0 || reachable_pre.count(canon) > 0) {
+        wt.emplace(canon, kv.second);
+      }
+    }
+    pruned.getPostWrittenTo() = std::move(wt);
+
+    std::map<AbstractValue, AllocationInfo> ai;
+    for (const auto &kv : pruned.getPostAllocationInfo()) {
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_post.count(canon) > 0) {
+        ai.emplace(canon, kv.second);
+      }
+    }
+    pruned.getPostAllocationInfo() = std::move(ai);
+
+    std::map<AbstractValue, std::vector<PropagateTaintFromInfo>> ptf;
+    for (const auto &kv : pruned.getPostPropagateTaintFrom()) {
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_post.count(canon) > 0) {
+        ptf[canon] = kv.second;
+      }
+    }
+    pruned.getPostPropagateTaintFrom() = std::move(ptf);
+
+    std::map<AbstractValue, UnknownEffectInfo> ue;
+    for (const auto &kv : pruned.getPostUnknownEffect()) {
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_post.count(canon) > 0 || reachable_pre.count(canon) > 0) {
+        ue.emplace(canon, kv.second);
+      }
+    }
+    pruned.getPostUnknownEffect() = std::move(ue);
+
+    std::map<AbstractValue, std::vector<SanitizerRecord>> san;
+    for (const auto &kv : pruned.getPostTaintSanitized()) {
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_post.count(canon) > 0 || reachable_pre.count(canon) > 0) {
+        san[canon] = kv.second;
+      }
+    }
+    pruned.getPostTaintSanitized() = std::move(san);
+
+    TaintDomain new_taint;
+    for (const auto &kv : pruned.getTaintDomain().getMap()) {
+      AbstractValue canon = pruned.getCanonical(kv.first);
+      if (reachable_post.count(canon) > 0) {
+        for (const auto &item : kv.second) {
+          new_taint.add(canon, item);
+        }
+      }
+    }
+    pruned.getTaintDomain() = std::move(new_taint);
+  }
+
+  // Prune allocation sizes & roots.
   {
     std::map<AbstractValue, uint64_t> sizes;
     for (const auto &kv : pruned.getAllocationSizes()) {
@@ -151,28 +419,40 @@ static AbductiveDomain pruneForSummary(const llvm::Function *F,
       }
     }
     pruned.getAllocationSizes() = std::move(sizes);
-  }
 
-  {
-    std::map<AbstractValue, AbstractValue> roots;
+    std::map<AbstractValue, AbstractValue> alloc_roots;
     for (const auto &kv : astate.getAllocationRoots()) {
       AbstractValue addr = pruned.getCanonical(kv.first);
       AbstractValue root = pruned.getCanonical(kv.second);
       if (reachable_post.count(addr) > 0 || reachable_pre.count(addr) > 0) {
-        roots.emplace(addr, root);
+        alloc_roots.emplace(addr, root);
       }
     }
-    pruned.getAllocationRoots() = std::move(roots);
+    pruned.getAllocationRoots() = std::move(alloc_roots);
+
+    std::set<AbstractValue> kept_dyn_needed;
+    for (AbstractValue need_av : pruned.getNeedDynamicTypeSpecialization()) {
+      AbstractValue canon = pruned.getCanonical(need_av);
+      if (reachable_pre.count(canon) > 0 || reachable_post.count(canon) > 0) {
+        kept_dyn_needed.insert(canon);
+      }
+    }
+    pruned.clearNeedDynamicTypeSpecialization();
+    for (AbstractValue canon : kept_dyn_needed) {
+      pruned.addNeedDynamicTypeSpecialization(canon);
+    }
   }
 
   pruned.canonicalize();
   return pruned;
 }
+
 } // namespace
 
 void PulseChecker::createSummary(
     const llvm::Function *F, const std::vector<ExecutionDomain> &exit_states,
-    const std::vector<ExecutionDomain> &latent_exit_states) {
+    const std::vector<ExecutionDomain> &latent_exit_states,
+    const SpecializationKey *spec_key) {
   PulseLogger::debug("Creating summary for " + F->getName().str() + " (" +
                      std::to_string(exit_states.size()) + " exit states, " +
                      std::to_string(latent_exit_states.size()) +
@@ -181,7 +461,9 @@ void PulseChecker::createSummary(
   if (exit_states.empty() && latent_exit_states.empty())
     return;
 
-  PulseSummary summary(F);
+  auto summary_ptr = std::make_unique<PulseSummary>(F);
+  PulseSummary &summary = *summary_ptr;
+  TransitiveInfo merged_transitive;
 
   unsigned latent_added = 0;
   for (const auto &latent_state : latent_exit_states) {
@@ -196,31 +478,38 @@ void PulseChecker::createSummary(
     if (!astate)
       continue;
 
-    auto *issue = latent_state.getStoppedExecution().latent_issue;
-    if (!issue)
-      continue;
-
+    const auto &stopped = latent_state.getStoppedExecution();
     SummaryEntry::LatentIssueSummary latent;
-    latent.diagnostic = issue->getDiagnostic();
-    latent.address = astate->getCanonical(issue->getAddress());
-    // Avoid cloning trace/calling_context when large to prevent
-    // std::length_error and crashes from huge or corrupt vectors (e.g. in
-    // write_gauge_info_item).
-    const Trace &issue_trace = issue->getTrace();
-    const auto &cc = issue->getCallingContext();
-    constexpr size_t kMaxTraceEventsForSummary = 1024;
-    constexpr size_t kMaxCallingContextForSummary = 1024;
-    if (issue_trace.getEvents().size() <= kMaxTraceEventsForSummary &&
-        cc.size() <= kMaxCallingContextForSummary) {
-      latent.trace = issue_trace.clone();
-      latent.calling_context = cc;
+
+    if (latent_state.isLatentInvalidAccess()) {
+      latent.is_latent_invalid_access = true;
+      latent.diagnostic = OperationResult::NullDereference;
+      latent.address = astate->getCanonical(stopped.address);
+      latent.trace = stopped.must_be_valid.first.clone();
+      latent.must_be_valid_reason = stopped.must_be_valid.second;
+      latent.calling_context = stopped.calling_context;
+    } else if (stopped.latent_issue) {
+      auto *issue = stopped.latent_issue;
+      latent.diagnostic = issue->getDiagnostic();
+      latent.address = astate->getCanonical(issue->getAddress());
+      constexpr size_t kMaxTraceEventsForSummary = 1024;
+      constexpr size_t kMaxCallingContextForSummary = 1024;
+      if (issue->getTrace().getEvents().size() <= kMaxTraceEventsForSummary &&
+          issue->getCallingContext().size() <= kMaxCallingContextForSummary) {
+        latent.trace = issue->getTrace().clone();
+        latent.calling_context = issue->getCallingContext();
+      }
     } else {
-      latent.trace = Trace();
-      latent.calling_context.clear();
+      latent.diagnostic = stopped.diagnostic;
+      latent.address = astate->getCanonical(stopped.address);
+      latent.trace = stopped.trace_to_issue.clone();
+      latent.calling_context = stopped.calling_context;
     }
 
-    const PulseFormula formula = astate->getPathFormula().clone();
-    AbductiveDomain pruned = pruneForSummary(F, *astate, std::nullopt);
+    AbductiveDomain pruned = pruneForSummary(F, *astate, std::nullopt, false);
+    const PulseFormula formula = pruned.getPathFormula().clone();
+    merged_transitive =
+        TransitiveInfo::merge(merged_transitive, pruned.getTransitiveInfo());
     auto pre = std::make_unique<AbductiveDomain>(pruned.clone());
     auto post = std::make_unique<AbductiveDomain>(std::move(pruned));
     summary.addPrePost(SummaryEntry(
@@ -233,9 +522,9 @@ void PulseChecker::createSummary(
   bool has_any_entry = latent_added > 0;
   const unsigned max_normal_entries =
       kMaxDisjuncts > latent_added ? (kMaxDisjuncts - latent_added) : 0u;
+  const bool run_leak_check = (spec_key == nullptr);
 
   for (const auto &exit_state : exit_states) {
-    // Skip abort/latent states (bugs), but process normal ExitProgram
     if (exit_state.isAbortProgram() || exit_state.isLatentAbortProgram() ||
         exit_state.isLatentInvalidAccess() ||
         exit_state.isLatentSpecializedTypeIssue()) {
@@ -246,284 +535,77 @@ void PulseChecker::createSummary(
       continue;
 
     has_any_entry = true;
-    const PulseFormula formula = astate->getPathFormula().clone();
+    const bool is_exception = exit_state.isExceptionRaised();
     std::optional<AbstractValue> ret_val = std::nullopt;
+    std::optional<AbstractValue> exc_val = exit_state.getExceptionValue();
+    std::string exc_type = exit_state.getExceptionType();
     if (exit_state.isStopped()) {
       ret_val = exit_state.getStoppedExecution().return_value;
     }
 
     const unsigned normal_entries =
         static_cast<unsigned>(summary.getPrePostList().size()) - latent_added;
-    if (normal_entries < max_normal_entries) {
-      AbductiveDomain pruned = pruneForSummary(F, *astate, ret_val);
-      auto pre = std::make_unique<AbductiveDomain>(pruned.clone());
-      auto post = std::make_unique<AbductiveDomain>(std::move(pruned));
-      summary.addPrePost(SummaryEntry(std::move(pre), formula.clone(),
-                                      std::move(post), formula.clone(),
-                                      ret_val));
+    if (normal_entries >= max_normal_entries) {
+      break;
+    }
+
+    std::optional<AbstractValue> root_val = is_exception ? exc_val : ret_val;
+    AbductiveDomain pruned = pruneForSummary(
+        F, *astate, root_val, run_leak_check && !is_exception);
+
+    // Deduplicate structurally isomorphic summary entries (Infer's leq check).
+    bool duplicate = false;
+    for (const auto &existing : summary.getPrePostList()) {
+      if (existing.getLatentIssue().has_value() ||
+          existing.isExceptionRaised() != is_exception ||
+          existing.getExceptionType() != exc_type)
+        continue;
+      if (existing.getPost() && AbductiveDomain::leq(pruned, *existing.getPost())) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) {
       continue;
     }
-    // Budget exhausted: for sound incorrectness, do not merge multiple exit
-    // states into a single summary entry. Union-style merging can fabricate
-    // heap facts and admit non-witnessable caller paths. Prefer dropping extra
-    // disjuncts (reduces recall, preserves witnessability).
-    break;
+
+    if (exc_val) {
+      exc_val = pruned.getCanonical(*exc_val);
+    }
+
+    const PulseFormula formula = pruned.getPathFormula().clone();
+    merged_transitive =
+        TransitiveInfo::merge(merged_transitive, pruned.getTransitiveInfo());
+    auto pre = std::make_unique<AbductiveDomain>(pruned.clone());
+    auto post = std::make_unique<AbductiveDomain>(std::move(pruned));
+    summary.addPrePost(SummaryEntry(std::move(pre), formula.clone(),
+                                    std::move(post), formula.clone(), ret_val,
+                                    std::nullopt, is_exception, exc_val,
+                                    std::move(exc_type)));
   }
 
   if (!has_any_entry) {
     return;
   }
 
-  // Store formal parameter mappings
   for (const auto &Arg : F->args()) {
     AbstractValue formal_av = factory_.getOrCreate(&Arg);
     summary.setFormalAV(&Arg, formal_av);
   }
-
-  summary_manager_.storeSummary(F, std::move(summary));
+  summary.setTransitiveInfo(std::move(merged_transitive));
+  if (!spec_key) {
+    summary.setNonDisj(analysis_non_disj_.createSummary());
+    summary_manager_.storeSummary(F, std::move(summary));
+  } else {
+    specialization_manager_.addSpecializedSummary(F, *spec_key,
+                                                  std::move(summary_ptr));
+  }
 }
 
 std::vector<ExecutionDomain> PulseChecker::applySummary(
     const llvm::Function *callee, const ExecutionDomain &caller_state,
     const llvm::CallInst *CI, const llvm::BasicBlock *pred) {
-
-  const PulseSummary *summary_ptr =
-      resolveSummaryForCall(callee, caller_state, CI, pred);
-  if (!summary_ptr || !summary_ptr->isValid()) {
-    return {};
-  }
-
-  const PulseSummary &summary = *summary_ptr;
-  std::vector<ExecutionDomain> results;
-
-  const AbductiveDomain *caller_astate = caller_state.getAstate();
-  if (!caller_astate)
-    return {caller_state};
-
-  // Create new state by applying summary
-  ExecutionDomain new_state = caller_state.clone();
-  auto *new_astate = new_state.getAstate();
-  if (!new_astate)
-    return {caller_state};
-
-  // Build substitution: map formal parameters to actual arguments
-  Substitution substitution;
-
-  const auto *pre = summary.getPre();
-  const auto *post = summary.getPost();
-
-  unsigned arg_idx = 0;
-  for (const auto &Arg : callee->args()) {
-    if (arg_idx >= CI->arg_size())
-      break;
-
-    // Get actual argument value (use new_astate which is non-const)
-    auto actual_opt =
-        ops_.eval(*new_astate, CI->getArgOperand(arg_idx), CI, pred);
-    if (actual_opt) {
-      // Get formal abstract value from summary
-      auto formal_av_opt = summary.getFormalAV(&Arg);
-      if (formal_av_opt) {
-        // Map formal to actual (canonicalize both)
-        AbstractValue formal_canon = pre->getCanonical(*formal_av_opt);
-        AbstractValue actual_canon = new_astate->getCanonical(actual_opt->addr);
-        substitution.add(formal_canon, actual_canon);
-      }
-    }
-    arg_idx++;
-  }
-
-  // Check for contradictions: verify pre-condition is satisfied
-  // Check if actual arguments satisfy the pre-condition's constraints
-  bool has_contradiction = false;
-  for (const auto &kv : pre->getPreStack().getMap()) {
-    auto formal_av_opt = summary.getFormalAV(kv.first);
-    if (!formal_av_opt)
-      continue;
-
-    AbstractValue formal_canon = pre->getCanonical(*formal_av_opt);
-    auto actual_opt = substitution.substitute(formal_canon);
-    if (!actual_opt)
-      continue;
-
-    // Check if pre-condition attributes are satisfied
-    const auto &pre_attrs = pre->getPreAttrs().get(*formal_av_opt);
-    for (Attribute attr : pre_attrs) {
-      if (attr == Attribute::Null) {
-        // Pre-condition says formal is null, but actual might not be
-        if (!new_astate->getPathFormula().isNull(*actual_opt) &&
-            !new_astate->getPostAttrs().has(*actual_opt, Attribute::Null)) {
-          // Contradiction: pre says null but actual is not null
-          has_contradiction = true;
-          break;
-        }
-      } else if (attr == Attribute::Allocated) {
-        // Pre-condition says formal is allocated
-        if (new_astate->getPostAttrs().has(*actual_opt, Attribute::Invalid)) {
-          // Contradiction: pre says allocated but actual is invalid
-          has_contradiction = true;
-          break;
-        }
-      }
-    }
-    if (has_contradiction)
-      break;
-  }
-
-  // Check path condition contradictions
-  if (!has_contradiction) {
-    // Merge caller's path condition with callee's pre-formula (after
-    // substitution)
-    PulseFormula caller_formula = new_astate->getPathFormula().clone();
-    PulseFormula callee_pre_formula = summary.getPreFormula();
-
-    // Apply substitution to callee's pre-formula constraints
-    // For now, we do a simplified check: if caller has constraints that
-    // contradict the substituted pre-formula, we have a contradiction (Full
-    // implementation would substitute all values in the formula)
-
-    // Simple check: if pre-formula has null constraints that contradict caller
-    for (const auto &kv : pre->getPreStack().getMap()) {
-      auto formal_av_opt = summary.getFormalAV(kv.first);
-      if (!formal_av_opt)
-        continue;
-
-      AbstractValue formal_canon = pre->getCanonical(*formal_av_opt);
-      auto actual_opt = substitution.substitute(formal_canon);
-      if (!actual_opt)
-        continue;
-
-      // Check null/non-null contradictions
-      if (callee_pre_formula.isNull(formal_canon)) {
-        if (caller_formula.isNonNull(*actual_opt)) {
-          has_contradiction = true;
-          break;
-        }
-      } else if (callee_pre_formula.isNonNull(formal_canon)) {
-        if (caller_formula.isNull(*actual_opt)) {
-          has_contradiction = true;
-          break;
-        }
-      }
-    }
-  }
-
-  if (has_contradiction) {
-    // Contradiction detected - cannot apply this summary.
-    return {};
-  }
-
-  // Apply post-condition from summary with substitution
-  // Copy post-heap edges (with substitution)
-  for (const auto &kv : post->getPostHeap().getEdges()) {
-    AbstractValue formal_from = kv.first;
-    AbstractValue actual_from = substitution.substituteOrIdentity(formal_from);
-
-    for (const auto &edge_kv : kv.second) {
-      const Access &access = edge_kv.first;
-      const Address &formal_target = edge_kv.second;
-
-      // Substitute target address
-      Address actual_target = applySubstitution(substitution, formal_target);
-
-      // Add edge to caller's heap
-      if (!new_astate->getPostHeap().findEdge(actual_from, access)) {
-        new_astate->getPostHeap().addEdge(actual_from, access, actual_target);
-      }
-    }
-  }
-
-  // Copy post-attributes (with substitution)
-  for (const auto &kv : post->getPostAttrs().getAttrs()) {
-    AbstractValue formal_av = kv.first;
-    AbstractValue actual_av = substitution.substituteOrIdentity(formal_av);
-
-    for (Attribute attr : kv.second) {
-      new_astate->getPostAttrs().add(actual_av, attr);
-    }
-  }
-
-  // Copy allocation sizes (with substitution)
-  for (const auto &kv : post->getAllocationSizes()) {
-    AbstractValue formal_av = post->getCanonical(kv.first);
-    AbstractValue actual_av = substitution.substituteOrIdentity(formal_av);
-    new_astate->setAllocationSize(actual_av, kv.second);
-  }
-
-  // Merge post-formula (with substitution applied conceptually)
-  PulseFormula post_formula = summary.getPostFormula();
-  // Merge formulas (substitution is handled implicitly through
-  // canonicalization)
-  PulseFormula merged_formula =
-      PulseFormula::merge(new_astate->getPathFormula(), post_formula);
-  if (merged_formula.isConsistent()) {
-    new_astate->setPathFormula(
-        std::make_unique<PulseFormula>(std::move(merged_formula)));
-  }
-
-  // Handle return value with substitution
-  if (summary.getReturnValue()) {
-    AbstractValue formal_ret = *summary.getReturnValue();
-    AbstractValue actual_ret = substitution.substituteOrIdentity(formal_ret);
-
-    // If return value was substituted, use it; otherwise create fresh
-    if (substitution.substitute(formal_ret)) {
-      Address ret_addr(actual_ret);
-      ret_addr.history.addEvent(ValueHistory::EventKind::FunctionCall, CI,
-                                CI->getFunction());
-      new_astate->getPostStack().add(CI, ret_addr);
-    } else {
-      // Return value not in substitution (fresh value from callee)
-      // Check if the function returns a null constant
-      const llvm::Function *callee = summary.getFunction();
-      const llvm::Value *null_constant_ret = nullptr;
-
-      // Check if any ReturnInst in the function returns a null constant
-      for (const auto &BB : *callee) {
-        if (auto *RI = llvm::dyn_cast<llvm::ReturnInst>(BB.getTerminator())) {
-          if (RI->getNumOperands() > 0) {
-            const llvm::Value *ret_val = RI->getReturnValue();
-            if (ret_val && ret_val->getType()->isPointerTy()) {
-              if (detail::isNullPointerConstantValue(ret_val)) {
-                null_constant_ret = ret_val;
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      // Create return value: use null constant as source if function returns
-      // null
-      AbstractValue fresh_ret;
-      if (null_constant_ret) {
-        fresh_ret = factory_.createFresh(null_constant_ret);
-      } else {
-        fresh_ret = factory_.createFresh(CI);
-      }
-
-      Address ret_addr(fresh_ret);
-      ret_addr.history.addEvent(ValueHistory::EventKind::FunctionCall, CI,
-                                CI->getFunction());
-      new_astate->getPostStack().add(CI, ret_addr);
-
-      // Copy attributes from formal return to fresh return
-      const auto &ret_attrs = post->getPostAttrs().get(formal_ret);
-      for (Attribute attr : ret_attrs) {
-        new_astate->getPostAttrs().add(fresh_ret, attr);
-      }
-
-      // If function returns null constant, also set Null attribute and path
-      // formula
-      if (null_constant_ret) {
-        new_astate->getPostAttrs().add(fresh_ret, Attribute::Null);
-        new_astate->getPathFormula().addNull(fresh_ret);
-      }
-    }
-  }
-
-  results.push_back(std::move(new_state));
-  return results;
+  return applySummaryImproved(callee, caller_state, CI, pred, nullptr);
 }
 
 } // namespace pulse

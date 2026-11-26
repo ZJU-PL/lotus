@@ -17,6 +17,8 @@ class Instruction;
 
 namespace pulse {
 
+class Heap;
+
 /// LLVM implementation of Infer's TOPL call/array-write property language.
 /// Histories belong to individual Pulse disjuncts, and are replayed after
 /// callee-to-caller substitution. This also resolves guards that were unknown
@@ -97,7 +99,8 @@ public:
   bool empty() const { return properties_.empty(); }
   bool observes(ToplEvent::Kind kind, llvm::StringRef name) const;
   std::vector<ToplViolation> evaluate(const ToplHistory &history,
-                                      const PulseFormula &formula) const;
+                                      const PulseFormula &formula,
+                                      const Heap *post_heap = nullptr) const;
 };
 
 } // namespace pulse

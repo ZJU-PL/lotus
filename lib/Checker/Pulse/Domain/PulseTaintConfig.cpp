@@ -2,88 +2,287 @@
 
 #include <algorithm>
 
+#include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/Function.h>
+#include <llvm/Support/JSON.h>
 
 namespace pulse {
 
-bool ProcedureMatcher::matches(const llvm::Function *func) const {
-  if (!func)
-    return false;
+namespace {
 
-  std::string func_name = func->getName().str();
+static ProcedureTarget parseTarget(llvm::StringRef target_str,
+                                   ProcedureTarget fallback) {
+  if (target_str == "ReturnValue")
+    return ProcedureTarget::ReturnValue;
+  if (target_str == "AllArguments")
+    return ProcedureTarget::AllArguments;
+  if (target_str == "ArgumentPositions")
+    return ProcedureTarget::ArgumentPositions;
+  if (target_str == "InstanceReference")
+    return ProcedureTarget::InstanceReference;
+  if (target_str == "AllArgumentsButPositions")
+    return ProcedureTarget::AllArgumentsButPositions;
+  return fallback;
+}
+
+static llvm::Expected<ProcedureUnit>
+parseProcedureUnit(const llvm::json::Object &obj,
+                   ProcedureTarget default_target,
+                   const std::vector<TaintKind> &default_kinds) {
+  std::vector<TaintKind> kinds;
+  if (const auto *arr = obj.getArray("kinds")) {
+    for (const auto &v : *arr) {
+      if (auto s = v.getAsString()) {
+        kinds.emplace_back(s->str());
+      }
+    }
+  }
+  if (kinds.empty()) {
+    kinds = default_kinds;
+  }
+
+  ProcedureTarget target = default_target;
+  if (auto t = obj.getString("target")) {
+    target = parseTarget(*t, default_target);
+  }
+
+  std::vector<int> positions;
+  if (const auto *pos_arr = obj.getArray("positions")) {
+    for (const auto &v : *pos_arr) {
+      if (auto n = v.getAsInteger()) {
+        positions.push_back(static_cast<int>(*n));
+      }
+    }
+  }
+
+  if (auto proc = obj.getString("procedure")) {
+    ProcedureMatcher matcher(ProcedureMatcher::Type::ProcedureName,
+                             proc->str());
+    return ProcedureUnit(matcher, kinds, target, std::move(positions));
+  }
+  if (auto proc_re = obj.getString("procedure_regex")) {
+    try {
+      ProcedureMatcher matcher(ProcedureMatcher::Type::ProcedureNameRegex,
+                               proc_re->str());
+      return ProcedureUnit(matcher, kinds, target, std::move(positions));
+    } catch (const std::regex_error &e) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "invalid procedure_regex '%s': %s",
+                                     proc_re->str().c_str(), e.what());
+    }
+  }
+  if (const auto *classes = obj.getArray("class_names")) {
+    std::vector<std::string> cls_vec;
+    std::vector<std::string> mth_vec;
+    for (const auto &v : *classes) {
+      if (auto s = v.getAsString())
+        cls_vec.push_back(s->str());
+    }
+    if (const auto *methods = obj.getArray("method_names")) {
+      for (const auto &v : *methods) {
+        if (auto s = v.getAsString())
+          mth_vec.push_back(s->str());
+      }
+    }
+    ProcedureMatcher matcher =
+        ProcedureMatcher::forClassAndMethods(std::move(cls_vec),
+                                             std::move(mth_vec));
+    return ProcedureUnit(matcher, kinds, target, std::move(positions));
+  }
+
+  return llvm::createStringError(
+      llvm::inconvertibleErrorCode(),
+      "taint unit requires 'procedure', 'procedure_regex', or 'class_names'");
+}
+
+} // namespace
+
+bool ProcedureMatcher::matchesName(const std::string &func_name,
+                                   bool is_intrinsic) const {
+  if (func_name.empty()) {
+    return false;
+  }
+
+  for (const auto &ex : exclude_names_) {
+    if (func_name == ex) {
+      return false;
+    }
+  }
+
+  const std::string demangled = llvm::demangle(func_name);
+  const std::string demangled_no_args =
+      demangled.substr(0, demangled.find('('));
+
+  for (const auto &ex_in : exclude_in_) {
+    if (demangled_no_args.find(ex_in) != std::string::npos ||
+        func_name.find(ex_in) != std::string::npos) {
+      return false;
+    }
+  }
 
   switch (type_) {
   case Type::ProcedureName:
-    return func_name == name_;
+    return func_name == name_ || demangled_no_args == name_;
 
   case Type::ProcedureNameRegex:
-    return std::regex_search(func_name, name_regex_);
+    return std::regex_search(func_name, name_regex_) ||
+           std::regex_search(demangled_no_args, name_regex_);
 
   case Type::BuiltinName:
-    return func->isIntrinsic() && func_name == name_;
+    return is_intrinsic && func_name == name_;
 
   case Type::ClassNameRegex:
-  case Type::ClassAndMethodNames:
-    // Simplified: check if function name contains class name
-    // Full implementation would parse class name from function signature
-    for (const auto &class_name : class_names_) {
-      if (func_name.find(class_name) != std::string::npos) {
+    return std::regex_search(demangled_no_args, name_regex_);
+
+  case Type::ClassAndMethodNames: {
+    bool class_match = class_names_.empty();
+    for (const auto &cn : class_names_) {
+      if (demangled_no_args.find(cn) != std::string::npos) {
+        class_match = true;
+        break;
+      }
+    }
+    if (!class_match) {
+      return false;
+    }
+    if (method_names_.empty()) {
+      return true;
+    }
+    for (const auto &mn : method_names_) {
+      if (demangled_no_args.find("::" + mn) != std::string::npos ||
+          demangled_no_args == mn) {
         return true;
       }
     }
     return false;
-
-  default:
-    return false;
   }
+  }
+  return false;
+}
+
+bool ProcedureMatcher::matches(const llvm::Function *func) const {
+  if (!func)
+    return false;
+  return matchesName(func->getName().str(), func->isIntrinsic());
+}
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchSources(const llvm::Function *func) const {
+  std::vector<const ProcedureUnit *> out;
+  for (const auto &unit : source_procedures_) {
+    if (unit.matcher.matches(func)) {
+      out.push_back(&unit);
+    }
+  }
+  return out;
+}
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchSourcesByName(const std::string &func_name) const {
+  std::vector<const ProcedureUnit *> out;
+  for (const auto &unit : source_procedures_) {
+    if (unit.matcher.matchesName(func_name)) {
+      out.push_back(&unit);
+    }
+  }
+  return out;
+}
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchSinks(const llvm::Function *func) const {
+  std::vector<const ProcedureUnit *> out;
+  for (const auto &unit : sink_procedures_) {
+    if (unit.matcher.matches(func)) {
+      out.push_back(&unit);
+    }
+  }
+  return out;
+}
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchSinksByName(const std::string &func_name) const {
+  std::vector<const ProcedureUnit *> out;
+  for (const auto &unit : sink_procedures_) {
+    if (unit.matcher.matchesName(func_name)) {
+      out.push_back(&unit);
+    }
+  }
+  return out;
+}
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchSanitizers(const llvm::Function *func) const {
+  std::vector<const ProcedureUnit *> out;
+  for (const auto &unit : sanitizer_procedures_) {
+    if (unit.matcher.matches(func)) {
+      out.push_back(&unit);
+    }
+  }
+  return out;
+}
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchSanitizersByName(const std::string &func_name) const {
+  std::vector<const ProcedureUnit *> out;
+  for (const auto &unit : sanitizer_procedures_) {
+    if (unit.matcher.matchesName(func_name)) {
+      out.push_back(&unit);
+    }
+  }
+  return out;
+}
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchPropagators(const llvm::Function *func) const {
+  std::vector<const ProcedureUnit *> out;
+  for (const auto &unit : propagator_procedures_) {
+    if (unit.matcher.matches(func)) {
+      out.push_back(&unit);
+    }
+  }
+  return out;
+}
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchPropagatorsByName(const std::string &func_name) const {
+  std::vector<const ProcedureUnit *> out;
+  for (const auto &unit : propagator_procedures_) {
+    if (unit.matcher.matchesName(func_name)) {
+      out.push_back(&unit);
+    }
+  }
+  return out;
 }
 
 std::vector<TaintKind> TaintConfig::isSource(const llvm::Function *func) const {
   std::vector<TaintKind> kinds;
-
-  for (const auto &unit : source_procedures_) {
-    if (unit.matcher.matches(func)) {
-      kinds.insert(kinds.end(), unit.kinds.begin(), unit.kinds.end());
-    }
+  for (const ProcedureUnit *unit : matchSources(func)) {
+    kinds.insert(kinds.end(), unit->kinds.begin(), unit->kinds.end());
   }
-
   return kinds;
 }
 
 bool TaintConfig::isSink(const llvm::Function *func,
                          std::vector<TaintKind> &sink_kinds) const {
   sink_kinds.clear();
-
-  for (const auto &unit : sink_procedures_) {
-    if (unit.matcher.matches(func)) {
-      sink_kinds.insert(sink_kinds.end(), unit.kinds.begin(), unit.kinds.end());
-      return true;
-    }
+  auto matched = matchSinks(func);
+  for (const ProcedureUnit *unit : matched) {
+    sink_kinds.insert(sink_kinds.end(), unit->kinds.begin(), unit->kinds.end());
   }
-
-  return false;
+  return !matched.empty();
 }
 
 std::vector<TaintKind>
 TaintConfig::isSanitizer(const llvm::Function *func) const {
   std::vector<TaintKind> kinds;
-
-  for (const auto &unit : sanitizer_procedures_) {
-    if (unit.matcher.matches(func)) {
-      kinds.insert(kinds.end(), unit.kinds.begin(), unit.kinds.end());
-    }
+  for (const ProcedureUnit *unit : matchSanitizers(func)) {
+    kinds.insert(kinds.end(), unit->kinds.begin(), unit->kinds.end());
   }
-
   return kinds;
 }
 
 bool TaintConfig::isPropagator(const llvm::Function *func) const {
-  for (const auto &unit : propagator_procedures_) {
-    if (unit.matcher.matches(func)) {
-      return true;
-    }
-  }
-  return false;
+  return !matchPropagators(func).empty();
 }
 
 const std::vector<SinkPolicy> &
@@ -113,46 +312,66 @@ void TaintConfig::initializeDefault() {
 
   default_config_ = new TaintConfig();
 
-  // Common taint sources
-  ProcedureMatcher read_matcher(ProcedureMatcher::Type::ProcedureNameRegex,
-                                "read|fread|recv");
-  ProcedureUnit read_source(read_matcher, {TaintKind::UserInput()},
-                            ProcedureTarget::ReturnValue);
-  default_config_->addSourceProcedure(read_source);
+  // --- Unified default taint sources (with precise ProcedureTarget) ---
+  default_config_->addSourceProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureName, "read"),
+      {TaintKind::UserInput()}, ProcedureTarget::ArgumentPositions, {1}));
+  default_config_->addSourceProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
+                       "^(recv|recvfrom|recvmsg)$"),
+      {TaintKind::Network()}, ProcedureTarget::ArgumentPositions, {1}));
+  default_config_->addSourceProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
+                       "^(gets|fgets|fread)$"),
+      {TaintKind::UserInput()}, ProcedureTarget::ArgumentPositions, {0}));
+  default_config_->addSourceProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureName, "getcwd"),
+      {TaintKind::FileSystem()}, ProcedureTarget::ArgumentPositions, {0}));
+  default_config_->addSourceProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureName, "getenv"),
+      {TaintKind::Environment()}, ProcedureTarget::ReturnValue));
+  default_config_->addSourceProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureName, "scanf"),
+      {TaintKind::UserInput()}, ProcedureTarget::AllArgumentsButPositions,
+      {0}));
+  default_config_->addSourceProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureName, "fscanf"),
+      {TaintKind::UserInput()}, ProcedureTarget::AllArgumentsButPositions,
+      {0, 1}));
 
-  ProcedureMatcher getenv_matcher(ProcedureMatcher::Type::ProcedureName,
-                                  "getenv");
-  ProcedureUnit getenv_source(getenv_matcher, {TaintKind::Environment()},
-                              ProcedureTarget::ReturnValue);
-  default_config_->addSourceProcedure(getenv_source);
+  // --- Unified default taint sinks ---
+  default_config_->addSinkProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
+                       "^(system|exec|execl|execlp|execle|execv|execvp|execve|"
+                       "popen|eval)$"),
+      {TaintKind::UserInput()}, ProcedureTarget::AllArguments));
+  default_config_->addSinkProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
+                       "^(printf|fprintf|sprintf|snprintf)$"),
+      {TaintKind::UserInput()}, ProcedureTarget::AllArguments));
 
-  // Common taint sinks
-  ProcedureMatcher system_matcher(ProcedureMatcher::Type::ProcedureName,
-                                  "system");
-  ProcedureUnit system_sink(system_matcher, {TaintKind::UserInput()},
-                            ProcedureTarget::AllArguments);
-  default_config_->addSinkProcedure(system_sink);
+  // --- Unified default taint sanitizers ---
+  default_config_->addSanitizerProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
+                       "^(strlen|strcmp|strncmp|atoi|atol|atoll|strtol|"
+                       "strtoul)$"),
+      {TaintKind::Unknown()}, ProcedureTarget::AllArguments));
 
-  ProcedureMatcher exec_matcher(ProcedureMatcher::Type::ProcedureNameRegex,
-                                "exec|popen");
-  ProcedureUnit exec_sink(exec_matcher, {TaintKind::UserInput()},
-                          ProcedureTarget::AllArguments);
-  default_config_->addSinkProcedure(exec_sink);
+  // --- Unified default taint propagators ---
+  default_config_->addPropagatorProcedure(ProcedureUnit(
+      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
+                       "^(strcpy|strncpy|strcat|strncat|memcpy|memmove|strdup|"
+                       "sprintf|snprintf)$"),
+      {TaintKind::UserInput()}, ProcedureTarget::ReturnValue));
 
-  // Common sanitizers
-  ProcedureMatcher sanitizer_matcher(ProcedureMatcher::Type::ProcedureNameRegex,
-                                     "strlen|atoi|strtol");
-  ProcedureUnit sanitizer_unit(sanitizer_matcher, {TaintKind::Unknown()},
-                               ProcedureTarget::AllArguments);
-  default_config_->addSanitizerProcedure(sanitizer_unit);
-
-  // Sink policies
-  SinkPolicy command_injection(1, "Command injection");
+  // --- Default sink policies ---
+  SinkPolicy command_injection(1, "Command injection / tainted sink");
   command_injection.source_kinds = {TaintKind::UserInput(),
                                     TaintKind::Network(),
                                     TaintKind::Environment(),
-                                    TaintKind::FileSystem()};
-  command_injection.sanitizer_kinds = {};
+                                    TaintKind::FileSystem(),
+                                    TaintKind::Sensitive()};
+  command_injection.sanitizer_kinds = {TaintKind::Unknown()};
   default_config_->addSinkPolicy(TaintKind::UserInput(), command_injection);
 }
 
@@ -161,6 +380,98 @@ const TaintConfig &TaintConfig::getDefault() {
     initializeDefault();
   }
   return *default_config_;
+}
+
+llvm::Expected<TaintConfig>
+TaintConfig::loadFromJson(llvm::StringRef json_text, bool extend_default) {
+  auto parsed = llvm::json::parse(json_text);
+  if (!parsed) {
+    return parsed.takeError();
+  }
+  const auto *root = parsed->getAsObject();
+  if (!root) {
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "taint config JSON must be an object");
+  }
+
+  TaintConfig cfg = extend_default ? getDefault() : TaintConfig();
+
+  if (const auto *sources = root->getArray("sources")) {
+    for (const auto &v : *sources) {
+      const auto *obj = v.getAsObject();
+      if (!obj)
+        continue;
+      auto unit = parseProcedureUnit(*obj, ProcedureTarget::ReturnValue,
+                                     {TaintKind::UserInput()});
+      if (!unit)
+        return unit.takeError();
+      cfg.addSourceProcedure(*unit);
+    }
+  }
+  if (const auto *sinks = root->getArray("sinks")) {
+    for (const auto &v : *sinks) {
+      const auto *obj = v.getAsObject();
+      if (!obj)
+        continue;
+      auto unit = parseProcedureUnit(*obj, ProcedureTarget::AllArguments,
+                                     {TaintKind::UserInput()});
+      if (!unit)
+        return unit.takeError();
+      cfg.addSinkProcedure(*unit);
+    }
+  }
+  if (const auto *sanitizers = root->getArray("sanitizers")) {
+    for (const auto &v : *sanitizers) {
+      const auto *obj = v.getAsObject();
+      if (!obj)
+        continue;
+      auto unit = parseProcedureUnit(*obj, ProcedureTarget::AllArguments,
+                                     {TaintKind::Unknown()});
+      if (!unit)
+        return unit.takeError();
+      cfg.addSanitizerProcedure(*unit);
+    }
+  }
+  if (const auto *props = root->getArray("propagators")) {
+    for (const auto &v : *props) {
+      const auto *obj = v.getAsObject();
+      if (!obj)
+        continue;
+      auto unit = parseProcedureUnit(*obj, ProcedureTarget::ReturnValue,
+                                     {TaintKind::UserInput()});
+      if (!unit)
+        return unit.takeError();
+      cfg.addPropagatorProcedure(*unit);
+    }
+  }
+  if (const auto *policies = root->getArray("policies")) {
+    int next_id = 100;
+    for (const auto &v : *policies) {
+      const auto *obj = v.getAsObject();
+      if (!obj)
+        continue;
+      std::string sink_kind_name =
+          obj->getString("sink_kind").getValueOr("UserInput").str();
+      std::string desc =
+          obj->getString("description").getValueOr("Custom taint policy").str();
+      SinkPolicy pol(next_id++, desc);
+      if (const auto *srcs = obj->getArray("source_kinds")) {
+        for (const auto &sv : *srcs) {
+          if (auto s = sv.getAsString())
+            pol.source_kinds.emplace_back(s->str());
+        }
+      }
+      if (const auto *sans = obj->getArray("sanitizer_kinds")) {
+        for (const auto &sv : *sans) {
+          if (auto s = sv.getAsString())
+            pol.sanitizer_kinds.emplace_back(s->str());
+        }
+      }
+      cfg.addSinkPolicy(TaintKind(sink_kind_name), pol);
+    }
+  }
+
+  return cfg;
 }
 
 } // namespace pulse

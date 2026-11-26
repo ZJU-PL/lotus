@@ -275,7 +275,7 @@ public:
    */
   static void taint(AbductiveDomain &astate, AbstractValue v, TaintKind kind,
                     const llvm::Instruction *source) {
-    taint(astate, v, {std::move(kind)}, source);
+    taint(astate, v, std::vector<TaintKind>{std::move(kind)}, source);
   }
 
   /**

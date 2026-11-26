@@ -151,6 +151,8 @@ private:
   std::unique_ptr<AbductiveDomain> astate_;
   StoppedExecution stopped_execution_;
   const llvm::BasicBlock *entry_pred_{nullptr};
+  std::optional<AbstractValue> exception_value_;
+  std::string exception_type_;
 
 public:
   ExecutionDomain()
@@ -167,7 +169,9 @@ public:
         astate_(other.astate_
                     ? std::make_unique<AbductiveDomain>(other.astate_->clone())
                     : nullptr),
-        entry_pred_(other.entry_pred_) {
+        entry_pred_(other.entry_pred_),
+        exception_value_(other.exception_value_),
+        exception_type_(other.exception_type_) {
     // Deep copy stopped_execution_ if needed
     if (other.variant_ == Variant::Stopped) {
       stopped_execution_.kind = other.stopped_execution_.kind;
@@ -203,6 +207,8 @@ public:
                     ? std::make_unique<AbductiveDomain>(other.astate_->clone())
                     : nullptr;
       entry_pred_ = other.entry_pred_;
+      exception_value_ = other.exception_value_;
+      exception_type_ = other.exception_type_;
       if (other.variant_ == Variant::Stopped) {
         stopped_execution_.kind = other.stopped_execution_.kind;
         if (other.stopped_execution_.astate) {
@@ -241,10 +247,14 @@ public:
   }
 
   static ExecutionDomain
-  exceptionRaised(std::unique_ptr<AbductiveDomain> astate) {
+  exceptionRaised(std::unique_ptr<AbductiveDomain> astate,
+                  std::optional<AbstractValue> exc_val = std::nullopt,
+                  std::string exc_type = "") {
     ExecutionDomain d;
     d.variant_ = Variant::ExceptionRaised;
     d.astate_ = std::move(astate);
+    d.exception_value_ = exc_val;
+    d.exception_type_ = std::move(exc_type);
     return d;
   }
 
@@ -272,12 +282,16 @@ public:
 
   static ExecutionDomain
   latentAbortProgram(std::unique_ptr<AbductiveDomain> astate,
-                     LatentIssue *latent_issue) {
+                     LatentIssue *latent_issue,
+                     OperationResult diagnostic = OperationResult::InvalidAccess,
+                     Trace trace = Trace()) {
     ExecutionDomain d;
     d.variant_ = Variant::Stopped;
     d.stopped_execution_.kind = StoppedExecutionKind::LatentAbortProgram;
     d.stopped_execution_.astate = std::move(astate);
     d.stopped_execution_.latent_issue = latent_issue;
+    d.stopped_execution_.diagnostic = diagnostic;
+    d.stopped_execution_.trace_to_issue = std::move(trace);
     return d;
   }
 
@@ -290,6 +304,8 @@ public:
     d.variant_ = Variant::Stopped;
     d.stopped_execution_.kind = StoppedExecutionKind::LatentInvalidAccess;
     d.stopped_execution_.astate = std::move(astate);
+    d.stopped_execution_.diagnostic = OperationResult::NullDereference;
+    d.stopped_execution_.trace_to_issue = must_be_valid.first.clone();
     d.stopped_execution_.address = address;
     d.stopped_execution_.must_be_valid = std::move(must_be_valid);
     d.stopped_execution_.calling_context = std::move(calling_context);
@@ -350,6 +366,16 @@ public:
   const llvm::BasicBlock *getEntryPred() const { return entry_pred_; }
   void setEntryPred(const llvm::BasicBlock *pred) { entry_pred_ = pred; }
 
+  // Thrown exception object & normalized RTTI type name (when ExceptionRaised).
+  std::optional<AbstractValue> getExceptionValue() const {
+    return exception_value_;
+  }
+  const std::string &getExceptionType() const { return exception_type_; }
+  void setExceptionInfo(std::optional<AbstractValue> val, std::string type) {
+    exception_value_ = val;
+    exception_type_ = std::move(type);
+  }
+
   AbductiveDomain *getAstate() {
     return isStopped() ? stopped_execution_.astate.get() : astate_.get();
   }
@@ -385,6 +411,8 @@ public:
     c.astate_ =
         astate_ ? std::make_unique<AbductiveDomain>(astate_->clone()) : nullptr;
     c.entry_pred_ = entry_pred_;
+    c.exception_value_ = exception_value_;
+    c.exception_type_ = exception_type_;
     if (stopped_execution_.astate) {
       c.stopped_execution_.astate =
           std::make_unique<AbductiveDomain>(stopped_execution_.astate->clone());

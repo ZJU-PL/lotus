@@ -4,6 +4,7 @@
 #include "Checker/Pulse/Core/PulseSubstitution.h"
 #include "Checker/Pulse/Domain/PulseInvalidation.h"
 #include "Checker/Pulse/Domain/PulseTaint.h"
+#include "Checker/Pulse/Domain/PulseTaintConfig.h"
 #include "Checker/Pulse/Interproc/PulseModels.h"
 #include "Checker/Pulse/Interproc/PulseSpecialization.h"
 #include "Checker/Pulse/Report/PulseDiagnostic.h"
@@ -15,6 +16,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <string>
 #include <tuple>
 #include <unordered_set>
 #include <vector>
@@ -23,48 +25,169 @@
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/Operator.h>
+#include <llvm/Support/raw_ostream.h>
 
 namespace pulse {
 
 namespace {
+
+static std::string formatTypeName(const llvm::Type *ty) {
+  if (!ty)
+    return "unknown";
+  std::string out;
+  llvm::raw_string_ostream os(out);
+  ty->print(os);
+  return os.str();
+}
+
+static bool isExpensiveAggregateType(const llvm::Type *ty,
+                                     const llvm::Module *M) {
+  if (!ty)
+    return false;
+  if (!ty->isStructTy() && !ty->isArrayTy()) {
+    return false;
+  }
+  if (M && ty->isSized()) {
+    return M->getDataLayout().getTypeAllocSize(const_cast<llvm::Type *>(ty)) >=
+           16;
+  }
+  return true;
+}
+
 static void modelUnknownCallEffects(PulseOperations &ops,
                                     AbductiveDomain &astate,
-                                    const llvm::CallInst *CI,
+                                    const llvm::CallBase *CB,
                                     const llvm::BasicBlock *pred,
                                     AbstractValueFactory &factory) {
-  for (unsigned i = 0; i < CI->arg_size(); ++i) {
-    const llvm::Value *arg = CI->getArgOperand(i);
+  for (unsigned i = 0; i < CB->arg_size(); ++i) {
+    const llvm::Value *arg = CB->getArgOperand(i);
     if (!arg->getType()->isPointerTy()) {
       continue;
     }
-    auto arg_opt = ops.eval(astate, arg, CI, pred);
+    auto arg_opt = ops.eval(astate, arg, CB, pred);
     if (!arg_opt) {
       continue;
     }
-    ops.havoc(astate, *arg_opt, CI);
+    ops.havoc(astate, *arg_opt, CB);
   }
 
-  if (CI->getType()->isPointerTy()) {
-    AbstractValue ret_val = factory.createFresh(CI);
+  if (!CB->getType()->isVoidTy()) {
+    AbstractValue ret_val = factory.createFresh(CB);
     Address ret_addr(ret_val);
-    ret_addr.history.addEvent(ValueHistory::EventKind::FunctionCall, CI,
-                              CI->getFunction());
-    astate.getPostStack().add(CI, ret_addr);
+    ret_addr.history.addEvent(ValueHistory::EventKind::FunctionCall, CB,
+                              CB->getFunction());
+    astate.getPostStack().add(CB, ret_addr);
+    if (CB->getType()->isIntegerTy()) {
+      astate.getPathFormula().addIntegerConstraint(ret_val);
+    }
   }
 }
+
+static bool isHeapOrResourceAllocator(AllocatorKind kind) {
+  return kind == AllocatorKind::CMalloc || kind == AllocatorKind::CRealloc ||
+         kind == AllocatorKind::CppNew || kind == AllocatorKind::CppNewArray ||
+         kind == AllocatorKind::FileHandle || kind == AllocatorKind::Socket ||
+         kind == AllocatorKind::CustomResource;
+}
+
+static void clearUnreachableAt(AbductiveDomain &astate, AbstractValue av) {
+  AbstractValue root = astate.getAllocationRoot(av);
+  auto it = astate.getPostAllocationInfo().find(root);
+  if (it != astate.getPostAllocationInfo().end()) {
+    it->second.unreachable_at = nullptr;
+  }
+}
+
+static void markUnreachableAllocationIfDead(AbductiveDomain &astate,
+                                            AbstractValue candidate,
+                                            const llvm::Instruction *loc) {
+  if (!loc) {
+    return;
+  }
+  AbstractValue canon = astate.getCanonical(candidate);
+  AbstractValue root = astate.getAllocationRoot(canon);
+  auto &alloc_map = astate.getPostAllocationInfo();
+  auto it = alloc_map.find(root);
+  if (it == alloc_map.end()) {
+    it = alloc_map.find(canon);
+    if (it == alloc_map.end()) {
+      return;
+    }
+    root = it->first;
+  }
+  if (!isHeapOrResourceAllocator(it->second.kind) ||
+      astate.getPostAttrs().has(root, Attribute::Invalid) ||
+      astate.getPostAttrs().has(root, Attribute::Stack) ||
+      astate.getPostAttrs().has(root, Attribute::Global)) {
+    return;
+  }
+
+  // Check if any stack slot (alloca/arg/global) or heap edge still references
+  // this allocation or an interior pointer derived from it.
+  for (const auto &kv : astate.getPostStack().getMap()) {
+    if (!kv.first ||
+        (!llvm::isa<llvm::AllocaInst>(kv.first) &&
+         !llvm::isa<llvm::Argument>(kv.first) &&
+         !llvm::isa<llvm::GlobalValue>(kv.first))) {
+      continue;
+    }
+    AbstractValue v = astate.getCanonical(kv.second.addr);
+    if (v == root || astate.getAllocationRoot(v) == root) {
+      return;
+    }
+  }
+  for (const auto &node_kv : astate.getPostHeap().getEdges()) {
+    for (const auto &edge_kv : node_kv.second) {
+      AbstractValue target = astate.getCanonical(edge_kv.second.addr);
+      if (target == root || astate.getAllocationRoot(target) == root) {
+        return;
+      }
+    }
+  }
+
+  if (!it->second.unreachable_at) {
+    it->second.unreachable_at = loc;
+  }
+}
+
+static PathConditionAtom::Kind
+atomKindFromIcmpPred(llvm::ICmpInst::Predicate pred) {
+  switch (pred) {
+  case llvm::ICmpInst::ICMP_EQ:
+    return PathConditionAtom::Kind::Equal;
+  case llvm::ICmpInst::ICMP_NE:
+    return PathConditionAtom::Kind::NotEqual;
+  case llvm::ICmpInst::ICMP_SLT:
+  case llvm::ICmpInst::ICMP_ULT:
+    return PathConditionAtom::Kind::LessThan;
+  case llvm::ICmpInst::ICMP_SLE:
+  case llvm::ICmpInst::ICMP_ULE:
+    return PathConditionAtom::Kind::LessEqual;
+  case llvm::ICmpInst::ICMP_SGT:
+  case llvm::ICmpInst::ICMP_UGT:
+    return PathConditionAtom::Kind::GreaterThan;
+  case llvm::ICmpInst::ICMP_SGE:
+  case llvm::ICmpInst::ICMP_UGE:
+    return PathConditionAtom::Kind::GreaterEqual;
+  default:
+    return PathConditionAtom::Kind::Other;
+  }
+}
+
 } // namespace
 
 std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     const llvm::Instruction *I, ExecutionDomain exec_state,
     const llvm::BasicBlock *pred, unsigned call_depth) {
-  if (exec_state.isStopped())
+  if (exec_state.isStopped() || exec_state.isExceptionRaised())
     return {exec_state};
   auto *astate = exec_state.getAstate();
   if (!astate)
     return {exec_state};
 
   auto pruneInfeasible = [](ExecutionDomain &st) -> bool {
-    if (st.isStopped())
+    if (st.isStopped() || st.isExceptionRaised())
       return true;
     AbductiveDomain *a = st.getAstate();
     if (!a)
@@ -85,15 +208,8 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     return out;
   };
 
-  //===--------------------------------------------------------------------===//
-  // Select
-  //
-  // `select cond, t, f` is a value-level branch. Keep alternatives as separate
-  // disjuncts and refine each one with the selected truth value, exactly as for
-  // a CFG branch. This prevents a constant-false or already-constrained select
-  // from fabricating the other operand as a witness.
   if (auto *Sel = llvm::dyn_cast<llvm::SelectInst>(I)) {
-    if (Sel->getType()->isPointerTy()) {
+    if (Sel->getType()->isPointerTy() || Sel->getType()->isIntegerTy()) {
       auto apply_choice = [&](ExecutionDomain &st, const llvm::Value *chosen) {
         auto *a = st.getAstate();
         if (!a)
@@ -115,8 +231,10 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
                                         choose_true, Sel, pred);
         if (!selected)
           continue;
-        apply_choice(*selected, choose_true ? Sel->getTrueValue()
-                                            : Sel->getFalseValue());
+        if (!selected->isStopped()) {
+          apply_choice(*selected, choose_true ? Sel->getTrueValue()
+                                              : Sel->getFalseValue());
+        }
         selected_states.push_back(std::move(*selected));
       }
       return pruneStates(std::move(selected_states));
@@ -125,15 +243,9 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
   }
 
   if (auto *Phi = llvm::dyn_cast<llvm::PHINode>(I)) {
-    // PHI nodes need special handling: they merge values from multiple
-    // predecessors Since we've already joined states at block entry, we can use
-    // any predecessor In a more precise implementation, we'd track which
-    // predecessor led to which state
     if (!pred) {
       pred = exec_state.getEntryPred();
     }
-
-    // Check if pred is actually a predecessor of the PHI node
     bool is_predecessor = false;
     for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
       if (Phi->getIncomingBlock(i) == pred) {
@@ -142,15 +254,12 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
       }
     }
     if (!is_predecessor) {
-      // Without the incoming edge this state is not a witness for any PHI
-      // operand. Drop it rather than guessing an operand or fresh value.
       return {};
     }
 
     const llvm::Value *incoming = Phi->getIncomingValueForBlock(pred);
     auto addr_opt = ops_.eval(*astate, incoming, I, pred);
     if (addr_opt) {
-      // Canonicalize the PHI result
       AbstractValue canon_addr = astate->getCanonical(addr_opt->addr);
       Address canon_result(canon_addr);
       canon_result.history = addr_opt->history;
@@ -161,8 +270,271 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     return pruneStates({exec_state});
   }
 
+  if (auto *GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(I)) {
+    auto gep_opt = ops_.eval(*astate, GEP, GEP, pred);
+    if (gep_opt) {
+      astate->getPostStack().add(GEP, *gep_opt);
+    }
+    return pruneStates({exec_state});
+  }
+
+  if (auto *BC = llvm::dyn_cast<llvm::BitCastInst>(I)) {
+    auto src_opt = ops_.eval(*astate, BC->getOperand(0), BC, pred);
+    if (src_opt) {
+      astate->getPostStack().add(BC, *src_opt);
+    }
+    return pruneStates({exec_state});
+  }
+
+  if (llvm::isa<llvm::ZExtInst>(I) || llvm::isa<llvm::SExtInst>(I) ||
+      llvm::isa<llvm::TruncInst>(I) || llvm::isa<llvm::IntToPtrInst>(I) ||
+      llvm::isa<llvm::PtrToIntInst>(I)) {
+    auto src_opt = ops_.eval(*astate, I->getOperand(0), I, pred);
+    if (src_opt) {
+      astate->getPostStack().add(I, *src_opt);
+    }
+    return pruneStates({exec_state});
+  }
+
+  if (auto *IVI = llvm::dyn_cast<llvm::InsertValueInst>(I)) {
+    AbstractValue res_av = factory_.createFresh(IVI);
+    Address res_addr(res_av);
+    if (auto agg_opt =
+            ops_.eval(*astate, IVI->getAggregateOperand(), IVI, pred)) {
+      ops_.copySubgraph(*astate, astate->getCanonical(agg_opt->addr), res_av, 3);
+    }
+    if (auto ins_opt =
+            ops_.eval(*astate, IVI->getInsertedValueOperand(), IVI, pred)) {
+      AbstractValue cur = res_av;
+      auto indices = IVI->getIndices();
+      for (size_t idx_i = 0; idx_i < indices.size(); ++idx_i) {
+        Access acc(indices[idx_i]);
+        if (idx_i + 1 == indices.size()) {
+          Address leaf = *ins_opt;
+          leaf.history.addEvent(ValueHistory::EventKind::Store, IVI,
+                                IVI->getFunction());
+          astate->getPostHeap().addEdge(cur, acc, leaf);
+        } else if (const Address *existing =
+                       astate->getPostHeap().findEdge(cur, acc)) {
+          cur = astate->getCanonical(existing->addr);
+        } else {
+          AbstractValue mid = factory_.createFresh(IVI);
+          astate->getPostHeap().addEdge(cur, acc, Address(mid));
+          cur = mid;
+        }
+      }
+    }
+    astate->getPostStack().add(IVI, res_addr);
+    return pruneStates({exec_state});
+  }
+
+  if (auto *EVI = llvm::dyn_cast<llvm::ExtractValueInst>(I)) {
+    if (auto agg_opt =
+            ops_.eval(*astate, EVI->getAggregateOperand(), EVI, pred)) {
+      AbstractValue cur = astate->getCanonical(agg_opt->addr);
+      ValueHistory hist = agg_opt->history;
+      for (unsigned field_idx : EVI->getIndices()) {
+        Access acc(field_idx);
+        if (const Address *next = astate->getPostHeap().findEdge(cur, acc)) {
+          cur = astate->getCanonical(next->addr);
+          hist = next->history;
+        } else {
+          AbstractValue fresh = factory_.createFresh(EVI);
+          Address next_addr(fresh);
+          next_addr.history = hist;
+          astate->getPostHeap().addEdge(cur, acc, next_addr);
+          astate->abduceToPre(cur, acc, next_addr);
+          cur = fresh;
+        }
+      }
+      Address extracted(cur);
+      extracted.history = hist;
+      astate->getPostStack().add(EVI, extracted);
+    }
+    return pruneStates({exec_state});
+  }
+
+  if (auto *RMW = llvm::dyn_cast<llvm::AtomicRMWInst>(I)) {
+    auto ptr_opt = ops_.eval(*astate, RMW->getPointerOperand(), RMW, pred);
+    if (!ptr_opt)
+      return pruneStates({exec_state});
+    auto read_res = ops_.readDeref(*astate, *ptr_opt, RMW);
+    if (read_res.first != OperationResult::Success) {
+      Trace trace = Trace::fromValueHistory(ptr_opt->history);
+      trace.addEvent(RMW, "Atomic read-modify-write through invalid pointer");
+      AbstractValue canon_ptr = astate->getCanonical(ptr_opt->addr);
+      if (LatentIssue::isManifest(read_res.first, *astate, canon_ptr)) {
+        reportBug(read_res.first, RMW, canon_ptr, trace, astate);
+        return {ExecutionDomain::abortProgram(
+            std::make_unique<AbductiveDomain>(astate->clone()), read_res.first,
+            std::move(trace))};
+      }
+      latent_issues_.emplace_back(
+          read_res.first, LatentIssue::issueKindFromResult(read_res.first),
+          canon_ptr, RMW, trace.clone());
+      return {ExecutionDomain::latentAbortProgram(
+          std::make_unique<AbductiveDomain>(astate->clone()),
+          &latent_issues_.back(), read_res.first, std::move(trace))};
+    }
+    Address old_addr =
+        read_res.second ? *read_res.second : Address(factory_.createFresh(RMW));
+    astate->getPostStack().add(RMW, old_addr);
+
+    auto val_opt = ops_.eval(*astate, RMW->getValOperand(), RMW, pred);
+    Address new_addr(factory_.createFresh(RMW));
+    if (RMW->getOperation() == llvm::AtomicRMWInst::Xchg && val_opt) {
+      new_addr = *val_opt;
+    } else if (val_opt && RMW->getType()->isIntegerTy()) {
+      astate->getPathFormula().addIntegerConstraint(new_addr.addr);
+      if (RMW->getOperation() == llvm::AtomicRMWInst::Add) {
+        (void)astate->getPathFormula().addArithmeticOperation(
+            new_addr.addr, astate->getCanonical(old_addr.addr),
+            astate->getCanonical(val_opt->addr), "+");
+      } else if (RMW->getOperation() == llvm::AtomicRMWInst::Sub) {
+        (void)astate->getPathFormula().addArithmeticOperation(
+            new_addr.addr, astate->getCanonical(old_addr.addr),
+            astate->getCanonical(val_opt->addr), "-");
+      }
+    }
+    ops_.writeDeref(*astate, *ptr_opt, new_addr, RMW);
+    return pruneStates({exec_state});
+  }
+
+  if (auto *CX = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(I)) {
+    auto ptr_opt = ops_.eval(*astate, CX->getPointerOperand(), CX, pred);
+    if (!ptr_opt)
+      return pruneStates({exec_state});
+    auto read_res = ops_.readDeref(*astate, *ptr_opt, CX);
+    if (read_res.first != OperationResult::Success) {
+      Trace trace = Trace::fromValueHistory(ptr_opt->history);
+      trace.addEvent(CX, "Atomic compare-exchange through invalid pointer");
+      AbstractValue canon_ptr = astate->getCanonical(ptr_opt->addr);
+      if (LatentIssue::isManifest(read_res.first, *astate, canon_ptr)) {
+        reportBug(read_res.first, CX, canon_ptr, trace, astate);
+        return {ExecutionDomain::abortProgram(
+            std::make_unique<AbductiveDomain>(astate->clone()), read_res.first,
+            std::move(trace))};
+      }
+      latent_issues_.emplace_back(
+          read_res.first, LatentIssue::issueKindFromResult(read_res.first),
+          canon_ptr, CX, trace.clone());
+      return {ExecutionDomain::latentAbortProgram(
+          std::make_unique<AbductiveDomain>(astate->clone()),
+          &latent_issues_.back(), read_res.first, std::move(trace))};
+    }
+    Address old_addr =
+        read_res.second ? *read_res.second : Address(factory_.createFresh(CX));
+    auto cmp_opt = ops_.eval(*astate, CX->getCompareOperand(), CX, pred);
+    auto new_opt = ops_.eval(*astate, CX->getNewValOperand(), CX, pred);
+
+    std::vector<ExecutionDomain> out;
+    // Branch 1: compare succeeded -> write new value, return {old, 1}.
+    {
+      ExecutionDomain succ = exec_state.clone();
+      AbductiveDomain *sa = succ.getAstate();
+      bool ok = true;
+      if (cmp_opt) {
+        ok = sa->getPathFormula().addEquality(sa->getCanonical(old_addr.addr),
+                                              sa->getCanonical(cmp_opt->addr));
+      }
+      if (ok && sa->incorporatePendingNewEqs().isOk()) {
+        if (new_opt) {
+          ops_.writeDeref(*sa, *ptr_opt, *new_opt, CX);
+        }
+        AbstractValue res_av = factory_.createFresh(CX);
+        AbstractValue flag_av = factory_.createFresh(CX);
+        sa->getPathFormula().addBounds(flag_av, 1, 1);
+        sa->getPostHeap().addEdge(res_av, Access(0u), old_addr);
+        sa->getPostHeap().addEdge(res_av, Access(1u), Address(flag_av));
+        sa->getPostStack().add(CX, Address(res_av));
+        out.push_back(std::move(succ));
+      }
+    }
+    // Branch 2: compare failed -> leave memory unchanged, return {old, 0}.
+    {
+      ExecutionDomain fail = exec_state.clone();
+      AbductiveDomain *fa = fail.getAstate();
+      bool ok = true;
+      if (cmp_opt) {
+        ok = fa->getPathFormula().addDisequality(
+            fa->getCanonical(old_addr.addr), fa->getCanonical(cmp_opt->addr));
+      }
+      if (ok && fa->incorporatePendingNewEqs().isOk()) {
+        AbstractValue res_av = factory_.createFresh(CX);
+        AbstractValue flag_av = factory_.createFresh(CX);
+        fa->getPathFormula().addBounds(flag_av, 0, 0);
+        fa->getPostHeap().addEdge(res_av, Access(0u), old_addr);
+        fa->getPostHeap().addEdge(res_av, Access(1u), Address(flag_av));
+        fa->getPostStack().add(CX, Address(res_av));
+        out.push_back(std::move(fail));
+      }
+    }
+    return pruneStates(std::move(out));
+  }
+
+  if (auto *LPI = llvm::dyn_cast<llvm::LandingPadInst>(I)) {
+    AbstractValue lp_av = factory_.createFresh(LPI);
+    AbstractValue exc_ptr = exec_state.getExceptionValue()
+                                ? astate->getCanonical(*exec_state.getExceptionValue())
+                                : factory_.createFresh(LPI);
+    AbstractValue sel = factory_.createFresh(LPI);
+    astate->addNonNull(exc_ptr);
+    astate->getPathFormula().addIntegerConstraint(sel);
+
+    const std::string &exc_type = exec_state.getExceptionType();
+    if (!exc_type.empty()) {
+      astate->setDynamicType(exc_ptr, exc_type);
+      std::optional<int64_t> matched_sel;
+      for (unsigned i = 0; i < LPI->getNumClauses(); ++i) {
+        if (!LPI->isCatch(i))
+          continue;
+        std::string clause_type =
+            detail::normalizeRttiTypeName(LPI->getClause(i));
+        if (clause_type.empty()) {
+          // Catch-all (`catch i8* null`) matches if no more specific clause did.
+          if (!matched_sel)
+            matched_sel = 1;
+        } else if (clause_type == exc_type) {
+          matched_sel = detail::rttiTypeIdForName(clause_type);
+          break;
+        }
+      }
+      if (!matched_sel && LPI->isCleanup()) {
+        matched_sel = 0;
+      }
+      if (matched_sel) {
+        (void)astate->getPathFormula().addBounds(sel, *matched_sel,
+                                                 *matched_sel);
+      }
+    }
+
+    astate->getPostHeap().addEdge(lp_av, Access(0u), Address(exc_ptr));
+    astate->getPostHeap().addEdge(lp_av, Access(1u), Address(sel));
+    astate->getPostStack().add(LPI, Address(lp_av));
+    return pruneStates({exec_state});
+  }
+
+  if (auto *ResI = llvm::dyn_cast<llvm::ResumeInst>(I)) {
+    std::optional<AbstractValue> exc_val = exec_state.getExceptionValue();
+    std::string exc_type = exec_state.getExceptionType();
+    if (auto lp_opt = ops_.eval(*astate, ResI->getValue(), ResI, pred)) {
+      AbstractValue lp_c = astate->getCanonical(lp_opt->addr);
+      if (const Address *e0 = astate->getPostHeap().findEdge(lp_c, Access(0u))) {
+        AbstractValue e0_c = astate->getCanonical(e0->addr);
+        exc_val = e0_c;
+        if (auto dt = astate->getDynamicType(e0_c)) {
+          exc_type = *dt;
+        }
+      }
+    }
+    return {ExecutionDomain::exceptionRaised(
+        std::make_unique<AbductiveDomain>(astate->clone()), exc_val,
+        std::move(exc_type))};
+  }
+
   if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(I))
     return pruneStates({handleLoad(LI, exec_state, pred)});
+
   if (auto *SI = llvm::dyn_cast<llvm::StoreInst>(I)) {
     auto result = handleStore(SI, exec_state, pred);
     if (!result.isStopped() && result.getAstate() &&
@@ -175,44 +547,84 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
         event.kind = ToplEvent::Kind::ArrayWrite;
         event.name = "#ArrayWrite";
         event.location = SI;
-        event.arguments = {toplValue(state, gep->getPointerOperand(), SI, pred),
-                           toplValue(state, gep->getOperand(gep->getNumOperands() - 1), SI, pred)};
+        event.arguments = {
+            toplValue(state, gep->getPointerOperand(), SI, pred),
+            toplValue(state, gep->getOperand(gep->getNumOperands() - 1), SI,
+                      pred)};
         recordToplEvent(state, std::move(event));
       }
     }
     return pruneStates({std::move(result)});
   }
-  if (auto *CI = llvm::dyn_cast<llvm::CallInst>(I)) {
+
+  if (auto *CB = llvm::dyn_cast<llvm::CallBase>(I)) {
     const auto *callee = llvm::dyn_cast<llvm::Function>(
-        CI->getCalledOperand()->stripPointerCasts());
+        CB->getCalledOperand()->stripPointerCasts());
     const bool observe = callee &&
-        topl_program_.observes(ToplEvent::Kind::Call, callee->getName());
+                         topl_program_.observes(ToplEvent::Kind::Call,
+                                                callee->getName());
     ToplEvent event;
     if (observe) {
       event.name = callee->getName().str();
-      event.location = CI;
-      for (const auto &arg : CI->args())
-        event.arguments.push_back(toplValue(*astate, arg.get(), CI, pred));
+      event.location = CB;
+      for (const auto &arg : CB->args())
+        event.arguments.push_back(toplValue(*astate, arg.get(), CB, pred));
     }
-    auto results = handleCall(CI, exec_state, pred, call_depth);
+    auto results = handleCallBase(CB, exec_state, pred, call_depth);
     if (observe) {
       for (auto &result : results) {
-        if (result.isStopped() || !result.getAstate())
+        if (result.isStopped() || result.isExceptionRaised() ||
+            !result.getAstate())
           continue;
         ToplEvent completed = event;
-        completed.arguments.push_back(toplValue(*result.getAstate(), CI, CI, pred));
+        completed.arguments.push_back(
+            toplValue(*result.getAstate(), CB, CB, pred));
         recordToplEvent(*result.getAstate(), std::move(completed));
       }
     }
     return pruneStates(std::move(results));
   }
+
   if (auto *AI = llvm::dyn_cast<llvm::AllocaInst>(I))
     return pruneStates({handleAlloca(AI, exec_state)});
   if (auto *RI = llvm::dyn_cast<llvm::ReturnInst>(I))
     return pruneStates({handleReturn(RI, exec_state)});
 
-  // Integer arithmetic: record constraints linking SSA values.
   if (auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(I)) {
+    if (BO->getType()->isFloatingPointTy()) {
+      auto lhs_opt = ops_.eval(*astate, BO->getOperand(0), BO, pred);
+      auto rhs_opt = ops_.eval(*astate, BO->getOperand(1), BO, pred);
+      if (lhs_opt && rhs_opt) {
+        AbstractValue res_av = factory_.getOrCreate(BO);
+        AbstractValue lhs_av = astate->getCanonical(lhs_opt->addr);
+        AbstractValue rhs_av = astate->getCanonical(rhs_opt->addr);
+        astate->getPostStack().add(BO, Address(res_av));
+        std::string op;
+        switch (BO->getOpcode()) {
+        case llvm::Instruction::FAdd:
+          op = "+";
+          break;
+        case llvm::Instruction::FSub:
+          op = "-";
+          break;
+        case llvm::Instruction::FMul:
+          op = "*";
+          break;
+        case llvm::Instruction::FDiv:
+          op = "/";
+          break;
+        default:
+          break;
+        }
+        if (!op.empty()) {
+          if (!astate->getPathFormula().addFloatOperation(res_av, lhs_av,
+                                                          rhs_av, op)) {
+            return {};
+          }
+        }
+      }
+      return pruneStates({exec_state});
+    }
     if (BO->getType()->isIntegerTy()) {
       auto lhs_opt = ops_.eval(*astate, BO->getOperand(0), BO, pred);
       auto rhs_opt = ops_.eval(*astate, BO->getOperand(1), BO, pred);
@@ -220,9 +632,14 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
         AbstractValue res_av = factory_.getOrCreate(BO);
         AbstractValue lhs_av = astate->getCanonical(lhs_opt->addr);
         AbstractValue rhs_av = astate->getCanonical(rhs_opt->addr);
+        unsigned bw = BO->getType()->getIntegerBitWidth();
         astate->getPathFormula().addIntegerConstraint(res_av);
         astate->getPathFormula().addIntegerConstraint(lhs_av);
         astate->getPathFormula().addIntegerConstraint(rhs_av);
+        astate->getPathFormula().setBitWidth(res_av, bw);
+        astate->getPathFormula().setBitWidth(lhs_av, bw);
+        astate->getPathFormula().setBitWidth(rhs_av, bw);
+        astate->getPostStack().add(BO, Address(res_av));
 
         std::string op;
         switch (BO->getOpcode()) {
@@ -271,8 +688,6 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     return pruneStates({exec_state});
   }
 
-  // Handle comparisons for path conditions. Skip when used as branch condition:
-  // we fork and apply per-branch in applyBranchCondition.
   if (llvm::isa<llvm::ICmpInst>(I) || llvm::isa<llvm::FCmpInst>(I)) {
     const llvm::Instruction *next = I->getNextNode();
     if (auto *BI = next ? llvm::dyn_cast<llvm::BranchInst>(
@@ -289,17 +704,13 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
   return pruneStates({exec_state});
 }
 
-std::vector<ExecutionDomain>
-PulseChecker::handleLibraryCall(const llvm::CallInst *CI,
-                                ExecutionDomain exec_state,
-                                const llvm::BasicBlock *pred) {
-
-  // Delegate to modular models
-  auto result = models_->dispatch(CI, exec_state, pred);
+std::vector<ExecutionDomain> PulseChecker::handleLibraryCall(
+    const llvm::CallBase *CB, ExecutionDomain exec_state,
+    const llvm::BasicBlock *pred, const llvm::Function *resolved_callee) {
+  auto result = models_->dispatch(CB, exec_state, pred, resolved_callee);
   if (result.handled) {
     return result.states;
   }
-
   return {};
 }
 
@@ -309,13 +720,10 @@ ExecutionDomain PulseChecker::handleLoad(const llvm::LoadInst *LI,
   auto *astate = exec_state.getAstate();
   const llvm::Value *ptr_operand = LI->getPointerOperand();
 
-  // Check if this is a direct load from a stack variable (alloca)
   if (auto *AI = llvm::dyn_cast<llvm::AllocaInst>(ptr_operand)) {
-    // Direct load from alloca - read from stack
     AbstractValue stack_var = factory_.getOrCreate(AI);
     AbstractValue canon_var = astate->getCanonical(stack_var);
 
-    // Check if variable is uninitialized (only for reads, not writes)
     if (astate->getPostAttrs().has(canon_var, Attribute::Uninitialized)) {
       Trace trace;
       trace.addEvent(LI, "Load from uninitialized variable");
@@ -330,18 +738,16 @@ ExecutionDomain PulseChecker::handleLoad(const llvm::LoadInst *LI,
         latent_issues_.emplace_back(OperationResult::UninitializedRead,
                                     LatentIssue::issueKindFromResult(
                                         OperationResult::UninitializedRead),
-                                    canon_var, LI, std::move(trace));
+                                    canon_var, LI, trace.clone());
         return ExecutionDomain::latentAbortProgram(
             std::make_unique<AbductiveDomain>(astate->clone()),
-            &latent_issues_.back());
+            &latent_issues_.back(), OperationResult::UninitializedRead,
+            std::move(trace));
       }
     }
 
-    // Variable is initialized - get value from stack
     if (auto *stack_addr = astate->getPostStack().find(AI)) {
       AbstractValue loaded_canon = astate->getCanonical(stack_addr->addr);
-
-      // Check if loaded value is invalid (use-after-free)
       if (astate->getPostAttrs().has(loaded_canon, Attribute::Invalid)) {
         Trace trace = Trace::fromValueHistory(stack_addr->history);
         trace.addEvent(LI, "Load of freed pointer");
@@ -356,21 +762,15 @@ ExecutionDomain PulseChecker::handleLoad(const llvm::LoadInst *LI,
           latent_issues_.emplace_back(
               OperationResult::UseAfterFree,
               LatentIssue::issueKindFromResult(OperationResult::UseAfterFree),
-              loaded_canon, LI, std::move(trace));
+              loaded_canon, LI, trace.clone());
           return ExecutionDomain::latentAbortProgram(
               std::make_unique<AbductiveDomain>(astate->clone()),
-              &latent_issues_.back());
+              &latent_issues_.back(), OperationResult::UseAfterFree,
+              std::move(trace));
         }
       }
-
-      // Do NOT report NullDereference here: loading a pointer value is not a
-      // dereference. The actual dereference (store/load through the pointer) is
-      // checked in writeDeref/readDeref.
-
       astate->getPostStack().add(LI, *stack_addr);
     } else {
-      // Variable not in stack yet - create fresh value (shouldn't happen for
-      // initialized)
       AbstractValue fresh = factory_.createFresh(LI);
       Address addr(fresh);
       astate->getPostStack().add(LI, addr);
@@ -378,47 +778,74 @@ ExecutionDomain PulseChecker::handleLoad(const llvm::LoadInst *LI,
     return exec_state;
   }
 
-  // Heap load (pointer dereference) - use readDeref
+  // Track reads from candidate const-refable parameters.
+  if (const auto *Arg =
+          llvm::dyn_cast<llvm::Argument>(ptr_operand->stripPointerCasts())) {
+    analysis_non_disj_.markParamRead(Arg);
+  } else if (const auto *GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(
+                 ptr_operand->stripPointerCasts())) {
+    if (const auto *Arg = llvm::dyn_cast<llvm::Argument>(
+            GEP->getPointerOperand()->stripPointerCasts())) {
+      analysis_non_disj_.markParamRead(Arg);
+    }
+  }
+
   auto ptr_opt = ops_.eval(*astate, ptr_operand, LI, pred);
   if (!ptr_opt) {
-    // Eval failed - could be null/invalid pointer in GEP or other operation
-    // Check if ptr_operand is a GEP that failed due to null/invalid base
     if (auto *GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr_operand)) {
       auto base_opt = ops_.eval(*astate, GEP->getPointerOperand(), LI, pred);
       if (base_opt) {
         AbstractValue base_canon = astate->getCanonical(base_opt->addr);
-        // PRIORITY: Check Invalid FIRST (UseAfterFree > NullDereference)
         if (astate->getPostAttrs().has(base_canon, Attribute::Invalid)) {
           Trace trace = Trace::fromValueHistory(base_opt->history);
           trace.addEvent(LI, "Array access through invalid pointer");
-          reportBug(OperationResult::UseAfterFree, LI, base_canon, trace,
-                    astate);
-          return ExecutionDomain::abortProgram(
-              std::make_unique<AbductiveDomain>(astate->clone()),
-              OperationResult::UseAfterFree, std::move(trace));
+          if (LatentIssue::isManifest(OperationResult::UseAfterFree, *astate,
+                                      base_canon)) {
+            reportBug(OperationResult::UseAfterFree, LI, base_canon, trace,
+                      astate);
+            return ExecutionDomain::abortProgram(
+                std::make_unique<AbductiveDomain>(astate->clone()),
+                OperationResult::UseAfterFree, std::move(trace));
+          } else {
+            latent_issues_.emplace_back(
+                OperationResult::UseAfterFree,
+                LatentIssue::issueKindFromResult(OperationResult::UseAfterFree),
+                base_canon, LI, trace.clone());
+            return ExecutionDomain::latentAbortProgram(
+                std::make_unique<AbductiveDomain>(astate->clone()),
+                &latent_issues_.back(), OperationResult::UseAfterFree,
+                std::move(trace));
+          }
         }
-        // Check if base is null (only if not invalid). A path-formula null fact
-        // is already a concrete branch witness; it need not originate as a
-        // literal null constant.
-        if (!astate->getPostAttrs().has(base_canon, Attribute::Invalid)) {
-          if (astate->getPathFormula().isNull(base_canon) ||
-              (astate->getPostAttrs().has(base_canon, Attribute::Null) &&
-               !astate->getPathFormula().isNonNull(base_canon))) {
-            Trace trace = Trace::fromValueHistory(base_opt->history);
-            trace.addEvent(LI, "Array access through null pointer");
+        if (astate->getPathFormula().isNull(base_canon) ||
+            (astate->getPostAttrs().has(base_canon, Attribute::Null) &&
+             !astate->getPathFormula().isNonNull(base_canon))) {
+          Trace trace = Trace::fromValueHistory(base_opt->history);
+          trace.addEvent(LI, "Array access through null pointer");
+          if (LatentIssue::isManifest(OperationResult::NullDereference, *astate,
+                                      base_canon)) {
             reportBug(OperationResult::NullDereference, LI, base_canon, trace,
                       astate);
             return ExecutionDomain::abortProgram(
                 std::make_unique<AbductiveDomain>(astate->clone()),
                 OperationResult::NullDereference, std::move(trace));
+          } else {
+            latent_issues_.emplace_back(
+                OperationResult::NullDereference,
+                LatentIssue::issueKindFromResult(
+                    OperationResult::NullDereference),
+                base_canon, LI, trace.clone());
+            return ExecutionDomain::latentAbortProgram(
+                std::make_unique<AbductiveDomain>(astate->clone()),
+                &latent_issues_.back(), OperationResult::NullDereference,
+                std::move(trace));
           }
         }
       }
     }
     return exec_state;
   }
-  // PRIORITY: Check Invalid FIRST before dereferencing (UseAfterFree >
-  // NullDereference)
+
   AbstractValue canon_ptr = astate->getCanonical(ptr_opt->addr);
   if (astate->getPostAttrs().has(canon_ptr, Attribute::Invalid)) {
     Trace trace = Trace::fromValueHistory(ptr_opt->history);
@@ -433,10 +860,11 @@ ExecutionDomain PulseChecker::handleLoad(const llvm::LoadInst *LI,
       latent_issues_.emplace_back(
           OperationResult::UseAfterFree,
           LatentIssue::issueKindFromResult(OperationResult::UseAfterFree),
-          canon_ptr, LI, std::move(trace));
+          canon_ptr, LI, trace.clone());
       return ExecutionDomain::latentAbortProgram(
           std::make_unique<AbductiveDomain>(astate->clone()),
-          &latent_issues_.back());
+          &latent_issues_.back(), OperationResult::UseAfterFree,
+          std::move(trace));
     }
   }
 
@@ -450,23 +878,20 @@ ExecutionDomain PulseChecker::handleLoad(const llvm::LoadInst *LI,
 
     if (LatentIssue::isManifest(result, *astate,
                                 astate->getCanonical(ptr_opt->addr))) {
-      // Manifest error - report immediately
       reportBug(result, LI, ptr_opt->addr, trace, astate);
       return ExecutionDomain::abortProgram(
           std::make_unique<AbductiveDomain>(astate->clone()), result,
           std::move(trace));
     } else {
-      // Latent error - create latent issue
       latent_issues_.emplace_back(result,
                                   LatentIssue::issueKindFromResult(result),
-                                  ptr_opt->addr, LI, std::move(trace));
+                                  ptr_opt->addr, LI, trace.clone());
       return ExecutionDomain::latentAbortProgram(
           std::make_unique<AbductiveDomain>(astate->clone()),
-          &latent_issues_.back());
+          &latent_issues_.back(), result, std::move(trace));
     }
   }
   if (value_opt) {
-    // Check if the loaded value itself is Invalid (UAF through pointer)
     AbstractValue loaded_canon = astate->getCanonical(value_opt->addr);
     if (astate->getPostAttrs().has(loaded_canon, Attribute::Invalid)) {
       Trace trace = Trace::fromValueHistory(value_opt->history);
@@ -482,17 +907,14 @@ ExecutionDomain PulseChecker::handleLoad(const llvm::LoadInst *LI,
         latent_issues_.emplace_back(
             OperationResult::UseAfterFree,
             LatentIssue::issueKindFromResult(OperationResult::UseAfterFree),
-            loaded_canon, LI, std::move(trace));
+            loaded_canon, LI, trace.clone());
         return ExecutionDomain::latentAbortProgram(
             std::make_unique<AbductiveDomain>(astate->clone()),
-            &latent_issues_.back());
+            &latent_issues_.back(), OperationResult::UseAfterFree,
+            std::move(trace));
       }
     }
-
     astate->getPostStack().add(LI, *value_opt);
-
-    // Check for taint sink: if loaded value flows to a sink
-    // (This would be checked at sink locations, not here)
   }
   return exec_state;
 }
@@ -511,7 +933,7 @@ ExecutionDomain PulseChecker::handleStore(const llvm::StoreInst *SI,
           !event.location) {
         continue;
       }
-      auto *call = llvm::dyn_cast<llvm::CallInst>(event.location);
+      auto *call = llvm::dyn_cast<llvm::CallBase>(event.location);
       if (!call)
         continue;
       auto *callee = call->getCalledFunction();
@@ -524,8 +946,6 @@ ExecutionDomain PulseChecker::handleStore(const llvm::StoreInst *SI,
 
   const llvm::Value *ptr_operand = SI->getPointerOperand();
 
-  // Sound incorrectness: report stack address escape only when provable.
-  // If a stack-derived pointer is stored into heap/global memory, it escapes.
   auto maybeReportStackEscape = [&](const Address &stored_value,
                                     const Address &dest_ptr) {
     if (!SI->getValueOperand()->getType()->isPointerTy())
@@ -540,7 +960,7 @@ ExecutionDomain PulseChecker::handleStore(const llvm::StoreInst *SI,
         astate->getPostAttrs().has(canon_dest, Attribute::Allocated) &&
         !astate->getPostAttrs().has(canon_dest, Attribute::Stack);
     if (!dest_is_global && !dest_is_heap)
-      return; // Cannot prove escape.
+      return;
 
     Trace trace = Trace::fromValueHistory(stored_value.history);
     trace.addEvent(SI, "Storing stack-derived address into non-stack memory");
@@ -551,45 +971,22 @@ ExecutionDomain PulseChecker::handleStore(const llvm::StoreInst *SI,
     DiagnosticManager::getInstance().report(std::move(diag));
   };
 
-  // Check if this is a direct store to a stack variable (alloca)
-  // Stack variables are in the stack map, and we can store to them directly
-  // without checking for uninitialized (storing initializes them)
   if (auto *AI = llvm::dyn_cast<llvm::AllocaInst>(ptr_operand)) {
-    // Direct store to alloca - update stack and clear Uninitialized
     AbstractValue stack_var = factory_.getOrCreate(AI);
     AbstractValue canon_var = astate->getCanonical(stack_var);
 
-    // Clear Uninitialized attribute (storing initializes the variable)
     astate->getPostAttrs().remove(canon_var, Attribute::Uninitialized);
+    astate->markWrittenTo(canon_var, SI);
 
-    // When storing a pointer value, preserve its attributes (Null, Invalid,
-    // Allocated)
     AbstractValue canon_value = astate->getCanonical(value_opt->addr);
-    if (astate->getPostAttrs().has(canon_value, Attribute::Null)) {
-      // Preserve null attribute on the stored value
-      astate->getPostAttrs().add(canon_value, Attribute::Null);
-    }
-    if (astate->getPostAttrs().has(canon_value, Attribute::Invalid)) {
-      // Preserve invalid attribute on the stored value
-      astate->getPostAttrs().add(canon_value, Attribute::Invalid);
-    }
-    if (astate->getPostAttrs().has(canon_value, Attribute::Allocated)) {
-      // Preserve allocated attribute on the stored value
-      astate->getPostAttrs().add(canon_value, Attribute::Allocated);
-    }
-
-    // Fix for realloc pattern false positives: when storing a new pointer value
-    // (especially from realloc), if the stored value is valid (Allocated and
-    // not Invalid), clear Invalid from the variable itself. This handles cases
-    // like:
-    //   int *new_p = realloc(p, size);
-    //   p = new_p;  // p now points to valid allocation, not the old
-    //   invalidated one
     if (astate->getPostAttrs().has(canon_value, Attribute::Allocated) &&
         !astate->getPostAttrs().has(canon_value, Attribute::Invalid)) {
-      // The stored value is a valid allocation - clear Invalid from the
-      // variable This ensures that after p = new_p, p is not considered invalid
       astate->getPostAttrs().remove(canon_var, Attribute::Invalid);
+    }
+
+    std::optional<AbstractValue> overwritten_av;
+    if (auto *old_addr = astate->getPostStack().find(AI)) {
+      overwritten_av = astate->getCanonical(old_addr->addr);
     }
 
     if (astate->getPostAttrs().has(canon_value, Attribute::Allocated) &&
@@ -601,27 +998,48 @@ ExecutionDomain PulseChecker::handleStore(const llvm::StoreInst *SI,
       astate->getPostAttrs().remove(canon_var, Attribute::Invalid);
     }
 
-    // Update stack with new value
-    // Add Store event to history so isNullConstantSource can detect null
-    // constants stored via CallInst
     Address stored_addr = *value_opt;
     stored_addr.history.addEvent(ValueHistory::EventKind::Store, SI,
                                  SI->getFunction());
     astate->getPostStack().add(AI, stored_addr);
+    clearUnreachableAt(*astate, canon_value);
 
-    // Only record copy if it's not a pointer type (to reduce false positives)
-    if (!SI->getValueOperand()->getType()->isPointerTy()) {
-      analysis_non_disj_.recordCopy(SI);
+    // If storing an aggregate SSA value (e.g. built via InsertValueInst) into
+    // a stack alloca, mirror its field subgraph onto the alloca address too.
+    if (SI->getValueOperand()->getType()->isStructTy() ||
+        SI->getValueOperand()->getType()->isArrayTy()) {
+      ops_.copySubgraph(*astate, canon_value, canon_var, 3);
+    }
+
+    if (overwritten_av && !(*overwritten_av == canon_value)) {
+      markUnreachableAllocationIfDead(*astate, *overwritten_av, SI);
+    }
+
+    // Track expensive aggregate copies into local stack variables.
+    if (isExpensiveAggregateType(SI->getValueOperand()->getType(), module_) &&
+        !llvm::isa<llvm::Constant>(SI->getValueOperand())) {
+      std::string var_name = AI->hasName() ? AI->getName().str() : "local_copy";
+      analysis_non_disj_.recordAggregateCopy(
+          SI, canon_var, var_name,
+          formatTypeName(SI->getValueOperand()->getType()),
+          astate->getTimestampCounter());
     }
     return exec_state;
   }
 
-  // Heap store (pointer dereference) - use writeDeref
   auto ptr_opt = ops_.eval(*astate, ptr_operand, SI, pred);
   if (!ptr_opt)
     return exec_state;
 
   maybeReportStackEscape(*value_opt, *ptr_opt);
+
+  AbstractValue canon_dest = astate->getCanonical(ptr_opt->addr);
+  AbstractValue canon_val = astate->getCanonical(value_opt->addr);
+  std::optional<AbstractValue> overwritten_heap_av;
+  if (const Address *old_edge = astate->getPostHeap().findEdge(
+          canon_dest, Access(AccessKind::Dereference))) {
+    overwritten_heap_av = astate->getCanonical(old_edge->addr);
+  }
 
   auto res = ops_.writeDeref(*astate, *ptr_opt, *value_opt, SI);
   if (res != OperationResult::Success) {
@@ -630,23 +1048,38 @@ ExecutionDomain PulseChecker::handleStore(const llvm::StoreInst *SI,
 
     if (LatentIssue::isManifest(res, *astate,
                                 astate->getCanonical(ptr_opt->addr))) {
-      // Manifest error - report immediately
       reportBug(res, SI, ptr_opt->addr, trace, astate);
       return ExecutionDomain::abortProgram(
           std::make_unique<AbductiveDomain>(astate->clone()), res,
           std::move(trace));
     } else {
-      // Latent error - create latent issue
       latent_issues_.emplace_back(res, LatentIssue::issueKindFromResult(res),
-                                  ptr_opt->addr, SI, std::move(trace));
+                                  ptr_opt->addr, SI, trace.clone());
       return ExecutionDomain::latentAbortProgram(
           std::make_unique<AbductiveDomain>(astate->clone()),
-          &latent_issues_.back());
+          &latent_issues_.back(), res, std::move(trace));
     }
   }
-  // Only record copy if it's not a pointer type (to reduce false positives)
-  if (!SI->getValueOperand()->getType()->isPointerTy()) {
-    analysis_non_disj_.recordCopy(SI);
+
+  clearUnreachableAt(*astate, canon_val);
+  if (SI->getValueOperand()->getType()->isStructTy() ||
+      SI->getValueOperand()->getType()->isArrayTy()) {
+    ops_.copySubgraph(*astate, canon_val, canon_dest, 3);
+  }
+  if (overwritten_heap_av && !(*overwritten_heap_av == canon_val)) {
+    markUnreachableAllocationIfDead(*astate, *overwritten_heap_av, SI);
+  }
+
+  if (isExpensiveAggregateType(SI->getValueOperand()->getType(), module_) &&
+      !llvm::isa<llvm::Constant>(SI->getValueOperand()) &&
+      !llvm::isa<llvm::PHINode>(SI->getValueOperand())) {
+    AbstractValue dest_c = astate->getCanonical(ptr_opt->addr);
+    std::string var_name =
+        astate->getDecompilerName(dest_c).value_or(
+            ptr_operand->hasName() ? ptr_operand->getName().str() : "copy");
+    analysis_non_disj_.recordAggregateCopy(
+        SI, dest_c, var_name, formatTypeName(SI->getValueOperand()->getType()),
+        astate->getTimestampCounter());
   }
   return exec_state;
 }
@@ -654,29 +1087,45 @@ ExecutionDomain PulseChecker::handleStore(const llvm::StoreInst *SI,
 std::vector<ExecutionDomain>
 PulseChecker::handleCall(const llvm::CallInst *CI, ExecutionDomain exec_state,
                          const llvm::BasicBlock *pred, unsigned call_depth) {
+  return handleCallBase(CI, std::move(exec_state), pred, call_depth);
+}
+
+std::vector<ExecutionDomain>
+PulseChecker::handleCallBase(const llvm::CallBase *CB,
+                             ExecutionDomain exec_state,
+                             const llvm::BasicBlock *pred,
+                             unsigned call_depth) {
+  (void)call_depth;
   auto *astate = exec_state.getAstate();
   if (!astate) {
     return {exec_state};
   }
 
-  // Handle LLVM lifetime intrinsics: model end as definite invalidation.
+  // Handle LLVM intrinsics (eh.typeid.for, lifetime, memcpy/memmove/memset).
   if (auto *II = llvm::dyn_cast<llvm::IntrinsicInst>(
-          const_cast<llvm::CallInst *>(CI))) {
+          const_cast<llvm::CallBase *>(CB))) {
     const auto iid = II->getIntrinsicID();
+    if (iid == llvm::Intrinsic::eh_typeid_for && CB->arg_size() >= 1) {
+      std::string rtti_name =
+          detail::normalizeRttiTypeName(CB->getArgOperand(0));
+      int64_t tid = detail::rttiTypeIdForName(rtti_name);
+      AbstractValue ret_val = factory_.createFresh(CB);
+      astate->getPathFormula().addIntegerConstraint(ret_val);
+      (void)astate->getPathFormula().addBounds(ret_val, tid, tid);
+      astate->getPostStack().add(CB, Address(ret_val));
+      return {exec_state};
+    }
     if (iid == llvm::Intrinsic::lifetime_start ||
         iid == llvm::Intrinsic::lifetime_end) {
-      if (CI->arg_size() >= 2) {
-        auto ptr_opt = ops_.eval(*astate, CI->getArgOperand(1), CI, pred);
+      if (CB->arg_size() >= 2) {
+        auto ptr_opt = ops_.eval(*astate, CB->getArgOperand(1), CB, pred);
         if (ptr_opt) {
           AbstractValue canon_ptr = astate->getCanonical(ptr_opt->addr);
           if (iid == llvm::Intrinsic::lifetime_start) {
-            // Treat as beginning of lifetime: clear invalidation and mark
-            // uninitialized.
             astate->getPostAttrs().remove(canon_ptr, Attribute::Invalid);
             astate->getPostAttrs().add(canon_ptr, Attribute::Uninitialized);
           } else {
-            // End of lifetime: uses after this are invalid (gone out of scope).
-            ops_.invalidate(*astate, *ptr_opt, CI,
+            ops_.invalidate(*astate, *ptr_opt, CB,
                             InvalidationKind::GoneOutOfScope);
           }
         }
@@ -699,30 +1148,29 @@ PulseChecker::handleCall(const llvm::CallInst *CI, ExecutionDomain exec_state,
         auto size_opt = a->getAllocationSize(canon);
         if (size_opt && len > *size_opt) {
           Trace trace = Trace::fromValueHistory(addr.history);
-          trace.addEvent(CI, detail);
-          reportBug(OperationResult::OutOfBounds, CI, canon, trace, a);
+          trace.addEvent(CB, detail);
+          reportBug(OperationResult::OutOfBounds, CB, canon, trace, a);
           a->getPostAttrs().add(canon, Attribute::OutOfBounds);
         }
       };
 
-      auto dest_opt = ops_.eval(*a, CI->getArgOperand(0), CI, pred);
+      auto dest_opt = ops_.eval(*a, CB->getArgOperand(0), CB, pred);
       if (!dest_opt)
         return {exec_state};
       if (iid == llvm::Intrinsic::memset) {
-        check_len(*dest_opt, CI->getArgOperand(2),
+        check_len(*dest_opt, CB->getArgOperand(2),
                   "memset writes beyond destination buffer");
-        auto val_opt = ops_.eval(*a, CI->getArgOperand(1), CI, pred);
+        auto val_opt = ops_.eval(*a, CB->getArgOperand(1), CB, pred);
         if (val_opt) {
-          ops_.writeDeref(*a, *dest_opt, *val_opt, CI);
+          ops_.writeDeref(*a, *dest_opt, *val_opt, CB);
         }
-        a->getPostStack().add(CI, *dest_opt);
-        // Fix for false positives: memset to a stack array initializes it.
-        auto *dest_val = CI->getArgOperand(0);
+        a->getPostStack().add(CB, *dest_opt);
+        auto *dest_val = CB->getArgOperand(0);
         while (dest_val) {
           if (auto *AI = llvm::dyn_cast<llvm::AllocaInst>(dest_val)) {
-            AbstractValue base_av = factory_.getOrCreate(AI);
-            AbstractValue base_canon = a->getCanonical(base_av);
+            AbstractValue base_canon = a->getCanonical(factory_.getOrCreate(AI));
             a->getPostAttrs().remove(base_canon, Attribute::Uninitialized);
+            a->markWrittenTo(base_canon, CB);
             break;
           }
           if (auto *BC = llvm::dyn_cast<llvm::BitCastInst>(dest_val)) {
@@ -737,27 +1185,44 @@ PulseChecker::handleCall(const llvm::CallInst *CI, ExecutionDomain exec_state,
         return {exec_state};
       }
 
-      auto src_opt = ops_.eval(*a, CI->getArgOperand(1), CI, pred);
+      auto src_opt = ops_.eval(*a, CB->getArgOperand(1), CB, pred);
       if (src_opt) {
-        check_len(*dest_opt, CI->getArgOperand(2),
+        check_len(*dest_opt, CB->getArgOperand(2),
                   "memcpy/memmove writes beyond destination buffer");
-        check_len(*src_opt, CI->getArgOperand(2),
+        check_len(*src_opt, CB->getArgOperand(2),
                   "memcpy/memmove reads beyond source buffer");
-        auto src_read = ops_.readDeref(*a, *src_opt, CI);
+        AbstractValue src_c = a->getCanonical(src_opt->addr);
+        AbstractValue dst_c = a->getCanonical(dest_opt->addr);
+        const bool src_invalid_or_null =
+            a->getPostAttrs().has(src_c, Attribute::Invalid) ||
+            a->getPostAttrs().has(src_c, Attribute::Null) ||
+            a->getPathFormula().isNull(src_c);
+        auto src_read = ops_.readDeref(*a, *src_opt, CB);
         if (src_read.first == OperationResult::Success) {
-          AbstractValue dummy = factory_.createFresh(CI);
-          ops_.writeDeref(*a, *dest_opt, Address(dummy), CI);
-          a->getPostStack().add(CI, *dest_opt);
+          AbstractValue val_to_write =
+              src_read.second ? src_read.second->addr : factory_.createFresh(CB);
+          ops_.writeDeref(*a, *dest_opt, Address(val_to_write), CB);
+        }
+        if (!src_invalid_or_null) {
+          ops_.copySubgraph(*a, src_c, dst_c, 3);
+          TaintOperations::propagate(*a, src_c, dst_c, CB);
+          a->getPostStack().add(CB, *dest_opt);
         }
       }
-      // Fix for false positives: memcpy to a stack array initializes it,
-      // so clear the Uninitialized attribute from the base alloca.
-      auto *dest_val = CI->getArgOperand(0);
+      // Track expensive struct/array memcpy into local stack alloca as copy.
+      auto *dest_val = CB->getArgOperand(0);
       while (dest_val) {
         if (auto *AI = llvm::dyn_cast<llvm::AllocaInst>(dest_val)) {
-          AbstractValue base_av = factory_.getOrCreate(AI);
-          AbstractValue base_canon = a->getCanonical(base_av);
+          AbstractValue base_canon = a->getCanonical(factory_.getOrCreate(AI));
           a->getPostAttrs().remove(base_canon, Attribute::Uninitialized);
+          if (isExpensiveAggregateType(AI->getAllocatedType(), module_)) {
+            std::string var_name =
+                AI->hasName() ? AI->getName().str() : "local_copy";
+            analysis_non_disj_.recordAggregateCopy(
+                CB, base_canon, var_name,
+                formatTypeName(AI->getAllocatedType()),
+                a->getTimestampCounter());
+          }
           break;
         }
         if (auto *BC = llvm::dyn_cast<llvm::BitCastInst>(dest_val)) {
@@ -773,97 +1238,215 @@ PulseChecker::handleCall(const llvm::CallInst *CI, ExecutionDomain exec_state,
     }
   }
 
-  llvm::Function *F = CI->getCalledFunction();
+  const llvm::Function *F = CB->getCalledFunction();
+  if (!F) {
+    if (const auto *direct = llvm::dyn_cast<llvm::Function>(
+            CB->getCalledOperand()->stripPointerCasts())) {
+      F = direct;
+    }
+  }
+  if (!F) {
+    // Resolve indirect calls (function pointers / vtable slots) through the
+    // abstract heap and dynamic types; if the callee is an unconstrained formal
+    // in pre, mark DynamicTypeNeeded for caller-driven specialization.
+    auto callee_opt = ops_.eval(*astate, CB->getCalledOperand(), CB, pred);
+    if (callee_opt) {
+      AbstractValue canon_callee = astate->getCanonical(callee_opt->addr);
+      if (const auto *fn =
+              llvm::dyn_cast_or_null<llvm::Function>(canon_callee.getValue())) {
+        F = fn;
+      } else if (auto dyn_ty = astate->getDynamicType(canon_callee)) {
+        if (module_) {
+          F = module_->getFunction(*dyn_ty);
+        }
+      }
+      if (!F && astate->isInPre(canon_callee)) {
+        astate->addNeedDynamicTypeSpecialization(canon_callee);
+      }
+      // For virtual dispatch (`%vt = load %vptr; %slot = gep %vt, k; %fn = load %slot`),
+      // also mark the vtable pointer AV (`%vt`) if it comes from pre so callers
+      // with concrete `__vtable__:<gv>:<off>` specialize the callee.
+      if (!F) {
+        const llvm::Value *cur_v = CB->getCalledOperand()->stripPointerCasts();
+        for (unsigned hops = 0; hops < 4 && cur_v; ++hops) {
+          if (const auto *LI = llvm::dyn_cast<llvm::LoadInst>(cur_v)) {
+            cur_v = LI->getPointerOperand()->stripPointerCasts();
+          } else if (const auto *GEP =
+                         llvm::dyn_cast<llvm::GEPOperator>(cur_v)) {
+            cur_v = GEP->getPointerOperand()->stripPointerCasts();
+          } else {
+            break;
+          }
+          if (auto hop_opt = ops_.eval(*astate, cur_v, CB, pred)) {
+            AbstractValue hop_c = astate->getCanonical(hop_opt->addr);
+            if (astate->isInPre(hop_c)) {
+              astate->addNeedDynamicTypeSpecialization(hop_c);
+            }
+          }
+        }
+      }
+    }
+  }
   if (!F) {
     astate->addSkippedCall("<indirect>");
     astate->declareUnknownValues();
-    modelUnknownCallEffects(ops_, *astate, CI, pred, factory_);
+    modelUnknownCallEffects(ops_, *astate, CB, pred, factory_);
     return {exec_state};
   }
 
-  // Check for taint sources/sinks/sanitizers in function calls
   std::string func_name = F->getName().str();
-  if (models_->isTaintSource(func_name)) {
-    TaintKind kind = TaintKind::UserInput();
-    if (func_name == "recv" || func_name == "recvfrom" ||
-        func_name == "recvmsg") {
-      kind = TaintKind::Network();
-    } else if (func_name == "getenv") {
-      kind = TaintKind::Environment();
-    } else if (func_name == "getcwd") {
-      kind = TaintKind::FileSystem();
-    }
+  astate->getTransitiveInfo().recordCallResolution(
+      CB, CB->getFunction(), TransitiveInfo::CallResolution::Resolved, {F});
 
-    std::optional<unsigned> output_arg;
-    if (func_name == "read" || func_name == "recv" ||
-        func_name == "recvfrom" || func_name == "recvmsg") {
-      output_arg = 1;
-    } else if (func_name == "gets" || func_name == "fgets" ||
-               func_name == "getcwd") {
-      output_arg = 0;
-    }
+  const TaintConfig &taint_cfg = TaintOperations::getConfig();
 
-    if (output_arg && *output_arg < CI->arg_size()) {
-      auto output_opt =
-          ops_.eval(*astate, CI->getArgOperand(*output_arg), CI, pred);
-      if (output_opt) {
-        TaintOperations::taint(*astate,
-                               astate->getCanonical(output_opt->addr), kind,
-                               func_name);
+  // Taint sources (driven by unified TaintConfig ProcedureUnit targets)
+  auto source_units = taint_cfg.matchSources(F);
+  if (!source_units.empty()) {
+    bool tainted_return = false;
+    bool tainted_any_arg = false;
+    for (const ProcedureUnit *unit : source_units) {
+      TaintKind kind =
+          unit->kinds.empty() ? TaintKind::UserInput() : unit->kinds.front();
+      if (unit->appliesToReturn()) {
+        AbstractValue ret_val = factory_.createFresh(CB);
+        TaintOperations::taint(*astate, ret_val, kind, func_name);
+        astate->getPostStack().add(CB, Address(ret_val));
+        tainted_return = true;
+      } else {
+        for (unsigned i = 0; i < CB->arg_size(); ++i) {
+          if (!unit->appliesToArgument(i))
+            continue;
+          auto arg_opt = ops_.eval(*astate, CB->getArgOperand(i), CB, pred);
+          if (arg_opt) {
+            AbstractValue canon_arg = astate->getCanonical(arg_opt->addr);
+            astate->getPostAttrs().remove(canon_arg, Attribute::Uninitialized);
+            TaintOperations::taint(*astate, canon_arg, kind, func_name);
+            tainted_any_arg = true;
+          }
+        }
       }
-      // Continue into the ordinary model so buffer writes and return values are
-      // still represented.
-    } else {
-      AbstractValue ret_val = factory_.createFresh(CI);
-      TaintOperations::taint(*astate, ret_val, kind, func_name);
-      astate->getPostStack().add(CI, Address(ret_val));
+    }
+    if ((tainted_return || tainted_any_arg) && F->isDeclaration() &&
+        !models_->hasModel(F)) {
+      if (!tainted_return && !CB->getType()->isVoidTy()) {
+        AbstractValue ret_val = factory_.createFresh(CB);
+        Address ret_addr(ret_val);
+        ret_addr.history.addEvent(ValueHistory::EventKind::FunctionCall, CB,
+                                  CB->getFunction());
+        astate->getPostStack().add(CB, ret_addr);
+        if (CB->getType()->isIntegerTy()) {
+          astate->getPathFormula().addIntegerConstraint(ret_val);
+        }
+      }
       return {exec_state};
     }
   }
 
-  if (models_->isTaintSink(func_name)) {
-    // Check if arguments are tainted
-    for (unsigned i = 0; i < CI->arg_size(); ++i) {
-      auto arg_opt = ops_.eval(*astate, CI->getArgOperand(i), CI, pred);
-      if (arg_opt) {
-        AbstractValue canon_arg = astate->getCanonical(arg_opt->addr);
-        TaintOperations::checkSink(*astate, canon_arg, func_name, CI);
+  // Taint sinks (both intraprocedural check AND interprocedural
+  // MustNotBeTainted abduction!)
+  auto sink_units = taint_cfg.matchSinks(F);
+  if (!sink_units.empty()) {
+    std::set<unsigned> checked_args;
+    for (const ProcedureUnit *unit : sink_units) {
+      for (unsigned i = 0; i < CB->arg_size(); ++i) {
+        if (!unit->appliesToArgument(i) || !checked_args.insert(i).second)
+          continue;
+        auto arg_opt = ops_.eval(*astate, CB->getArgOperand(i), CB, pred);
+        if (arg_opt) {
+          AbstractValue canon_arg = astate->getCanonical(arg_opt->addr);
+          bool reported =
+              TaintOperations::checkSink(*astate, canon_arg, func_name, CB);
+          if (!reported && astate->isInPre(canon_arg)) {
+            Trace sink_trace;
+            sink_trace.addEvent(CB, "Taint sink: " + func_name);
+            std::vector<TaintKind> kinds =
+                unit->kinds.empty()
+                    ? std::vector<TaintKind>{TaintKind::UserInput()}
+                    : unit->kinds;
+            astate->abduceMustNotBeTainted(
+                canon_arg,
+                MustNotBeTaintedSink(func_name, std::move(kinds), CB,
+                                     std::move(sink_trace),
+                                     astate->nextTimestamp()));
+          }
+        }
       }
     }
   }
 
-  if (models_->isTaintSanitizer(func_name)) {
-    // Sanitize arguments (remove taint)
-    for (unsigned i = 0; i < CI->arg_size(); ++i) {
-      auto arg_opt = ops_.eval(*astate, CI->getArgOperand(i), CI, pred);
-      if (arg_opt) {
-        AbstractValue canon_arg = astate->getCanonical(arg_opt->addr);
-        TaintKind sanitizer_kind = TaintKind::Unknown(); // Generic sanitizer
-        TaintOperations::sanitize(*astate, canon_arg, sanitizer_kind, CI);
+  // Taint sanitizers (both local sanitization AND interprocedural post record)
+  auto sanitizer_units = taint_cfg.matchSanitizers(F);
+  if (!sanitizer_units.empty()) {
+    for (const ProcedureUnit *unit : sanitizer_units) {
+      TaintKind sanitizer_kind =
+          unit->kinds.empty() ? TaintKind::Unknown() : unit->kinds.front();
+      for (unsigned i = 0; i < CB->arg_size(); ++i) {
+        if (!unit->appliesToArgument(i))
+          continue;
+        auto arg_opt = ops_.eval(*astate, CB->getArgOperand(i), CB, pred);
+        if (arg_opt) {
+          AbstractValue canon_arg = astate->getCanonical(arg_opt->addr);
+          TaintOperations::sanitize(*astate, canon_arg, sanitizer_kind, CB);
+          astate->addTaintSanitized(
+              canon_arg,
+              SanitizerRecord{sanitizer_kind, CB, astate->nextTimestamp()});
+        }
       }
     }
   }
 
-  // Try library models first
-  auto lib_result = handleLibraryCall(CI, exec_state, pred);
+  // Taint propagators (for unmodeled declaration propagators)
+  auto prop_units = taint_cfg.matchPropagators(F);
+  if (!prop_units.empty() && F->isDeclaration() && !models_->hasModel(F)) {
+    std::vector<AbstractValue> src_avs;
+    for (unsigned i = 0; i < CB->arg_size(); ++i) {
+      auto arg_opt = ops_.eval(*astate, CB->getArgOperand(i), CB, pred);
+      if (arg_opt) {
+        src_avs.push_back(astate->getCanonical(arg_opt->addr));
+      }
+    }
+    if (!CB->getType()->isVoidTy()) {
+      AbstractValue ret_val = factory_.createFresh(CB);
+      Address ret_addr(ret_val);
+      ret_addr.history.addEvent(ValueHistory::EventKind::FunctionCall, CB,
+                                CB->getFunction());
+      astate->getPostStack().add(CB, ret_addr);
+      for (AbstractValue src : src_avs) {
+        TaintOperations::propagate(*astate, src, ret_val, CB);
+        if (astate->isInPre(src)) {
+          astate->addPropagateTaintFrom(
+              ret_val, PropagateTaintFromInfo{{src}, func_name});
+        }
+      }
+      return {exec_state};
+    }
+  }
+
+  // Try library models first (forwarding resolved indirect callee if any)
+  auto lib_result = handleLibraryCall(CB, exec_state, pred, F);
   if (!lib_result.empty()) {
-    return lib_result; // Library model handled it
+    return lib_result;
   }
 
-  // Fall back to old handling for compatibility
+  // Fallback for malloc/calloc/realloc/free if invoked via InvokeInst before
+  // Step 5 upgrades PulseModels to CallBase.
   if (F->getName() == "malloc" || F->getName() == "calloc" ||
       F->getName() == "realloc") {
-    AbstractValue av = factory_.createFresh(CI);
-    ops_.allocate(*astate, av, CI);
-    if (F->getName() == "malloc" && CI->arg_size() >= 1) {
-      if (auto *CI0 = llvm::dyn_cast<llvm::ConstantInt>(CI->getArgOperand(0))) {
+    AbstractValue av = factory_.createFresh(CB);
+    AllocatorKind ak = (F->getName() == "realloc") ? AllocatorKind::CRealloc
+                                                   : AllocatorKind::CMalloc;
+    ops_.allocate(*astate, av, CB, ak);
+    astate->addNonNull(av);
+    if (F->getName() == "malloc" && CB->arg_size() >= 1) {
+      if (auto *CI0 = llvm::dyn_cast<llvm::ConstantInt>(CB->getArgOperand(0))) {
         if (!CI0->isNegative() && CI0->getBitWidth() <= 64) {
           astate->setAllocationSize(av, CI0->getZExtValue());
         }
       }
-    } else if (F->getName() == "calloc" && CI->arg_size() >= 2) {
-      auto *n = llvm::dyn_cast<llvm::ConstantInt>(CI->getArgOperand(0));
-      auto *s = llvm::dyn_cast<llvm::ConstantInt>(CI->getArgOperand(1));
+    } else if (F->getName() == "calloc" && CB->arg_size() >= 2) {
+      auto *n = llvm::dyn_cast<llvm::ConstantInt>(CB->getArgOperand(0));
+      auto *s = llvm::dyn_cast<llvm::ConstantInt>(CB->getArgOperand(1));
       if (n && s && !n->isNegative() && !s->isNegative() &&
           n->getBitWidth() <= 64 && s->getBitWidth() <= 64) {
         __int128 prod = static_cast<__int128>(n->getZExtValue()) *
@@ -872,67 +1455,146 @@ PulseChecker::handleCall(const llvm::CallInst *CI, ExecutionDomain exec_state,
           astate->setAllocationSize(av, static_cast<uint64_t>(prod));
         }
       }
-    } else if (F->getName() == "realloc" && CI->arg_size() >= 2) {
-      if (auto *CI1 = llvm::dyn_cast<llvm::ConstantInt>(CI->getArgOperand(1))) {
+    } else if (F->getName() == "realloc" && CB->arg_size() >= 2) {
+      if (auto *CI1 = llvm::dyn_cast<llvm::ConstantInt>(CB->getArgOperand(1))) {
         if (!CI1->isNegative() && CI1->getBitWidth() <= 64) {
           astate->setAllocationSize(av, CI1->getZExtValue());
         }
       }
     }
-    astate->getPostStack().add(CI, Address(av));
+    astate->getPostStack().add(CB, Address(av));
     return {exec_state};
   }
   if (F->getName() == "free") {
-    if (CI->arg_size() > 0) {
-      auto ptr_opt = ops_.eval(*astate, CI->getArgOperand(0), CI, pred);
+    if (CB->arg_size() > 0) {
+      auto ptr_opt = ops_.eval(*astate, CB->getArgOperand(0), CB, pred);
       if (ptr_opt) {
-        ops_.invalidate(*astate, *ptr_opt, CI, InvalidationKind::CFree);
-
-        // Also invalidate aliases
-        AbstractValue canon_ptr = astate->getCanonical(ptr_opt->addr);
-        for (auto &stack_kv : astate->getPostStack().getMap()) {
-          AbstractValue stack_canon =
-              astate->getCanonical(stack_kv.second.addr);
-          if (stack_canon == canon_ptr) {
-            astate->getPostAttrs().add(stack_canon, Attribute::Invalid);
-            astate->getPostAttrs().remove(stack_canon, Attribute::Allocated);
-          }
-        }
+        ops_.invalidate(*astate, *ptr_opt, CB, InvalidationKind::CFree);
       }
     }
     return {exec_state};
   }
 
-  // Calls within the current SCC are treated as unknown to avoid
-  // order-dependent interprocedural behavior in recursive cycles.
+  // Helper to check whether a recursive call re-enters `caller_fn` with
+  // unchanged entry formal arguments on a manifest path (Infer
+  // PulseMutualRecursion).
+  auto argsMatchEntryFormals = [](const AbductiveDomain &state,
+                                  const llvm::Function *caller_fn,
+                                  const std::vector<AbstractValue> &args) {
+    if (!caller_fn || args.size() != caller_fn->arg_size()) {
+      return false;
+    }
+    unsigned idx = 0;
+    for (const auto &Arg : caller_fn->args()) {
+      const Address *pre_addr = state.getPreStack().find(&Arg);
+      if (!pre_addr) {
+        return false;
+      }
+      AbstractValue formal_c = state.getCanonical(pre_addr->addr);
+      AbstractValue actual_c = state.getCanonical(args[idx]);
+      if (!state.getPathFormula().areEqual(formal_c, actual_c)) {
+        return false;
+      }
+      ++idx;
+    }
+    return true;
+  };
+
+  // Mutual recursion cycle handling: record structured edge & diagnose
+  // manifest direct infinite recursion with unchanged arguments.
   if (current_scc_.count(F) > 0) {
+    std::vector<AbstractValue> actual_avs;
+    actual_avs.reserve(CB->arg_size());
+    for (unsigned i = 0; i < CB->arg_size(); ++i) {
+      if (auto arg_opt = ops_.eval(*astate, CB->getArgOperand(i), CB, pred)) {
+        actual_avs.push_back(astate->getCanonical(arg_opt->addr));
+      } else {
+        actual_avs.push_back(factory_.createFresh(CB));
+      }
+    }
+    const llvm::Function *caller_fn = CB->getFunction();
+    astate->addRecursiveCall(F->getName().str());
+    astate->addRecursiveCallEdge(
+        RecursiveCallEdge{F, caller_fn, CB, actual_avs});
+
+    auto is_allocated = [astate](AbstractValue v) {
+      return astate->isAllocated(v);
+    };
+    if (F == caller_fn && astate->getPathFormula().isManifest(is_allocated) &&
+        argsMatchEntryFormals(*astate, caller_fn, actual_avs)) {
+      Trace cycle_trace;
+      cycle_trace.addEvent(
+          CB, "Direct recursive call to " + F->getName().str() +
+                  " with identical arguments");
+      auto diag = std::make_unique<MutualRecursionCycle>(
+          CB, F->getName().str() + " -> " + F->getName().str(),
+          std::move(cycle_trace));
+      DiagnosticManager::getInstance().report(std::move(diag));
+    }
+
     astate->addSkippedCall(F->getName().str());
     astate->declareUnknownValues();
-    modelUnknownCallEffects(ops_, *astate, CI, pred, factory_);
+    modelUnknownCallEffects(ops_, *astate, CB, pred, factory_);
     return {exec_state};
   }
 
   if (F->isDeclaration()) {
-    // External function with no model - record as skipped
     astate->addSkippedCall(F->getName().str());
     astate->declareUnknownValues();
-    modelUnknownCallEffects(ops_, *astate, CI, pred, factory_);
+    modelUnknownCallEffects(ops_, *astate, CB, pred, factory_);
     return {exec_state};
   }
 
-  // Try to use summary if available
+  // On-demand analysis for indirectly resolved functions not visited earlier
+  // in static direct-call-graph order.
+  if (!summary_manager_.hasSummary(F) && active_functions_.count(F) == 0) {
+    analyzeFunction(F);
+  }
+
   if (summary_manager_.hasSummary(F)) {
     PulseLogger::incrementCounter("summaries.applied");
-    auto summary_results = applySummaryImproved(F, exec_state, CI, pred);
+    auto summary_results = applySummaryImproved(F, exec_state, CB, pred);
     if (!summary_results.empty()) {
+      // Check for manifest mutual recursion cycles (caller -> F -> ... ->
+      // caller with unchanged entry arguments).
+      const llvm::Function *caller_fn = CB->getFunction();
+      for (const auto &res_state : summary_results) {
+        const AbductiveDomain *res_a = res_state.getAstate();
+        if (!res_a || res_a->getRecursiveCallEdges().empty())
+          continue;
+        auto is_allocated = [res_a](AbstractValue v) {
+          return res_a->isAllocated(v);
+        };
+        if (!res_a->getPathFormula().isManifest(is_allocated))
+          continue;
+        for (const auto &edge : res_a->getRecursiveCallEdges()) {
+          if (edge.callee == caller_fn &&
+              argsMatchEntryFormals(*res_a, caller_fn, edge.args)) {
+            Trace cycle_trace;
+            cycle_trace.addEvent(CB, "Calls " + F->getName().str());
+            if (edge.call_site) {
+              cycle_trace.addEvent(
+                  edge.call_site,
+                  "Recursively calls back into " + caller_fn->getName().str() +
+                      " with identical arguments");
+            }
+            std::string desc = caller_fn->getName().str() + " -> " +
+                               F->getName().str() + " -> " +
+                               caller_fn->getName().str();
+            auto diag = std::make_unique<MutualRecursionCycle>(
+                CB, desc, std::move(cycle_trace));
+            DiagnosticManager::getInstance().report(std::move(diag));
+            break;
+          }
+        }
+      }
       return summary_results;
     }
   }
 
-  // No summary could be applied. Conservatively treat the call as unknown.
   astate->addSkippedCall(F->getName().str());
   astate->declareUnknownValues();
-  modelUnknownCallEffects(ops_, *astate, CI, pred, factory_);
+  modelUnknownCallEffects(ops_, *astate, CB, pred, factory_);
   return {exec_state};
 }
 
@@ -940,7 +1602,11 @@ ExecutionDomain PulseChecker::handleAlloca(const llvm::AllocaInst *AI,
                                            ExecutionDomain exec_state) {
   auto *astate = exec_state.getAstate();
   AbstractValue av = factory_.getOrCreate(AI);
-  ops_.allocate(*astate, av, AI);
+  ops_.allocate(*astate, av, AI, AllocatorKind::Stack);
+  astate->addNonNull(av);
+  if (AI->hasName()) {
+    astate->setDecompilerName(av, AI->getName().str());
+  }
   if (AI->getModule()) {
     const llvm::DataLayout &DL = AI->getModule()->getDataLayout();
     uint64_t elem_size = DL.getTypeAllocSize(AI->getAllocatedType());
@@ -957,7 +1623,6 @@ ExecutionDomain PulseChecker::handleAlloca(const llvm::AllocaInst *AI,
       astate->setAllocationSize(av, total_size);
     }
   }
-  // Stack allocation: mark as stack-derived so we can prove invalid escapes.
   astate->getPostAttrs().add(av, Attribute::Stack);
   astate->getPostAttrs().add(av, Attribute::Uninitialized);
   astate->getPostStack().add(AI, Address(av));
@@ -968,13 +1633,10 @@ ExecutionDomain PulseChecker::handleReturn(const llvm::ReturnInst *RI,
                                            ExecutionDomain exec_state) {
   auto *astate = exec_state.getAstate();
   if (astate && !topl_program_.empty()) {
-    // A helper's temporary error state can be repaired after the call. Keep
-    // its history in the summary, and report at the surrounding entry boundary.
-    // Address-taken functions and SCCs without outside direct callers also
-    // serve as independently analyzable entry points.
     const auto *function = RI->getFunction();
     bool hasCaller = false;
-    std::vector<const llvm::User *> uses(function->user_begin(), function->user_end());
+    std::vector<const llvm::User *> uses(function->user_begin(),
+                                         function->user_end());
     std::set<const llvm::User *> visited;
     while (!uses.empty() && !hasCaller) {
       const auto *user = uses.back();
@@ -992,15 +1654,17 @@ ExecutionDomain PulseChecker::handleReturn(const llvm::ReturnInst *RI,
     if (!hasCaller || function->hasAddressTaken())
       reportTopl(*astate);
   }
+
   std::optional<AbstractValue> returned_value = std::nullopt;
   if (RI && astate && RI->getNumOperands() > 0) {
     const llvm::Value *ret_v = RI->getReturnValue();
-    if (ret_v && ret_v->getType()->isPointerTy()) {
+    if (ret_v) {
       auto ret_opt = ops_.eval(*astate, ret_v, RI, nullptr);
       if (ret_opt) {
         AbstractValue canon_ret = astate->getCanonical(ret_opt->addr);
         returned_value = canon_ret;
-        if (astate->getPostAttrs().has(canon_ret, Attribute::Stack)) {
+        if (ret_v->getType()->isPointerTy() &&
+            astate->getPostAttrs().has(canon_ret, Attribute::Stack)) {
           Trace trace = Trace::fromValueHistory(ret_opt->history);
           trace.addEvent(RI, "Returning address derived from stack allocation");
           auto diag = std::make_unique<StackVariableAddressEscape>(
@@ -1013,7 +1677,7 @@ ExecutionDomain PulseChecker::handleReturn(const llvm::ReturnInst *RI,
       }
     }
   }
-  // Convert to ExitProgram variant
+
   if (exec_state.isContinueProgram() && exec_state.getAstate()) {
     return ExecutionDomain::exitProgram(
         std::make_unique<AbductiveDomain>(exec_state.getAstate()->clone()),
@@ -1026,9 +1690,6 @@ ExecutionDomain
 PulseChecker::handleComparison(const llvm::Instruction *I,
                                ExecutionDomain exec_state,
                                const llvm::BasicBlock *pred_bb) {
-  // An LLVM comparison computes an i1 value; it does not assume the predicate.
-  // Branch/select transfer functions interpret that value when a control-flow
-  // or value choice is actually made.
   (void)I;
   (void)pred_bb;
   return exec_state;
@@ -1061,17 +1722,47 @@ std::optional<ExecutionDomain> PulseChecker::assumeCondition(
     return std::nullopt;
 
   auto finish = [&]() -> std::optional<ExecutionDomain> {
+    IncorporateResult inc = astate->incorporatePendingNewEqs();
+    if (inc.isUnsat()) {
+      return std::nullopt;
+    }
+    if (inc.isPotentialInvalidAccess()) {
+      return ExecutionDomain::latentInvalidAccess(
+          std::make_unique<AbductiveDomain>(astate->clone()), inc.address,
+          std::make_pair(inc.must_be_valid.trace.clone(),
+                         inc.must_be_valid.reason),
+          {});
+    }
     const PulseFormula &formula = astate->getPathFormula();
     if (!formula.isConsistent() || formula.isUnsat())
       return std::nullopt;
     return std::optional<ExecutionDomain>(std::move(forked));
   };
 
+  if (auto *FCmp = llvm::dyn_cast<llvm::FCmpInst>(condition)) {
+    auto a0_opt = ops_.eval(*astate, FCmp->getOperand(0), FCmp, pred_bb);
+    auto a1_opt = ops_.eval(*astate, FCmp->getOperand(1), FCmp, pred_bb);
+    if (!a0_opt || !a1_opt)
+      return std::nullopt;
+    AbstractValue av0 = astate->getCanonical(a0_opt->addr);
+    AbstractValue av1 = astate->getCanonical(a1_opt->addr);
+    const bool both_const =
+        astate->getPathFormula().asConstantFloat(av0).has_value() &&
+        astate->getPathFormula().asConstantFloat(av1).has_value();
+    if (!detail::applyFloatCmpConstraint(astate->getPathFormula(),
+                                         FCmp->getPredicate(), av0, av1,
+                                         assumed_true)) {
+      return std::nullopt;
+    }
+    PathConditionAtom atom = PathConditionAtom::makeRel(
+        PathConditionAtom::Kind::Other, av0, av1);
+    atom.is_ground = both_const;
+    astate->getPathFormula().recordCondition(atom, 0);
+    return finish();
+  }
+
   auto *ICmp = llvm::dyn_cast<llvm::ICmpInst>(condition);
   if (!ICmp) {
-    // For arbitrary SSA i1 values, record the selected edge predicate as an
-    // equality with the corresponding Boolean constant. Values already bound
-    // by a PHI/load reuse their exact abstract address through eval().
     auto condition_opt = ops_.eval(*astate, condition, location, pred_bb);
     auto *bool_constant = llvm::ConstantInt::get(
         llvm::cast<llvm::IntegerType>(condition->getType()), assumed_true);
@@ -1079,11 +1770,17 @@ std::optional<ExecutionDomain> PulseChecker::assumeCondition(
         ops_.eval(*astate, bool_constant, location, pred_bb);
     if (!condition_opt || !constant_opt)
       return std::nullopt;
-    if (!astate->getPathFormula().addEquality(
-            astate->getCanonical(condition_opt->addr),
-            astate->getCanonical(constant_opt->addr))) {
+    AbstractValue cond_c = astate->getCanonical(condition_opt->addr);
+    AbstractValue const_c = astate->getCanonical(constant_opt->addr);
+    const bool already_const =
+        astate->getPathFormula().asConstantInt(cond_c).has_value();
+    if (!astate->getPathFormula().addEquality(cond_c, const_c)) {
       return std::nullopt;
     }
+    PathConditionAtom atom = assumed_true ? PathConditionAtom::neZero(cond_c)
+                                          : PathConditionAtom::eqZero(cond_c);
+    atom.is_ground = already_const;
+    astate->getPathFormula().recordCondition(atom, 0);
     return finish();
   }
 
@@ -1110,21 +1807,38 @@ std::optional<ExecutionDomain> PulseChecker::assumeCondition(
     if (taking_null) {
       if (astate->getPostAttrs().has(canon_ptr_av, Attribute::Allocated) ||
           astate->getPostAttrs().has(canon_ptr_av, Attribute::Invalid) ||
-          astate->getPathFormula().isNonNull(canon_ptr_av) ||
-          !astate->getPathFormula().addNull(canon_ptr_av)) {
+          astate->getPostAttrs().has(canon_ptr_av, Attribute::Stack) ||
+          astate->getPostAttrs().has(canon_ptr_av, Attribute::Global) ||
+          astate->getPathFormula().isNonNull(canon_ptr_av)) {
         return std::nullopt;
       }
+      const bool already_concrete_null =
+          astate->getPostAttrs().has(canon_ptr_av, Attribute::Null) ||
+          astate->getPathFormula().isNull(canon_ptr_av);
+      if (!astate->getPathFormula().addNull(canon_ptr_av)) {
+        return std::nullopt;
+      }
+      PathConditionAtom atom = PathConditionAtom::eqZero(canon_ptr_av);
+      atom.is_ground = already_concrete_null;
+      astate->getPathFormula().recordCondition(atom, 0);
     } else {
       if (astate->getPostAttrs().has(canon_ptr_av, Attribute::Null) ||
           astate->getPathFormula().isNull(canon_ptr_av)) {
         return std::nullopt;
       }
-      astate->getPathFormula().addNonNull(canon_ptr_av);
+      const bool already_non_null =
+          astate->isAllocated(canon_ptr_av) ||
+          astate->getPathFormula().isNonNull(canon_ptr_av);
+      if (!astate->getPathFormula().addNonNull(canon_ptr_av)) {
+        return std::nullopt;
+      }
+      PathConditionAtom atom = PathConditionAtom::neZero(canon_ptr_av);
+      atom.is_ground = already_non_null;
+      astate->getPathFormula().recordCondition(atom, 0);
     }
     return finish();
   }
 
-  // Integer comparisons contribute to path constraints too.
   if (op0->getType()->isIntegerTy() && op1->getType()->isIntegerTy()) {
     auto a0_opt = ops_.eval(*astate, op0, ICmp, pred_bb);
     auto a1_opt = ops_.eval(*astate, op1, ICmp, pred_bb);
@@ -1133,12 +1847,20 @@ std::optional<ExecutionDomain> PulseChecker::assumeCondition(
     AbstractValue av0 = astate->getCanonical(a0_opt->addr);
     AbstractValue av1 = astate->getCanonical(a1_opt->addr);
 
+    const bool both_const =
+        astate->getPathFormula().asConstantInt(av0).has_value() &&
+        astate->getPathFormula().asConstantInt(av1).has_value();
+
     llvm::ICmpInst::Predicate eff_pred =
         is_then ? cmp_pred : detail::invertIcmpPred(cmp_pred);
     if (!detail::applyIntegerIcmpConstraint(astate->getPathFormula(), eff_pred,
                                             av0, av1)) {
       return std::nullopt;
     }
+    PathConditionAtom atom =
+        PathConditionAtom::makeRel(atomKindFromIcmpPred(eff_pred), av0, av1);
+    atom.is_ground = both_const;
+    astate->getPathFormula().recordCondition(atom, 0);
     return finish();
   }
 
@@ -1151,17 +1873,25 @@ std::optional<ExecutionDomain> PulseChecker::assumeCondition(
     auto av1_opt = ops_.eval(*astate, op1, ICmp, pred_bb);
     if (!av0_opt || !av1_opt)
       return std::nullopt;
-    AbstractValue av0 = av0_opt->addr;
-    AbstractValue av1 = av1_opt->addr;
+    AbstractValue av0 = astate->getCanonical(av0_opt->addr);
+    AbstractValue av1 = astate->getCanonical(av1_opt->addr);
 
     bool should_be_equal =
         (cmp_pred == llvm::ICmpInst::ICMP_EQ) ? is_then : !is_then;
     if (should_be_equal) {
       if (!astate->getPathFormula().addEquality(av0, av1))
         return std::nullopt;
+      PathConditionAtom atom = PathConditionAtom::makeRel(
+          PathConditionAtom::Kind::Equal, av0, av1);
+      atom.is_ground = (av0 == av1);
+      astate->getPathFormula().recordCondition(atom, 0);
     } else {
       if (!astate->getPathFormula().addDisequality(av0, av1))
         return std::nullopt;
+      PathConditionAtom atom = PathConditionAtom::makeRel(
+          PathConditionAtom::Kind::NotEqual, av0, av1);
+      atom.is_ground = astate->isAllocated(av0) && astate->isAllocated(av1);
+      astate->getPathFormula().recordCondition(atom, 0);
     }
     return finish();
   }

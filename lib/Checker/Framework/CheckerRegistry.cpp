@@ -37,6 +37,9 @@ constexpr NativeCheckDescriptor PULSE_CHECKS[] = {
     {"unnecessary-copy", "Unnecessary copy"},
     {"stack-address-escape", "Stack address escape"},
     {"const-refable-parameter", "Parameter can be passed by const reference"},
+    {"memory-leak", "Memory leak"},
+    {"resource-leak", "Resource leak"},
+    {"mutual-recursion-cycle", "Mutual recursion cycle"},
 };
 constexpr NativeCheckDescriptor KINT_CHECKS[] = {
     {"int-overflow", "Integer overflow"},

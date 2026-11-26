@@ -11,17 +11,13 @@
 #include <vector>
 
 #include <llvm/IR/Function.h>
+#include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instruction.h>
 
 namespace pulse {
 
 class PulseChecker;
 
-/**
- * ModelResult: Result of applying a model
- * - handled: true if the model handled the call
- * - states: list of resulting execution states
- */
 struct ModelResult {
   bool handled;
   std::vector<ExecutionDomain> states;
@@ -32,44 +28,26 @@ struct ModelResult {
   }
 };
 
-/**
- * PulseModel: A function type that models a specific function call
- */
 using PulseModel = std::function<ModelResult(
-    PulseChecker &checker, const llvm::CallInst *call, ExecutionDomain &state,
+    PulseChecker &checker, const llvm::CallBase *call, ExecutionDomain &state,
     const llvm::BasicBlock *pred)>;
 
 /**
- * PulseModels: Manages library models and taint configurations
+ * PulseModels: Manages C/C++/POSIX library models.
+ * Taint queries delegate directly to TaintOperations::getConfig().
  */
 class PulseModels {
 public:
-  PulseModels(PulseChecker &checker);
+  explicit PulseModels(PulseChecker &checker);
 
-  /**
-   * Try to dispatch a call to a registered model
-   */
-  ModelResult dispatch(const llvm::CallInst *call, ExecutionDomain &state,
-                       const llvm::BasicBlock *pred);
+  ModelResult dispatch(const llvm::CallBase *call, ExecutionDomain &state,
+                       const llvm::BasicBlock *pred,
+                       const llvm::Function *resolved_callee = nullptr);
 
-  /**
-   * Check if a function has a model registered
-   */
   bool hasModel(const llvm::Function *func) const;
 
-  /**
-   * Check if a function name is a taint source
-   */
   bool isTaintSource(const std::string &func_name) const;
-
-  /**
-   * Check if a function name is a taint sink
-   */
   bool isTaintSink(const std::string &func_name) const;
-
-  /**
-   * Check if a function name is a taint sanitizer
-   */
   bool isTaintSanitizer(const std::string &func_name) const;
 
 private:
@@ -77,131 +55,172 @@ private:
   PulseOperations &ops_;
   AbstractValueFactory &factory_;
 
-  // Registry of function models
   std::map<std::string, PulseModel> models_;
 
-  // Taint configurations
-  struct TaintConfig {
-    std::set<std::string> sources;
-    std::set<std::string> sinks;
-    std::set<std::string> propagators;
-    std::set<std::string> sanitizers;
-
-    bool isSource(const std::string &name) const {
-      return sources.find(name) != sources.end();
-    }
-
-    bool isSink(const std::string &name) const {
-      return sinks.find(name) != sinks.end();
-    }
-
-    bool isSanitizer(const std::string &name) const {
-      return sanitizers.find(name) != sanitizers.end();
-    }
-  } taint_config_;
+  struct PatternModel {
+    std::string class_substr;
+    std::string method_substr;
+    std::string mangled_glob;
+    PulseModel model;
+  };
+  std::vector<PatternModel> pattern_models_;
 
   void registerStandardModels();
-  void registerTaintModels();
   void registerCppModels();
 
-  // Model implementations
-  ModelResult modelMalloc(const llvm::CallInst *call, ExecutionDomain &state,
+  const PulseModel *findModelByName(const std::string &funcName) const;
+
+  // Memory & resource models
+  ModelResult modelMalloc(const llvm::CallBase *call, ExecutionDomain &state,
+                          const llvm::BasicBlock *pred,
+                          AllocatorKind kind = AllocatorKind::CMalloc);
+  ModelResult modelCalloc(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
-  ModelResult modelCalloc(const llvm::CallInst *call, ExecutionDomain &state,
-                          const llvm::BasicBlock *pred);
-  ModelResult modelFree(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelPosixMemalign(const llvm::CallBase *call,
+                                 ExecutionDomain &state,
+                                 const llvm::BasicBlock *pred);
+  ModelResult modelAlignedAlloc(const llvm::CallBase *call,
+                                ExecutionDomain &state,
+                                const llvm::BasicBlock *pred);
+  ModelResult modelMmap(const llvm::CallBase *call, ExecutionDomain &state,
                         const llvm::BasicBlock *pred);
-  ModelResult modelRealloc(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelMunmap(const llvm::CallBase *call, ExecutionDomain &state,
+                          const llvm::BasicBlock *pred);
+  ModelResult modelFree(const llvm::CallBase *call, ExecutionDomain &state,
+                        const llvm::BasicBlock *pred,
+                        InvalidationKind inv_kind = InvalidationKind::CFree);
+  ModelResult modelRealloc(const llvm::CallBase *call, ExecutionDomain &state,
                            const llvm::BasicBlock *pred);
-  ModelResult modelFileOpen(const llvm::CallInst *call, ExecutionDomain &state,
-                            const llvm::BasicBlock *pred);
-  ModelResult modelFileClose(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelFileOpen(const llvm::CallBase *call, ExecutionDomain &state,
+                            const llvm::BasicBlock *pred,
+                            AllocatorKind kind = AllocatorKind::FileHandle);
+  ModelResult modelFileClose(const llvm::CallBase *call, ExecutionDomain &state,
                              const llvm::BasicBlock *pred);
-  ModelResult modelLock(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelLock(const llvm::CallBase *call, ExecutionDomain &state,
                         const llvm::BasicBlock *pred);
-  ModelResult modelUnlock(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelUnlock(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
-  ModelResult modelStringCopy(const llvm::CallInst *call,
+  ModelResult modelStringCopy(const llvm::CallBase *call,
                               ExecutionDomain &state,
                               const llvm::BasicBlock *pred);
-  ModelResult modelStrdup(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelStrdup(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
-  ModelResult modelStrchr(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelStrchr(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
-  ModelResult modelStrstr(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelStrstr(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
-  ModelResult modelMemcpy(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelMemcpy(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
-  ModelResult modelMemmove(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelMemmove(const llvm::CallBase *call, ExecutionDomain &state,
                            const llvm::BasicBlock *pred);
-  ModelResult modelMemset(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelMemset(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
-  ModelResult modelRead(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelRead(const llvm::CallBase *call, ExecutionDomain &state,
                         const llvm::BasicBlock *pred);
-  ModelResult modelWrite(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelWrite(const llvm::CallBase *call, ExecutionDomain &state,
                          const llvm::BasicBlock *pred);
-  ModelResult modelFread(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelFread(const llvm::CallBase *call, ExecutionDomain &state,
                          const llvm::BasicBlock *pred);
-  ModelResult modelFwrite(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelFwrite(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
-  ModelResult modelFgets(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelFgets(const llvm::CallBase *call, ExecutionDomain &state,
                          const llvm::BasicBlock *pred);
-  ModelResult modelGets(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelGets(const llvm::CallBase *call, ExecutionDomain &state,
                         const llvm::BasicBlock *pred);
 
-  // C++ Models
-  ModelResult modelStdVectorPushBack(const llvm::CallInst *call,
+  // Exception runtime
+  ModelResult modelCxaThrow(const llvm::CallBase *call, ExecutionDomain &state,
+                            const llvm::BasicBlock *pred);
+
+  // C++ Container & Smart Pointer Models
+  ModelResult modelStdVectorPushBack(const llvm::CallBase *call,
                                      ExecutionDomain &state,
                                      const llvm::BasicBlock *pred);
-  ModelResult modelStdVectorAccess(const llvm::CallInst *call,
+  ModelResult modelStdVectorClear(const llvm::CallBase *call,
+                                  ExecutionDomain &state,
+                                  const llvm::BasicBlock *pred);
+  ModelResult modelStdVectorAccess(const llvm::CallBase *call,
                                    ExecutionDomain &state,
                                    const llvm::BasicBlock *pred);
-  ModelResult modelStdVectorData(const llvm::CallInst *call,
+  ModelResult modelStdVectorData(const llvm::CallBase *call,
                                  ExecutionDomain &state,
                                  const llvm::BasicBlock *pred);
-  ModelResult modelStdStringCStr(const llvm::CallInst *call,
+  ModelResult modelStdStringCStr(const llvm::CallBase *call,
                                  ExecutionDomain &state,
                                  const llvm::BasicBlock *pred);
+  ModelResult modelStdStringMutate(const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred);
 
   // std::unique_ptr
-  ModelResult modelStdUniquePtrRelease(const llvm::CallInst *call,
+  ModelResult modelStdUniquePtrCtor(const llvm::CallBase *call,
+                                    ExecutionDomain &state,
+                                    const llvm::BasicBlock *pred);
+  ModelResult modelStdUniquePtrMove(const llvm::CallBase *call,
+                                    ExecutionDomain &state,
+                                    const llvm::BasicBlock *pred);
+  ModelResult modelStdUniquePtrRelease(const llvm::CallBase *call,
                                        ExecutionDomain &state,
                                        const llvm::BasicBlock *pred);
-  ModelResult modelStdUniquePtrReset(const llvm::CallInst *call,
+  ModelResult modelStdUniquePtrReset(const llvm::CallBase *call,
                                      ExecutionDomain &state,
                                      const llvm::BasicBlock *pred);
-  ModelResult modelStdUniquePtrGet(const llvm::CallInst *call,
+  ModelResult modelStdUniquePtrGet(const llvm::CallBase *call,
                                    ExecutionDomain &state,
                                    const llvm::BasicBlock *pred);
-  ModelResult modelStdUniquePtrDtor(const llvm::CallInst *call,
+  ModelResult modelStdUniquePtrDtor(const llvm::CallBase *call,
                                     ExecutionDomain &state,
                                     const llvm::BasicBlock *pred);
 
-  // POSIX Models
-  ModelResult modelSocket(const llvm::CallInst *call, ExecutionDomain &state,
-                          const llvm::BasicBlock *pred);
+  // std::shared_ptr
+  ModelResult modelStdSharedPtrCtor(const llvm::CallBase *call,
+                                    ExecutionDomain &state,
+                                    const llvm::BasicBlock *pred);
+  ModelResult modelStdSharedPtrCopyCtor(const llvm::CallBase *call,
+                                        ExecutionDomain &state,
+                                        const llvm::BasicBlock *pred);
+  ModelResult modelStdSharedPtrGet(const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred);
+  ModelResult modelStdSharedPtrReset(const llvm::CallBase *call,
+                                     ExecutionDomain &state,
+                                     const llvm::BasicBlock *pred);
+  ModelResult modelStdSharedPtrDtor(const llvm::CallBase *call,
+                                    ExecutionDomain &state,
+                                    const llvm::BasicBlock *pred);
 
-  // Explicit escape sinks (sound incorrectness): functions that store a
-  // pointer argument for later use beyond the current stack frame.
-  ModelResult modelPthreadCreate(const llvm::CallInst *call,
+  // std::optional
+  ModelResult modelStdOptionalReset(const llvm::CallBase *call,
+                                    ExecutionDomain &state,
+                                    const llvm::BasicBlock *pred);
+  ModelResult modelStdOptionalValue(const llvm::CallBase *call,
+                                    ExecutionDomain &state,
+                                    const llvm::BasicBlock *pred);
+  ModelResult modelStdOptionalHasValue(const llvm::CallBase *call,
+                                       ExecutionDomain &state,
+                                       const llvm::BasicBlock *pred);
+
+  // POSIX & async escape sinks
+  ModelResult modelSocket(const llvm::CallBase *call, ExecutionDomain &state,
+                          const llvm::BasicBlock *pred);
+  ModelResult modelPthreadCreate(const llvm::CallBase *call,
                                  ExecutionDomain &state,
                                  const llvm::BasicBlock *pred);
-  ModelResult modelThrdCreate(const llvm::CallInst *call,
+  ModelResult modelThrdCreate(const llvm::CallBase *call,
                               ExecutionDomain &state,
                               const llvm::BasicBlock *pred);
-  ModelResult modelDispatchAsyncF(const llvm::CallInst *call,
+  ModelResult modelDispatchAsyncF(const llvm::CallBase *call,
                                   ExecutionDomain &state,
                                   const llvm::BasicBlock *pred);
 
   // Taint models
-  ModelResult modelTaintSource(const llvm::CallInst *call,
+  ModelResult modelTaintSource(const llvm::CallBase *call,
                                ExecutionDomain &state,
                                const llvm::BasicBlock *pred,
                                const std::string &kind);
-  ModelResult modelTaintSink(const llvm::CallInst *call, ExecutionDomain &state,
+  ModelResult modelTaintSink(const llvm::CallBase *call, ExecutionDomain &state,
                              const llvm::BasicBlock *pred,
                              const std::string &kind);
 };
 
 } // namespace pulse
-

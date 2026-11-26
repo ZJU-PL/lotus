@@ -195,7 +195,8 @@ std::pair<PulseJoin::JoinState &, Heap> PulseJoin::joinHeaps(
     JoinState &state, Heap &heap_join, const AbductiveDomain &lhs_astate,
     std::optional<std::pair<AbstractValue, ValueHistory>> lhs_opt,
     const AbductiveDomain &rhs_astate,
-    std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt) {
+    std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt,
+    bool use_pre_heap) {
   using Key =
       std::pair<std::optional<AbstractValue>, std::optional<AbstractValue>>;
 
@@ -217,11 +218,19 @@ std::pair<PulseJoin::JoinState &, Heap> PulseJoin::joinHeaps(
       joinValuesHistsOpts(state, lhs_astate, lhs_opt, rhs_astate, rhs_opt);
   state = value_result.first;
   auto v_hist_join = value_result.second;
+  if (use_pre_heap) {
+    heap_join.registerAddress(v_hist_join.first);
+  }
+
+  const Heap &lhs_heap =
+      use_pre_heap ? lhs_astate.getPreHeap() : lhs_astate.getPostHeap();
+  const Heap &rhs_heap =
+      use_pre_heap ? rhs_astate.getPreHeap() : rhs_astate.getPostHeap();
 
   // Collect edges from both sides
   std::set<Access> all_accesses;
   if (lhs_opt) {
-    const auto &lhs_edges = lhs_astate.getPostHeap().getEdges();
+    const auto &lhs_edges = lhs_heap.getEdges();
     auto lhs_it = lhs_edges.find(lhs_opt->first);
     if (lhs_it != lhs_edges.end()) {
       for (const auto &edge_kv : lhs_it->second) {
@@ -230,7 +239,7 @@ std::pair<PulseJoin::JoinState &, Heap> PulseJoin::joinHeaps(
     }
   }
   if (rhs_opt) {
-    const auto &rhs_edges = rhs_astate.getPostHeap().getEdges();
+    const auto &rhs_edges = rhs_heap.getEdges();
     auto rhs_it = rhs_edges.find(rhs_opt->first);
     if (rhs_it != rhs_edges.end()) {
       for (const auto &edge_kv : rhs_it->second) {
@@ -245,15 +254,13 @@ std::pair<PulseJoin::JoinState &, Heap> PulseJoin::joinHeaps(
     std::optional<std::pair<AbstractValue, ValueHistory>> rhs_target_opt;
 
     if (lhs_opt) {
-      const auto *lhs_target =
-          lhs_astate.getPostHeap().findEdge(lhs_opt->first, access);
+      const auto *lhs_target = lhs_heap.findEdge(lhs_opt->first, access);
       if (lhs_target) {
         lhs_target_opt = {{lhs_target->addr, lhs_target->history}};
       }
     }
     if (rhs_opt) {
-      const auto *rhs_target =
-          rhs_astate.getPostHeap().findEdge(rhs_opt->first, access);
+      const auto *rhs_target = rhs_heap.findEdge(rhs_opt->first, access);
       if (rhs_target) {
         rhs_target_opt = {{rhs_target->addr, rhs_target->history}};
       }
@@ -266,8 +273,9 @@ std::pair<PulseJoin::JoinState &, Heap> PulseJoin::joinHeaps(
     auto target_v_hist = target_result.second;
 
     // Recursively join heaps from targets
-    auto heap_result = joinHeaps(state, heap_join, lhs_astate, lhs_target_opt,
-                                 rhs_astate, rhs_target_opt);
+    auto heap_result =
+        joinHeaps(state, heap_join, lhs_astate, lhs_target_opt, rhs_astate,
+                  rhs_target_opt, use_pre_heap);
     state = heap_result.first;
     heap_join = heap_result.second;
 
@@ -275,6 +283,9 @@ std::pair<PulseJoin::JoinState &, Heap> PulseJoin::joinHeaps(
     Address target_addr(target_v_hist.first);
     target_addr.history = target_v_hist.second;
     heap_join.addEdge(v_hist_join.first, access, target_addr);
+    if (use_pre_heap) {
+      heap_join.registerAddress(target_v_hist.first);
+    }
   }
 
   return {state, heap_join};
@@ -321,8 +332,9 @@ PulseJoin::joinStacks(JoinState &state, const AbductiveDomain &lhs_astate,
     auto v_hist_join = result.second;
 
     // Join heaps from pre stack values
-    auto heap_result = joinHeaps(state, heap_pre_join, lhs_astate, lhs_opt,
-                                 rhs_astate, rhs_opt);
+    auto heap_result =
+        joinHeaps(state, heap_pre_join, lhs_astate, lhs_opt, rhs_astate,
+                  rhs_opt, /*use_pre_heap=*/true);
     state = heap_result.first;
     heap_pre_join = heap_result.second;
 
@@ -640,26 +652,62 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
   // Join formulas
   PulseFormula joined_formula = joinFormulas(lhs, rhs);
 
-  // Add equalities from rev_subst: for each v_join mapping to (v_lhs, v_rhs),
-  // we should add v_join = v_lhs ∨ v_join = v_rhs
-  // However, our formula system doesn't support disjunction yet, so we add both
-  // equalities This is conservative (weaker than ideal) but safe
-  // TODO: When formula system supports disjunction, add proper disjunctive
-  // constraints
+  // Add disjunctive equalities from rev_subst: for each v_join mapping to
+  // (v_lhs, v_rhs), record `v_join = v_lhs ∨ v_join = v_rhs` (and exact
+  // constant disjunction / interval hull / non-nullness) so relational facts
+  // survive joins (Infer PulseJoin + PulseFormula.join).
+  const PulseFormula &lhs_f = lhs.getPathFormula();
+  const PulseFormula &rhs_f = rhs.getPathFormula();
   for (const auto &kv : join_state.rev_subst) {
     AbstractValue v_join = kv.first;
     const auto &pair_opt = kv.second;
     if (pair_opt.first && pair_opt.second) {
-      // Both sides exist: v_join could be either
-      // For now, we don't add constraints (would require disjunction)
-      // In a full implementation, we'd add: v_join = v_lhs ∨ v_join = v_rhs
-      (void)v_join; // Suppress unused warning
+      AbstractValue l_av = *pair_opt.first;
+      AbstractValue r_av = *pair_opt.second;
+      if (v_join == l_av && v_join == r_av) {
+        continue;
+      }
+      auto c1 = lhs_f.asConstantInt(l_av);
+      auto c2 = rhs_f.asConstantInt(r_av);
+      if (c1 && c2) {
+        (void)joined_formula.addDisjunctiveEquality(v_join, l_av, r_av, c1, c2);
+      } else {
+        auto lo1 = lhs_f.getLowerBound(l_av);
+        auto lo2 = rhs_f.getLowerBound(r_av);
+        auto hi1 = lhs_f.getUpperBound(l_av);
+        auto hi2 = rhs_f.getUpperBound(r_av);
+        if (lo1 && lo2 && hi1 && hi2) {
+          (void)joined_formula.addBounds(v_join, std::min(*lo1, *lo2),
+                                         std::max(*hi1, *hi2));
+        } else if (lo1 && lo2) {
+          (void)joined_formula.addBounds(v_join, std::min(*lo1, *lo2),
+                                         std::numeric_limits<int64_t>::max());
+        } else if (hi1 && hi2) {
+          (void)joined_formula.addBounds(v_join,
+                                         std::numeric_limits<int64_t>::min(),
+                                         std::max(*hi1, *hi2));
+        }
+        if (lhs_f.isNonNull(l_av) && rhs_f.isNonNull(r_av)) {
+          (void)joined_formula.addNonNull(v_join);
+        } else if (lhs_f.isNull(l_av) && rhs_f.isNull(r_av)) {
+          (void)joined_formula.addNull(v_join);
+        }
+        if (lhs_f.isInteger(l_av) && rhs_f.isInteger(r_av)) {
+          joined_formula.addIntegerConstraint(v_join);
+        }
+        auto t1 = lhs_f.getExactType(l_av);
+        auto t2 = rhs_f.getExactType(r_av);
+        if (t1 && t2 && *t1 == *t2) {
+          (void)joined_formula.addExactType(v_join, *t1);
+        }
+        (void)joined_formula.addDisjunctiveEquality(v_join, l_av, r_av);
+      }
     } else if (pair_opt.first) {
       // Only lhs: v_join = v_lhs
-      joined_formula.addEquality(v_join, *pair_opt.first);
+      (void)joined_formula.addEquality(v_join, *pair_opt.first);
     } else if (pair_opt.second) {
       // Only rhs: v_join = v_rhs
-      joined_formula.addEquality(v_join, *pair_opt.second);
+      (void)joined_formula.addEquality(v_join, *pair_opt.second);
     }
   }
 
@@ -706,22 +754,106 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
     joined.addRecursiveCall(call);
   }
 
-  // Loop header info: preserve from lhs (as in Infer)
+  // Preserve loop header info and path stamps from lhs (as in Infer).
   for (const auto &kv : lhs.getLoopHeaderInfo()) {
     joined.pushLoopHeaderInfo(kv.first, kv.second);
   }
+  joined.getLoopPathStamps() = lhs.getLoopPathStamps();
+  joined.setTimestampCounter(
+      std::max(lhs.getTimestampCounter(), rhs.getTimestampCounter()));
 
-  // Loop invariant under inference: preserve from lhs if present (as in Infer)
-  // Note: This requires access to the private field, which we don't have
-  // For now, we skip this - it will be preserved if we clone from lhs
-  // TODO: Add getter method or friend class access
+  // Preserve parameterized attributes, invalidation metadata, allocation
+  // sizes/roots/info, dynamic types, and taint along rev_subst.
+  for (const auto &kv : join_state.rev_subst) {
+    AbstractValue v_join = kv.first;
+    const auto &l_opt = kv.second.first;
+    const auto &r_opt = kv.second.second;
 
-  // Merge invalidation info (union)
-  // Note: getInvalidationInfo() only returns one entry, so we need to access
-  // the map directly For now, we'll skip this - it requires exposing the map or
-  // adding an iterator The invalidation info will be preserved through the heap
-  // join process
+    // Invalidation info (when both sides invalidated or attribute preserved)
+    if (joined.getPostAttrs().has(v_join, Attribute::Invalid)) {
+      if (l_opt) {
+        if (auto inv = lhs.getInvalidationInfo(*l_opt)) {
+          joined.setInvalidationInfo(v_join, inv->first, inv->second);
+        }
+      } else if (r_opt) {
+        if (auto inv = rhs.getInvalidationInfo(*r_opt)) {
+          joined.setInvalidationInfo(v_join, inv->first, inv->second);
+        }
+      }
+    }
 
+    // Allocation sizes: keep tighter bound when both sides know size.
+    std::optional<uint64_t> l_sz =
+        l_opt ? lhs.getAllocationSize(*l_opt) : std::nullopt;
+    std::optional<uint64_t> r_sz =
+        r_opt ? rhs.getAllocationSize(*r_opt) : std::nullopt;
+    if (l_sz && r_sz) {
+      joined.setAllocationSize(v_join, std::min(*l_sz, *r_sz));
+    } else if (l_sz && !r_opt) {
+      joined.setAllocationSize(v_join, *l_sz);
+    } else if (r_sz && !l_opt) {
+      joined.setAllocationSize(v_join, *r_sz);
+    }
+
+    // Allocation info (keep when present on both or one-sided weak).
+    if (l_opt) {
+      if (auto ai = lhs.getAllocationInfo(*l_opt)) {
+        joined.setAllocationInfo(v_join, *ai);
+      }
+    } else if (r_opt) {
+      if (auto ai = rhs.getAllocationInfo(*r_opt)) {
+        joined.setAllocationInfo(v_join, *ai);
+      }
+    }
+
+    // WrittenTo: keep if written on either side (weak / conservative for
+    // unmodified-copy checking).
+    if (l_opt) {
+      if (auto wt = lhs.getWrittenTo(*l_opt)) {
+        joined.markWrittenTo(v_join, wt->location, wt->trace.clone());
+      }
+    }
+    if (r_opt) {
+      if (auto wt = rhs.getWrittenTo(*r_opt)) {
+        joined.markWrittenTo(v_join, wt->location, wt->trace.clone());
+      }
+    }
+
+    // Pre MustBeValid & MustBeInitialized (keep when required on both sides).
+    if (l_opt && r_opt) {
+      auto l_mbv = lhs.getPreMustBeValid().find(lhs.getCanonical(*l_opt));
+      auto r_mbv = rhs.getPreMustBeValid().find(rhs.getCanonical(*r_opt));
+      if (l_mbv != lhs.getPreMustBeValid().end() &&
+          r_mbv != rhs.getPreMustBeValid().end()) {
+        joined.getPreMustBeValid().emplace(v_join, l_mbv->second);
+      }
+      auto l_mbi = lhs.getPreMustBeInitialized().find(lhs.getCanonical(*l_opt));
+      auto r_mbi = rhs.getPreMustBeInitialized().find(rhs.getCanonical(*r_opt));
+      if (l_mbi != lhs.getPreMustBeInitialized().end() &&
+          r_mbi != rhs.getPreMustBeInitialized().end()) {
+        joined.getPreMustBeInitialized().emplace(v_join, l_mbi->second);
+      }
+      auto l_dt = lhs.getDynamicType(*l_opt);
+      auto r_dt = rhs.getDynamicType(*r_opt);
+      if (l_dt && r_dt && *l_dt == *r_dt) {
+        joined.setDynamicType(v_join, *l_dt);
+      }
+    }
+
+    // Taint: union of taint items from both sides.
+    if (l_opt && lhs.getTaintDomain().has(*l_opt)) {
+      for (const auto &item : lhs.getTaintDomain().get(*l_opt)) {
+        joined.getTaintDomain().add(v_join, item);
+      }
+    }
+    if (r_opt && rhs.getTaintDomain().has(*r_opt)) {
+      for (const auto &item : rhs.getTaintDomain().get(*r_opt)) {
+        joined.getTaintDomain().add(v_join, item);
+      }
+    }
+  }
+
+  joined.canonicalize();
   return joined;
 }
 

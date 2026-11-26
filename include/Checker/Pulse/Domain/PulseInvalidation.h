@@ -21,6 +21,8 @@ enum class InvalidationKind {
   Realloc,
   FClose,
   LockReleased,
+  StdVectorPushBack,
+  StdVectorClear,
   Other
 };
 
@@ -41,6 +43,10 @@ inline const char *invalidationKindString(InvalidationKind k) {
     return "closed (fclose)";
   case InvalidationKind::LockReleased:
     return "released (unlock)";
+  case InvalidationKind::StdVectorPushBack:
+    return "invalidated (std::vector::push_back)";
+  case InvalidationKind::StdVectorClear:
+    return "invalidated (std::vector::clear)";
   case InvalidationKind::Other:
   default:
     return "invalidated";

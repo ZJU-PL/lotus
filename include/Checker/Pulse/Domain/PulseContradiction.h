@@ -80,8 +80,10 @@ struct Contradiction {
     std::vector<AbstractValue> captured_actuals;
   } captured_length_mismatch;
 
-  // For DynamicTypeNeeded - maps heap paths to abstract values
+  // For DynamicTypeNeeded - maps heap paths to abstract values and resolved
+  // dynamic type names
   std::map<HeapPath, AbstractValue> dynamic_type_paths;
+  std::map<HeapPath, std::string> dynamic_type_names;
 
   Contradiction()
       : kind(ContradictionKind::None),

@@ -15,6 +15,8 @@ class BasicBlock;
 
 namespace pulse {
 
+class NonDisjunctiveDomain;
+
 /**
  * DisjunctiveDomain: manages multiple disjunctive states
  * Implements proper disjunctive abstract domain with widening
@@ -53,6 +55,16 @@ public:
    */
   void add(const llvm::BasicBlock *at_block, ExecutionDomain state,
            const llvm::BasicBlock *path_context);
+
+  /**
+   * Add a disjunct with graph-isomorphism deduplication (`AbductiveDomain::leq`)
+   * and optional spilling of dropped disjuncts into a NonDisjunctiveDomain.
+   * Returns false if an isomorphic disjunct was already present for the same
+   * predecessor context.
+   */
+  bool addWithDedup(const llvm::BasicBlock *at_block, ExecutionDomain state,
+                    const llvm::BasicBlock *path_context,
+                    NonDisjunctiveDomain *non_disj = nullptr);
 
   /**
    * Get disjuncts recorded at a given block

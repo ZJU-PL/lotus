@@ -7,22 +7,23 @@
 #include <string>
 #include <vector>
 
+#include <llvm/ADT/StringRef.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Value.h>
+#include <llvm/Support/Error.h>
 
 namespace pulse {
 
 /**
- * TaintKind: category of taint source/sink
- * Aligned with Infer's TaintConfig.Kind
+ * TaintKind: category of taint source/sink (Infer's TaintConfig.Kind).
  */
 class TaintKind {
 private:
   std::string name_;
-  bool is_data_flow_only_; // True if this kind is only for data flow tracking
+  bool is_data_flow_only_;
 
 public:
-  TaintKind(const std::string &name, bool is_data_flow_only = false)
+  explicit TaintKind(const std::string &name, bool is_data_flow_only = false)
       : name_(name), is_data_flow_only_(is_data_flow_only) {}
 
   const std::string &getName() const { return name_; }
@@ -32,7 +33,6 @@ public:
   bool operator==(const TaintKind &other) const { return name_ == other.name_; }
   bool operator!=(const TaintKind &other) const { return name_ != other.name_; }
 
-  // Common taint kinds
   static TaintKind UserInput() { return TaintKind("UserInput"); }
   static TaintKind Network() { return TaintKind("Network"); }
   static TaintKind FileSystem() { return TaintKind("FileSystem"); }
@@ -42,17 +42,16 @@ public:
 };
 
 /**
- * ProcedureMatcher: matches procedures for taint sources/sinks
- * Aligned with Infer's TaintConfig.Unit.procedure_matcher
+ * ProcedureMatcher: matches procedures for taint sources/sinks/sanitizers.
  */
 class ProcedureMatcher {
 public:
   enum class Type {
     ProcedureName,       // Exact name match
-    ProcedureNameRegex,  // Regex match on name
-    ClassNameRegex,      // Regex match on class name
-    ClassAndMethodNames, // Match class and method names
-    BuiltinName          // Builtin function name
+    ProcedureNameRegex,  // Regex match on raw or demangled name
+    ClassNameRegex,      // Regex match on demangled class name
+    ClassAndMethodNames, // Match demangled class and method names
+    BuiltinName          // Builtin/intrinsic function name
   };
 
 private:
@@ -71,45 +70,90 @@ public:
     }
   }
 
+  static ProcedureMatcher
+  forClassAndMethods(std::vector<std::string> classes,
+                     std::vector<std::string> methods) {
+    ProcedureMatcher m(Type::ClassAndMethodNames, "");
+    m.class_names_ = std::move(classes);
+    m.method_names_ = std::move(methods);
+    return m;
+  }
+
+  void addExcludeName(std::string name) {
+    exclude_names_.push_back(std::move(name));
+  }
+  void addExcludeIn(std::string scope) {
+    exclude_in_.push_back(std::move(scope));
+  }
+
   bool matches(const llvm::Function *func) const;
+  bool matchesName(const std::string &func_name,
+                   bool is_intrinsic = false) const;
 
   Type getType() const { return type_; }
   const std::string &getName() const { return name_; }
 };
 
 /**
- * ProcedureTarget: specifies which part of a procedure is tainted
- * Aligned with Infer's TaintConfig.Target.procedure_target
+ * ProcedureTarget: specifies which values of a call are tainted/checked.
  */
 enum class ProcedureTarget {
-  ReturnValue,             // Return value is tainted
-  AllArguments,            // All arguments are tainted
-  ArgumentPositions,       // Specific argument positions
-  InstanceReference,       // Instance reference (this/self)
-  AllArgumentsButPositions // All arguments except specified positions
+  ReturnValue,
+  AllArguments,
+  ArgumentPositions,
+  InstanceReference,
+  AllArgumentsButPositions
 };
 
 /**
- * ProcedureUnit: defines a taint source/sink/sanitizer for a procedure
+ * ProcedureUnit: defines a taint source/sink/sanitizer/propagator rule.
  */
 struct ProcedureUnit {
   ProcedureMatcher matcher;
   std::vector<TaintKind> kinds;
   ProcedureTarget target;
-  std::vector<int> argument_positions; // For ArgumentPositions target
+  std::vector<int> argument_positions;
 
   ProcedureUnit(const ProcedureMatcher &m, const std::vector<TaintKind> &k,
-                ProcedureTarget t)
-      : matcher(m), kinds(k), target(t) {}
+                ProcedureTarget t, std::vector<int> positions = {})
+      : matcher(m), kinds(k), target(t),
+        argument_positions(std::move(positions)) {}
+
+  bool appliesToReturn() const {
+    return target == ProcedureTarget::ReturnValue;
+  }
+
+  bool appliesToArgument(unsigned arg_idx) const {
+    switch (target) {
+    case ProcedureTarget::ReturnValue:
+      return false;
+    case ProcedureTarget::AllArguments:
+      return true;
+    case ProcedureTarget::InstanceReference:
+      return arg_idx == 0;
+    case ProcedureTarget::ArgumentPositions:
+      for (int pos : argument_positions) {
+        if (pos >= 0 && static_cast<unsigned>(pos) == arg_idx)
+          return true;
+      }
+      return false;
+    case ProcedureTarget::AllArgumentsButPositions:
+      for (int pos : argument_positions) {
+        if (pos >= 0 && static_cast<unsigned>(pos) == arg_idx)
+          return false;
+      }
+      return true;
+    }
+    return false;
+  }
 };
 
 /**
- * SinkPolicy: defines when a taint flow should be reported
- * Aligned with Infer's TaintConfig.SinkPolicy
+ * SinkPolicy: defines when a taint flow should be reported.
  */
 struct SinkPolicy {
-  std::vector<TaintKind> source_kinds; // Which source kinds trigger this policy
-  std::vector<TaintKind> sanitizer_kinds; // Which sanitizers prevent reporting
+  std::vector<TaintKind> source_kinds;
+  std::vector<TaintKind> sanitizer_kinds;
   std::string description;
   int policy_id;
   std::string privacy_effect;
@@ -121,28 +165,16 @@ struct SinkPolicy {
 };
 
 /**
- * TaintConfig: configuration for taint analysis
- * Aligned with Infer's PulseTaintConfig
+ * TaintConfig: unified configuration for Pulse taint analysis.
  */
 class TaintConfig {
 private:
-  // Source matchers
   std::vector<ProcedureUnit> source_procedures_;
   std::vector<ProcedureUnit> source_blocks_;
-
-  // Sink matchers
   std::vector<ProcedureUnit> sink_procedures_;
-
-  // Sanitizer matchers
   std::vector<ProcedureUnit> sanitizer_procedures_;
-
-  // Propagator matchers (functions that propagate taint)
   std::vector<ProcedureUnit> propagator_procedures_;
-
-  // Sink policies: map from sink kind to policies
   std::map<TaintKind, std::vector<SinkPolicy>> sink_policies_;
-
-  // Allocation sources: class names that create taint
   std::map<std::string, std::vector<TaintKind>> allocation_sources_;
 
   static TaintConfig *default_config_;
@@ -150,7 +182,6 @@ private:
 public:
   TaintConfig() = default;
 
-  // Add matchers
   void addSourceProcedure(const ProcedureUnit &unit) {
     source_procedures_.push_back(unit);
   }
@@ -163,45 +194,52 @@ public:
   void addPropagatorProcedure(const ProcedureUnit &unit) {
     propagator_procedures_.push_back(unit);
   }
-
-  // Add sink policy
   void addSinkPolicy(const TaintKind &sink_kind, const SinkPolicy &policy) {
     sink_policies_[sink_kind].push_back(policy);
   }
-
-  // Add allocation source
   void addAllocationSource(const std::string &class_name,
                            const std::vector<TaintKind> &kinds) {
     allocation_sources_[class_name] = kinds;
   }
 
-  // Check if function is a source
-  std::vector<TaintKind> isSource(const llvm::Function *func) const;
+  // Unit-level matchers (respect ProcedureTarget & ArgumentPositions).
+  std::vector<const ProcedureUnit *>
+  matchSources(const llvm::Function *func) const;
+  std::vector<const ProcedureUnit *>
+  matchSourcesByName(const std::string &func_name) const;
+  std::vector<const ProcedureUnit *>
+  matchSinks(const llvm::Function *func) const;
+  std::vector<const ProcedureUnit *>
+  matchSinksByName(const std::string &func_name) const;
+  std::vector<const ProcedureUnit *>
+  matchSanitizers(const llvm::Function *func) const;
+  std::vector<const ProcedureUnit *>
+  matchSanitizersByName(const std::string &func_name) const;
+  std::vector<const ProcedureUnit *>
+  matchPropagators(const llvm::Function *func) const;
+  std::vector<const ProcedureUnit *>
+  matchPropagatorsByName(const std::string &func_name) const;
 
-  // Check if function is a sink
+  // Convenience queries
+  std::vector<TaintKind> isSource(const llvm::Function *func) const;
   bool isSink(const llvm::Function *func,
               std::vector<TaintKind> &sink_kinds) const;
-
-  // Check if function is a sanitizer
   std::vector<TaintKind> isSanitizer(const llvm::Function *func) const;
-
-  // Check if function is a propagator
   bool isPropagator(const llvm::Function *func) const;
 
-  // Get sink policies for a sink kind
   const std::vector<SinkPolicy> &
   getSinkPolicies(const TaintKind &sink_kind) const;
-
-  // Get allocation source kinds
   std::vector<TaintKind>
   getAllocationSourceKinds(const std::string &class_name) const;
 
-  // Get default configuration (with common sources/sinks)
   static const TaintConfig &getDefault();
-
-  // Initialize default configuration
   static void initializeDefault();
+
+  /**
+   * Parse custom taint rules from JSON text (optionally extending default).
+   */
+  static llvm::Expected<TaintConfig>
+  loadFromJson(llvm::StringRef json_text, bool extend_default = true);
 };
 
 } // namespace pulse
-

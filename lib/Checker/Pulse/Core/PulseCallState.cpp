@@ -5,6 +5,48 @@
 
 namespace pulse {
 
+void CallState::canonicalizeMaps() {
+  if (!astate_) {
+    return;
+  }
+
+  Substitution normalized_subst;
+  for (const auto &kv : subst_.getMap()) {
+    normalized_subst.add(kv.first, astate_->getCanonical(kv.second));
+  }
+  subst_ = std::move(normalized_subst);
+
+  std::map<AbstractValue, std::pair<AbstractValue, LazyHeapPath>>
+      normalized_rev_subst;
+  for (const auto &kv : rev_subst_) {
+    normalized_rev_subst.emplace(astate_->getCanonical(kv.first), kv.second);
+  }
+  rev_subst_ = std::move(normalized_rev_subst);
+
+  std::map<AbstractValue, std::vector<LazyHeapPath>> normalized_alias_paths;
+  for (const auto &kv : alias_paths_by_caller_) {
+    auto &dst = normalized_alias_paths[astate_->getCanonical(kv.first)];
+    dst.insert(dst.end(), kv.second.begin(), kv.second.end());
+  }
+  alias_paths_by_caller_ = std::move(normalized_alias_paths);
+
+  if (first_error_) {
+    first_error_ = astate_->getCanonical(*first_error_);
+  }
+}
+
+IncorporateResult CallState::incorporateNewEqs(const NewEqs &new_eqs) {
+  if (!astate_) {
+    return IncorporateResult::ok();
+  }
+  IncorporateResult res = astate_->incorporateNewEqs(new_eqs);
+  if (!res.isOk()) {
+    return res;
+  }
+  canonicalizeMaps();
+  return res;
+}
+
 bool CallState::incorporateNewEqs(const PulseFormula &new_eqs) {
   if (astate_) {
     PulseFormula merged =
@@ -12,51 +54,15 @@ bool CallState::incorporateNewEqs(const PulseFormula &new_eqs) {
     if (!merged.isConsistent()) {
       return false;
     }
+    NewEqs discovered = merged.takeNewEqs();
     astate_->setPathFormula(std::make_unique<PulseFormula>(std::move(merged)));
+    auto res = astate_->incorporateNewEqs(discovered);
+    if (!res.isOk()) {
+      return false;
+    }
     astate_->canonicalize();
   }
-
-  if (!astate_) {
-    return true;
-  }
-
-  Substitution normalized_subst;
-  for (const auto &kv : subst_.getMap()) {
-    normalized_subst.add(astate_->getCanonical(kv.first),
-                         astate_->getCanonical(kv.second));
-  }
-  subst_ = std::move(normalized_subst);
-
-  std::map<AbstractValue, std::pair<AbstractValue, LazyHeapPath>>
-      normalized_rev_subst;
-  for (const auto &kv : rev_subst_) {
-    normalized_rev_subst[astate_->getCanonical(kv.first)] =
-        std::make_pair(astate_->getCanonical(kv.second.first), kv.second.second);
-  }
-  rev_subst_ = std::move(normalized_rev_subst);
-
-  std::map<AbstractValue, ValueHistory> normalized_hist_map;
-  for (const auto &kv : hist_map_) {
-    normalized_hist_map[astate_->getCanonical(kv.first)] = kv.second;
-  }
-  hist_map_ = std::move(normalized_hist_map);
-
-  std::set<AbstractValue> normalized_visited;
-  for (AbstractValue v : visited_) {
-    normalized_visited.insert(astate_->getCanonical(v));
-  }
-  visited_ = std::move(normalized_visited);
-
-  std::map<AbstractValue, std::set<AbstractValue>> normalized_aliases;
-  for (const auto &kv : aliases_) {
-    AbstractValue canon_key = astate_->getCanonical(kv.first);
-    auto &targets = normalized_aliases[canon_key];
-    for (AbstractValue alias : kv.second) {
-      targets.insert(astate_->getCanonical(alias));
-    }
-  }
-  aliases_ = std::move(normalized_aliases);
-
+  canonicalizeMaps();
   return true;
 }
 

@@ -46,8 +46,10 @@ private:
     unsigned iterations;          // Number of times we've visited this header
     ExecutionDomain header_state; // State at loop header (first iteration)
     ExecutionDomain entry_state;  // State when entering loop
+    std::optional<ExecutionDomain> candidate_invariant; // Current candidate inv
     PulseFormula local_path_condition;          // Path condition local to loop
     std::vector<IterationInfo> iteration_stack; // Stack of iteration info
+    std::vector<ExecutionDomain> seen_states;   // Bounded history for leq check
 
     LoopInfo() : loop(nullptr), iterations(0) {}
   };
@@ -164,6 +166,13 @@ public:
    * Reset timestamp counter
    */
   void resetTimestamp() { current_timestamp_ = 1; }
+
+  /**
+   * Check if `state` has already converged to a previously seen header state
+   * (via AbductiveDomain::leq isomorphism) or verified inductive invariant.
+   */
+  bool hasConverged(const llvm::BasicBlock *BB,
+                    const ExecutionDomain &state) const;
 
   /**
    * Get entry state for a loop header

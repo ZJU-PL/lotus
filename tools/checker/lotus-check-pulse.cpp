@@ -11,6 +11,8 @@
 #include "Checker/Framework/Subcommands.h"
 #include "Checker/Framework/SuppressionManager.h"
 #include "Checker/Pulse/Checker/PulseChecker.h"
+#include "Checker/Pulse/Domain/PulseTaint.h"
+#include "Checker/Pulse/Domain/PulseTaintConfig.h"
 #include "Checker/Pulse/Report/PulseDiagnostic.h"
 #include "Checker/Pulse/Report/PulseLogger.h"
 #include "Checker/Pulse/Report/PulseOptions.h"
@@ -46,6 +48,18 @@ static cl::opt<SMTMode>
                    clEnumValN(SMTMode::On, "on", "Enable SMT solving")),
         cl::init(SMTMode::On),
         cl::sub(lotus::checker::tooling::pulseSubCommand()));
+static cl::opt<bool> ModelMallocFailure(
+    "pulse.model-malloc-failure",
+    cl::desc("Fork a null-return state for malloc calls"), cl::init(false),
+    cl::sub(lotus::checker::tooling::pulseSubCommand()));
+static cl::opt<bool> ReportLatentIssues(
+    "pulse.report-latent-issues",
+    cl::desc("Report latent issues even without a manifesting caller"),
+    cl::init(false), cl::sub(lotus::checker::tooling::pulseSubCommand()));
+static cl::opt<std::string> TaintConfigPath(
+    "pulse.taint-config",
+    cl::desc("JSON file specifying custom Pulse taint sources/sinks/policies"),
+    cl::init(""), cl::sub(lotus::checker::tooling::pulseSubCommand()));
 
 int runPulseCheckerTool(const char *argv0) {
   (void)lotus::checker::tooling::statsEnabled();
@@ -83,8 +97,27 @@ int runPulseCheckerTool(const char *argv0) {
   PulseLogger::setOutputStream(&errs());
   PulseLogger::resetStats();
 
+  std::optional<TaintConfig> customTaintConfig;
+  if (!TaintConfigPath.empty()) {
+    auto buffer = MemoryBuffer::getFile(TaintConfigPath);
+    if (!buffer) {
+      errs() << "error: cannot read taint config: "
+             << buffer.getError().message() << '\n';
+      return lotus::checker::tooling::EXIT_ERROR;
+    }
+    auto parsed = TaintConfig::loadFromJson((*buffer)->getBuffer(), true);
+    if (!parsed) {
+      logAllUnhandledErrors(parsed.takeError(), errs(), "error: ");
+      return lotus::checker::tooling::EXIT_ERROR;
+    }
+    customTaintConfig = std::move(*parsed);
+    TaintOperations::setConfig(&*customTaintConfig);
+  }
+
   const bool disableSMT = SMT == SMTMode::Off;
   pulse::options::setDisableSMT(disableSMT);
+  pulse::options::setModelMallocFailure(ModelMallocFailure);
+  pulse::options::setReportLatentIssues(ReportLatentIssues);
   if (disableSMT) {
     PulseLogger::info("Fast mode: SMT solving disabled");
   }
@@ -132,7 +165,10 @@ int runPulseCheckerTool(const char *argv0) {
       {"taint-flow", IssueType::TaintError},
       {"unnecessary-copy", IssueType::UnnecessaryCopy},
       {"stack-address-escape", IssueType::StackVariableAddressEscape},
-      {"const-refable-parameter", "Const-Refable Parameter"},
+      {"const-refable-parameter", IssueType::ConstRefableParam},
+      {"memory-leak", IssueType::MemoryLeak},
+      {"resource-leak", IssueType::ResourceLeak},
+      {"mutual-recursion-cycle", IssueType::MutualRecursionCycle},
   };
   std::set<std::string> disabledBugTypes;
   for (const auto &[id, bugType] : checkBugTypes) {

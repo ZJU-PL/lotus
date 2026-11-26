@@ -96,6 +96,16 @@ struct Access {
     }
     return false;
   }
+
+  bool operator==(const Access &other) const {
+    if (kind != other.kind)
+      return false;
+    if (kind == AccessKind::Field)
+      return field_idx == other.field_idx;
+    if (kind == AccessKind::ArrayIndex)
+      return stride_bytes == other.stride_bytes && index == other.index;
+    return true;
+  }
 };
 
 /**
@@ -133,9 +143,12 @@ public:
   std::map<AbstractValue, std::map<Access, Address>> &getEdges() {
     return edges_;
   }
+  void registerAddress(AbstractValue addr);
+  bool hasAddress(AbstractValue addr) const;
   void addEdge(AbstractValue from, Access access, Address to);
   Address *findEdge(AbstractValue from, Access access);
   const Address *findEdge(AbstractValue from, Access access) const;
+  void removeEdge(AbstractValue from, const Access &access);
   void removeEdges(AbstractValue addr);
 };
 

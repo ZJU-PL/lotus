@@ -1,17 +1,22 @@
 #include "Checker/Pulse/Report/PulseLatentIssue.h"
 
 #include "Checker/Pulse/Interproc/PulseSummary.h"
+#include "Checker/Pulse/Report/PulseOptions.h"
 
 #include <llvm/IR/Argument.h>
 
 namespace pulse {
 
-bool LatentIssue::shouldReport(const PulseSummary & /*summary*/,
+bool LatentIssue::shouldReport(const PulseSummary &summary,
                                const LatentIssue & /*issue*/) {
-  // Used when we have a stored latent issue and summary; typically we decide
-  // at detection site via isManifest(astate). This remains for API
-  // compatibility.
-  return true;
+  if (options::reportLatentIssues()) {
+    return true;
+  }
+  const AbductiveDomain *post = summary.getPost();
+  if (!post) {
+    return false;
+  }
+  return isManifest(*post);
 }
 
 LatentIssue::IssueKind
@@ -35,40 +40,50 @@ LatentIssue::issueKindFromResult(OperationResult result) {
 }
 
 bool LatentIssue::isManifest(const AbductiveDomain &astate) {
-  // A state is manifest if it doesn't rely on restrictive assumptions
-  // (e.g., ptr == null) and we haven't introduced unknown values.
-  return !astate.hasUnknownValues() &&
-         astate.getPathFormula().isEmptyOrTrivial();
+  if (options::reportLatentIssues()) {
+    return true;
+  }
+  if (astate.hasUnknownValues() || astate.preHeapHasAssumptions()) {
+    return false;
+  }
+  auto is_allocated = [&astate](AbstractValue v) {
+    return astate.isAllocated(v);
+  };
+  return astate.getPathFormula().isManifest(is_allocated,
+                                            /*check_depth_zero=*/true);
 }
 
 bool LatentIssue::isManifest(OperationResult diagnostic,
                              const AbductiveDomain &astate,
                              AbstractValue address) {
-  // Null dereferences are reported only from a concrete null attribute or a
-  // path-formula null assumption, so they are witnessable by construction.
-  if (diagnostic == OperationResult::NullDereference) {
+  if (options::reportLatentIssues()) {
     return true;
   }
-
-  // Use-after-free is manifest once we have observed the invalidation along
-  // the current path.
-  if (diagnostic == OperationResult::UseAfterFree) {
-    return true;
-  }
+  auto is_allocated = [&astate](AbstractValue v) {
+    return astate.isAllocated(v);
+  };
 
   if (diagnostic == OperationResult::OutOfBounds) {
-    return true;
+    return !astate.preHeapHasAssumptions() &&
+           astate.getPathFormula().isManifest(is_allocated,
+                                              /*check_depth_zero=*/false);
   }
 
-  // Uninitialized reads from parameters are highly dependent on caller
-  // context; delay them as latent. Local uninitialized reads are manifest.
   if (diagnostic == OperationResult::UninitializedRead) {
     const llvm::Value *v = address.getValue();
-    return v ? !llvm::isa<llvm::Argument>(v) : false;
+    if (v && llvm::isa<llvm::Argument>(v)) {
+      return false;
+    }
+    return !astate.preHeapHasAssumptions() &&
+           astate.getPathFormula().isManifest(is_allocated,
+                                              /*check_depth_zero=*/true);
   }
 
-  // Default: use the state-level heuristic.
-  return isManifest(astate);
+  if (astate.preHeapHasAssumptions()) {
+    return false;
+  }
+  return astate.getPathFormula().isManifest(is_allocated,
+                                            /*check_depth_zero=*/true);
 }
 
 } // namespace pulse

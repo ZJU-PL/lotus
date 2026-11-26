@@ -2,10 +2,13 @@
 
 #include "Checker/Pulse/Core/PulseFormula.h"
 
+#include <functional>
 #include <limits>
 #include <optional>
 
+#include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalValue.h>
 #include <llvm/IR/Instructions.h>
 
 namespace pulse {
@@ -139,13 +142,19 @@ bool applyIntegerIcmpConstraint(PulseFormula &formula,
 
     switch (p) {
     case P::ICMP_SLT:
-    case P::ICMP_ULT:
       if (c == std::numeric_limits<int64_t>::min())
         return false;
       return add_upper(c - 1);
+    case P::ICMP_ULT:
+      if (c <= 0)
+        return false;
+      return formula.addBounds(lhs, 0, c - 1);
     case P::ICMP_SLE:
-    case P::ICMP_ULE:
       return add_upper(c);
+    case P::ICMP_ULE:
+      if (c < 0)
+        return false;
+      return formula.addBounds(lhs, 0, c);
     case P::ICMP_SGT:
     case P::ICMP_UGT:
       if (c == std::numeric_limits<int64_t>::max())
@@ -184,6 +193,69 @@ bool applyIntegerIcmpConstraint(PulseFormula &formula,
     return true;
   }
   return formula.addLinearConstraint(lc);
+}
+
+bool applyFloatCmpConstraint(PulseFormula &formula,
+                             llvm::FCmpInst::Predicate p, AbstractValue lhs,
+                             AbstractValue rhs, bool assumed_true) {
+  using P = llvm::FCmpInst::Predicate;
+  P eff = assumed_true ? p : llvm::FCmpInst::getInversePredicate(p);
+  switch (eff) {
+  case P::FCMP_FALSE:
+    return false;
+  case P::FCMP_TRUE:
+    return true;
+  case P::FCMP_OEQ:
+  case P::FCMP_UEQ:
+    return formula.addFloatComparison(lhs, rhs, "==");
+  case P::FCMP_ONE:
+  case P::FCMP_UNE:
+    return formula.addFloatComparison(lhs, rhs, "!=");
+  case P::FCMP_OLT:
+  case P::FCMP_ULT:
+    return formula.addFloatComparison(lhs, rhs, "<");
+  case P::FCMP_OLE:
+  case P::FCMP_ULE:
+    return formula.addFloatComparison(lhs, rhs, "<=");
+  case P::FCMP_OGT:
+  case P::FCMP_UGT:
+    return formula.addFloatComparison(lhs, rhs, ">");
+  case P::FCMP_OGE:
+  case P::FCMP_UGE:
+    return formula.addFloatComparison(lhs, rhs, ">=");
+  default:
+    return true;
+  }
+}
+
+std::string normalizeRttiTypeName(const llvm::Value *tinfo) {
+  if (!tinfo || isNullPointerConstantValue(tinfo)) {
+    return "";
+  }
+  const llvm::Value *stripped = tinfo->stripPointerCasts();
+  if (const auto *GV = llvm::dyn_cast_or_null<llvm::GlobalValue>(stripped)) {
+    if (!GV->hasName()) {
+      return "";
+    }
+    std::string raw = GV->getName().str();
+    std::string demangled = llvm::demangle(raw);
+    static constexpr const char kPrefix[] = "typeinfo for ";
+    constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+    if (demangled.compare(0, kPrefixLen, kPrefix) == 0) {
+      return demangled.substr(kPrefixLen);
+    }
+    return raw;
+  }
+  return "";
+}
+
+int64_t rttiTypeIdForName(const std::string &type_name) {
+  if (type_name.empty()) {
+    return 1;
+  }
+  // Stable positive 31-bit selector ID (>= 2 so 0=cleanup, 1=catch-all).
+  size_t h = std::hash<std::string>{}(type_name);
+  return static_cast<int64_t>((h % 0x3FFFFFFEu) + 2u);
 }
 
 } // namespace detail

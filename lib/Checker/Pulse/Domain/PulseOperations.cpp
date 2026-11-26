@@ -59,6 +59,71 @@ static std::optional<int64_t> getI64Constant(const llvm::Value *v) {
   }
   return std::nullopt;
 }
+
+static const llvm::Function *
+extractFunctionFromConstant(const llvm::Constant *C) {
+  if (!C)
+    return nullptr;
+  const llvm::Value *stripped = C->stripPointerCasts();
+  return llvm::dyn_cast_or_null<llvm::Function>(stripped);
+}
+
+static const llvm::Constant *
+extractConstantAtByteOffset(const llvm::Constant *C, uint64_t byte_off,
+                            const llvm::DataLayout &DL, unsigned depth = 0) {
+  if (!C || depth > 8)
+    return nullptr;
+  if (byte_off == 0 && C->getType()->isPointerTy()) {
+    return C;
+  }
+  llvm::Type *Ty = C->getType();
+  if (auto *ST = llvm::dyn_cast<llvm::StructType>(Ty)) {
+    const llvm::StructLayout *SL = DL.getStructLayout(ST);
+    unsigned idx = SL->getElementContainingOffset(byte_off);
+    if (idx < ST->getNumElements()) {
+      uint64_t elem_off = SL->getElementOffset(idx);
+      if (const llvm::Constant *elem = C->getAggregateElement(idx)) {
+        return extractConstantAtByteOffset(elem, byte_off - elem_off, DL,
+                                           depth + 1);
+      }
+    }
+    return nullptr;
+  }
+  if (auto *AT = llvm::dyn_cast<llvm::ArrayType>(Ty)) {
+    uint64_t elem_size = DL.getTypeAllocSize(AT->getElementType());
+    if (elem_size == 0)
+      return nullptr;
+    uint64_t idx = byte_off / elem_size;
+    if (idx < AT->getNumElements()) {
+      if (const llvm::Constant *elem =
+              C->getAggregateElement(static_cast<unsigned>(idx))) {
+        return extractConstantAtByteOffset(elem, byte_off - idx * elem_size, DL,
+                                           depth + 1);
+      }
+    }
+    return nullptr;
+  }
+  return nullptr;
+}
+
+static bool parseVtableDynamicType(const std::string &dyn_ty,
+                                   std::string &out_gv_name,
+                                   uint64_t &out_base_off) {
+  static constexpr const char kPrefix[] = "__vtable__:";
+  constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+  if (dyn_ty.compare(0, kPrefixLen, kPrefix) != 0)
+    return false;
+  size_t sep = dyn_ty.rfind(':');
+  if (sep == std::string::npos || sep <= kPrefixLen)
+    return false;
+  out_gv_name = dyn_ty.substr(kPrefixLen, sep - kPrefixLen);
+  try {
+    out_base_off = std::stoull(dyn_ty.substr(sep + 1));
+  } catch (...) {
+    return false;
+  }
+  return true;
+}
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -198,6 +263,15 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
       llvm::isa<llvm::GlobalValue>(exp)) {
     AbstractValue gv_av = factory_->getOrCreate(exp);
     astate.getPostAttrs().add(gv_av, Attribute::Global);
+    astate.registerPreAddress(gv_av);
+    if (exp->hasName()) {
+      astate.setDecompilerName(gv_av, exp->getName().str());
+      if (llvm::isa<llvm::Function>(exp)) {
+        // Track concrete function pointer target as dynamic type for indirect
+        // call resolution & DynamicTypeNeeded specialization.
+        astate.setDynamicType(gv_av, exp->getName().str());
+      }
+    }
     return std::optional<Address>(Address(gv_av));
   }
 
@@ -214,7 +288,19 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
   if (auto c = getI64Constant(exp)) {
     AbstractValue av = factory_->getOrCreate(exp);
     astate.getPathFormula().addIntegerConstraint(av);
+    if (exp->getType()->isIntegerTy()) {
+      astate.getPathFormula().setBitWidth(av,
+                                          exp->getType()->getIntegerBitWidth());
+    }
     (void)astate.getPathFormula().addBounds(av, *c, *c);
+    return std::optional<Address>(Address(av));
+  }
+
+  // Floating-point constants: track exact double value for FCmp / FP ops.
+  if (auto *CFP = llvm::dyn_cast_or_null<llvm::ConstantFP>(exp)) {
+    AbstractValue av = factory_->getOrCreate(exp);
+    double val = CFP->getValueAPF().convertToDouble();
+    (void)astate.getPathFormula().addFloatConstant(av, val);
     return std::optional<Address>(Address(av));
   }
 
@@ -232,17 +318,31 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
     return std::optional<Address>(result);
   }
 
-  // Handle bitcast instructions - they preserve pointer identity and attributes
+  // Handle bitcast, inttoptr, and ptrtoint instructions preserving identity.
   if (auto *BC = llvm::dyn_cast<llvm::BitCastInst>(exp)) {
     auto src_opt = eval(astate, BC->getOperand(0), loc, pred);
     if (src_opt) {
-      // Bitcast preserves the pointer value and its attributes
-      // Use same canonical value as source so attributes are preserved
       AbstractValue src_canon = astate.getCanonical(src_opt->addr);
       Address result(src_canon);
       result.history = src_opt->history;
-      // Attributes (Allocated, Invalid, Null) are already on src_canon, so
-      // they're preserved
+      return std::optional<Address>(result);
+    }
+  }
+  if (auto *I2P = llvm::dyn_cast<llvm::IntToPtrInst>(exp)) {
+    auto src_opt = eval(astate, I2P->getOperand(0), loc, pred);
+    if (src_opt) {
+      AbstractValue src_canon = astate.getCanonical(src_opt->addr);
+      Address result(src_canon);
+      result.history = src_opt->history;
+      return std::optional<Address>(result);
+    }
+  }
+  if (auto *P2I = llvm::dyn_cast<llvm::PtrToIntInst>(exp)) {
+    auto src_opt = eval(astate, P2I->getOperand(0), loc, pred);
+    if (src_opt) {
+      AbstractValue src_canon = astate.getCanonical(src_opt->addr);
+      Address result(src_canon);
+      result.history = src_opt->history;
       return std::optional<Address>(result);
     }
   }
@@ -400,8 +500,10 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
 
       if (auto *target = astate.getPostHeap().findEdge(cur, acc)) {
         cur = target->addr;
-        // If base was uninitialized, propagate to existing field
-        if (base_is_uninitialized) {
+        // If base was uninitialized, propagate to existing field unless it was
+        // already explicitly written to.
+        if (base_is_uninitialized &&
+            !astate.hasWrittenTo(astate.getCanonical(cur))) {
           AbstractValue target_canon = astate.getCanonical(cur);
           astate.getPostAttrs().add(target_canon, Attribute::Uninitialized);
         }
@@ -432,6 +534,61 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
 
       cur = fresh;
     }
+    // Base pointer must be valid if it comes from the precondition.
+    if (astate.isInPre(base_canon) && !astate.isAllocated(base_canon)) {
+      Trace t = Trace::fromValueHistory(base.history);
+      if (loc) {
+        t.addEvent(loc, "Pointer arithmetic / field access");
+      }
+      astate.abduceMustBeValid(base_canon, std::move(t));
+    }
+    // Resolve constant global vtable / dispatch-table pointers (e.g., C++
+    // @_ZTV... vtables or static function-pointer arrays/structs) so virtual
+    // dispatch `vtable[slot](this, ...)` resolves directly AND carries a
+    // `__vtable__:<gv>:<offset>` dynamic type for interprocedural specialization.
+    if (offset_known && total_offset >= 0 && DL) {
+      const llvm::GlobalVariable *vtable_gv = nullptr;
+      uint64_t abs_byte_off = static_cast<uint64_t>(total_offset);
+      if (const auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(
+              GEP->getPointerOperand()->stripPointerCasts())) {
+        if (GV->isConstant() && GV->hasInitializer()) {
+          vtable_gv = GV;
+        }
+      } else if (auto dyn_ty = astate.getDynamicType(base_canon)) {
+        std::string gv_name;
+        uint64_t base_off = 0;
+        if (parseVtableDynamicType(*dyn_ty, gv_name, base_off) && loc &&
+            loc->getModule()) {
+          if (const auto *GV = loc->getModule()->getNamedGlobal(gv_name)) {
+            if (GV->isConstant() && GV->hasInitializer()) {
+              vtable_gv = GV;
+              abs_byte_off = base_off + static_cast<uint64_t>(total_offset);
+            }
+          }
+        }
+      }
+
+      if (vtable_gv) {
+        AbstractValue cur_c = astate.getCanonical(cur);
+        if (vtable_gv->hasName()) {
+          astate.setDynamicType(cur_c, "__vtable__:" +
+                                           vtable_gv->getName().str() + ":" +
+                                           std::to_string(abs_byte_off));
+        }
+        if (const llvm::Constant *elem = extractConstantAtByteOffset(
+                vtable_gv->getInitializer(), abs_byte_off, *DL)) {
+          if (const llvm::Function *target_fn =
+                  extractFunctionFromConstant(elem)) {
+            if (auto fn_addr = eval(astate, target_fn, loc, pred)) {
+              astate.getPostHeap().addEdge(
+                  cur_c, Access(AccessKind::Dereference), *fn_addr);
+              astate.getPostAttrs().remove(cur_c, Attribute::Uninitialized);
+            }
+          }
+        }
+      }
+    }
+
     // If we can prove an out-of-bounds offset, mark it for later reporting.
     if (alloc_size_opt && offset_known) {
       const uint64_t alloc_size = *alloc_size_opt;
@@ -441,35 +598,34 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
       }
     }
 
-    AbstractValue gepAv = factory_->getOrCreate(GEP);
+    AbstractValue cur_canon = astate.getCanonical(cur);
     if (oob_proven) {
-      astate.getPostAttrs().add(gepAv, Attribute::OutOfBounds);
+      astate.getPostAttrs().add(cur_canon, Attribute::OutOfBounds);
     }
     if (alloc_size_opt && offset_known && total_offset >= 0) {
       uint64_t alloc_size = *alloc_size_opt;
       if (static_cast<uint64_t>(total_offset) < alloc_size) {
         uint64_t remaining = alloc_size - static_cast<uint64_t>(total_offset);
         if (remaining > 0) {
-          astate.setAllocationSize(gepAv, remaining);
+          astate.setAllocationSize(cur_canon, remaining);
         }
       }
     }
-    astate.setAllocationRoot(gepAv, astate.getAllocationRoot(base_canon));
+    astate.setAllocationRoot(cur_canon, astate.getAllocationRoot(base_canon));
     if (base_is_stack) {
-      astate.getPostAttrs().add(gepAv, Attribute::Stack);
+      astate.getPostAttrs().add(cur_canon, Attribute::Stack);
     }
     if (base_is_global) {
-      astate.getPostAttrs().add(gepAv, Attribute::Global);
+      astate.getPostAttrs().add(cur_canon, Attribute::Global);
     }
-    Address gepAddr(gepAv);
+    if (auto base_name = astate.getDecompilerName(base_canon)) {
+      astate.setDecompilerName(cur_canon, *base_name + "[...]");
+    }
+    Address gepAddr(cur_canon);
     gepAddr.history = base.history;
     if (loc)
       gepAddr.history.addEvent(ValueHistory::EventKind::Unknown, loc,
                                loc->getFunction());
-    Access deref(AccessKind::Dereference);
-    astate.getPostHeap().addEdge(gepAv, deref, Address(cur));
-    astate.abduceToPre(gepAv, deref, Address(cur));
-    astate.abduceAttrToPre(gepAv, Attribute::Allocated);
     return std::optional<Address>(gepAddr);
   }
 
@@ -618,16 +774,34 @@ OperationResult PulseOperations::checkAddrAccess(AbductiveDomain &astate,
     return OperationResult::UninitializedRead;
   }
 
+  // Record MustBeValid precondition for accesses to pre-addresses (unless this
+  // is free(ptr), where free(NULL) is valid in C).
+  if (!is_free_call && astate.isInPre(canon_addr) &&
+      !astate.isAllocated(canon_addr)) {
+    Trace t = Trace::fromValueHistory(addr.history);
+    if (loc) {
+      t.addEvent(loc, "Memory access");
+    }
+    astate.abduceMustBeValid(canon_addr, std::move(t));
+  }
+
   return OperationResult::Success;
 }
 
 void PulseOperations::allocate(AbductiveDomain &astate, AbstractValue addr,
-                               const llvm::Instruction *loc) {
-  (void)loc;
-  astate.getPostAttrs().add(addr, Attribute::Allocated);
-  astate.getPostAttrs().remove(addr, Attribute::Invalid);
-  astate.getPostAttrs().remove(addr, Attribute::Uninitialized);
-  astate.setAllocationRoot(addr, addr);
+                               const llvm::Instruction *loc,
+                               AllocatorKind kind) {
+  AbstractValue canon = astate.getCanonical(addr);
+  astate.getPostAttrs().add(canon, Attribute::Allocated);
+  astate.getPostAttrs().remove(canon, Attribute::Invalid);
+  astate.getPostAttrs().remove(canon, Attribute::Uninitialized);
+  astate.setAllocationRoot(canon, canon);
+  Trace alloc_trace;
+  if (loc) {
+    alloc_trace.addEvent(loc, "Allocated");
+  }
+  astate.setAllocationInfo(canon,
+                           AllocationInfo(kind, loc, std::move(alloc_trace)));
 }
 
 void PulseOperations::invalidate(AbductiveDomain &astate, Address addr,
@@ -639,9 +813,8 @@ void PulseOperations::invalidate(AbductiveDomain &astate, Address addr,
   // Invalidate the canonical address
   astate.getPostAttrs().add(canon, Attribute::Invalid);
   astate.getPostAttrs().remove(canon, Attribute::Allocated);
+  astate.removeAllocationInfo(canon);
   // Clear allocation size for freed memory.
-  // (Do not retain bounds for invalidated objects.)
-  // We keep it out of post state to avoid misleading OOB checks later.
   astate.setAllocationSize(canon, 0);
   astate.setInvalidationInfo(canon, kind, loc);
   // Heap edges are keyed by canonical abstract values.
@@ -656,6 +829,7 @@ void PulseOperations::invalidate(AbductiveDomain &astate, Address addr,
   for (AbstractValue derived : same_allocation) {
     astate.getPostAttrs().add(derived, Attribute::Invalid);
     astate.getPostAttrs().remove(derived, Attribute::Allocated);
+    astate.removeAllocationInfo(derived);
     astate.setAllocationSize(derived, 0);
     astate.setInvalidationInfo(derived, kind, loc);
     astate.getPostHeap().removeEdges(derived);
@@ -724,6 +898,11 @@ OperationResult PulseOperations::writeDeref(AbductiveDomain &astate,
       !astate.getPostAttrs().has(canon_ptr, Attribute::Stack) &&
       !astate.getPostAttrs().has(canon_ptr, Attribute::Global)) {
     astate.abduceAttrToPre(canon_ptr, Attribute::Allocated);
+    Trace write_trace = Trace::fromValueHistory(ptr.history);
+    if (loc) {
+      write_trace.addEvent(loc, "Write dereference");
+    }
+    astate.abduceMustBeValid(canon_ptr, std::move(write_trace));
   }
 
   // Canonicalize values (canon_ptr already defined above)
@@ -734,6 +913,11 @@ OperationResult PulseOperations::writeDeref(AbductiveDomain &astate,
   // Write to heap (using canonical values)
   Access deref(AccessKind::Dereference);
   astate.getPostHeap().addEdge(canon_ptr, deref, canon_value_addr);
+  Trace wt_trace;
+  if (loc) {
+    wt_trace.addEvent(loc, "Written to memory");
+  }
+  astate.markWrittenTo(canon_ptr, loc, std::move(wt_trace));
 
   // Propagate taint: if value is tainted, propagate to memory location
   TaintOperations::propagateThroughStore(astate, canon_value, canon_ptr, loc);
@@ -743,15 +927,10 @@ OperationResult PulseOperations::writeDeref(AbductiveDomain &astate,
 
   // Interprocedural initialization: when writing through a pointer parameter,
   // clear Uninitialized from the pointed-to memory location
-  // This handles cases like: void init(int *p) { *p = 100; } ... int x;
-  // init(&x); The write initializes the memory that p points to
   AbstractValue pointed_canon = astate.getCanonical(canon_value_addr.addr);
   astate.getPostAttrs().remove(pointed_canon, Attribute::Uninitialized);
 
-  // Also check if the pointer itself points to a stack variable
-  // (for cases where we write to *p and p points to a stack variable)
   if (astate.getPostAttrs().has(canon_ptr, Attribute::Stack)) {
-    // Clear Uninitialized from the stack variable that this pointer points to
     astate.getPostAttrs().remove(canon_ptr, Attribute::Uninitialized);
   }
 
@@ -767,10 +946,22 @@ PulseOperations::readDeref(AbductiveDomain &astate, Address ptr,
     return {OperationResult::UseAfterFree, std::nullopt};
   }
 
-  // Check access (will check Null, Uninitialized, etc.)
+  // Check access (will check Null, OutOfBounds, Uninitialized, and abduce
+  // MustBeValid for pre-addresses)
   auto result = checkAddrAccess(astate, ptr, loc);
   if (result != OperationResult::Success) {
     return {result, std::nullopt};
+  }
+
+  // Reading through a pre-address that has not been written in this procedure
+  // requires the caller to have initialized it.
+  if (astate.isInPre(canon_ptr) && !astate.hasWrittenTo(canon_ptr) &&
+      !astate.isAllocated(canon_ptr)) {
+    Trace init_trace = Trace::fromValueHistory(ptr.history);
+    if (loc) {
+      init_trace.addEvent(loc, "Read from memory");
+    }
+    astate.abduceMustBeInitialized(canon_ptr, std::move(init_trace));
   }
 
   // Evaluate dereference
@@ -905,9 +1096,66 @@ void PulseOperations::deepCopyRecursive(AbductiveDomain &astate,
   }
 }
 
+void PulseOperations::copySubgraph(AbductiveDomain &astate, AbstractValue src,
+                                   AbstractValue dst, unsigned max_depth) {
+  AbstractValue c_src = astate.getCanonical(src);
+  AbstractValue c_dst = astate.getCanonical(dst);
+  if (c_src == c_dst) {
+    return;
+  }
+  std::set<AbstractValue> visited;
+  std::function<void(AbstractValue, AbstractValue, unsigned)> copy_rec =
+      [&](AbstractValue s, AbstractValue d, unsigned depth) {
+        if (depth >= max_depth || !visited.insert(s).second) {
+          return;
+        }
+        auto it = astate.getPostHeap().getEdges().find(s);
+        if (it == astate.getPostHeap().getEdges().end()) {
+          return;
+        }
+        // Snapshot edges before mutating post_heap_.
+        auto edges_copy = it->second;
+        for (const auto &ekv : edges_copy) {
+          const Access &acc = ekv.first;
+          const Address &src_target = ekv.second;
+          AbstractValue c_src_target = astate.getCanonical(src_target.addr);
+          // For nested Field/ArrayIndex sub-cells that themselves have outgoing
+          // edges (e.g. addressable struct fields from GEP), allocate/reuse a
+          // destination sub-cell and recurse. For leaf values (e.g. pointer or
+          // scalar fields in SSA aggregates or Dereference targets), copy the
+          // Address directly to preserve its abstract value and attributes.
+          const auto src_child_it =
+              astate.getPostHeap().getEdges().find(c_src_target);
+          const bool has_child_edges =
+              src_child_it != astate.getPostHeap().getEdges().end() &&
+              !src_child_it->second.empty();
+          if ((acc.kind == AccessKind::Field ||
+               acc.kind == AccessKind::ArrayIndex) &&
+              has_child_edges && depth + 1 <= max_depth) {
+            AbstractValue dst_cell;
+            if (const Address *existing =
+                    astate.getPostHeap().findEdge(d, acc)) {
+              dst_cell = astate.getCanonical(existing->addr);
+            } else {
+              dst_cell = factory_->createFresh();
+              Address cell_addr(dst_cell);
+              cell_addr.history = src_target.history;
+              astate.getPostHeap().addEdge(d, acc, cell_addr);
+              astate.setAllocationRoot(dst_cell, astate.getAllocationRoot(d));
+            }
+            astate.getPostAttrs().remove(dst_cell, Attribute::Uninitialized);
+            astate.markWrittenTo(dst_cell, nullptr);
+            copy_rec(c_src_target, dst_cell, depth + 1);
+          } else {
+            astate.getPostHeap().addEdge(d, acc, src_target);
+          }
+        }
+      };
+  copy_rec(c_src, c_dst, 0);
+}
+
 void PulseOperations::havoc(AbductiveDomain &astate, Address addr,
                             const llvm::Instruction *loc) {
-  (void)loc;
   // Remove all edges from the address (model unknown effects)
   AbstractValue canon_addr = astate.getCanonical(addr.addr);
   astate.getPostHeap().removeEdges(canon_addr);
@@ -937,6 +1185,25 @@ void PulseOperations::havoc(AbductiveDomain &astate, Address addr,
     astate.getPostAttrs().add(canon_addr, attr);
   }
   astate.setAllocationSize(canon_addr, 0);
+
+  // Record UnknownEffect and WrittenTo so downstream summaries and leak checks
+  // know this address passed through an unknown call.
+  std::string callee_name = "<unknown>";
+  if (loc) {
+    if (auto *CB = llvm::dyn_cast<llvm::CallBase>(loc)) {
+      if (const llvm::Function *F = CB->getCalledFunction()) {
+        callee_name = F->getName().str();
+      } else {
+        callee_name = "<indirect>";
+      }
+    }
+  }
+  UnknownEffectInfo ue;
+  ue.callee = std::move(callee_name);
+  ue.location = loc;
+  ue.history = addr.history;
+  astate.setUnknownEffect(canon_addr, std::move(ue));
+  astate.markWrittenTo(canon_addr, loc);
 }
 
 OperationResult

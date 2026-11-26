@@ -29,14 +29,16 @@ void DiagnosticManager::report(std::unique_ptr<Diagnostic> diagnostic) {
 
   for (auto &entry : bucket) {
     if (entry.representative->equals(*diagnostic)) {
-      // Duplicate found
       entry.count++;
-      // Here we could implement trace merging:
-      // if
-      // (diagnostic->getTrace().isShortThan(entry.representative->getTrace()))
-      // {
-      //     entry.representative = std::move(diagnostic);
-      // }
+      // Infer-style trace deduplication: prefer the shortest non-empty witness
+      // trace so reports remain concise and readable.
+      const Trace *old_trace = entry.representative->getTrace();
+      const Trace *new_trace = diagnostic->getTrace();
+      const size_t old_len = old_trace ? old_trace->getEvents().size() : 0;
+      const size_t new_len = new_trace ? new_trace->getEvents().size() : 0;
+      if (new_len > 0 && (old_len == 0 || new_len < old_len)) {
+        entry.representative = std::move(diagnostic);
+      }
       return;
     }
   }

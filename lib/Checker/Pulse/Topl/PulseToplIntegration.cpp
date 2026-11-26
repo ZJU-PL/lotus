@@ -31,8 +31,9 @@ void PulseChecker::reportTopl(const AbductiveDomain &state) {
   if (toplTypeId_ < 0)
     toplTypeId_ = BugReportMgr::get_instance().register_bug_type(
         "TOPL Error", BugDescription::BI_HIGH, BugDescription::BC_ERROR);
-  for (const auto &violation :
-       topl_program_.evaluate(state.getToplHistory(), state.getPathFormula())) {
+  for (const auto &violation : topl_program_.evaluate(
+           state.getToplHistory(), state.getPathFormula(),
+           &state.getPostHeap())) {
     if (violation.trace.empty())
       continue;
     const auto *location = violation.trace.back().location;

@@ -1,26 +1,16 @@
 
 #include "Checker/Pulse/Domain/PulseDisjunctiveDomain.h"
 
+#include "Checker/Pulse/Domain/PulseJoin.h"
+#include "Checker/Pulse/Domain/PulseNonDisjunctiveDomain.h"
+
 #include <algorithm>
 
 namespace pulse {
 
-//===----------------------------------------------------------------------===//
-// DisjunctiveDomain
-//
-// Tracks a bounded set of disjunctive states per basic block entry.
-//
-// Sound incorrectness guidance:
-// - Prefer keeping distinct disjuncts (witness paths) rather than aggressively
-//   merging them, because merges can forget the very information needed to make
-//   a bug witnessable.
-// - Widening/limits are scalability mechanisms; they may reduce recall. When
-//   forced to merge, this implementation avoids *conjoining* path conditions
-//   (which would drop feasible witnesses).
-//===----------------------------------------------------------------------===//
-
 static void reduceDisjuncts(std::vector<DisjunctiveDomain::Disjunct> &disjuncts,
-                            size_t max) {
+                            size_t max,
+                            NonDisjunctiveDomain *spill_non_disj = nullptr) {
   if (disjuncts.size() <= max) {
     return;
   }
@@ -68,6 +58,14 @@ static void reduceDisjuncts(std::vector<DisjunctiveDomain::Disjunct> &disjuncts,
       }
       if (!chosen[i]) {
         selected.push_back(std::move(pool[i]));
+        chosen[i] = true;
+      }
+    }
+    if (spill_non_disj) {
+      for (size_t i = 0; i < pool.size(); ++i) {
+        if (!chosen[i] && pool[i].state.getAstate()) {
+          spill_non_disj->addState(*pool[i].state.getAstate());
+        }
       }
     }
   };
@@ -107,6 +105,25 @@ void DisjunctiveDomain::add(const llvm::BasicBlock *at_block,
   limitDisjuncts(at_block);
 }
 
+bool DisjunctiveDomain::addWithDedup(const llvm::BasicBlock *at_block,
+                                     ExecutionDomain state,
+                                     const llvm::BasicBlock *path_context,
+                                     NonDisjunctiveDomain *non_disj) {
+  state.setEntryPred(path_context);
+  auto &vec = disjuncts_by_block_[at_block];
+  if (const AbductiveDomain *cand = state.getAstate()) {
+    for (const auto &existing : vec) {
+      if (existing.path_context == path_context && existing.state.getAstate() &&
+          AbductiveDomain::leq(*cand, *existing.state.getAstate())) {
+        return false;
+      }
+    }
+  }
+  vec.emplace_back(std::move(state), path_context);
+  reduceDisjuncts(vec, kMaxDisjuncts, non_disj);
+  return true;
+}
+
 void DisjunctiveDomain::limitDisjuncts(const llvm::BasicBlock *at_block) {
   auto it = disjuncts_by_block_.find(at_block);
   if (it == disjuncts_by_block_.end()) {
@@ -126,10 +143,10 @@ ExecutionDomain DisjunctiveDomain::joinAtBlock(const llvm::BasicBlock *BB) {
     return disjuncts[0].state.clone();
   }
 
-  // Sound incorrectness: avoid over-approximating joins under widening.
-  // A union-style merge can fabricate heap facts and admit non-witnessable bug
-  // paths (false positives). When forced to reduce disjuncts, keep a single
-  // representative witness state instead.
+  // Group non-stopped disjuncts by CFG predecessor (path_context) so PHI
+  // evaluation remains sound, then join same-predecessor disjuncts via
+  // PulseJoin::joinAbductive (preserving shared facts and disjunctive
+  // equalities), falling back to a clean representative if join is unavailable.
   const DisjunctiveDomain::Disjunct *best = nullptr;
   for (const auto &disj : disjuncts) {
     if (disj.state.isStopped()) {
@@ -148,6 +165,27 @@ ExecutionDomain DisjunctiveDomain::joinAtBlock(const llvm::BasicBlock *BB) {
     }
   }
   if (best) {
+    const llvm::BasicBlock *target_pred = best->path_context;
+    if (const AbductiveDomain *acc_init = best->state.getAstate()) {
+      AbductiveDomain acc = acc_init->clone();
+      bool joined_any = false;
+      for (const auto &disj : disjuncts) {
+        if (&disj == best || disj.state.isStopped() ||
+            disj.path_context != target_pred || !disj.state.getAstate()) {
+          continue;
+        }
+        if (auto merged = PulseJoin::joinAbductive(acc, *disj.state.getAstate())) {
+          acc = std::move(*merged);
+          joined_any = true;
+        }
+      }
+      if (joined_any) {
+        ExecutionDomain joined = ExecutionDomain::continueProgram(
+            std::make_unique<AbductiveDomain>(std::move(acc)));
+        joined.setEntryPred(target_pred);
+        return joined;
+      }
+    }
     return best->state.clone();
   }
 

@@ -1,11 +1,14 @@
 #include "Checker/Pulse/Domain/PulseDomain.h"
 
 #include "Checker/Pulse/Core/PulseFormula.h"
+#include "Checker/Pulse/Core/PulseSubstitution.h"
 #include "Checker/Pulse/Interproc/PulseTransitiveInfo.h"
 
 #include <algorithm>
 #include <cassert>
+#include <deque>
 #include <optional>
+#include <queue>
 
 namespace pulse {
 
@@ -33,6 +36,12 @@ void Stack::clear() { stack_.clear(); }
 // Heap Implementation
 //===----------------------------------------------------------------------===//
 
+void Heap::registerAddress(AbstractValue addr) { edges_.try_emplace(addr); }
+
+bool Heap::hasAddress(AbstractValue addr) const {
+  return edges_.find(addr) != edges_.end();
+}
+
 void Heap::addEdge(AbstractValue from, Access access, Address to) {
   edges_[from][access] = to;
 }
@@ -51,6 +60,13 @@ const Address *Heap::findEdge(AbstractValue from, Access access) const {
     return nullptr;
   auto acc_it = it->second.find(access);
   return (acc_it != it->second.end()) ? &acc_it->second : nullptr;
+}
+
+void Heap::removeEdge(AbstractValue from, const Access &access) {
+  auto it = edges_.find(from);
+  if (it != edges_.end()) {
+    it->second.erase(access);
+  }
 }
 
 void Heap::removeEdges(AbstractValue addr) { edges_.erase(addr); }
@@ -100,7 +116,6 @@ PulseFormula &AbductiveDomain::getPathFormula() {
 
 const PulseFormula &AbductiveDomain::getPathFormula() const {
   if (!path_formula_) {
-    // Create a mutable copy for const access
     const_cast<AbductiveDomain *>(this)->path_formula_ =
         std::make_unique<PulseFormula>();
   }
@@ -112,7 +127,7 @@ void AbductiveDomain::setPathFormula(std::unique_ptr<PulseFormula> formula) {
 }
 
 void AbductiveDomain::addNonNull(AbstractValue addr) {
-  getPathFormula().addNonNull(addr);
+  (void)getPathFormula().addNonNull(addr);
 }
 
 bool AbductiveDomain::isNonNull(AbstractValue addr) const {
@@ -120,37 +135,283 @@ bool AbductiveDomain::isNonNull(AbstractValue addr) const {
 }
 
 void AbductiveDomain::addEquality(AbstractValue v1, AbstractValue v2) {
-  getPathFormula().addEquality(v1, v2);
+  (void)getPathFormula().addEquality(v1, v2);
 }
 
 AbstractValue AbductiveDomain::getCanonical(AbstractValue v) const {
   return getPathFormula().getCanonical(v);
 }
 
+void AbductiveDomain::registerPreAddress(AbstractValue addr) {
+  AbstractValue canon = getCanonical(addr);
+  pre_heap_.registerAddress(canon);
+}
+
+bool AbductiveDomain::isInPre(AbstractValue addr) const {
+  AbstractValue canon = getCanonical(addr);
+  if (pre_heap_.hasAddress(canon) || pre_heap_.hasAddress(addr)) {
+    return true;
+  }
+  for (const auto &kv : pre_stack_.getMap()) {
+    if (getCanonical(kv.second.addr) == canon) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool AbductiveDomain::isAllocated(AbstractValue addr) const {
+  AbstractValue canon = getCanonical(addr);
+  if (post_attrs_.has(canon, Attribute::Allocated) ||
+      post_attrs_.has(canon, Attribute::Stack) ||
+      post_attrs_.has(canon, Attribute::Global)) {
+    return true;
+  }
+  return post_allocation_info_.find(canon) != post_allocation_info_.end();
+}
+
+bool AbductiveDomain::preHeapHasAssumptions() const {
+  // Infer PulseAbductiveDomain.ml:2367-2389:
+  // True if distinct pre-stack entries alias to the same address, or if two
+  // distinct edges in pre_heap_ point to the same canonical target address
+  // (i.e. aliasing/sharing assumption in the precondition).
+  std::set<AbstractValue> seen_targets;
+  for (const auto &kv : pre_stack_.getMap()) {
+    AbstractValue canon = getCanonical(kv.second.addr);
+    if (!seen_targets.insert(canon).second) {
+      return true;
+    }
+  }
+  for (const auto &kv : pre_heap_.getEdges()) {
+    for (const auto &edge_kv : kv.second) {
+      AbstractValue target_canon = getCanonical(edge_kv.second.addr);
+      if (!seen_targets.insert(target_canon).second) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void AbductiveDomain::abduceToPre(AbstractValue addr, const Access &access,
                                   Address target) {
-  // Biabduction: if we read from memory not in pre, add it to pre
-  if (!pre_heap_.findEdge(addr, access)) {
-    pre_heap_.addEdge(addr, access, target);
+  AbstractValue canon_addr = getCanonical(addr);
+  if (!isInPre(canon_addr)) {
+    return;
   }
+  Access canon_access = access;
+  if (canon_access.kind == AccessKind::ArrayIndex) {
+    canon_access.index = getCanonical(canon_access.index);
+  }
+  Address canon_target(getCanonical(target.addr));
+  canon_target.history = target.history;
+  pre_heap_.registerAddress(canon_addr);
+  if (!pre_heap_.findEdge(canon_addr, canon_access)) {
+    pre_heap_.addEdge(canon_addr, canon_access, canon_target);
+  }
+  pre_heap_.registerAddress(canon_target.addr);
 }
 
 void AbductiveDomain::abduceAttrToPre(AbstractValue addr, Attribute attr) {
-  // Abduce attribute to pre if not already there
-  if (!pre_attrs_.has(addr, attr)) {
-    pre_attrs_.add(addr, attr);
+  AbstractValue canon_addr = getCanonical(addr);
+  if (!isInPre(canon_addr)) {
+    return;
   }
+  pre_heap_.registerAddress(canon_addr);
+  if (!pre_attrs_.has(canon_addr, attr)) {
+    pre_attrs_.add(canon_addr, attr);
+  }
+}
+
+void AbductiveDomain::abduceMustBeValid(
+    AbstractValue addr, Trace trace, std::optional<InvalidationKind> reason) {
+  AbstractValue canon_addr = getCanonical(addr);
+  if (!isInPre(canon_addr)) {
+    return;
+  }
+  // Do not require caller validity for locally allocated storage.
+  if (isAllocated(canon_addr)) {
+    return;
+  }
+  pre_heap_.registerAddress(canon_addr);
+  if (pre_must_be_valid_.find(canon_addr) == pre_must_be_valid_.end()) {
+    pre_must_be_valid_.emplace(
+        canon_addr, MustBeValidInfo(nextTimestamp(), std::move(trace), reason));
+  }
+}
+
+void AbductiveDomain::abduceMustBeInitialized(AbstractValue addr, Trace trace) {
+  AbstractValue canon_addr = getCanonical(addr);
+  if (!isInPre(canon_addr)) {
+    return;
+  }
+  if (hasWrittenTo(canon_addr) || isAllocated(canon_addr)) {
+    return;
+  }
+  pre_heap_.registerAddress(canon_addr);
+  if (pre_must_be_initialized_.find(canon_addr) ==
+      pre_must_be_initialized_.end()) {
+    pre_must_be_initialized_.emplace(
+        canon_addr, MustBeInitializedInfo(nextTimestamp(), std::move(trace)));
+  }
+}
+
+void AbductiveDomain::abduceMustNotBeTainted(AbstractValue addr,
+                                             MustNotBeTaintedSink sink) {
+  AbstractValue canon_addr = getCanonical(addr);
+  if (!isInPre(canon_addr)) {
+    return;
+  }
+  pre_heap_.registerAddress(canon_addr);
+  if (sink.timestamp == 0) {
+    sink.timestamp = nextTimestamp();
+  }
+  pre_must_not_be_tainted_[canon_addr].push_back(std::move(sink));
+}
+
+void AbductiveDomain::markWrittenTo(AbstractValue addr,
+                                    const llvm::Instruction *loc, Trace trace) {
+  AbstractValue canon = getCanonical(addr);
+  post_written_to_[canon] = WrittenToInfo(nextTimestamp(), loc, std::move(trace));
+}
+
+bool AbductiveDomain::hasWrittenTo(AbstractValue addr) const {
+  AbstractValue canon = getCanonical(addr);
+  return post_written_to_.find(canon) != post_written_to_.end() ||
+         post_written_to_.find(addr) != post_written_to_.end();
+}
+
+std::optional<WrittenToInfo>
+AbductiveDomain::getWrittenTo(AbstractValue addr) const {
+  AbstractValue canon = getCanonical(addr);
+  auto it = post_written_to_.find(canon);
+  if (it != post_written_to_.end()) {
+    return it->second;
+  }
+  it = post_written_to_.find(addr);
+  if (it != post_written_to_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+void AbductiveDomain::setAllocationInfo(AbstractValue addr,
+                                        AllocationInfo info) {
+  AbstractValue canon = getCanonical(addr);
+  post_allocation_info_[canon] = std::move(info);
+}
+
+std::optional<AllocationInfo>
+AbductiveDomain::getAllocationInfo(AbstractValue addr) const {
+  AbstractValue canon = getCanonical(addr);
+  auto it = post_allocation_info_.find(canon);
+  if (it != post_allocation_info_.end()) {
+    return it->second;
+  }
+  it = post_allocation_info_.find(addr);
+  if (it != post_allocation_info_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+void AbductiveDomain::removeAllocationInfo(AbstractValue addr) {
+  AbstractValue canon = getCanonical(addr);
+  post_allocation_info_.erase(canon);
+  post_allocation_info_.erase(addr);
+}
+
+void AbductiveDomain::addPropagateTaintFrom(AbstractValue dest,
+                                            PropagateTaintFromInfo info) {
+  AbstractValue canon = getCanonical(dest);
+  for (AbstractValue &src : info.sources) {
+    src = getCanonical(src);
+  }
+  post_propagate_taint_from_[canon].push_back(std::move(info));
+}
+
+void AbductiveDomain::setUnknownEffect(AbstractValue addr,
+                                       UnknownEffectInfo info) {
+  AbstractValue canon = getCanonical(addr);
+  post_unknown_effect_[canon] = std::move(info);
+}
+
+std::optional<UnknownEffectInfo>
+AbductiveDomain::getUnknownEffect(AbstractValue addr) const {
+  AbstractValue canon = getCanonical(addr);
+  auto it = post_unknown_effect_.find(canon);
+  if (it != post_unknown_effect_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+void AbductiveDomain::addTaintSanitized(AbstractValue addr,
+                                        SanitizerRecord rec) {
+  AbstractValue canon = getCanonical(addr);
+  if (rec.timestamp == 0) {
+    rec.timestamp = nextTimestamp();
+  }
+  post_taint_sanitized_[canon].push_back(std::move(rec));
+}
+
+void AbductiveDomain::setDynamicType(AbstractValue addr,
+                                     const std::string &type_name) {
+  if (!type_name.empty()) {
+    AbstractValue canon = getCanonical(addr);
+    dynamic_types_[canon] = type_name;
+    (void)getPathFormula().addExactType(canon, type_name);
+  }
+}
+
+std::optional<std::string>
+AbductiveDomain::getDynamicType(AbstractValue addr) const {
+  AbstractValue canon = getCanonical(addr);
+  auto it = dynamic_types_.find(canon);
+  if (it != dynamic_types_.end()) {
+    return it->second;
+  }
+  it = dynamic_types_.find(addr);
+  if (it != dynamic_types_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+void AbductiveDomain::setDecompilerName(AbstractValue addr,
+                                        const std::string &name) {
+  if (!name.empty()) {
+    decompiler_[getCanonical(addr)] = name;
+  }
+}
+
+std::optional<std::string>
+AbductiveDomain::getDecompilerName(AbstractValue addr) const {
+  AbstractValue canon = getCanonical(addr);
+  auto it = decompiler_.find(canon);
+  if (it != decompiler_.end()) {
+    return it->second;
+  }
+  it = decompiler_.find(addr);
+  if (it != decompiler_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
 }
 
 void AbductiveDomain::setInvalidationInfo(AbstractValue addr,
                                           InvalidationKind kind,
                                           const llvm::Instruction *loc) {
-  invalidation_info_[addr] = {kind, loc};
+  invalidation_info_[getCanonical(addr)] = {kind, loc};
 }
 
 std::optional<std::pair<InvalidationKind, const llvm::Instruction *>>
 AbductiveDomain::getInvalidationInfo(AbstractValue addr) const {
-  auto it = invalidation_info_.find(addr);
+  AbstractValue canon = getCanonical(addr);
+  auto it = invalidation_info_.find(canon);
+  if (it != invalidation_info_.end())
+    return it->second;
+  it = invalidation_info_.find(addr);
   if (it != invalidation_info_.end())
     return it->second;
   return std::nullopt;
@@ -159,19 +420,24 @@ AbductiveDomain::getInvalidationInfo(AbstractValue addr) const {
 AbductiveDomain AbductiveDomain::clone() const {
   AbductiveDomain cloned;
 
-  // Clone stacks (simple copy)
   cloned.post_stack_ = post_stack_;
   cloned.pre_stack_ = pre_stack_;
-
-  // Clone heaps (simple copy)
   cloned.post_heap_ = post_heap_;
   cloned.pre_heap_ = pre_heap_;
-
-  // Clone attributes (simple copy)
   cloned.post_attrs_ = post_attrs_;
   cloned.pre_attrs_ = pre_attrs_;
 
-  // Clone path formula
+  cloned.pre_must_be_valid_ = pre_must_be_valid_;
+  cloned.pre_must_be_initialized_ = pre_must_be_initialized_;
+  cloned.pre_must_not_be_tainted_ = pre_must_not_be_tainted_;
+  cloned.post_written_to_ = post_written_to_;
+  cloned.post_allocation_info_ = post_allocation_info_;
+  cloned.post_propagate_taint_from_ = post_propagate_taint_from_;
+  cloned.post_unknown_effect_ = post_unknown_effect_;
+  cloned.post_taint_sanitized_ = post_taint_sanitized_;
+  cloned.dynamic_types_ = dynamic_types_;
+  cloned.decompiler_ = decompiler_;
+
   if (path_formula_) {
     cloned.path_formula_ =
         std::make_unique<PulseFormula>(path_formula_->clone());
@@ -183,15 +449,16 @@ AbductiveDomain AbductiveDomain::clone() const {
   cloned.taint_domain_.join(taint_domain_);
   cloned.topl_history_ = topl_history_;
 
-  // Clone new fields
   cloned.skipped_calls_ = skipped_calls_;
   cloned.transitive_info_ = transitive_info_.clone();
   cloned.unknown_values_ = unknown_values_;
   cloned.need_dynamic_type_specialization_ = need_dynamic_type_specialization_;
   cloned.recursive_calls_ = recursive_calls_;
+  cloned.recursive_call_edges_ = recursive_call_edges_;
   cloned.loop_header_info_ = loop_header_info_;
+  cloned.loop_path_stamps_ = loop_path_stamps_;
+  cloned.timestamp_counter_ = timestamp_counter_;
 
-  // Clone loop invariant under inference if present
   if (loop_invariant_under_inference_) {
     cloned.loop_invariant_under_inference_ =
         std::make_unique<LoopInvariantUnderInference>(
@@ -203,16 +470,9 @@ AbductiveDomain AbductiveDomain::clone() const {
 }
 
 void AbductiveDomain::canonicalize() {
-  // Normalize stack bindings (values) and heap/attrs keys w.r.t. the current
-  // path formula. This is a best-effort canonicalization: when multiple entries
-  // collapse to the same canonical value, we keep the first encountered one.
-
   auto canon_access = [this](const Access &access) -> Access {
     if (access.kind == AccessKind::ArrayIndex) {
       Access out = access;
-      // Canonicalize only the symbolic index value. The `stride_bytes` is a
-      // structural part of the access path identity and should remain
-      // unchanged.
       out.index = getCanonical(access.index);
       return out;
     }
@@ -248,6 +508,9 @@ void AbductiveDomain::canonicalize() {
     Heap new_heap;
     for (const auto &kv : post_heap_.getEdges()) {
       AbstractValue from = getCanonical(kv.first);
+      if (kv.second.empty()) {
+        continue;
+      }
       for (const auto &edge_kv : kv.second) {
         Access acc = canon_access(edge_kv.first);
         Address to = canon_address(edge_kv.second);
@@ -259,17 +522,19 @@ void AbductiveDomain::canonicalize() {
     post_heap_ = std::move(new_heap);
   }
 
-  // Pre heap
+  // Pre heap (preserve registered addresses even when edge maps are empty!)
   {
     Heap new_heap;
     for (const auto &kv : pre_heap_.getEdges()) {
       AbstractValue from = getCanonical(kv.first);
+      new_heap.registerAddress(from);
       for (const auto &edge_kv : kv.second) {
         Access acc = canon_access(edge_kv.first);
         Address to = canon_address(edge_kv.second);
         if (!new_heap.findEdge(from, acc)) {
           new_heap.addEdge(from, acc, to);
         }
+        new_heap.registerAddress(to.addr);
       }
     }
     pre_heap_ = std::move(new_heap);
@@ -297,6 +562,134 @@ void AbductiveDomain::canonicalize() {
       }
     }
     pre_attrs_ = std::move(new_attrs);
+  }
+
+  // Pre MustBeValid (keep earliest timestamp)
+  {
+    std::map<AbstractValue, MustBeValidInfo> canon_map;
+    for (const auto &kv : pre_must_be_valid_) {
+      AbstractValue addr = getCanonical(kv.first);
+      auto it = canon_map.find(addr);
+      if (it == canon_map.end() || kv.second.timestamp < it->second.timestamp) {
+        canon_map[addr] = kv.second;
+      }
+    }
+    pre_must_be_valid_ = std::move(canon_map);
+  }
+
+  // Pre MustBeInitialized (keep earliest timestamp)
+  {
+    std::map<AbstractValue, MustBeInitializedInfo> canon_map;
+    for (const auto &kv : pre_must_be_initialized_) {
+      AbstractValue addr = getCanonical(kv.first);
+      auto it = canon_map.find(addr);
+      if (it == canon_map.end() || kv.second.timestamp < it->second.timestamp) {
+        canon_map[addr] = kv.second;
+      }
+    }
+    pre_must_be_initialized_ = std::move(canon_map);
+  }
+
+  // Pre MustNotBeTainted
+  {
+    std::map<AbstractValue, std::vector<MustNotBeTaintedSink>> canon_map;
+    for (const auto &kv : pre_must_not_be_tainted_) {
+      AbstractValue addr = getCanonical(kv.first);
+      auto &dst = canon_map[addr];
+      dst.insert(dst.end(), kv.second.begin(), kv.second.end());
+    }
+    pre_must_not_be_tainted_ = std::move(canon_map);
+  }
+
+  // Post WrittenTo (keep latest timestamp)
+  {
+    std::map<AbstractValue, WrittenToInfo> canon_map;
+    for (const auto &kv : post_written_to_) {
+      AbstractValue addr = getCanonical(kv.first);
+      auto it = canon_map.find(addr);
+      if (it == canon_map.end() || kv.second.timestamp > it->second.timestamp) {
+        canon_map[addr] = kv.second;
+      }
+    }
+    post_written_to_ = std::move(canon_map);
+  }
+
+  // Post AllocationInfo
+  {
+    std::map<AbstractValue, AllocationInfo> canon_map;
+    for (const auto &kv : post_allocation_info_) {
+      AbstractValue addr = getCanonical(kv.first);
+      canon_map.emplace(addr, kv.second);
+    }
+    post_allocation_info_ = std::move(canon_map);
+  }
+
+  // Post PropagateTaintFrom
+  {
+    std::map<AbstractValue, std::vector<PropagateTaintFromInfo>> canon_map;
+    for (const auto &kv : post_propagate_taint_from_) {
+      AbstractValue addr = getCanonical(kv.first);
+      for (PropagateTaintFromInfo info : kv.second) {
+        for (AbstractValue &src : info.sources) {
+          src = getCanonical(src);
+        }
+        canon_map[addr].push_back(std::move(info));
+      }
+    }
+    post_propagate_taint_from_ = std::move(canon_map);
+  }
+
+  // Post UnknownEffect
+  {
+    std::map<AbstractValue, UnknownEffectInfo> canon_map;
+    for (const auto &kv : post_unknown_effect_) {
+      canon_map.emplace(getCanonical(kv.first), kv.second);
+    }
+    post_unknown_effect_ = std::move(canon_map);
+  }
+
+  // Post TaintSanitized
+  {
+    std::map<AbstractValue, std::vector<SanitizerRecord>> canon_map;
+    for (const auto &kv : post_taint_sanitized_) {
+      AbstractValue addr = getCanonical(kv.first);
+      auto &dst = canon_map[addr];
+      dst.insert(dst.end(), kv.second.begin(), kv.second.end());
+    }
+    post_taint_sanitized_ = std::move(canon_map);
+  }
+
+  // Dynamic types & decompiler
+  {
+    std::map<AbstractValue, std::string> canon_types;
+    for (const auto &kv : dynamic_types_) {
+      canon_types.emplace(getCanonical(kv.first), kv.second);
+    }
+    dynamic_types_ = std::move(canon_types);
+
+    std::map<AbstractValue, std::string> canon_decomp;
+    for (const auto &kv : decompiler_) {
+      canon_decomp.emplace(getCanonical(kv.first), kv.second);
+    }
+    decompiler_ = std::move(canon_decomp);
+
+    for (auto &edge : recursive_call_edges_) {
+      for (AbstractValue &arg : edge.args) {
+        arg = getCanonical(arg);
+      }
+    }
+  }
+
+  // Taint domain
+  {
+    TaintDomain new_taint;
+    for (const auto &kv : taint_domain_.getMap()) {
+      AbstractValue addr = getCanonical(kv.first);
+      for (const auto &item : kv.second) {
+        new_taint.add(addr, item);
+      }
+    }
+    taint_domain_ = std::move(new_taint);
   }
 
   // Invalidation info
@@ -347,16 +740,418 @@ void AbductiveDomain::canonicalize() {
   }
 }
 
+IncorporateResult
+AbductiveDomain::incorporateNewEqs(const NewEqs &initial_eqs) {
+  std::deque<NewEq> worklist(initial_eqs.begin(), initial_eqs.end());
+  unsigned steps = 0;
+  constexpr unsigned kMaxSteps = 4096;
+
+  auto hasConcreteAlloc = [this](AbstractValue v) -> bool {
+    return post_attrs_.has(v, Attribute::Allocated) ||
+           post_attrs_.has(v, Attribute::Stack) ||
+           post_attrs_.has(v, Attribute::Global) ||
+           post_allocation_info_.find(v) != post_allocation_info_.end();
+  };
+
+  auto rawAllocRoot = [this](AbstractValue v) -> std::optional<AbstractValue> {
+    auto it = allocation_roots_.find(v);
+    if (it != allocation_roots_.end()) {
+      return it->second;
+    }
+    if (post_attrs_.has(v, Attribute::Allocated) ||
+        post_attrs_.has(v, Attribute::Stack) ||
+        post_attrs_.has(v, Attribute::Global) ||
+        post_allocation_info_.find(v) != post_allocation_info_.end()) {
+      return v;
+    }
+    return std::nullopt;
+  };
+
+  while (!worklist.empty() && steps++ < kMaxSteps) {
+    NewEq eq = worklist.front();
+    worklist.pop_front();
+
+    if (eq.kind == NewEq::Kind::EqZero) {
+      AbstractValue v = getCanonical(eq.lhs);
+      // Stack, Global, or locally allocated non-null memory cannot be 0.
+      if (post_attrs_.has(v, Attribute::Stack) ||
+          post_attrs_.has(v, Attribute::Global) ||
+          post_attrs_.has(v, Attribute::Allocated) ||
+          post_allocation_info_.find(v) != post_allocation_info_.end()) {
+        return IncorporateResult::unsat();
+      }
+      // If this address was required to be valid in the precondition and is now
+      // constrained to zero (e.g., `*p = 1; if (!p) {}`), emit
+      // PotentialInvalidAccess (Infer's LatentInvalidAccess).
+      auto mbv_it = pre_must_be_valid_.find(v);
+      if (mbv_it != pre_must_be_valid_.end()) {
+        return IncorporateResult::potentialInvalidAccess(v, mbv_it->second);
+      }
+      continue;
+    }
+
+    // NewEq::Kind::Equal (lhs -> rhs)
+    AbstractValue v_old = eq.lhs;
+    AbstractValue v_new = getCanonical(eq.rhs);
+    if (v_old == v_new) {
+      continue;
+    }
+
+    // Two distinct concrete allocations cannot alias (UNSAT).
+    // Compare raw pre-merge allocation roots because path_formula_ has already
+    // unified v_old -> v_new before incorporateNewEqs runs.
+    auto r_old = rawAllocRoot(v_old);
+    auto r_new = rawAllocRoot(v_new);
+    if (r_old && r_new && !(*r_old == *r_new)) {
+      return IncorporateResult::unsat();
+    }
+
+    // Merge post_heap_ edges from v_old into v_new, equating colliding targets.
+    {
+      auto it = post_heap_.getEdges().find(v_old);
+      if (it != post_heap_.getEdges().end()) {
+        auto edges_copy = it->second;
+        post_heap_.removeEdges(v_old);
+        for (const auto &edge_kv : edges_copy) {
+          if (auto *existing = post_heap_.findEdge(v_new, edge_kv.first)) {
+            AbstractValue t1 = getCanonical(existing->addr);
+            AbstractValue t2 = getCanonical(edge_kv.second.addr);
+            if (!(t1 == t2)) {
+              if (!getPathFormula().addEquality(t1, t2)) {
+                return IncorporateResult::unsat();
+              }
+              for (const auto &ne : getPathFormula().takeNewEqs()) {
+                worklist.push_back(ne);
+              }
+            }
+          } else {
+            post_heap_.addEdge(v_new, edge_kv.first, edge_kv.second);
+          }
+        }
+      }
+    }
+
+    // Merge pre_heap_ edges from v_old into v_new.
+    {
+      auto it = pre_heap_.getEdges().find(v_old);
+      if (it != pre_heap_.getEdges().end()) {
+        auto edges_copy = it->second;
+        pre_heap_.removeEdges(v_old);
+        pre_heap_.registerAddress(v_new);
+        for (const auto &edge_kv : edges_copy) {
+          if (auto *existing = pre_heap_.findEdge(v_new, edge_kv.first)) {
+            AbstractValue t1 = getCanonical(existing->addr);
+            AbstractValue t2 = getCanonical(edge_kv.second.addr);
+            if (!(t1 == t2)) {
+              if (!getPathFormula().addEquality(t1, t2)) {
+                return IncorporateResult::unsat();
+              }
+              for (const auto &ne : getPathFormula().takeNewEqs()) {
+                worklist.push_back(ne);
+              }
+            }
+          } else {
+            pre_heap_.addEdge(v_new, edge_kv.first, edge_kv.second);
+          }
+        }
+      }
+    }
+
+    // Merge attributes and parameterized metadata.
+    for (Attribute a : post_attrs_.get(v_old)) {
+      post_attrs_.add(v_new, a);
+    }
+    post_attrs_.clear(v_old);
+
+    for (Attribute a : pre_attrs_.get(v_old)) {
+      pre_attrs_.add(v_new, a);
+    }
+    pre_attrs_.clear(v_old);
+
+    auto mbv_old = pre_must_be_valid_.find(v_old);
+    if (mbv_old != pre_must_be_valid_.end()) {
+      auto mbv_new = pre_must_be_valid_.find(v_new);
+      if (mbv_new == pre_must_be_valid_.end() ||
+          mbv_old->second.timestamp < mbv_new->second.timestamp) {
+        pre_must_be_valid_[v_new] = mbv_old->second;
+      }
+      pre_must_be_valid_.erase(mbv_old);
+    }
+
+    auto mbi_old = pre_must_be_initialized_.find(v_old);
+    if (mbi_old != pre_must_be_initialized_.end()) {
+      auto mbi_new = pre_must_be_initialized_.find(v_new);
+      if (mbi_new == pre_must_be_initialized_.end() ||
+          mbi_old->second.timestamp < mbi_new->second.timestamp) {
+        pre_must_be_initialized_[v_new] = mbi_old->second;
+      }
+      pre_must_be_initialized_.erase(mbi_old);
+    }
+
+    auto mnt_old = pre_must_not_be_tainted_.find(v_old);
+    if (mnt_old != pre_must_not_be_tainted_.end()) {
+      auto &dst = pre_must_not_be_tainted_[v_new];
+      dst.insert(dst.end(), mnt_old->second.begin(), mnt_old->second.end());
+      pre_must_not_be_tainted_.erase(mnt_old);
+    }
+
+    auto wt_old = post_written_to_.find(v_old);
+    if (wt_old != post_written_to_.end()) {
+      auto wt_new = post_written_to_.find(v_new);
+      if (wt_new == post_written_to_.end() ||
+          wt_old->second.timestamp > wt_new->second.timestamp) {
+        post_written_to_[v_new] = wt_old->second;
+      }
+      post_written_to_.erase(wt_old);
+    }
+
+    auto ai_old = post_allocation_info_.find(v_old);
+    if (ai_old != post_allocation_info_.end()) {
+      post_allocation_info_.emplace(v_new, ai_old->second);
+      post_allocation_info_.erase(ai_old);
+    }
+
+    auto ue_old = post_unknown_effect_.find(v_old);
+    if (ue_old != post_unknown_effect_.end()) {
+      post_unknown_effect_.emplace(v_new, ue_old->second);
+      post_unknown_effect_.erase(ue_old);
+    }
+
+    auto inv_old = invalidation_info_.find(v_old);
+    if (inv_old != invalidation_info_.end()) {
+      invalidation_info_.emplace(v_new, inv_old->second);
+      invalidation_info_.erase(inv_old);
+    }
+
+    auto sz_old = allocation_sizes_.find(v_old);
+    if (sz_old != allocation_sizes_.end()) {
+      auto sz_new = allocation_sizes_.find(v_new);
+      if (sz_new == allocation_sizes_.end()) {
+        allocation_sizes_[v_new] = sz_old->second;
+      } else {
+        sz_new->second = std::min(sz_new->second, sz_old->second);
+      }
+      allocation_sizes_.erase(sz_old);
+    }
+
+    auto dt_old = dynamic_types_.find(v_old);
+    if (dt_old != dynamic_types_.end()) {
+      auto dt_new = dynamic_types_.find(v_new);
+      if (dt_new != dynamic_types_.end() && dt_new->second != dt_old->second) {
+        return IncorporateResult::unsat();
+      }
+      dynamic_types_[v_new] = dt_old->second;
+      dynamic_types_.erase(dt_old);
+    }
+
+    // Check if the merged value is now simultaneously null and allocated/valid.
+    if (getPathFormula().isNull(v_new)) {
+      if (hasConcreteAlloc(v_new)) {
+        return IncorporateResult::unsat();
+      }
+      auto mbv_it = pre_must_be_valid_.find(v_new);
+      if (mbv_it != pre_must_be_valid_.end()) {
+        return IncorporateResult::potentialInvalidAccess(v_new, mbv_it->second);
+      }
+    }
+  }
+
+  canonicalize();
+  return IncorporateResult::ok();
+}
+
+IncorporateResult AbductiveDomain::incorporatePendingNewEqs() {
+  NewEqs eqs = getPathFormula().takeNewEqs();
+  if (eqs.empty()) {
+    return IncorporateResult::ok();
+  }
+  return incorporateNewEqs(eqs);
+}
+
+bool AbductiveDomain::leq(const AbductiveDomain &lhs,
+                          const AbductiveDomain &rhs) {
+  // Infer's GraphComparison.is_isograph: check structural bijection from lhs to
+  // rhs over stacks, pre/post heaps, attributes, and path formulas.
+  if (!(lhs.topl_history_ == rhs.topl_history_)) {
+    return false;
+  }
+  if (lhs.skipped_calls_ != rhs.skipped_calls_) {
+    return false;
+  }
+  if (lhs.unknown_values_ != rhs.unknown_values_) {
+    return false;
+  }
+
+  const auto &l_post_stack = lhs.post_stack_.getMap();
+  const auto &r_post_stack = rhs.post_stack_.getMap();
+  if (l_post_stack.size() != r_post_stack.size()) {
+    return false;
+  }
+
+  const auto &l_pre_stack = lhs.pre_stack_.getMap();
+  const auto &r_pre_stack = rhs.pre_stack_.getMap();
+  if (l_pre_stack.size() != r_pre_stack.size()) {
+    return false;
+  }
+
+  std::map<AbstractValue, AbstractValue> l_to_r;
+  std::map<AbstractValue, AbstractValue> r_to_l;
+  std::queue<std::pair<AbstractValue, AbstractValue>> worklist;
+
+  auto bind_pair = [&](AbstractValue l_raw, AbstractValue r_raw) -> bool {
+    AbstractValue l = lhs.getCanonical(l_raw);
+    AbstractValue r = rhs.getCanonical(r_raw);
+    auto it_l = l_to_r.find(l);
+    auto it_r = r_to_l.find(r);
+    if (it_l != l_to_r.end() || it_r != r_to_l.end()) {
+      return it_l != l_to_r.end() && it_r != r_to_l.end() &&
+             it_l->second == r && it_r->second == l;
+    }
+    l_to_r.emplace(l, r);
+    r_to_l.emplace(r, l);
+    worklist.emplace(l, r);
+    return true;
+  };
+
+  for (const auto &kv : l_post_stack) {
+    auto r_it = r_post_stack.find(kv.first);
+    if (r_it == r_post_stack.end()) {
+      return false;
+    }
+    if (!bind_pair(kv.second.addr, r_it->second.addr)) {
+      return false;
+    }
+  }
+  for (const auto &kv : l_pre_stack) {
+    auto r_it = r_pre_stack.find(kv.first);
+    if (r_it == r_pre_stack.end()) {
+      return false;
+    }
+    if (!bind_pair(kv.second.addr, r_it->second.addr)) {
+      return false;
+    }
+  }
+
+  auto match_heap_edges = [&](const Heap &lh, const Heap &rh, AbstractValue l,
+                              AbstractValue r) -> bool {
+    auto l_it = lh.getEdges().find(l);
+    auto r_it = rh.getEdges().find(r);
+    const bool l_empty = (l_it == lh.getEdges().end() || l_it->second.empty());
+    const bool r_empty = (r_it == rh.getEdges().end() || r_it->second.empty());
+    if (l_empty && r_empty) {
+      return true;
+    }
+    if (l_empty != r_empty) {
+      return false;
+    }
+    if (l_it->second.size() != r_it->second.size()) {
+      return false;
+    }
+    for (const auto &le : l_it->second) {
+      Access expected = le.first;
+      if (expected.kind == AccessKind::ArrayIndex) {
+        AbstractValue l_idx = lhs.getCanonical(expected.index);
+        auto map_it = l_to_r.find(l_idx);
+        if (map_it != l_to_r.end()) {
+          expected.index = map_it->second;
+        } else {
+          // Try matching by constant value or unique compatible edge.
+          bool matched = false;
+          auto l_const = lhs.getPathFormula().asConstantInt(l_idx);
+          for (const auto &re : r_it->second) {
+            if (re.first.kind == AccessKind::ArrayIndex &&
+                re.first.stride_bytes == expected.stride_bytes) {
+              AbstractValue r_idx = rhs.getCanonical(re.first.index);
+              auto r_const = rhs.getPathFormula().asConstantInt(r_idx);
+              if (l_const == r_const && bind_pair(l_idx, r_idx) &&
+                  bind_pair(le.second.addr, re.second.addr)) {
+                matched = true;
+                break;
+              }
+            }
+          }
+          if (!matched) {
+            return false;
+          }
+          continue;
+        }
+      }
+      auto re_it = r_it->second.find(expected);
+      if (re_it == r_it->second.end()) {
+        return false;
+      }
+      if (!bind_pair(le.second.addr, re_it->second.addr)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  while (!worklist.empty()) {
+    auto [l, r] = worklist.front();
+    worklist.pop();
+
+    // Check attributes on matched addresses.
+    if (lhs.post_attrs_.get(l) != rhs.post_attrs_.get(r)) {
+      return false;
+    }
+    if (lhs.pre_attrs_.get(l) != rhs.pre_attrs_.get(r)) {
+      return false;
+    }
+    if ((lhs.pre_must_be_valid_.count(l) > 0) !=
+        (rhs.pre_must_be_valid_.count(r) > 0)) {
+      return false;
+    }
+    if ((lhs.pre_must_be_initialized_.count(l) > 0) !=
+        (rhs.pre_must_be_initialized_.count(r) > 0)) {
+      return false;
+    }
+    if ((lhs.post_written_to_.count(l) > 0) !=
+        (rhs.post_written_to_.count(r) > 0)) {
+      return false;
+    }
+    if (lhs.getAllocationSize(l) != rhs.getAllocationSize(r)) {
+      return false;
+    }
+    if (lhs.getDynamicType(l) != rhs.getDynamicType(r)) {
+      return false;
+    }
+    if (lhs.taint_domain_.has(l) != rhs.taint_domain_.has(r)) {
+      return false;
+    }
+    auto l_inv = lhs.getInvalidationInfo(l);
+    auto r_inv = rhs.getInvalidationInfo(r);
+    if (l_inv.has_value() != r_inv.has_value()) {
+      return false;
+    }
+    if (l_inv && r_inv && l_inv->first != r_inv->first) {
+      return false;
+    }
+
+    if (!match_heap_edges(lhs.post_heap_, rhs.post_heap_, l, r)) {
+      return false;
+    }
+    if (!match_heap_edges(lhs.pre_heap_, rhs.pre_heap_, l, r)) {
+      return false;
+    }
+  }
+
+  // Compare path formulas under the discovered bijection.
+  Substitution subst;
+  for (const auto &kv : l_to_r) {
+    subst.add(kv.first, kv.second);
+  }
+  PulseFormula mapped_lhs = lhs.getPathFormula().applySubstitution(subst);
+  return mapped_lhs.equivalentTo(rhs.getPathFormula());
+}
+
 std::optional<AbductiveDomain>
 AbductiveDomain::merge(const AbductiveDomain &d1, const AbductiveDomain &d2) {
-  // Temporal histories from distinct paths must never be concatenated.
   if (!(d1.topl_history_ == d2.topl_history_))
     return std::nullopt;
-  // Merge path formulas first to check for contradictions
+
   PulseFormula merged_formula;
   if (d1.path_formula_ && d2.path_formula_) {
-    // Joining states at a program point requires disjunction of path
-    // conditions. Conjoining them (merge) would drop feasible paths.
     merged_formula = PulseFormula::join(*d1.path_formula_, *d2.path_formula_);
   } else if (d1.path_formula_) {
     merged_formula = d1.path_formula_->clone();
@@ -373,9 +1168,6 @@ AbductiveDomain::merge(const AbductiveDomain &d1, const AbductiveDomain &d2) {
   merged.path_formula_ =
       std::make_unique<PulseFormula>(std::move(merged_formula));
 
-  // Merge stacks: take union of variables
-  // For variables in both, we'd need to merge their addresses (simplified: take
-  // first)
   for (const auto &kv : d1.post_stack_.getMap()) {
     merged.post_stack_.add(kv.first, kv.second);
   }
@@ -385,7 +1177,6 @@ AbductiveDomain::merge(const AbductiveDomain &d1, const AbductiveDomain &d2) {
     }
   }
 
-  // Merge heaps: take union of edges
   for (const auto &kv : d1.post_heap_.getEdges()) {
     for (const auto &edge_kv : kv.second) {
       merged.post_heap_.addEdge(kv.first, edge_kv.first, edge_kv.second);
@@ -399,7 +1190,6 @@ AbductiveDomain::merge(const AbductiveDomain &d1, const AbductiveDomain &d2) {
     }
   }
 
-  // Merge attributes: take union
   for (const auto &kv : d1.post_attrs_.getAttrs()) {
     for (Attribute attr : kv.second) {
       merged.post_attrs_.add(kv.first, attr);
@@ -411,7 +1201,6 @@ AbductiveDomain::merge(const AbductiveDomain &d1, const AbductiveDomain &d2) {
     }
   }
 
-  // Merge pre-conditions similarly
   for (const auto &kv : d1.pre_stack_.getMap()) {
     merged.pre_stack_.add(kv.first, kv.second);
   }
@@ -422,11 +1211,13 @@ AbductiveDomain::merge(const AbductiveDomain &d1, const AbductiveDomain &d2) {
   }
 
   for (const auto &kv : d1.pre_heap_.getEdges()) {
+    merged.pre_heap_.registerAddress(kv.first);
     for (const auto &edge_kv : kv.second) {
       merged.pre_heap_.addEdge(kv.first, edge_kv.first, edge_kv.second);
     }
   }
   for (const auto &kv : d2.pre_heap_.getEdges()) {
+    merged.pre_heap_.registerAddress(kv.first);
     for (const auto &edge_kv : kv.second) {
       if (!merged.pre_heap_.findEdge(kv.first, edge_kv.first)) {
         merged.pre_heap_.addEdge(kv.first, edge_kv.first, edge_kv.second);
@@ -445,15 +1236,63 @@ AbductiveDomain::merge(const AbductiveDomain &d1, const AbductiveDomain &d2) {
     }
   }
 
+  merged.pre_must_be_valid_ = d1.pre_must_be_valid_;
+  for (const auto &kv : d2.pre_must_be_valid_) {
+    merged.pre_must_be_valid_.emplace(kv.first, kv.second);
+  }
+  merged.pre_must_be_initialized_ = d1.pre_must_be_initialized_;
+  for (const auto &kv : d2.pre_must_be_initialized_) {
+    merged.pre_must_be_initialized_.emplace(kv.first, kv.second);
+  }
+  merged.pre_must_not_be_tainted_ = d1.pre_must_not_be_tainted_;
+  for (const auto &kv : d2.pre_must_not_be_tainted_) {
+    auto &dst = merged.pre_must_not_be_tainted_[kv.first];
+    dst.insert(dst.end(), kv.second.begin(), kv.second.end());
+  }
+
+  merged.post_written_to_ = d1.post_written_to_;
+  for (const auto &kv : d2.post_written_to_) {
+    auto it = merged.post_written_to_.find(kv.first);
+    if (it == merged.post_written_to_.end() ||
+        kv.second.timestamp > it->second.timestamp) {
+      merged.post_written_to_[kv.first] = kv.second;
+    }
+  }
+  merged.post_allocation_info_ = d1.post_allocation_info_;
+  for (const auto &kv : d2.post_allocation_info_) {
+    merged.post_allocation_info_.emplace(kv.first, kv.second);
+  }
+  merged.post_propagate_taint_from_ = d1.post_propagate_taint_from_;
+  for (const auto &kv : d2.post_propagate_taint_from_) {
+    auto &dst = merged.post_propagate_taint_from_[kv.first];
+    dst.insert(dst.end(), kv.second.begin(), kv.second.end());
+  }
+  merged.post_unknown_effect_ = d1.post_unknown_effect_;
+  for (const auto &kv : d2.post_unknown_effect_) {
+    merged.post_unknown_effect_.emplace(kv.first, kv.second);
+  }
+  merged.post_taint_sanitized_ = d1.post_taint_sanitized_;
+  for (const auto &kv : d2.post_taint_sanitized_) {
+    auto &dst = merged.post_taint_sanitized_[kv.first];
+    dst.insert(dst.end(), kv.second.begin(), kv.second.end());
+  }
+  merged.dynamic_types_ = d1.dynamic_types_;
+  for (const auto &kv : d2.dynamic_types_) {
+    merged.dynamic_types_.emplace(kv.first, kv.second);
+  }
+  merged.decompiler_ = d1.decompiler_;
+  for (const auto &kv : d2.decompiler_) {
+    merged.decompiler_.emplace(kv.first, kv.second);
+  }
+  merged.taint_domain_.join(d1.taint_domain_);
+  merged.taint_domain_.join(d2.taint_domain_);
+
   for (const auto &kv : d1.invalidation_info_)
     merged.invalidation_info_.insert(kv);
   for (const auto &kv : d2.invalidation_info_) {
-    if (merged.invalidation_info_.find(kv.first) ==
-        merged.invalidation_info_.end())
-      merged.invalidation_info_.insert(kv);
+    merged.invalidation_info_.emplace(kv.first, kv.second);
   }
 
-  // Merge allocation sizes: keep the tighter (smaller) bound when both exist.
   merged.allocation_sizes_ = d1.allocation_sizes_;
   for (const auto &kv : d2.allocation_sizes_) {
     auto it = merged.allocation_sizes_.find(kv.first);
@@ -469,34 +1308,29 @@ AbductiveDomain::merge(const AbductiveDomain &d1, const AbductiveDomain &d2) {
     merged.allocation_roots_.emplace(kv.first, kv.second);
   }
 
-  // Merge skipped calls (union)
   merged.skipped_calls_ = d1.skipped_calls_;
   merged.skipped_calls_.insert(d2.skipped_calls_.begin(),
                                d2.skipped_calls_.end());
 
-  // Merge transitive info
   merged.transitive_info_ =
       TransitiveInfo::merge(d1.transitive_info_, d2.transitive_info_);
-
-  // Merge unknown values flag (OR operation)
   merged.unknown_values_ = d1.unknown_values_ || d2.unknown_values_;
 
-  // Merge need_dynamic_type_specialization (union)
   merged.need_dynamic_type_specialization_ =
       d1.need_dynamic_type_specialization_;
   merged.need_dynamic_type_specialization_.insert(
       d2.need_dynamic_type_specialization_.begin(),
       d2.need_dynamic_type_specialization_.end());
 
-  // Merge recursive calls (union)
   merged.recursive_calls_ = d1.recursive_calls_;
   merged.recursive_calls_.insert(d2.recursive_calls_.begin(),
                                  d2.recursive_calls_.end());
 
-  // Merge loop header info (preserve from lhs, as in Infer)
   merged.loop_header_info_ = d1.loop_header_info_;
+  merged.loop_path_stamps_ = d1.loop_path_stamps_;
+  merged.timestamp_counter_ =
+      std::max(d1.timestamp_counter_, d2.timestamp_counter_);
 
-  // Loop invariant under inference: preserve from lhs if present
   if (d1.loop_invariant_under_inference_) {
     merged.loop_invariant_under_inference_ =
         std::make_unique<LoopInvariantUnderInference>(
