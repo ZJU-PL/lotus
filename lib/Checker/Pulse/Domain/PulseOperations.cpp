@@ -4,6 +4,7 @@
 #include "Checker/Pulse/Domain/PulseTaint.h"
 
 #include <cassert>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <set>
@@ -135,15 +136,42 @@ AbstractValue AbstractValueFactory::getOrCreate(const llvm::Value *v) {
   if (it != value_map_.end()) {
     return it->second;
   }
-  if (mustAliasFn_) {
-    for (const auto &kv : value_map_) {
-      if (mustAliasFn_(v, kv.first)) {
-        AbstractValue av = kv.second;
+
+  const bool is_ptr = v && v->getType() && v->getType()->isPointerTy();
+  const llvm::Value *stripped = is_ptr ? v->stripPointerCasts() : nullptr;
+
+  if (mustAliasFn_ && is_ptr) {
+    // O(1) syntactic must-alias fast path: pointer casts and zero-offset GEPs
+    // sharing the same underlying value are guaranteed must-alias in LLVM IR
+    // without triggering expensive interprocedural UnderApprox::EquivDB runs.
+    if (stripped) {
+      auto sit = stripped_ptr_map_.find(stripped);
+      if (sit != stripped_ptr_map_.end()) {
+        AbstractValue av = sit->second.second;
         value_map_[v] = av;
         return av;
       }
     }
+    // Identical GEP expressions in the same function must-alias in O(1).
+    if (const auto *GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(v)) {
+      const llvm::Function *parent_fn = GEP->getFunction();
+      auto &fn_ptrs = ptr_values_by_fn_[parent_fn];
+      constexpr size_t kMaxGepScan = 32;
+      const size_t start =
+          fn_ptrs.size() > kMaxGepScan ? fn_ptrs.size() - kMaxGepScan : 0;
+      for (size_t i = fn_ptrs.size(); i > start; --i) {
+        if (const auto *other =
+                llvm::dyn_cast<llvm::GetElementPtrInst>(fn_ptrs[i - 1].first)) {
+          if (GEP->isIdenticalTo(other)) {
+            AbstractValue av = fn_ptrs[i - 1].second;
+            value_map_[v] = av;
+            return av;
+          }
+        }
+      }
+    }
   }
+
   unsigned id = global_next_id_.fetch_add(1u, std::memory_order_relaxed);
   // 0 is reserved for the default-constructed AbstractValue.
   if (id == 0u) {
@@ -151,6 +179,14 @@ AbstractValue AbstractValueFactory::getOrCreate(const llvm::Value *v) {
   }
   AbstractValue av(v, id);
   value_map_[v] = av;
+  if (is_ptr) {
+    if (stripped) {
+      stripped_ptr_map_.emplace(stripped, std::make_pair(v, av));
+    }
+    if (const auto *GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(v)) {
+      ptr_values_by_fn_[GEP->getFunction()].emplace_back(v, av);
+    }
+  }
   return av;
 }
 
@@ -272,6 +308,46 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
         astate.setDynamicType(gv_av, exp->getName().str());
       }
     }
+    // Materialize static initializers for constant global variables (strings,
+    // integers, pointers, null pointers) if not already initialized in heap.
+    if (const auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(exp)) {
+      if (GV->hasInitializer() &&
+          !astate.getPostHeap().findEdge(gv_av,
+                                         Access(AccessKind::Dereference))) {
+        const llvm::Constant *init = GV->getInitializer();
+        if (const auto *CDS = llvm::dyn_cast<llvm::ConstantDataSequential>(init)) {
+          if (CDS->isCString()) {
+            (void)astate.getPathFormula().addStringConstant(
+                gv_av, CDS->getAsCString().str());
+          }
+        } else if (GV->isConstant()) {
+          if (const auto *CI = llvm::dyn_cast<llvm::ConstantInt>(init)) {
+            if (CI->getBitWidth() <= 64) {
+              AbstractValue iv = factory_->getOrCreate(CI);
+              astate.getPathFormula().addIntegerConstraint(iv);
+              int64_t val = CI->getSExtValue();
+              (void)astate.getPathFormula().addBounds(iv, val, val);
+              astate.getPostHeap().addEdge(gv_av,
+                                           Access(AccessKind::Dereference),
+                                           Address(iv));
+            }
+          } else if (llvm::isa<llvm::ConstantPointerNull>(init)) {
+            AbstractValue nv = factory_->createFresh(init);
+            astate.getPostAttrs().add(nv, Attribute::Null);
+            (void)astate.getPathFormula().addNull(nv);
+            astate.getPostHeap().addEdge(gv_av, Access(AccessKind::Dereference),
+                                         Address(nv));
+          } else if (const auto *target_gv = llvm::dyn_cast_or_null<llvm::GlobalValue>(
+                         init->stripPointerCasts())) {
+            if (auto target_opt = eval(astate, target_gv, loc, pred)) {
+              astate.getPostHeap().addEdge(gv_av,
+                                           Access(AccessKind::Dereference),
+                                           *target_opt);
+            }
+          }
+        }
+      }
+    }
     return std::optional<Address>(Address(gv_av));
   }
 
@@ -296,11 +372,18 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
     return std::optional<Address>(Address(av));
   }
 
-  // Floating-point constants: track exact double value for FCmp / FP ops.
+  // Floating-point constants: safely convert any LLVM FP semantics (half,
+  // float, double, x86_fp80, fp128) to IEEEdouble before recording.
   if (auto *CFP = llvm::dyn_cast_or_null<llvm::ConstantFP>(exp)) {
     AbstractValue av = factory_->getOrCreate(exp);
-    double val = CFP->getValueAPF().convertToDouble();
-    (void)astate.getPathFormula().addFloatConstant(av, val);
+    llvm::APFloat apf = CFP->getValueAPF();
+    bool loses_info = false;
+    apf.convert(llvm::APFloat::IEEEdouble(),
+                llvm::APFloat::rmNearestTiesToEven, &loses_info);
+    double val = apf.convertToDouble();
+    if (std::isfinite(val)) {
+      (void)astate.getPathFormula().addFloatConstant(av, val);
+    }
     return std::optional<Address>(Address(av));
   }
 
@@ -532,6 +615,18 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
         astate.getPostAttrs().add(fresh_canon, Attribute::Uninitialized);
       }
 
+      // Mirror field-level taint attached directly on `base_canon` onto the
+      // struct-GEP cell (so field-sensitive taint sources called before GEP
+      // flow precisely to the matching field only).
+      if (op_index == 2 && acc.kind == AccessKind::Field) {
+        if (const Address *direct_field =
+                astate.getPostHeap().findEdge(base_canon, acc)) {
+          TaintOperations::propagate(astate, direct_field->addr, fresh, loc);
+          astate.getPostAttrs().remove(astate.getCanonical(fresh),
+                                       Attribute::Uninitialized);
+        }
+      }
+
       cur = fresh;
     }
     // Base pointer must be valid if it comes from the precondition.
@@ -589,6 +684,65 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
       }
     }
 
+    // Propagate known constant string suffix across constant-offset byte GEPs
+    // (e.g. `gep inbounds ([6 x i8], [6 x i8]* @.str, i64 0, i64 0)`).
+    if (offset_known && total_offset >= 0) {
+      if (auto base_str = astate.getPathFormula().asConstantString(base_canon)) {
+        size_t byte_off = static_cast<size_t>(total_offset);
+        if (byte_off <= base_str->size()) {
+          (void)astate.getPathFormula().addStringConstant(
+              astate.getCanonical(cur), base_str->substr(byte_off));
+        }
+      }
+    }
+
+    // Check symbolic dynamic-size allocation OOB (e.g. `alloca i8, i64 %n` or
+    // `malloc(%n)` indexed by `idx >= %n`).
+    if (!alloc_size_opt && !oob_proven) {
+      if (auto sym_sz = astate.getSymbolicAllocationSize(base_canon)) {
+        if (GEP->getNumIndices() >= 1) {
+          const llvm::Value *last_idx =
+              GEP->getOperand(GEP->getNumOperands() - 1);
+          if (last_idx->getType()->isIntegerTy()) {
+            AbstractValue idx_av = astate.getCanonical(factory_->getOrCreate(last_idx));
+            auto ge_sz = astate.getPathFormula().impliesComparison(
+                idx_av, std::nullopt, ">=", *sym_sz, std::nullopt);
+            auto lt_zero = astate.getPathFormula().impliesComparison(
+                idx_av, std::nullopt, "<", std::nullopt, 0);
+            if ((ge_sz && *ge_sz) || (lt_zero && *lt_zero)) {
+              oob_proven = true;
+            }
+          }
+        }
+      }
+    }
+
+    // Structured access-path decompiler name for derived GEP cell.
+    if (auto base_name = astate.getDecompilerName(base_canon)) {
+      std::string derived_name = *base_name;
+      unsigned idx_op = 1;
+      for (auto GTI = llvm::gep_type_begin(GEP), E = llvm::gep_type_end(GEP);
+           GTI != E; ++GTI, ++idx_op) {
+        const llvm::Value *idx = GEP->getOperand(idx_op);
+        if (GTI.getStructTypeOrNull()) {
+          if (auto *C = llvm::dyn_cast<llvm::ConstantInt>(idx)) {
+            derived_name += ".field" + std::to_string(C->getZExtValue());
+          }
+        } else {
+          if (auto c = getI64Constant(idx)) {
+            if (idx_op != 1 || *c != 0) {
+              derived_name += "[" + std::to_string(*c) + "]";
+            }
+          } else if (idx->hasName()) {
+            derived_name += "[" + idx->getName().str() + "]";
+          }
+        }
+      }
+      if (!astate.getDecompilerName(cur).has_value()) {
+        astate.setDecompilerName(cur, derived_name);
+      }
+    }
+
     // If we can prove an out-of-bounds offset, mark it for later reporting.
     if (alloc_size_opt && offset_known) {
       const uint64_t alloc_size = *alloc_size_opt;
@@ -617,9 +771,6 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
     }
     if (base_is_global) {
       astate.getPostAttrs().add(cur_canon, Attribute::Global);
-    }
-    if (auto base_name = astate.getDecompilerName(base_canon)) {
-      astate.setDecompilerName(cur_canon, *base_name + "[...]");
     }
     Address gepAddr(cur_canon);
     gepAddr.history = base.history;

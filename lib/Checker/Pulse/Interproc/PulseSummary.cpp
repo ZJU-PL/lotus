@@ -15,8 +15,24 @@ SummaryEntry::SummaryEntry(std::unique_ptr<AbductiveDomain> pre,
                            bool is_exception_raised,
                            std::optional<AbstractValue> exception_value,
                            std::string exception_type)
-    : pre_(std::move(pre)), pre_formula_(std::move(pre_formula)),
-      post_(std::move(post)), post_formula_(std::move(post_formula)),
+    : pre_(std::shared_ptr<const AbductiveDomain>(std::move(pre))),
+      pre_formula_(std::move(pre_formula)),
+      post_(std::shared_ptr<const AbductiveDomain>(std::move(post))),
+      post_formula_(std::move(post_formula)), return_value_(ret_val),
+      latent_issue_(std::move(latent_issue)),
+      is_exception_raised_(is_exception_raised),
+      exception_value_(exception_value),
+      exception_type_(std::move(exception_type)) {}
+
+SummaryEntry::SummaryEntry(std::shared_ptr<const AbductiveDomain> shared_domain,
+                           PulseFormula unified_formula,
+                           std::optional<AbstractValue> ret_val,
+                           std::optional<LatentIssueSummary> latent_issue,
+                           bool is_exception_raised,
+                           std::optional<AbstractValue> exception_value,
+                           std::string exception_type)
+    : pre_(shared_domain), pre_formula_(std::move(unified_formula)),
+      post_(std::move(shared_domain)), post_formula_shared_with_pre_(true),
       return_value_(ret_val), latent_issue_(std::move(latent_issue)),
       is_exception_raised_(is_exception_raised),
       exception_value_(exception_value),
@@ -34,11 +50,16 @@ SummaryEntry SummaryEntry::clone() const {
     copied.must_be_valid_reason = latent_issue_->must_be_valid_reason;
     latent = std::move(copied);
   }
+  if (pre_ == post_ && post_formula_shared_with_pre_) {
+    return SummaryEntry(pre_, pre_formula_.clone(), return_value_,
+                        std::move(latent), is_exception_raised_,
+                        exception_value_, exception_type_);
+  }
   return SummaryEntry(
       pre_ ? std::make_unique<AbductiveDomain>(pre_->clone()) : nullptr,
       pre_formula_.clone(),
       post_ ? std::make_unique<AbductiveDomain>(post_->clone()) : nullptr,
-      post_formula_.clone(), return_value_, std::move(latent),
+      getPostFormula().clone(), return_value_, std::move(latent),
       is_exception_raised_, exception_value_, exception_type_);
 }
 

@@ -124,6 +124,26 @@ bool DisjunctiveDomain::addWithDedup(const llvm::BasicBlock *at_block,
   return true;
 }
 
+bool DisjunctiveDomain::addWithDedupRef(const llvm::BasicBlock *at_block,
+                                        const ExecutionDomain &state,
+                                        const llvm::BasicBlock *path_context,
+                                        NonDisjunctiveDomain *non_disj) {
+  auto &vec = disjuncts_by_block_[at_block];
+  if (const AbductiveDomain *cand = state.getAstate()) {
+    for (const auto &existing : vec) {
+      if (existing.path_context == path_context && existing.state.getAstate() &&
+          AbductiveDomain::leq(*cand, *existing.state.getAstate())) {
+        return false;
+      }
+    }
+  }
+  ExecutionDomain copy = state.clone();
+  copy.setEntryPred(path_context);
+  vec.emplace_back(std::move(copy), path_context);
+  reduceDisjuncts(vec, kMaxDisjuncts, non_disj);
+  return true;
+}
+
 void DisjunctiveDomain::limitDisjuncts(const llvm::BasicBlock *at_block) {
   auto it = disjuncts_by_block_.find(at_block);
   if (it == disjuncts_by_block_.end()) {
@@ -192,6 +212,111 @@ ExecutionDomain DisjunctiveDomain::joinAtBlock(const llvm::BasicBlock *BB) {
   ExecutionDomain stopped;
   stopped.setState(ExecutionState::Stopped);
   return stopped;
+}
+
+ExecutionDomain
+DisjunctiveDomain::joinAtBlockForPred(const llvm::BasicBlock *BB,
+                                      const llvm::BasicBlock *pred_bb) {
+  auto it = disjuncts_by_block_.find(BB);
+  if (it == disjuncts_by_block_.end() || it->second.empty()) {
+    return ExecutionDomain();
+  }
+
+  auto &disjuncts = it->second;
+  const DisjunctiveDomain::Disjunct *best = nullptr;
+  for (const auto &disj : disjuncts) {
+    if (disj.state.isStopped() || disj.path_context != pred_bb) {
+      continue;
+    }
+    if (!best) {
+      best = &disj;
+      continue;
+    }
+    auto *a_best = best->state.getAstate();
+    auto *a_cur = disj.state.getAstate();
+    const bool best_unknown = a_best ? a_best->hasUnknownValues() : true;
+    const bool cur_unknown = a_cur ? a_cur->hasUnknownValues() : true;
+    if (best_unknown && !cur_unknown) {
+      best = &disj;
+    }
+  }
+  if (!best) {
+    ExecutionDomain stopped;
+    stopped.setState(ExecutionState::Stopped);
+    return stopped;
+  }
+
+  unsigned same_pred_count = 0;
+  for (const auto &disj : disjuncts) {
+    if (!disj.state.isStopped() && disj.path_context == pred_bb) {
+      ++same_pred_count;
+    }
+  }
+  if (same_pred_count <= 1) {
+    return best->state.clone();
+  }
+
+  ExecutionDomain out;
+  if (const AbductiveDomain *acc_init = best->state.getAstate()) {
+    AbductiveDomain acc = acc_init->clone();
+    bool joined_any = false;
+    for (const auto &disj : disjuncts) {
+      if (&disj == best || disj.state.isStopped() ||
+          disj.path_context != pred_bb || !disj.state.getAstate()) {
+        continue;
+      }
+      if (auto merged = PulseJoin::joinAbductive(acc, *disj.state.getAstate())) {
+        acc = std::move(*merged);
+        joined_any = true;
+      }
+    }
+    if (joined_any) {
+      out = ExecutionDomain::continueProgram(
+          std::make_unique<AbductiveDomain>(std::move(acc)));
+      out.setEntryPred(pred_bb);
+    } else {
+      out = best->state.clone();
+    }
+  } else {
+    out = best->state.clone();
+  }
+
+  // Collapse same-predecessor disjuncts in place so subsequent visits do not
+  // repeatedly re-join the old disjuncts.
+  std::vector<Disjunct> kept;
+  kept.reserve(disjuncts.size());
+  for (auto &d : disjuncts) {
+    if (d.path_context != pred_bb) {
+      kept.push_back(std::move(d));
+    }
+  }
+  kept.emplace_back(out.clone(), pred_bb);
+  disjuncts.swap(kept);
+  return out;
+}
+
+void DisjunctiveDomain::recordEdgeVisit(const llvm::BasicBlock *BB,
+                                        const llvm::BasicBlock *pred_bb) {
+  edge_iterations_[{BB, pred_bb}]++;
+}
+
+bool DisjunctiveDomain::shouldWidenEdge(const llvm::BasicBlock *BB,
+                                        const llvm::BasicBlock *pred_bb) const {
+  auto it = edge_iterations_.find({BB, pred_bb});
+  if (it == edge_iterations_.end()) {
+    return false;
+  }
+  return it->second >= kWidenThreshold;
+}
+
+bool DisjunctiveDomain::hasWidenedEdge(const llvm::BasicBlock *BB,
+                                       const llvm::BasicBlock *pred_bb) const {
+  return widened_edges_.count({BB, pred_bb}) > 0;
+}
+
+void DisjunctiveDomain::markWidenedEdge(const llvm::BasicBlock *BB,
+                                        const llvm::BasicBlock *pred_bb) {
+  widened_edges_.insert({BB, pred_bb});
 }
 
 bool DisjunctiveDomain::shouldWiden(const llvm::BasicBlock *BB) const {

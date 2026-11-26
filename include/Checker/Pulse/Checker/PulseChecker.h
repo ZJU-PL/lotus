@@ -71,6 +71,11 @@ private:
   int memoryLeakTypeId_{-1};
   int resourceLeakTypeId_{-1};
   int mutualRecursionTypeId_{-1};
+  int retainCycleTypeId_{-1};
+  int infiniteLoopTypeId_{-1};
+  int transitiveAccessTypeId_{-1};
+
+  std::vector<TransitiveAccessPolicy> transitive_access_policies_;
 
   std::map<const llvm::Function *, std::vector<ExecutionDomain>>
       function_states_;
@@ -81,8 +86,6 @@ private:
   int toplTypeId_ = -1;
   std::set<std::pair<std::string, const llvm::Instruction *>> topl_reported_;
 
-  std::map<const llvm::Function *, DisjunctiveDomain> disjunctive_domains_;
-  std::map<const llvm::Function *, LoopAbstraction> loop_abstractions_;
   std::map<const llvm::Function *, TransitiveInfo> transitive_info_;
 
   // std::deque guarantees stable pointers/references for ExecutionDomain's
@@ -106,6 +109,15 @@ public:
     topl_program_ = std::move(program);
     topl_reported_.clear();
   }
+  void addTransitiveAccessPolicy(TransitiveAccessPolicy policy) {
+    transitive_access_policies_.push_back(std::move(policy));
+  }
+  void setTransitiveAccessPolicies(std::vector<TransitiveAccessPolicy> policies) {
+    transitive_access_policies_ = std::move(policies);
+  }
+  void checkTransitiveAccessPolicies(const llvm::Function *F,
+                                     const TransitiveInfo &info);
+  void extractTypeHierarchyFromModule();
   ToplValue toplValue(AbductiveDomain &state, const llvm::Value *value,
                       const llvm::Instruction *location,
                       const llvm::BasicBlock *pred);

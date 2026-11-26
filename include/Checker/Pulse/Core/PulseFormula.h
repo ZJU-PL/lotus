@@ -9,6 +9,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace pulse {
@@ -158,6 +159,16 @@ class PulseFormula {
 private:
   // Bottom flag: represents an unsatisfiable/contradictory path condition.
   bool is_contradiction_{false};
+  // 0 = invalid, 1 = cached with SMT disabled, 2 = cached with SMT enabled.
+  mutable uint8_t sat_cache_mode_{0};
+  mutable bool sat_cache_result_{true};
+  mutable bool consistent_cache_valid_{false};
+  mutable bool consistent_cache_result_{true};
+  void invalidateSatOnly() { sat_cache_mode_ = 0; }
+  void invalidateSatCache() {
+    sat_cache_mode_ = 0;
+    consistent_cache_valid_ = false;
+  }
 
   // Track equalities: v1 = v2 via union-find (each value -> representative).
   std::map<AbstractValue, AbstractValue> equalities_;
@@ -198,6 +209,7 @@ private:
   };
   std::map<AbstractValue, LinearEqRow> linear_tableau_;
   bool in_tableau_propagate_{false};
+  bool has_linear_inequalities_{false};
 
   // Type / InstanceOf predicates (Infer's PulseFormulaInstanceOf).
   std::map<AbstractValue, std::string> exact_types_;
@@ -231,6 +243,22 @@ private:
     std::vector<int64_t> const_options;
   };
   std::vector<DisjunctiveEq> disjunctive_eqs_;
+
+  // String & regexp predicates (Infer PulseFormulaTerm/Atom string theory).
+  struct StringConcat {
+    AbstractValue result;
+    AbstractValue lhs;
+    AbstractValue rhs;
+  };
+  struct StringRegexMatch {
+    AbstractValue value;
+    std::string pattern;
+    bool positive{true};
+  };
+  std::map<AbstractValue, std::string> string_constants_;
+  std::map<AbstractValue, AbstractValue> string_lengths_;
+  std::vector<StringConcat> string_concats_;
+  std::vector<StringRegexMatch> string_regex_matches_;
 
   // Branch conditions assumed along the path, mapped to minimum call depth.
   std::map<PathConditionAtom, unsigned> conditions_;
@@ -320,6 +348,21 @@ public:
   bool isConsistent() const;
 
   bool isContradiction() const { return is_contradiction_; }
+  bool hasEqualities() const { return !equalities_.empty(); }
+  bool isEmpty() const {
+    return !is_contradiction_ && equalities_.empty() &&
+           disequalities_.empty() && non_null_values_.empty() &&
+           null_values_.empty() && linear_constraints_.empty() &&
+           lower_bounds_.empty() && upper_bounds_.empty() &&
+           integer_values_.empty() && arithmetic_ops_.empty() &&
+           linear_tableau_.empty() && exact_types_.empty() &&
+           instanceof_types_.empty() && not_instanceof_types_.empty() &&
+           float_constants_.empty() && float_ops_.empty() &&
+           float_cmps_.empty() && bit_widths_.empty() &&
+           disjunctive_eqs_.empty() && string_constants_.empty() &&
+           string_lengths_.empty() && string_concats_.empty() &&
+           string_regex_matches_.empty() && conditions_.empty();
+  }
 
   bool hasNullConstraints() const;
 
@@ -388,6 +431,8 @@ public:
    * Collect all abstract values mentioned in the formula.
    */
   std::set<AbstractValue> getReferencedValues() const;
+  void collectReferencedValues(std::unordered_set<AbstractValue> &out) const;
+  bool hasValueConstraints(AbstractValue v) const;
 
   void addIntegerConstraint(AbstractValue v);
   bool addLinearConstraint(const LinearConstraint &constraint);
@@ -410,7 +455,8 @@ public:
                                         std::optional<int64_t> lhs_const,
                                         const std::string &op,
                                         std::optional<AbstractValue> rhs_var,
-                                        std::optional<int64_t> rhs_const) const;
+                                        std::optional<int64_t> rhs_const,
+                                        bool allow_smt = true) const;
 
   bool addArithmeticOperation(AbstractValue result, AbstractValue op1,
                               AbstractValue op2, const std::string &op);
@@ -426,11 +472,29 @@ public:
   bool addRightShift(AbstractValue result, AbstractValue op1,
                      AbstractValue op2);
 
-  // Type / InstanceOf predicates (Infer PulseFormulaInstanceOf).
+  // Type / InstanceOf predicates (Infer PulseFormulaInstanceOf) + class
+  // inheritance hierarchy support (`Derived <: Base`).
   bool addExactType(AbstractValue v, const std::string &type_name);
   bool addInstanceOf(AbstractValue v, const std::string &type_name);
   bool addNotInstanceOf(AbstractValue v, const std::string &type_name);
   std::optional<std::string> getExactType(AbstractValue v) const;
+  bool isInstanceOf(AbstractValue v, const std::string &type_name) const;
+
+  static void registerSubtype(const std::string &derived_type,
+                              const std::string &base_type);
+  static bool isSubtypeOf(const std::string &derived_type,
+                          const std::string &base_type);
+  static std::set<std::string> getSupertypes(const std::string &type_name);
+  static void clearSubtypeHierarchy();
+
+  // String & regexp constraints.
+  bool addStringConstant(AbstractValue v, const std::string &str);
+  std::optional<std::string> asConstantString(AbstractValue v) const;
+  bool addStringLength(AbstractValue str_v, AbstractValue len_v);
+  bool addStringConcat(AbstractValue result, AbstractValue lhs,
+                       AbstractValue rhs);
+  bool addStringRegexMatch(AbstractValue v, const std::string &pattern,
+                           bool positive = true);
 
   // Floating-point constraints and constants.
   bool addFloatConstant(AbstractValue v, double val);
@@ -459,6 +523,7 @@ private:
   void propagateBounds();
   bool insertLinearEquationRow(LinearEqRow row);
   bool propagateLinearTableau();
+  bool propagateLinearInequalities();
 };
 
 } // namespace pulse

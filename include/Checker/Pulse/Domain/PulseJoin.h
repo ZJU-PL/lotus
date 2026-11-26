@@ -71,39 +71,38 @@ private:
   };
 
   /**
-   * Join two values with their histories.
-   * Returns (join_state, (joined_value, joined_history))
+   * Join two values with their histories (mutates `state` in place).
    */
-  static std::pair<JoinState &, std::pair<AbstractValue, ValueHistory>>
+  static std::pair<AbstractValue, ValueHistory>
   joinValuesHists(JoinState &state, const AbstractValue &lhs_val,
                   const ValueHistory &lhs_hist, const AbstractValue &rhs_val,
                   const ValueHistory &rhs_hist);
 
   /**
-   * Join optional values (handles one-sided cases).
+   * Join optional values (handles one-sided cases; mutates `state` in place).
    */
-  static std::pair<JoinState &, std::pair<AbstractValue, ValueHistory>>
+  static std::pair<AbstractValue, ValueHistory>
   joinValuesHistsOpts(
       JoinState &state, const AbductiveDomain &lhs_astate,
-      std::optional<std::pair<AbstractValue, ValueHistory>> lhs_opt,
+      const std::optional<std::pair<AbstractValue, ValueHistory>> &lhs_opt,
       const AbductiveDomain &rhs_astate,
-      std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt);
+      const std::optional<std::pair<AbstractValue, ValueHistory>> &rhs_opt);
 
   /**
-   * Join heaps recursively.
+   * Join heaps iteratively in place with bounded worklist (prevents stack
+   * overflow and product-graph blowup).
    */
-  static std::pair<JoinState &, Heap>
-  joinHeaps(JoinState &state, Heap &heap_join,
-            const AbductiveDomain &lhs_astate,
-            std::optional<std::pair<AbstractValue, ValueHistory>> lhs_opt,
-            const AbductiveDomain &rhs_astate,
-            std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt,
-            bool use_pre_heap = false);
+  static void joinHeaps(
+      JoinState &state, Heap &heap_join, const AbductiveDomain &lhs_astate,
+      const std::optional<std::pair<AbstractValue, ValueHistory>> &lhs_opt,
+      const AbductiveDomain &rhs_astate,
+      const std::optional<std::pair<AbstractValue, ValueHistory>> &rhs_opt,
+      bool use_pre_heap = false);
 
   /**
-   * Join stacks.
+   * Join pre stacks and pre heaps in place.
    */
-  static std::pair<JoinState &, std::pair<Stack, Heap>>
+  static std::pair<Stack, Heap>
   joinStacks(JoinState &state, const AbductiveDomain &lhs_astate,
              const AbductiveDomain &rhs_astate);
 

@@ -16,6 +16,8 @@
 namespace pulse {
 
 class AbductiveDomain;
+class AbstractValueFactory;
+class AbstractValueFactory;
 
 // TaintKind is now defined in PulseTaintConfig.h
 
@@ -285,6 +287,26 @@ public:
    */
   static void taint(AbductiveDomain &astate, AbstractValue v, TaintKind kind,
                     const std::string &procedure_name);
+
+  /**
+   * Field-sensitive taint operations (Infer field-level taint): taint,
+   * sanitize, or check a specific struct field without conflating siblings.
+   */
+  static void taintField(AbductiveDomain &astate, AbstractValue base,
+                         unsigned field_idx,
+                         const std::vector<TaintKind> &kinds,
+                         const llvm::Instruction *source,
+                         AbstractValueFactory &factory);
+  static void taintField(AbductiveDomain &astate, AbstractValue base,
+                         unsigned field_idx, TaintKind kind,
+                         const std::string &procedure_name,
+                         AbstractValueFactory &factory);
+  static void sanitizeField(AbductiveDomain &astate, AbstractValue base,
+                            unsigned field_idx, TaintKind sanitizer_kind,
+                            const llvm::Instruction *sanitizer_loc);
+  static bool checkSinkField(AbductiveDomain &astate, AbstractValue base,
+                             unsigned field_idx, const std::string &sink_name,
+                             const llvm::Instruction *sink_loc);
 
   /**
    * Check if a value is tainted and report if it flows to a sink

@@ -183,32 +183,6 @@ void NonDisjunctiveDomain::addState(const AbductiveDomain &state) {
       }
     }
   }
-
-  if (!summary_) {
-    summary_ = std::make_unique<AbductiveDomain>(state.clone());
-    return;
-  }
-
-  if (auto joined_opt = PulseJoin::joinAbductive(*summary_, state)) {
-    summary_ = std::make_unique<AbductiveDomain>(std::move(*joined_opt));
-    return;
-  }
-
-  AbductiveDomain intersection = summary_->clone();
-  const AbductiveDomain &existing = *summary_;
-  {
-    Stack new_stack;
-    for (const auto &kv : existing.getPostStack().getMap()) {
-      const Address *rhs_addr = state.getPostStack().find(kv.first);
-      if (rhs_addr && existing.getCanonical(kv.second.addr) ==
-                          state.getCanonical(rhs_addr->addr)) {
-        new_stack.add(kv.first, kv.second);
-      }
-    }
-    intersection.getPostStack() = std::move(new_stack);
-  }
-  intersection.canonicalize();
-  summary_ = std::make_unique<AbductiveDomain>(std::move(intersection));
 }
 
 void NonDisjunctiveDomain::join(const NonDisjunctiveDomain &other) {

@@ -2,6 +2,7 @@
 
 #include "Checker/Pulse/Core/PulseFormula.h"
 #include "Checker/Pulse/Domain/PulseJoin.h"
+#include "Checker/Pulse/Report/PulseOptions.h"
 
 #include <limits>
 #include <optional>
@@ -108,13 +109,14 @@ void LoopAbstraction::initialize(const llvm::LoopInfo &LI) {
     }
   }
 
-  // Record loop headers
+  // Record loop headers and copy body blocks (safe after LLVM LoopInfo dies).
   for (const llvm::Loop *L : loops) {
     const llvm::BasicBlock *header = L->getHeader();
     if (header) {
       LoopInfo info;
       info.loop = L;
-      loop_headers_[header] = info;
+      info.body_blocks.insert(L->block_begin(), L->block_end());
+      loop_headers_[header] = std::move(info);
     }
   }
 }
@@ -133,7 +135,7 @@ bool LoopAbstraction::shouldWiden(const llvm::BasicBlock *BB) const {
   if (it == loop_headers_.end()) {
     return false;
   }
-  return it->second.iterations >= kWidenThreshold;
+  return it->second.iterations >= options::widenThreshold();
 }
 
 bool LoopAbstraction::visitHeader(const llvm::BasicBlock *BB,
@@ -170,12 +172,60 @@ bool LoopAbstraction::visitHeader(const llvm::BasicBlock *BB,
     it->second.local_path_condition =
         PulseFormula::join(it->second.local_path_condition, path_condition);
   }
-  if (it->second.seen_states.size() < kMaxWidenIterations) {
+  if (it->second.seen_states.size() < options::maxLoopIterations()) {
     it->second.seen_states.push_back(state.clone());
   }
 
   // Check if we should widen
-  return it->second.iterations >= kWidenThreshold;
+  return it->second.iterations >= options::widenThreshold();
+}
+
+bool LoopAbstraction::hasExactRepeatingState(
+    const llvm::BasicBlock *BB, const ExecutionDomain &state) const {
+  auto it = loop_headers_.find(BB);
+  if (it == loop_headers_.end()) {
+    return false;
+  }
+  const AbductiveDomain *cand = state.getAstate();
+  if (!cand || cand->isLoopInvariantUnderInference(BB)) {
+    return false;
+  }
+  auto matchesAny = [&](const std::vector<ExecutionDomain> &history) {
+    for (const auto &prev : history) {
+      const AbductiveDomain *pa = prev.getAstate();
+      if (!pa || pa->isLoopInvariantUnderInference(BB)) {
+        continue;
+      }
+      if (AbductiveDomain::leq(*cand, *pa) &&
+          AbductiveDomain::leq(*pa, *cand)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  return matchesAny(it->second.seen_backedge_states) ||
+         matchesAny(it->second.seen_states);
+}
+
+void LoopAbstraction::recordBackedgeState(const llvm::BasicBlock *BB,
+                                          const ExecutionDomain &state) {
+  auto it = loop_headers_.find(BB);
+  if (it == loop_headers_.end()) {
+    return;
+  }
+  it->second.backedge_visits++;
+  if (const AbductiveDomain *a = state.getAstate()) {
+    if (!a->isLoopInvariantUnderInference(BB) &&
+        it->second.seen_backedge_states.size() <
+            options::maxLoopIterations()) {
+      it->second.seen_backedge_states.push_back(state.clone());
+    }
+  }
+}
+
+unsigned LoopAbstraction::getBackedgeVisits(const llvm::BasicBlock *BB) const {
+  auto it = loop_headers_.find(BB);
+  return (it != loop_headers_.end()) ? it->second.backedge_visits : 0u;
 }
 
 bool LoopAbstraction::hasConverged(const llvm::BasicBlock *BB,
@@ -217,7 +267,7 @@ ExecutionDomain LoopAbstraction::widen(const llvm::BasicBlock *BB,
   const ExecutionDomain &header_state = it->second.header_state;
 
   // Hard cap: stop exploring further back-edge unrollings once widened enough.
-  if (it->second.iterations > kMaxWidenIterations) {
+  if (it->second.iterations > options::maxLoopIterations()) {
     ExecutionDomain stopped;
     stopped.setState(ExecutionState::Stopped);
     return stopped;
@@ -237,11 +287,20 @@ ExecutionDomain LoopAbstraction::widen(const llvm::BasicBlock *BB,
 
 bool LoopAbstraction::isInLoop(const llvm::BasicBlock *BB) const {
   for (const auto &kv : loop_headers_) {
-    if (kv.second.loop->contains(BB)) {
+    if (kv.second.body_blocks.count(BB) > 0) {
       return true;
     }
   }
   return false;
+}
+
+bool LoopAbstraction::isInLoopBody(const llvm::BasicBlock *header,
+                                   const llvm::BasicBlock *BB) const {
+  auto it = loop_headers_.find(header);
+  if (it == loop_headers_.end() || !BB) {
+    return false;
+  }
+  return it->second.body_blocks.count(BB) > 0;
 }
 
 std::set<const llvm::BasicBlock *> LoopAbstraction::getLoopHeaders() const {

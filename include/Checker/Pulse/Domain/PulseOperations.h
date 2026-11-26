@@ -8,10 +8,13 @@
 
 #include <atomic>
 #include <functional>
+#include <optional>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Value.h>
-#include <optional>
 
 // Forward declaration
 namespace pulse {
@@ -166,7 +169,14 @@ private:
  */
 class AbstractValueFactory {
 private:
-  std::map<const llvm::Value *, AbstractValue> value_map_;
+  std::unordered_map<const llvm::Value *, AbstractValue> value_map_;
+  std::unordered_map<const llvm::Value *,
+                     std::pair<const llvm::Value *, AbstractValue>>
+      stripped_ptr_map_;
+  std::unordered_map<
+      const llvm::Function *,
+      std::vector<std::pair<const llvm::Value *, AbstractValue>>>
+      ptr_values_by_fn_;
   std::function<bool(const llvm::Value *, const llvm::Value *)> mustAliasFn_;
   // Global ID generator to ensure uniqueness even if multiple factories exist
   // (e.g., join operations that create temporary factories).

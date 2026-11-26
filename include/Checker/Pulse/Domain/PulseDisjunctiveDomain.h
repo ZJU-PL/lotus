@@ -42,10 +42,16 @@ private:
   std::map<const llvm::BasicBlock *, std::vector<Disjunct>> disjuncts_by_block_;
   static constexpr size_t kMaxDisjuncts = 10;
   static constexpr unsigned kWidenThreshold = 3; // Widen after 3 iterations
+  static constexpr unsigned kMaxBlockVisits = 8; // Cap total joins across huge switches
   static constexpr size_t kWidenKeepDisjuncts = 4;
 
-  // Track iterations per block for widening
+  // Track iterations per block and per (block, pred) edge for widening
   std::map<const llvm::BasicBlock *, unsigned> block_iterations_;
+  std::map<std::pair<const llvm::BasicBlock *, const llvm::BasicBlock *>,
+           unsigned>
+      edge_iterations_;
+  std::set<std::pair<const llvm::BasicBlock *, const llvm::BasicBlock *>>
+      widened_edges_;
 
 public:
   DisjunctiveDomain() = default;
@@ -65,6 +71,10 @@ public:
   bool addWithDedup(const llvm::BasicBlock *at_block, ExecutionDomain state,
                     const llvm::BasicBlock *path_context,
                     NonDisjunctiveDomain *non_disj = nullptr);
+  bool addWithDedupRef(const llvm::BasicBlock *at_block,
+                       const ExecutionDomain &state,
+                       const llvm::BasicBlock *path_context,
+                       NonDisjunctiveDomain *non_disj = nullptr);
 
   /**
    * Get disjuncts recorded at a given block
@@ -83,16 +93,30 @@ public:
    * Returns the joined state (or first state if only one)
    */
   ExecutionDomain joinAtBlock(const llvm::BasicBlock *BB);
+  ExecutionDomain joinAtBlockForPred(const llvm::BasicBlock *BB,
+                                     const llvm::BasicBlock *pred_bb);
 
   /**
    * Widen: apply widening operator if needed
    */
   void widen(const llvm::BasicBlock *BB);
+  void recordEdgeVisit(const llvm::BasicBlock *BB,
+                       const llvm::BasicBlock *pred_bb);
+  bool shouldWidenEdge(const llvm::BasicBlock *BB,
+                       const llvm::BasicBlock *pred_bb) const;
+  bool hasWidenedEdge(const llvm::BasicBlock *BB,
+                      const llvm::BasicBlock *pred_bb) const;
+  void markWidenedEdge(const llvm::BasicBlock *BB,
+                       const llvm::BasicBlock *pred_bb);
 
   /**
    * Check if we should widen at this block
    */
   bool shouldWiden(const llvm::BasicBlock *BB) const;
+  bool hasReachedBlockVisitCap(const llvm::BasicBlock *BB) const {
+    auto it = block_iterations_.find(BB);
+    return it != block_iterations_.end() && it->second > kMaxBlockVisits;
+  }
 
   /**
    * Clear disjuncts
@@ -100,6 +124,8 @@ public:
   void clear() {
     disjuncts_by_block_.clear();
     block_iterations_.clear();
+    edge_iterations_.clear();
+    widened_edges_.clear();
   }
 
   /**

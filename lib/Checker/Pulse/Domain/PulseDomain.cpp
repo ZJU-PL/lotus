@@ -445,6 +445,8 @@ AbductiveDomain AbductiveDomain::clone() const {
 
   cloned.invalidation_info_ = invalidation_info_;
   cloned.allocation_sizes_ = allocation_sizes_;
+  cloned.symbolic_allocation_sizes_ = symbolic_allocation_sizes_;
+  cloned.shared_ptr_targets_ = shared_ptr_targets_;
   cloned.allocation_roots_ = allocation_roots_;
   cloned.taint_domain_.join(taint_domain_);
   cloned.topl_history_ = topl_history_;
@@ -455,6 +457,7 @@ AbductiveDomain AbductiveDomain::clone() const {
   cloned.need_dynamic_type_specialization_ = need_dynamic_type_specialization_;
   cloned.recursive_calls_ = recursive_calls_;
   cloned.recursive_call_edges_ = recursive_call_edges_;
+  cloned.loop_header_stack_ = loop_header_stack_;
   cloned.loop_header_info_ = loop_header_info_;
   cloned.loop_path_stamps_ = loop_path_stamps_;
   cloned.timestamp_counter_ = timestamp_counter_;
@@ -470,6 +473,9 @@ AbductiveDomain AbductiveDomain::clone() const {
 }
 
 void AbductiveDomain::canonicalize() {
+  if (!path_formula_ || !path_formula_->hasEqualities()) {
+    return;
+  }
   auto canon_access = [this](const Access &access) -> Access {
     if (access.kind == AccessKind::ArrayIndex) {
       Access out = access;
@@ -485,63 +491,139 @@ void AbductiveDomain::canonicalize() {
     return out;
   };
 
-  // Post stack
-  {
-    Stack new_stack;
-    for (const auto &kv : post_stack_.getMap()) {
-      new_stack.add(kv.first, canon_address(kv.second));
+  // Post stack (in-place: keys are llvm::Value*, never change)
+  for (auto &kv : post_stack_.getMap()) {
+    AbstractValue c = getCanonical(kv.second.addr);
+    if (!(c == kv.second.addr)) {
+      kv.second.addr = c;
     }
-    post_stack_ = std::move(new_stack);
   }
 
-  // Pre stack
-  {
-    Stack new_stack;
-    for (const auto &kv : pre_stack_.getMap()) {
-      new_stack.add(kv.first, canon_address(kv.second));
+  // Pre stack (in-place: keys are llvm::Value*, never change)
+  for (auto &kv : pre_stack_.getMap()) {
+    AbstractValue c = getCanonical(kv.second.addr);
+    if (!(c == kv.second.addr)) {
+      kv.second.addr = c;
     }
-    pre_stack_ = std::move(new_stack);
   }
 
-  // Post heap
+  // Post heap: fast in-place pass unless a source key or ArrayIndex key needs
+  // re-keying or an empty edge bucket should be pruned.
   {
-    Heap new_heap;
-    for (const auto &kv : post_heap_.getEdges()) {
-      AbstractValue from = getCanonical(kv.first);
-      if (kv.second.empty()) {
-        continue;
+    auto &edges = post_heap_.getEdges();
+    bool needs_rebuild = false;
+    for (const auto &kv : edges) {
+      if (kv.second.empty() || !(getCanonical(kv.first) == kv.first)) {
+        needs_rebuild = true;
+        break;
       }
       for (const auto &edge_kv : kv.second) {
-        Access acc = canon_access(edge_kv.first);
-        Address to = canon_address(edge_kv.second);
-        if (!new_heap.findEdge(from, acc)) {
-          new_heap.addEdge(from, acc, to);
+        if (edge_kv.first.kind == AccessKind::ArrayIndex &&
+            !(getCanonical(edge_kv.first.index) == edge_kv.first.index)) {
+          needs_rebuild = true;
+          break;
         }
       }
+      if (needs_rebuild)
+        break;
     }
-    post_heap_ = std::move(new_heap);
+    if (!needs_rebuild) {
+      for (auto &kv : edges) {
+        for (auto &edge_kv : kv.second) {
+          AbstractValue c = getCanonical(edge_kv.second.addr);
+          if (!(c == edge_kv.second.addr)) {
+            edge_kv.second.addr = c;
+          }
+        }
+      }
+    } else {
+      Heap new_heap;
+      for (const auto &kv : edges) {
+        AbstractValue from = getCanonical(kv.first);
+        if (kv.second.empty()) {
+          continue;
+        }
+        for (const auto &edge_kv : kv.second) {
+          Access acc = canon_access(edge_kv.first);
+          Address to = canon_address(edge_kv.second);
+          if (!new_heap.findEdge(from, acc)) {
+            new_heap.addEdge(from, acc, to);
+          }
+        }
+      }
+      post_heap_ = std::move(new_heap);
+    }
   }
 
   // Pre heap (preserve registered addresses even when edge maps are empty!)
   {
-    Heap new_heap;
-    for (const auto &kv : pre_heap_.getEdges()) {
-      AbstractValue from = getCanonical(kv.first);
-      new_heap.registerAddress(from);
-      for (const auto &edge_kv : kv.second) {
-        Access acc = canon_access(edge_kv.first);
-        Address to = canon_address(edge_kv.second);
-        if (!new_heap.findEdge(from, acc)) {
-          new_heap.addEdge(from, acc, to);
-        }
-        new_heap.registerAddress(to.addr);
+    auto &edges = pre_heap_.getEdges();
+    bool needs_rebuild = false;
+    for (const auto &kv : edges) {
+      if (!(getCanonical(kv.first) == kv.first)) {
+        needs_rebuild = true;
+        break;
       }
+      for (const auto &edge_kv : kv.second) {
+        if (edge_kv.first.kind == AccessKind::ArrayIndex &&
+            !(getCanonical(edge_kv.first.index) == edge_kv.first.index)) {
+          needs_rebuild = true;
+          break;
+        }
+        AbstractValue to_c = getCanonical(edge_kv.second.addr);
+        if (edges.find(to_c) == edges.end()) {
+          needs_rebuild = true;
+          break;
+        }
+      }
+      if (needs_rebuild)
+        break;
     }
-    pre_heap_ = std::move(new_heap);
+    if (!needs_rebuild) {
+      for (auto &kv : edges) {
+        for (auto &edge_kv : kv.second) {
+          AbstractValue c = getCanonical(edge_kv.second.addr);
+          if (!(c == edge_kv.second.addr)) {
+            edge_kv.second.addr = c;
+          }
+        }
+      }
+    } else {
+      Heap new_heap;
+      for (const auto &kv : edges) {
+        AbstractValue from = getCanonical(kv.first);
+        new_heap.registerAddress(from);
+        for (const auto &edge_kv : kv.second) {
+          Access acc = canon_access(edge_kv.first);
+          Address to = canon_address(edge_kv.second);
+          if (!new_heap.findEdge(from, acc)) {
+            new_heap.addEdge(from, acc, to);
+          }
+          new_heap.registerAddress(to.addr);
+        }
+      }
+      pre_heap_ = std::move(new_heap);
+    }
   }
 
+  auto anyKeyNonCanon = [this](const auto &m) -> bool {
+    for (const auto &kv : m) {
+      if (!(getCanonical(kv.first) == kv.first))
+        return true;
+    }
+    return false;
+  };
+  auto anyElemNonCanon = [this](const auto &s) -> bool {
+    for (AbstractValue v : s) {
+      if (!(getCanonical(v) == v))
+        return true;
+    }
+    return false;
+  };
+
   // Post attrs
-  {
+  if (!post_attrs_.getAttrs().empty() &&
+      anyKeyNonCanon(post_attrs_.getAttrs())) {
     AddressAttributes new_attrs;
     for (const auto &kv : post_attrs_.getAttrs()) {
       AbstractValue addr = getCanonical(kv.first);
@@ -553,7 +635,7 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Pre attrs
-  {
+  if (!pre_attrs_.getAttrs().empty() && anyKeyNonCanon(pre_attrs_.getAttrs())) {
     AddressAttributes new_attrs;
     for (const auto &kv : pre_attrs_.getAttrs()) {
       AbstractValue addr = getCanonical(kv.first);
@@ -565,7 +647,7 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Pre MustBeValid (keep earliest timestamp)
-  {
+  if (!pre_must_be_valid_.empty() && anyKeyNonCanon(pre_must_be_valid_)) {
     std::map<AbstractValue, MustBeValidInfo> canon_map;
     for (const auto &kv : pre_must_be_valid_) {
       AbstractValue addr = getCanonical(kv.first);
@@ -578,7 +660,8 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Pre MustBeInitialized (keep earliest timestamp)
-  {
+  if (!pre_must_be_initialized_.empty() &&
+      anyKeyNonCanon(pre_must_be_initialized_)) {
     std::map<AbstractValue, MustBeInitializedInfo> canon_map;
     for (const auto &kv : pre_must_be_initialized_) {
       AbstractValue addr = getCanonical(kv.first);
@@ -591,7 +674,8 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Pre MustNotBeTainted
-  {
+  if (!pre_must_not_be_tainted_.empty() &&
+      anyKeyNonCanon(pre_must_not_be_tainted_)) {
     std::map<AbstractValue, std::vector<MustNotBeTaintedSink>> canon_map;
     for (const auto &kv : pre_must_not_be_tainted_) {
       AbstractValue addr = getCanonical(kv.first);
@@ -602,7 +686,7 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Post WrittenTo (keep latest timestamp)
-  {
+  if (!post_written_to_.empty() && anyKeyNonCanon(post_written_to_)) {
     std::map<AbstractValue, WrittenToInfo> canon_map;
     for (const auto &kv : post_written_to_) {
       AbstractValue addr = getCanonical(kv.first);
@@ -615,7 +699,7 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Post AllocationInfo
-  {
+  if (!post_allocation_info_.empty() && anyKeyNonCanon(post_allocation_info_)) {
     std::map<AbstractValue, AllocationInfo> canon_map;
     for (const auto &kv : post_allocation_info_) {
       AbstractValue addr = getCanonical(kv.first);
@@ -625,22 +709,32 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Post PropagateTaintFrom
-  {
-    std::map<AbstractValue, std::vector<PropagateTaintFromInfo>> canon_map;
-    for (const auto &kv : post_propagate_taint_from_) {
-      AbstractValue addr = getCanonical(kv.first);
-      for (PropagateTaintFromInfo info : kv.second) {
-        for (AbstractValue &src : info.sources) {
-          src = getCanonical(src);
+  if (!post_propagate_taint_from_.empty()) {
+    if (!anyKeyNonCanon(post_propagate_taint_from_)) {
+      for (auto &kv : post_propagate_taint_from_) {
+        for (auto &info : kv.second) {
+          for (AbstractValue &src : info.sources) {
+            src = getCanonical(src);
+          }
         }
-        canon_map[addr].push_back(std::move(info));
       }
+    } else {
+      std::map<AbstractValue, std::vector<PropagateTaintFromInfo>> canon_map;
+      for (const auto &kv : post_propagate_taint_from_) {
+        AbstractValue addr = getCanonical(kv.first);
+        for (PropagateTaintFromInfo info : kv.second) {
+          for (AbstractValue &src : info.sources) {
+            src = getCanonical(src);
+          }
+          canon_map[addr].push_back(std::move(info));
+        }
+      }
+      post_propagate_taint_from_ = std::move(canon_map);
     }
-    post_propagate_taint_from_ = std::move(canon_map);
   }
 
   // Post UnknownEffect
-  {
+  if (!post_unknown_effect_.empty() && anyKeyNonCanon(post_unknown_effect_)) {
     std::map<AbstractValue, UnknownEffectInfo> canon_map;
     for (const auto &kv : post_unknown_effect_) {
       canon_map.emplace(getCanonical(kv.first), kv.second);
@@ -649,7 +743,7 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Post TaintSanitized
-  {
+  if (!post_taint_sanitized_.empty() && anyKeyNonCanon(post_taint_sanitized_)) {
     std::map<AbstractValue, std::vector<SanitizerRecord>> canon_map;
     for (const auto &kv : post_taint_sanitized_) {
       AbstractValue addr = getCanonical(kv.first);
@@ -659,29 +753,55 @@ void AbductiveDomain::canonicalize() {
     post_taint_sanitized_ = std::move(canon_map);
   }
 
-  // Dynamic types & decompiler
-  {
+  // Dynamic types & decompiler & auxiliary maps
+  if (!dynamic_types_.empty() && anyKeyNonCanon(dynamic_types_)) {
     std::map<AbstractValue, std::string> canon_types;
     for (const auto &kv : dynamic_types_) {
       canon_types.emplace(getCanonical(kv.first), kv.second);
     }
     dynamic_types_ = std::move(canon_types);
+  }
 
+  if (!decompiler_.empty() && anyKeyNonCanon(decompiler_)) {
     std::map<AbstractValue, std::string> canon_decomp;
     for (const auto &kv : decompiler_) {
       canon_decomp.emplace(getCanonical(kv.first), kv.second);
     }
     decompiler_ = std::move(canon_decomp);
+  }
 
-    for (auto &edge : recursive_call_edges_) {
-      for (AbstractValue &arg : edge.args) {
-        arg = getCanonical(arg);
-      }
+  for (auto &edge : recursive_call_edges_) {
+    for (AbstractValue &arg : edge.args) {
+      arg = getCanonical(arg);
     }
   }
 
+  if (!symbolic_allocation_sizes_.empty()) {
+    if (!anyKeyNonCanon(symbolic_allocation_sizes_)) {
+      for (auto &kv : symbolic_allocation_sizes_) {
+        kv.second = getCanonical(kv.second);
+      }
+    } else {
+      std::map<AbstractValue, AbstractValue> canon_sym_sizes;
+      for (const auto &kv : symbolic_allocation_sizes_) {
+        canon_sym_sizes.emplace(getCanonical(kv.first),
+                                getCanonical(kv.second));
+      }
+      symbolic_allocation_sizes_ = std::move(canon_sym_sizes);
+    }
+  }
+
+  if (!shared_ptr_targets_.empty() && anyElemNonCanon(shared_ptr_targets_)) {
+    std::set<AbstractValue> canon_sptr;
+    for (AbstractValue v : shared_ptr_targets_) {
+      canon_sptr.insert(getCanonical(v));
+    }
+    shared_ptr_targets_ = std::move(canon_sptr);
+  }
+
   // Taint domain
-  {
+  if (!taint_domain_.getMap().empty() &&
+      anyKeyNonCanon(taint_domain_.getMap())) {
     TaintDomain new_taint;
     for (const auto &kv : taint_domain_.getMap()) {
       AbstractValue addr = getCanonical(kv.first);
@@ -693,7 +813,7 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Invalidation info
-  {
+  if (!invalidation_info_.empty() && anyKeyNonCanon(invalidation_info_)) {
     std::map<AbstractValue,
              std::pair<InvalidationKind, const llvm::Instruction *>>
         new_info;
@@ -707,7 +827,7 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Allocation sizes
-  {
+  if (!allocation_sizes_.empty() && anyKeyNonCanon(allocation_sizes_)) {
     std::map<AbstractValue, uint64_t> new_sizes;
     for (const auto &kv : allocation_sizes_) {
       AbstractValue addr = getCanonical(kv.first);
@@ -722,16 +842,23 @@ void AbductiveDomain::canonicalize() {
   }
 
   // Allocation roots
-  {
-    std::map<AbstractValue, AbstractValue> new_roots;
-    for (const auto &kv : allocation_roots_) {
-      new_roots[getCanonical(kv.first)] = getCanonical(kv.second);
+  if (!allocation_roots_.empty()) {
+    if (!anyKeyNonCanon(allocation_roots_)) {
+      for (auto &kv : allocation_roots_) {
+        kv.second = getCanonical(kv.second);
+      }
+    } else {
+      std::map<AbstractValue, AbstractValue> new_roots;
+      for (const auto &kv : allocation_roots_) {
+        new_roots[getCanonical(kv.first)] = getCanonical(kv.second);
+      }
+      allocation_roots_ = std::move(new_roots);
     }
-    allocation_roots_ = std::move(new_roots);
   }
 
   // Dynamic type specialization set
-  {
+  if (!need_dynamic_type_specialization_.empty() &&
+      anyElemNonCanon(need_dynamic_type_specialization_)) {
     std::set<AbstractValue> canon_set;
     for (AbstractValue av : need_dynamic_type_specialization_) {
       canon_set.insert(getCanonical(av));
@@ -767,6 +894,7 @@ AbductiveDomain::incorporateNewEqs(const NewEqs &initial_eqs) {
     return std::nullopt;
   };
 
+  bool merged_any_av = false;
   while (!worklist.empty() && steps++ < kMaxSteps) {
     NewEq eq = worklist.front();
     worklist.pop_front();
@@ -796,6 +924,7 @@ AbductiveDomain::incorporateNewEqs(const NewEqs &initial_eqs) {
     if (v_old == v_new) {
       continue;
     }
+    merged_any_av = true;
 
     // Two distinct concrete allocations cannot alias (UNSAT).
     // Compare raw pre-merge allocation roots because path_formula_ has already
@@ -956,7 +1085,9 @@ AbductiveDomain::incorporateNewEqs(const NewEqs &initial_eqs) {
     }
   }
 
-  canonicalize();
+  if (merged_any_av) {
+    canonicalize();
+  }
   return IncorporateResult::ok();
 }
 

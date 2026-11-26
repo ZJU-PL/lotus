@@ -300,8 +300,14 @@ private:
            std::pair<InvalidationKind, const llvm::Instruction *>>
       invalidation_info_;
 
-  // Allocation sizes (in bytes) for base addresses when known
+  // Allocation sizes (in bytes) for base addresses when known (constant or
+  // symbolic AbstractValue for dynamic-size alloca/malloc).
   std::map<AbstractValue, uint64_t> allocation_sizes_;
+  std::map<AbstractValue, AbstractValue> symbolic_allocation_sizes_;
+
+  // Objects managed by strong reference counting (std::shared_ptr targets) for
+  // RetainCycle detection.
+  std::set<AbstractValue> shared_ptr_targets_;
 
   // Stable allocation identity for base and derived pointer values
   std::map<AbstractValue, AbstractValue> allocation_roots_;
@@ -322,7 +328,14 @@ private:
   std::set<std::string> recursive_calls_;
   std::vector<RecursiveCallEdge> recursive_call_edges_;
 
-  // Loop header iteration counters and per-disjunct path-stamp history
+  // Per-disjunct nested loop header stack & iteration path stamps
+  // (Infer PulseLoopHeaderInfo.ml).
+  struct LoopHeaderFrame {
+    const llvm::BasicBlock *header{nullptr};
+    unsigned visits{0};
+    size_t last_stamp{0};
+  };
+  std::vector<LoopHeaderFrame> loop_header_stack_;
   std::map<const llvm::BasicBlock *, unsigned> loop_header_info_;
   std::map<const llvm::BasicBlock *, std::vector<size_t>> loop_path_stamps_;
 
@@ -527,6 +540,34 @@ public:
     return allocation_sizes_;
   }
 
+  void setSymbolicAllocationSize(AbstractValue addr, AbstractValue size_av) {
+    symbolic_allocation_sizes_[getCanonical(addr)] = getCanonical(size_av);
+  }
+  std::optional<AbstractValue>
+  getSymbolicAllocationSize(AbstractValue addr) const {
+    AbstractValue c = getCanonical(addr);
+    auto it = symbolic_allocation_sizes_.find(c);
+    if (it != symbolic_allocation_sizes_.end()) {
+      return getCanonical(it->second);
+    }
+    return std::nullopt;
+  }
+  const std::map<AbstractValue, AbstractValue> &
+  getSymbolicAllocationSizes() const {
+    return symbolic_allocation_sizes_;
+  }
+  std::map<AbstractValue, AbstractValue> &getSymbolicAllocationSizes() {
+    return symbolic_allocation_sizes_;
+  }
+
+  void addSharedPtrTarget(AbstractValue target) {
+    shared_ptr_targets_.insert(getCanonical(target));
+  }
+  const std::set<AbstractValue> &getSharedPtrTargets() const {
+    return shared_ptr_targets_;
+  }
+  std::set<AbstractValue> &getSharedPtrTargets() { return shared_ptr_targets_; }
+
   void setAllocationRoot(AbstractValue addr, AbstractValue root) {
     allocation_roots_[getCanonical(addr)] = getCanonical(root);
   }
@@ -641,6 +682,33 @@ public:
     loop_path_stamps_[header].push_back(stamp);
     loop_header_info_[header] =
         static_cast<unsigned>(loop_path_stamps_[header].size());
+    for (auto &frame : loop_header_stack_) {
+      if (frame.header == header) {
+        frame.visits++;
+        frame.last_stamp = stamp;
+        return;
+      }
+    }
+    loop_header_stack_.push_back(LoopHeaderFrame{header, 1u, stamp});
+  }
+  unsigned getDisjunctLoopVisits(const llvm::BasicBlock *header) const {
+    for (const auto &frame : loop_header_stack_) {
+      if (frame.header == header)
+        return frame.visits;
+    }
+    return 0u;
+  }
+  const std::vector<LoopHeaderFrame> &getLoopHeaderStack() const {
+    return loop_header_stack_;
+  }
+  void popLoopHeader(const llvm::BasicBlock *header) {
+    for (auto it = loop_header_stack_.begin(); it != loop_header_stack_.end();
+         ++it) {
+      if (it->header == header) {
+        loop_header_stack_.erase(it, loop_header_stack_.end());
+        return;
+      }
+    }
   }
 
   // Loop invariant under inference

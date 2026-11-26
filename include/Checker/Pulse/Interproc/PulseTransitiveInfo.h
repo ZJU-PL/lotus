@@ -3,10 +3,13 @@
 
 #include <map>
 #include <set>
+#include <string>
 #include <vector>
 
+#include <llvm/ADT/StringRef.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instruction.h>
+#include <llvm/Support/Error.h>
 
 namespace llvm {
 class Function;
@@ -14,6 +17,22 @@ class Instruction;
 } // namespace llvm
 
 namespace pulse {
+
+/**
+ * Policy rule for Pulse's TransitiveAccess checker (Infer
+ * PulseTransitiveAccessChecker.ml): flags when any function matching
+ * `source_functions` transitively calls a function matching
+ * `forbidden_callees`.
+ */
+struct TransitiveAccessPolicy {
+  std::string name;
+  std::vector<std::string> source_functions;
+  std::vector<std::string> forbidden_callees;
+  std::string description;
+};
+
+llvm::Expected<std::vector<TransitiveAccessPolicy>>
+loadTransitiveAccessPoliciesFromJson(llvm::StringRef json_text);
 
 /**
  * TransitiveInfo: tracks interprocedural information
@@ -47,6 +66,7 @@ public:
   };
 
 private:
+  static constexpr size_t kMaxTransitiveEntries = 256;
   std::vector<AccessInfo> transitive_accesses_;
   std::vector<CallInfo> call_resolutions_;
 
@@ -54,24 +74,18 @@ public:
   TransitiveInfo() = default;
 
   /**
-   * Record a transitive access
+   * Record a transitive access (deduplicated and bounded).
    */
   void recordTransitiveAccess(const llvm::Instruction *loc,
-                              const llvm::Function *func) {
-    transitive_accesses_.emplace_back(loc, func);
-  }
+                              const llvm::Function *func);
 
   /**
-   * Record call resolution
+   * Record call resolution (deduplicated and bounded).
    */
   void recordCallResolution(
       const llvm::Instruction *call_site, const llvm::Function *caller,
       CallResolution resolution,
-      const std::vector<const llvm::Function *> &targets = {}) {
-    CallInfo info(call_site, caller, resolution);
-    info.targets = targets;
-    call_resolutions_.push_back(info);
-  }
+      const std::vector<const llvm::Function *> &targets = {});
 
   const std::vector<AccessInfo> &getTransitiveAccesses() const {
     return transitive_accesses_;

@@ -2,9 +2,11 @@
 #pragma once
 
 #include <map>
+#include <optional>
 #include <regex>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <llvm/ADT/StringRef.h>
@@ -113,11 +115,13 @@ struct ProcedureUnit {
   std::vector<TaintKind> kinds;
   ProcedureTarget target;
   std::vector<int> argument_positions;
+  std::optional<unsigned> field_index;
 
   ProcedureUnit(const ProcedureMatcher &m, const std::vector<TaintKind> &k,
-                ProcedureTarget t, std::vector<int> positions = {})
+                ProcedureTarget t, std::vector<int> positions = {},
+                std::optional<unsigned> field_idx = std::nullopt)
       : matcher(m), kinds(k), target(t),
-        argument_positions(std::move(positions)) {}
+        argument_positions(std::move(positions)), field_index(field_idx) {}
 
   bool appliesToReturn() const {
     return target == ProcedureTarget::ReturnValue;
@@ -177,6 +181,23 @@ private:
   std::map<TaintKind, std::vector<SinkPolicy>> sink_policies_;
   std::map<std::string, std::vector<TaintKind>> allocation_sources_;
 
+  // Memoized match caches keyed by "(I:|F:)<func_name>" storing unit indices.
+  mutable std::unordered_map<std::string, std::vector<size_t>> source_cache_;
+  mutable std::unordered_map<std::string, std::vector<size_t>>
+      source_block_cache_;
+  mutable std::unordered_map<std::string, std::vector<size_t>> sink_cache_;
+  mutable std::unordered_map<std::string, std::vector<size_t>> sanitizer_cache_;
+  mutable std::unordered_map<std::string, std::vector<size_t>>
+      propagator_cache_;
+
+  void clearMatchCaches() {
+    source_cache_.clear();
+    source_block_cache_.clear();
+    sink_cache_.clear();
+    sanitizer_cache_.clear();
+    propagator_cache_.clear();
+  }
+
   static TaintConfig *default_config_;
 
 public:
@@ -184,15 +205,23 @@ public:
 
   void addSourceProcedure(const ProcedureUnit &unit) {
     source_procedures_.push_back(unit);
+    source_cache_.clear();
+  }
+  void addSourceBlock(const ProcedureUnit &unit) {
+    source_blocks_.push_back(unit);
+    source_block_cache_.clear();
   }
   void addSinkProcedure(const ProcedureUnit &unit) {
     sink_procedures_.push_back(unit);
+    sink_cache_.clear();
   }
   void addSanitizerProcedure(const ProcedureUnit &unit) {
     sanitizer_procedures_.push_back(unit);
+    sanitizer_cache_.clear();
   }
   void addPropagatorProcedure(const ProcedureUnit &unit) {
     propagator_procedures_.push_back(unit);
+    propagator_cache_.clear();
   }
   void addSinkPolicy(const TaintKind &sink_kind, const SinkPolicy &policy) {
     sink_policies_[sink_kind].push_back(policy);
@@ -207,6 +236,8 @@ public:
   matchSources(const llvm::Function *func) const;
   std::vector<const ProcedureUnit *>
   matchSourcesByName(const std::string &func_name) const;
+  std::vector<const ProcedureUnit *>
+  matchSourceBlocks(const llvm::Function *func) const;
   std::vector<const ProcedureUnit *>
   matchSinks(const llvm::Function *func) const;
   std::vector<const ProcedureUnit *>
@@ -231,6 +262,8 @@ public:
   getSinkPolicies(const TaintKind &sink_kind) const;
   std::vector<TaintKind>
   getAllocationSourceKinds(const std::string &class_name) const;
+  std::vector<TaintKind>
+  matchAllocationSourceForName(const std::string &name) const;
 
   static const TaintConfig &getDefault();
   static void initializeDefault();

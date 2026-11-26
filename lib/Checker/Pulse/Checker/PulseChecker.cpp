@@ -11,6 +11,7 @@
 #include "Checker/Pulse/Interproc/PulseSpecialization.h"
 #include "Checker/Pulse/Report/PulseDiagnostic.h"
 #include "Checker/Pulse/Report/PulseLogger.h"
+#include "Checker/Pulse/Report/PulseOptions.h"
 #include "Checker/Pulse/Report/PulseReport.h"
 
 #include <functional>
@@ -18,6 +19,7 @@
 #include <map>
 #include <optional>
 #include <queue>
+#include <regex>
 #include <set>
 #include <string>
 #include <tuple>
@@ -47,20 +49,37 @@ static std::string llvmTypeToString(const llvm::Type *ty) {
   return os.str();
 }
 
+static bool isCheapToCopyStructName(llvm::StringRef name) {
+  return name.contains("string_view") || name.contains("basic_string_view") ||
+         name.contains("span") || name.contains("iterator") ||
+         name.contains("unique_ptr") || name.contains("weak_ptr") ||
+         name.contains("reference_wrapper") || name.contains("function_ref");
+}
+
 static bool isNonTrivialConstRefCandidate(const llvm::Argument &arg) {
+  auto isCheapTy = [](const llvm::Type *ty) {
+    if (const auto *ST = llvm::dyn_cast_or_null<llvm::StructType>(ty)) {
+      if (ST->hasName() && isCheapToCopyStructName(ST->getName())) {
+        return true;
+      }
+    }
+    return false;
+  };
   if (arg.hasByValAttr()) {
+    if (const auto *pty = llvm::dyn_cast<llvm::PointerType>(arg.getType())) {
+      if (isCheapTy(pty->getPointerElementType()))
+        return false;
+    }
     return true;
   }
   const llvm::Type *ty = arg.getType();
   if (ty->isStructTy() || ty->isArrayTy()) {
-    return true;
+    return !isCheapTy(ty);
   }
   if (const auto *pty = llvm::dyn_cast<llvm::PointerType>(ty)) {
     if (const llvm::Type *elem = pty->getPointerElementType()) {
       if (elem->isStructTy() && !arg.onlyReadsMemory()) {
-        // Only suggest for non-const by-value-like struct pointer parameters
-        // that have explicit byval or sret-free struct arguments.
-        return arg.hasByValAttr();
+        return arg.hasByValAttr() && !isCheapTy(elem);
       }
     }
   }
@@ -91,6 +110,7 @@ static size_t computeDisjunctPathStamp(const AbductiveDomain &astate) {
     mix(static_cast<size_t>(kv.first.kind));
     mix(kv.second);
   }
+  mix(astate.getPostStack().getMap().size());
   mix(astate.getPostWrittenTo().size());
   mix(astate.getPostAllocationInfo().size());
   return h;
@@ -130,6 +150,10 @@ const PulseSummary *PulseChecker::resolveSummaryForCall(
 
   const auto *call_inst = llvm::dyn_cast<llvm::CallInst>(CI);
   if (!call_inst) {
+    return base_summary;
+  }
+
+  if (caller_astate->getDynamicTypes().empty() && CI->arg_size() < 2) {
     return base_summary;
   }
 
@@ -277,11 +301,144 @@ void PulseChecker::registerBugTypes() {
       BugDescription::BC_ERROR, "CWE-674");
   diagMgr.registerBugType(IssueType::MutualRecursionCycle,
                           mutualRecursionTypeId_);
+
+  retainCycleTypeId_ = mgr.register_bug_type(
+      IssueType::RetainCycle, BugDescription::BI_MEDIUM,
+      BugDescription::BC_PERFORMANCE, "CWE-401");
+  diagMgr.registerBugType(IssueType::RetainCycle, retainCycleTypeId_);
+
+  infiniteLoopTypeId_ = mgr.register_bug_type(
+      IssueType::InfiniteLoop, BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR, "CWE-835");
+  diagMgr.registerBugType(IssueType::InfiniteLoop, infiniteLoopTypeId_);
+
+  transitiveAccessTypeId_ = mgr.register_bug_type(
+      IssueType::TransitiveAccess, BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR, "");
+  diagMgr.registerBugType(IssueType::TransitiveAccess, transitiveAccessTypeId_);
+}
+
+void PulseChecker::extractTypeHierarchyFromModule() {
+  if (!module_) {
+    return;
+  }
+  // Parse Itanium C++ ABI RTTI globals (`@_ZTI*` using __si_class_type_info /
+  // __vmi_class_type_info) to populate PulseFormula's subtype hierarchy so
+  // `Derived <: Base` works for InstanceOf and catch(Base&) matching.
+  for (const llvm::GlobalVariable &GV : module_->globals()) {
+    if (!GV.hasName() || !GV.getName().startswith("_ZTI") ||
+        !GV.hasInitializer()) {
+      continue;
+    }
+    const auto *CS = llvm::dyn_cast<llvm::ConstantStruct>(GV.getInitializer());
+    if (!CS || CS->getNumOperands() < 3) {
+      continue;
+    }
+    std::string derived_name = detail::normalizeRttiTypeName(&GV);
+    if (derived_name.empty()) {
+      continue;
+    }
+    // Check element 0 for __si_class_type_info (single inheritance: op 2 is
+    // base _ZTI) or __vmi_class_type_info (multiple inheritance: ops >= 4).
+    const llvm::Value *meta = CS->getOperand(0)->stripPointerCasts();
+    std::string meta_name;
+    if (const auto *CE = llvm::dyn_cast<llvm::ConstantExpr>(meta)) {
+      if (CE->getNumOperands() > 0) {
+        if (const auto *MGV = llvm::dyn_cast<llvm::GlobalValue>(
+                CE->getOperand(0)->stripPointerCasts())) {
+          meta_name = MGV->getName().str();
+        }
+      }
+    } else if (const auto *MGV = llvm::dyn_cast<llvm::GlobalValue>(meta)) {
+      meta_name = MGV->getName().str();
+    }
+
+    auto registerBaseFromOp = [&](const llvm::Constant *op) {
+      std::string base_name = detail::normalizeRttiTypeName(op);
+      if (!base_name.empty() && base_name != derived_name) {
+        PulseFormula::registerSubtype(derived_name, base_name);
+      }
+    };
+
+    if (meta_name.find("__si_class_type_info") != std::string::npos) {
+      registerBaseFromOp(CS->getOperand(2));
+    } else if (meta_name.find("__vmi_class_type_info") != std::string::npos) {
+      for (unsigned i = 4; i < CS->getNumOperands(); ++i) {
+        if (CS->getOperand(i)->getType()->isPointerTy()) {
+          registerBaseFromOp(CS->getOperand(i));
+        }
+      }
+    } else if (CS->getNumOperands() == 3 &&
+               CS->getOperand(2)->getType()->isPointerTy()) {
+      // Fallback for hand-written single-inheritance RTTI structs in IR.
+      registerBaseFromOp(CS->getOperand(2));
+    }
+  }
+}
+
+void PulseChecker::checkTransitiveAccessPolicies(const llvm::Function *F,
+                                                 const TransitiveInfo &info) {
+  if (!F || transitive_access_policies_.empty()) {
+    return;
+  }
+  const std::string fname = F->getName().str();
+  auto matchesPatternList = [](const std::string &name,
+                               const std::vector<std::string> &patterns) {
+    for (const auto &pat : patterns) {
+      if (pat == name)
+        return true;
+      try {
+        if (std::regex_search(name, std::regex(pat)))
+          return true;
+      } catch (const std::regex_error &) {
+        if (name.find(pat) != std::string::npos)
+          return true;
+      }
+    }
+    return false;
+  };
+
+  for (const auto &policy : transitive_access_policies_) {
+    if (!matchesPatternList(fname, policy.source_functions)) {
+      continue;
+    }
+    for (const auto &call_info : info.getCallResolutions()) {
+      for (const llvm::Function *target : call_info.targets) {
+        if (!target)
+          continue;
+        std::string tname = target->getName().str();
+        if (!matchesPatternList(tname, policy.forbidden_callees)) {
+          continue;
+        }
+        const llvm::Instruction *loc =
+            call_info.call_site
+                ? call_info.call_site
+                : (F->empty() ? nullptr : &F->getEntryBlock().front());
+        if (!loc)
+          continue;
+        Trace trace;
+        if (!F->empty()) {
+          trace.addEvent(&F->getEntryBlock().front(),
+                         "Restricted entry function: " + fname);
+        }
+        if (call_info.call_site) {
+          trace.addEvent(call_info.call_site,
+                         "Transitively reaches forbidden callee: " + tname);
+        }
+        std::string detail = policy.description + " (" + fname +
+                             " transitively calls " + tname + ")";
+        auto diag = std::make_unique<TransitiveAccess>(loc, policy.name, detail,
+                                                       std::move(trace));
+        DiagnosticManager::getInstance().report(std::move(diag));
+      }
+    }
+  }
 }
 
 void PulseChecker::analyze() {
   PulseLogger::info("Starting module analysis");
   PulseLogger::incrementCounter("modules.analyzed");
+  extractTypeHierarchyFromModule();
 
   std::vector<const llvm::Function *> functions;
   functions.reserve(module_->size());
@@ -449,7 +606,14 @@ void PulseChecker::analyze() {
       analyzeFunction(F);
     }
 
-    if (is_cyclic) {
+    if (is_cyclic && sccs[id].size() <= 4) {
+      size_t total_scc_bbs = 0;
+      for (const llvm::Function *F : sccs[id]) {
+        total_scc_bbs += F->size();
+      }
+      if (total_scc_bbs > 256) {
+        continue;
+      }
       current_scc_.clear();
       for (const llvm::Function *F : sccs[id]) {
         active_functions_.insert(F);
@@ -519,27 +683,16 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
     }
   }
 
-  LoopAbstraction loop_abs;
+  LoopAbstraction loop_abs_ref;
   {
     llvm::Function &Fn = *const_cast<llvm::Function *>(F);
     llvm::DominatorTree DT(Fn);
     llvm::LoopInfo LI;
     LI.analyze(DT);
-    loop_abs.initialize(LI);
+    loop_abs_ref.initialize(LI);
   }
-  LoopAbstraction *loop_abs_ptr = nullptr;
-  if (!spec_key) {
-    loop_abstractions_[F] = std::move(loop_abs);
-    loop_abs_ptr = &loop_abstractions_[F];
-  } else {
-    loop_abs_ptr = &loop_abs;
-  }
-  LoopAbstraction &loop_abs_ref = *loop_abs_ptr;
 
-  DisjunctiveDomain local_disj;
-  DisjunctiveDomain &disj_domain =
-      spec_key ? local_disj : disjunctive_domains_[F];
-  disj_domain.clear();
+  DisjunctiveDomain disj_domain;
 
   // Compute Reverse-Post-Order numbering for RPO worklist scheduling
   // (Infer AbstractInterpreter.ml).
@@ -584,17 +737,22 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
   std::vector<ExecutionDomain> latent_exit_states;
   std::map<const llvm::BasicBlock *, unsigned> block_visits;
   unsigned iter_limit = 0;
-  const unsigned max_iter = 100000;
+  const unsigned max_iter = 4000;
 
   PulseLogger::incrementCounter("paths.explored");
 
+  const unsigned max_disjuncts = options::maxDisjuncts();
+  const unsigned max_worklist = std::max(max_disjuncts * 2, 16u);
+  const unsigned keep_worklist = std::max(max_disjuncts, 8u);
+  const unsigned max_block_visits = std::max(max_disjuncts * 2, 16u);
+
   while (!worklist.empty() && iter_limit++ < max_iter) {
-    if (worklist.size() > kMaxDisjuncts * 4) {
-      PulseLogger::warning("Pruning oversized worklist for function " +
-                           F->getName().str());
+    if (worklist.size() > max_worklist) {
+      PulseLogger::debug("Pruning oversized worklist for function " +
+                         F->getName().str());
       std::vector<WorkItem> kept;
-      kept.reserve(kMaxDisjuncts * 2);
-      while (!worklist.empty() && kept.size() < kMaxDisjuncts * 2) {
+      kept.reserve(keep_worklist);
+      while (!worklist.empty() && kept.size() < keep_worklist) {
         kept.push_back(std::move(const_cast<WorkItem &>(worklist.top())));
         worklist.pop();
       }
@@ -634,30 +792,64 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
     current_state.setEntryPred(pred_bb);
 
     block_visits[BB]++;
-    if (block_visits[BB] > kMaxDisjuncts * 4)
+    if (block_visits[BB] > max_block_visits)
       continue;
 
-    // Per-disjunct loop convergence (Infer's LoopHeaderInfo) + LoopAbstraction.
+    // Per-disjunct loop convergence (Infer's LoopHeaderInfo) + LoopAbstraction
+    // + sound InfiniteLoop (PulseEternal) detection on exact repeating back-edges.
     if (loop_abs_ref.isLoopHeader(BB)) {
+      const bool from_backedge =
+          pred_bb && loop_abs_ref.isInLoopBody(BB, pred_bb);
+      if (from_backedge && loop_abs_ref.hasExactRepeatingState(BB, current_state)) {
+        if (const AbductiveDomain *a = current_state.getAstate()) {
+          auto is_allocated = [a](AbstractValue v) { return a->isAllocated(v); };
+          if (!a->hasUnknownValues() &&
+              a->getPathFormula().isManifest(is_allocated)) {
+            const llvm::Instruction *loop_loc = BB->getTerminator()
+                                                    ? BB->getTerminator()
+                                                    : &BB->front();
+            Trace inf_trace;
+            inf_trace.addEvent(loop_loc,
+                               "Loop header repeats identical concrete state "
+                               "on back-edge with no progress");
+            auto diag = std::make_unique<InfiniteLoop>(
+                loop_loc,
+                "Manifest loop repeats identical state without termination "
+                "progress",
+                std::move(inf_trace));
+            DiagnosticManager::getInstance().report(std::move(diag));
+          }
+        }
+      }
       if (loop_abs_ref.hasConverged(BB, current_state)) {
         if (!spec_key && current_state.getAstate()) {
           analysis_non_disj_.addState(*current_state.getAstate());
         }
         continue;
       }
+      unsigned disj_visits = 0;
       if (AbductiveDomain *a = current_state.getAstate()) {
-        size_t stamp = computeDisjunctPathStamp(*a);
-        if (a->hasLoopPathStamp(BB, stamp)) {
-          if (!spec_key) {
-            analysis_non_disj_.addState(*a);
+        if (from_backedge) {
+          size_t stamp = computeDisjunctPathStamp(*a);
+          if (a->hasLoopPathStamp(BB, stamp)) {
+            if (!spec_key) {
+              analysis_non_disj_.addState(*a);
+            }
+            continue;
           }
-          continue;
+          a->recordLoopPathStamp(BB, stamp);
         }
-        a->recordLoopPathStamp(BB, stamp);
+        disj_visits = a->getDisjunctLoopVisits(BB);
       }
 
       bool should_widen = loop_abs_ref.visitHeader(BB, current_state);
-      if (should_widen) {
+      if (from_backedge) {
+        loop_abs_ref.recordBackedgeState(BB, current_state);
+      }
+      // Wait for at least one un-widened back-edge iteration beyond entry
+      // before widening, so exact-repeating infinite loops are observed
+      // without premature widening clobbering PHI-initialized loop locals.
+      if (should_widen && (!from_backedge || disj_visits > options::widenThreshold())) {
         if (loop_abs_ref.isInferringInvariant(BB)) {
           auto invariant_opt = loop_abs_ref.inferInvariant(
               BB, loop_abs_ref.getEntryState(BB), current_state);
@@ -676,21 +868,43 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
       }
     }
 
-    // Track iteration for widening and deduplicate isomorphic disjuncts.
+    // Check block-visit cap BEFORE cloning/deduplicating states that will
+    // immediately be dropped.
+    if (disj_domain.hasReachedBlockVisitCap(BB)) {
+      if (!spec_key && current_state.getAstate()) {
+        analysis_non_disj_.addState(*current_state.getAstate());
+      }
+      continue;
+    }
+
+    // Deduplicate isomorphic disjuncts first (cloning only when novel, so
+    // duplicate states never inflate visit counts or trigger premature joins).
+    if (!disj_domain.addWithDedupRef(BB, current_state, pred_bb,
+                                     spec_key ? nullptr
+                                              : &analysis_non_disj_)) {
+      continue;
+    }
     disj_domain.widen(BB);
-    if (disj_domain.shouldWiden(BB)) {
-      ExecutionDomain joined = disj_domain.joinAtBlock(BB);
+    if (disj_domain.hasReachedBlockVisitCap(BB)) {
+      if (!spec_key && current_state.getAstate()) {
+        analysis_non_disj_.addState(*current_state.getAstate());
+      }
+      continue;
+    }
+    disj_domain.recordEdgeVisit(BB, pred_bb);
+    if (disj_domain.shouldWidenEdge(BB, pred_bb)) {
+      if (disj_domain.hasWidenedEdge(BB, pred_bb)) {
+        if (!spec_key && current_state.getAstate()) {
+          analysis_non_disj_.addState(*current_state.getAstate());
+        }
+        continue;
+      }
+      ExecutionDomain joined = disj_domain.joinAtBlockForPred(BB, pred_bb);
+      disj_domain.markWidenedEdge(BB, pred_bb);
       if (!joined.isStopped()) {
         pred_bb = joined.getEntryPred();
         current_state = std::move(joined);
       } else {
-        continue;
-      }
-    } else {
-      bool added = disj_domain.addWithDedup(
-          BB, current_state.clone(), pred_bb,
-          spec_key ? nullptr : &analysis_non_disj_);
-      if (!added) {
         continue;
       }
     }
@@ -699,7 +913,7 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
     states.push_back(std::move(current_state));
 
     auto limitStates = [&](std::vector<ExecutionDomain> &vec) {
-      if (vec.size() <= kMaxDisjuncts) {
+      if (vec.size() <= max_disjuncts) {
         return;
       }
       std::vector<ExecutionDomain> preferred;
@@ -716,14 +930,14 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
       }
       vec.clear();
       for (auto &st : preferred) {
-        if (vec.size() < kMaxDisjuncts) {
+        if (vec.size() < max_disjuncts) {
           vec.push_back(std::move(st));
         } else if (!spec_key && st.getAstate()) {
           analysis_non_disj_.addState(*st.getAstate());
         }
       }
       for (auto &st : rest) {
-        if (vec.size() < kMaxDisjuncts) {
+        if (vec.size() < max_disjuncts) {
           vec.push_back(std::move(st));
         } else if (!spec_key && st.getAstate()) {
           analysis_non_disj_.addState(*st.getAstate());
@@ -739,9 +953,19 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
       std::vector<ExecutionDomain> next_states;
       next_states.reserve(states.size());
 
+      const bool is_call_inst = llvm::isa<llvm::CallBase>(&I);
+      unsigned clean_next_count = 0;
       for (auto &st : states) {
         if (st.isStopped() || st.isExceptionRaised()) {
           next_states.push_back(std::move(st));
+          continue;
+        }
+        if (is_call_inst &&
+            (clean_next_count >= max_disjuncts ||
+             next_states.size() >= max_disjuncts * 2)) {
+          if (!spec_key && st.getAstate()) {
+            analysis_non_disj_.addState(*st.getAstate());
+          }
           continue;
         }
 
@@ -753,6 +977,10 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
           if (&I != term && ns.isExceptionRaised()) {
             exit_states.push_back(std::move(ns));
             continue;
+          }
+          if (is_call_inst && ns.getAstate() &&
+              !ns.getAstate()->hasUnknownValues()) {
+            ++clean_next_count;
           }
           next_states.push_back(std::move(ns));
         }
@@ -770,14 +998,14 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
           if (!spec_key && st.getAstate()) {
             analysis_non_disj_.addState(*st.getAstate());
           }
-          exit_states.push_back(st.clone());
+          exit_states.push_back(std::move(st));
         } else if (st.isLatentAbortProgram() || st.isLatentInvalidAccess()) {
-          latent_exit_states.push_back(st.clone());
+          latent_exit_states.push_back(std::move(st));
         }
         continue;
       }
       if (st.isExceptionRaised() && !term_is_invoke) {
-        exit_states.push_back(st.clone());
+        exit_states.push_back(std::move(st));
         continue;
       }
       any_continuing = true;
@@ -812,7 +1040,8 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
                     std::string clause_ty =
                         detail::normalizeRttiTypeName(LPI->getClause(ci));
                     if (clause_ty.empty() ||
-                        clause_ty == st.getExceptionType()) {
+                        PulseFormula::isSubtypeOf(st.getExceptionType(),
+                                                  clause_ty)) {
                       handled_by_lpad = true;
                       break;
                     }
@@ -821,7 +1050,7 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
               }
             }
             if (!handled_by_lpad) {
-              exit_states.push_back(st.clone());
+              exit_states.push_back(std::move(st));
               continue;
             }
             ExecutionDomain unw = ExecutionDomain::continueProgram(
@@ -830,14 +1059,13 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
             unw.setExceptionInfo(st.getExceptionValue(), st.getExceptionType());
             pushWork(unwind, std::move(unw), BB);
           } else {
-            exit_states.push_back(st.clone());
+            exit_states.push_back(std::move(st));
           }
         } else {
           const llvm::BasicBlock *normal = II->getNormalDest();
           if (normal && !normal->empty()) {
-            ExecutionDomain nxt = st.clone();
-            nxt.setEntryPred(BB);
-            pushWork(normal, std::move(nxt), BB);
+            st.setEntryPred(BB);
+            pushWork(normal, std::move(st), BB);
           }
         }
       }
@@ -850,8 +1078,8 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
         if (st.isStopped() || st.isExceptionRaised())
           continue;
         for (unsigned i = 0; i < 2; i++) {
-          std::optional<ExecutionDomain> fork_opt =
-              applyBranchCondition(st.clone(), BI, i, pred_bb);
+          std::optional<ExecutionDomain> fork_opt = applyBranchCondition(
+              i == 0 ? st.clone() : std::move(st), BI, i, pred_bb);
           if (!fork_opt)
             continue;
           if (fork_opt->isLatentInvalidAccess() ||
@@ -916,7 +1144,7 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
           pushWork(succ, std::move(case_state), BB);
         }
 
-        ExecutionDomain default_state = st.clone();
+        ExecutionDomain default_state = std::move(st);
         AbductiveDomain *default_astate = default_state.getAstate();
         if (!default_astate)
           continue;
@@ -944,13 +1172,16 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
         }
       }
     } else {
+      const unsigned num_succs = term->getNumSuccessors();
       for (auto &st : states) {
         if (st.isStopped() || st.isExceptionRaised())
           continue;
-        for (const llvm::BasicBlock *succ : llvm::successors(BB)) {
-          if (succ->empty())
+        for (unsigned si = 0; si < num_succs; ++si) {
+          const llvm::BasicBlock *succ = term->getSuccessor(si);
+          if (!succ || succ->empty())
             continue;
-          ExecutionDomain succ_state = st.clone();
+          ExecutionDomain succ_state =
+              (si + 1 == num_succs) ? std::move(st) : st.clone();
           succ_state.setEntryPred(BB);
           pushWork(succ, std::move(succ_state), BB);
         }
@@ -958,12 +1189,17 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
     }
   }
 
-  if (!exit_states.empty() || !latent_exit_states.empty())
+  if (!exit_states.empty() || !latent_exit_states.empty() || !spec_key)
     createSummary(F, exit_states, latent_exit_states, spec_key);
 
   if (!spec_key) {
     reportUnnecessaryCopies(F);
     reportConstRefableParams(F);
+    if (!transitive_access_policies_.empty()) {
+      if (const PulseSummary *sum = summary_manager_.getSummary(F)) {
+        checkTransitiveAccessPolicies(F, sum->getTransitiveInfo());
+      }
+    }
   }
   if (isolate_non_disj) {
     analysis_non_disj_ = std::move(saved_non_disj);

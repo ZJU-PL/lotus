@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <llvm/IR/Function.h>
@@ -25,6 +26,12 @@ struct ModelResult {
   static ModelResult notHandled() { return {false, {}}; }
   static ModelResult success(std::vector<ExecutionDomain> s) {
     return {true, std::move(s)};
+  }
+  static ModelResult success(ExecutionDomain &&s) {
+    std::vector<ExecutionDomain> v;
+    v.reserve(1);
+    v.push_back(std::move(s));
+    return {true, std::move(v)};
   }
 };
 
@@ -64,11 +71,16 @@ private:
     PulseModel model;
   };
   std::vector<PatternModel> pattern_models_;
+  mutable std::unordered_map<const llvm::Function *, const PulseModel *>
+      fn_model_cache_;
+  mutable std::unordered_map<std::string, const PulseModel *>
+      name_model_cache_;
 
   void registerStandardModels();
   void registerCppModels();
 
   const PulseModel *findModelByName(const std::string &funcName) const;
+  const PulseModel *findModel(const llvm::Function *func) const;
 
   // Memory & resource models
   ModelResult modelMalloc(const llvm::CallBase *call, ExecutionDomain &state,
@@ -103,6 +115,12 @@ private:
   ModelResult modelStringCopy(const llvm::CallBase *call,
                               ExecutionDomain &state,
                               const llvm::BasicBlock *pred);
+  ModelResult modelStrlen(const llvm::CallBase *call, ExecutionDomain &state,
+                          const llvm::BasicBlock *pred);
+  ModelResult modelStrcat(const llvm::CallBase *call, ExecutionDomain &state,
+                          const llvm::BasicBlock *pred, bool bounded);
+  ModelResult modelSprintf(const llvm::CallBase *call, ExecutionDomain &state,
+                           const llvm::BasicBlock *pred, bool bounded);
   ModelResult modelStrdup(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
   ModelResult modelStrchr(const llvm::CallBase *call, ExecutionDomain &state,
@@ -126,6 +144,10 @@ private:
   ModelResult modelFgets(const llvm::CallBase *call, ExecutionDomain &state,
                          const llvm::BasicBlock *pred);
   ModelResult modelGets(const llvm::CallBase *call, ExecutionDomain &state,
+                        const llvm::BasicBlock *pred);
+  ModelResult modelPipe(const llvm::CallBase *call, ExecutionDomain &state,
+                        const llvm::BasicBlock *pred);
+  ModelResult modelDup2(const llvm::CallBase *call, ExecutionDomain &state,
                         const llvm::BasicBlock *pred);
 
   // Exception runtime
@@ -179,6 +201,9 @@ private:
   ModelResult modelStdSharedPtrCopyCtor(const llvm::CallBase *call,
                                         ExecutionDomain &state,
                                         const llvm::BasicBlock *pred);
+  ModelResult modelStdSharedPtrCopyAssign(const llvm::CallBase *call,
+                                          ExecutionDomain &state,
+                                          const llvm::BasicBlock *pred);
   ModelResult modelStdSharedPtrGet(const llvm::CallBase *call,
                                    ExecutionDomain &state,
                                    const llvm::BasicBlock *pred);
@@ -188,6 +213,45 @@ private:
   ModelResult modelStdSharedPtrDtor(const llvm::CallBase *call,
                                     ExecutionDomain &state,
                                     const llvm::BasicBlock *pred);
+
+  // std::make_unique / std::make_shared / std::weak_ptr / std::string_view /
+  // std::map / std::variant / std::move / std::forward
+  ModelResult modelStdMakeUnique(const llvm::CallBase *call,
+                                 ExecutionDomain &state,
+                                 const llvm::BasicBlock *pred);
+  ModelResult modelStdMakeShared(const llvm::CallBase *call,
+                                 ExecutionDomain &state,
+                                 const llvm::BasicBlock *pred);
+  ModelResult modelStdWeakPtrCtor(const llvm::CallBase *call,
+                                  ExecutionDomain &state,
+                                  const llvm::BasicBlock *pred);
+  ModelResult modelStdWeakPtrExpired(const llvm::CallBase *call,
+                                     ExecutionDomain &state,
+                                     const llvm::BasicBlock *pred);
+  ModelResult modelStdWeakPtrLock(const llvm::CallBase *call,
+                                  ExecutionDomain &state,
+                                  const llvm::BasicBlock *pred);
+  ModelResult modelStdWeakPtrReset(const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred);
+  ModelResult modelStdStringViewCtor(const llvm::CallBase *call,
+                                     ExecutionDomain &state,
+                                     const llvm::BasicBlock *pred);
+  ModelResult modelStdStringViewData(const llvm::CallBase *call,
+                                     ExecutionDomain &state,
+                                     const llvm::BasicBlock *pred);
+  ModelResult modelStdMapAccess(const llvm::CallBase *call,
+                                ExecutionDomain &state,
+                                const llvm::BasicBlock *pred);
+  ModelResult modelStdMapErase(const llvm::CallBase *call,
+                               ExecutionDomain &state,
+                               const llvm::BasicBlock *pred);
+  ModelResult modelStdVariantGet(const llvm::CallBase *call,
+                                 ExecutionDomain &state,
+                                 const llvm::BasicBlock *pred);
+  ModelResult modelStdIdentityPassThrough(const llvm::CallBase *call,
+                                          ExecutionDomain &state,
+                                          const llvm::BasicBlock *pred);
 
   // std::optional
   ModelResult modelStdOptionalReset(const llvm::CallBase *call,

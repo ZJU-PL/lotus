@@ -36,14 +36,23 @@ void CallState::canonicalizeMaps() {
 }
 
 IncorporateResult CallState::incorporateNewEqs(const NewEqs &new_eqs) {
-  if (!astate_) {
+  if (!astate_ || new_eqs.empty()) {
     return IncorporateResult::ok();
+  }
+  bool has_equal = false;
+  for (const auto &eq : new_eqs) {
+    if (eq.kind == NewEq::Kind::Equal) {
+      has_equal = true;
+      break;
+    }
   }
   IncorporateResult res = astate_->incorporateNewEqs(new_eqs);
   if (!res.isOk()) {
     return res;
   }
-  canonicalizeMaps();
+  if (has_equal) {
+    canonicalizeMaps();
+  }
   return res;
 }
 
@@ -56,11 +65,12 @@ bool CallState::incorporateNewEqs(const PulseFormula &new_eqs) {
     }
     NewEqs discovered = merged.takeNewEqs();
     astate_->setPathFormula(std::make_unique<PulseFormula>(std::move(merged)));
-    auto res = astate_->incorporateNewEqs(discovered);
-    if (!res.isOk()) {
-      return false;
+    if (!discovered.empty()) {
+      auto res = astate_->incorporateNewEqs(discovered);
+      if (!res.isOk()) {
+        return false;
+      }
     }
-    astate_->canonicalize();
   }
   canonicalizeMaps();
   return true;

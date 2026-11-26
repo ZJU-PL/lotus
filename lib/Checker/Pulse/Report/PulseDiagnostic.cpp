@@ -213,4 +213,84 @@ bool MutualRecursionCycle::equals(const Diagnostic &other) const {
          cycle_description_ == o->cycle_description_;
 }
 
+// --- RetainCycle ---
+
+std::string RetainCycle::getMessage() const { return "Retain cycle detected"; }
+
+std::string RetainCycle::getDescription() const {
+  return "Strong reference cycle prevents deallocation: " + cycle_description_;
+}
+
+std::string RetainCycle::getSuggestion() const {
+  return "Break the ownership cycle using std::weak_ptr or explicit reset().";
+}
+
+size_t RetainCycle::getHash() const {
+  size_t h = std::hash<const llvm::Instruction *>{}(location_);
+  h = h ^ (std::hash<std::string>{}(cycle_description_) << 1);
+  return h;
+}
+
+bool RetainCycle::equals(const Diagnostic &other) const {
+  const auto *o = dynamic_cast<const RetainCycle *>(&other);
+  if (!o)
+    return false;
+  return location_ == o->location_ &&
+         cycle_description_ == o->cycle_description_;
+}
+
+// --- InfiniteLoop ---
+
+std::string InfiniteLoop::getMessage() const {
+  return "Infinite loop detected";
+}
+
+std::string InfiniteLoop::getDescription() const {
+  return description_.empty() ? "Loop header repeats identical state with no "
+                                "progress toward termination"
+                              : description_;
+}
+
+std::string InfiniteLoop::getSuggestion() const {
+  return "Ensure loop variables make progress toward the exit condition.";
+}
+
+size_t InfiniteLoop::getHash() const {
+  return std::hash<const llvm::Instruction *>{}(location_) ^ 0x9e3779b9u;
+}
+
+bool InfiniteLoop::equals(const Diagnostic &other) const {
+  const auto *o = dynamic_cast<const InfiniteLoop *>(&other);
+  if (!o)
+    return false;
+  return location_ == o->location_;
+}
+
+// --- TransitiveAccess ---
+
+std::string TransitiveAccess::getMessage() const {
+  return "Forbidden transitive call (" + policy_name_ + ")";
+}
+
+std::string TransitiveAccess::getDescription() const { return detail_; }
+
+std::string TransitiveAccess::getSuggestion() const {
+  return "Avoid transitively calling restricted operations from this context.";
+}
+
+size_t TransitiveAccess::getHash() const {
+  size_t h = std::hash<const llvm::Instruction *>{}(location_);
+  h = h ^ (std::hash<std::string>{}(policy_name_) << 1);
+  h = h ^ (std::hash<std::string>{}(detail_) << 2);
+  return h;
+}
+
+bool TransitiveAccess::equals(const Diagnostic &other) const {
+  const auto *o = dynamic_cast<const TransitiveAccess *>(&other);
+  if (!o)
+    return false;
+  return location_ == o->location_ && policy_name_ == o->policy_name_ &&
+         detail_ == o->detail_;
+}
+
 } // namespace pulse

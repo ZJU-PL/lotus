@@ -116,10 +116,11 @@ private:
   std::map<const llvm::Value *, Address> stack_;
 
 public:
-  // Allow access for merging
+  // Allow access for merging / in-place canonicalization
   const std::map<const llvm::Value *, Address> &getMap() const {
     return stack_;
   }
+  std::map<const llvm::Value *, Address> &getMap() { return stack_; }
   void add(const llvm::Value *var, Address addr);
   Address *find(const llvm::Value *var);
   const Address *find(const llvm::Value *var) const;

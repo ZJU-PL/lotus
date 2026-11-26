@@ -16,10 +16,14 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Operator.h>
 
 namespace pulse {
 
 namespace {
+
+static constexpr unsigned kWeakPtrField = 0x7FFFFFF0u;
+static constexpr unsigned kWeakCbField = 0x7FFFFFF1u;
 
 static bool globMatch(const std::string &pattern, const std::string &text) {
   size_t p = 0, t = 0, star = std::string::npos, match = 0;
@@ -141,8 +145,14 @@ PulseModels::PulseModels(PulseChecker &checker)
 
 const PulseModel *
 PulseModels::findModelByName(const std::string &funcName) const {
+  auto cit = name_model_cache_.find(funcName);
+  if (cit != name_model_cache_.end()) {
+    return cit->second;
+  }
+
   auto it = models_.find(funcName);
   if (it != models_.end()) {
+    name_model_cache_.emplace(funcName, &it->second);
     return &it->second;
   }
 
@@ -152,17 +162,33 @@ PulseModels::findModelByName(const std::string &funcName) const {
 
   for (const auto &pm : pattern_models_) {
     if (!pm.mangled_glob.empty() && globMatch(pm.mangled_glob, funcName)) {
+      name_model_cache_.emplace(funcName, &pm.model);
       return &pm.model;
     }
     if (!pm.class_substr.empty() && !pm.method_substr.empty()) {
       if (demangled_no_args.find(pm.class_substr) != std::string::npos &&
           demangled_no_args.find(pm.method_substr) != std::string::npos) {
+        name_model_cache_.emplace(funcName, &pm.model);
         return &pm.model;
       }
     }
   }
 
+  name_model_cache_.emplace(funcName, nullptr);
   return nullptr;
+}
+
+const PulseModel *PulseModels::findModel(const llvm::Function *func) const {
+  if (!func || !func->hasName()) {
+    return nullptr;
+  }
+  auto it = fn_model_cache_.find(func);
+  if (it != fn_model_cache_.end()) {
+    return it->second;
+  }
+  const PulseModel *found = findModelByName(func->getName().str());
+  fn_model_cache_.emplace(func, found);
+  return found;
 }
 
 ModelResult PulseModels::dispatch(const llvm::CallBase *call,
@@ -171,12 +197,7 @@ ModelResult PulseModels::dispatch(const llvm::CallBase *call,
                                   const llvm::Function *resolved_callee) {
   const llvm::Function *func =
       resolved_callee ? resolved_callee : call->getCalledFunction();
-  if (!func || !func->hasName()) {
-    return ModelResult::notHandled();
-  }
-
-  std::string funcName = func->getName().str();
-  if (const PulseModel *model = findModelByName(funcName)) {
+  if (const PulseModel *model = findModel(func)) {
     return (*model)(checker_, call, state, pred);
   }
 
@@ -184,10 +205,7 @@ ModelResult PulseModels::dispatch(const llvm::CallBase *call,
 }
 
 bool PulseModels::hasModel(const llvm::Function *func) const {
-  if (!func || !func->hasName()) {
-    return false;
-  }
-  return findModelByName(func->getName().str()) != nullptr;
+  return findModel(func) != nullptr;
 }
 
 bool PulseModels::isTaintSource(const std::string &func_name) const {
@@ -313,8 +331,33 @@ void PulseModels::registerStandardModels() {
                              const llvm::BasicBlock *pred) {
     return modelSocket(call, state, pred);
   };
+  models_["accept"] = [this](PulseChecker &, const llvm::CallBase *call,
+                             ExecutionDomain &state,
+                             const llvm::BasicBlock *pred) {
+    return modelFileOpen(call, state, pred, AllocatorKind::Socket);
+  };
+  models_["pipe"] = [this](PulseChecker &, const llvm::CallBase *call,
+                           ExecutionDomain &state,
+                           const llvm::BasicBlock *pred) {
+    return modelPipe(call, state, pred);
+  };
+  models_["dup"] = [this](PulseChecker &, const llvm::CallBase *call,
+                          ExecutionDomain &state,
+                          const llvm::BasicBlock *pred) {
+    return modelFileOpen(call, state, pred, AllocatorKind::FileHandle);
+  };
+  models_["dup2"] = [this](PulseChecker &, const llvm::CallBase *call,
+                           ExecutionDomain &state,
+                           const llvm::BasicBlock *pred) {
+    return modelDup2(call, state, pred);
+  };
 
   // String & memory operations
+  models_["strlen"] = [this](PulseChecker &, const llvm::CallBase *call,
+                             ExecutionDomain &state,
+                             const llvm::BasicBlock *pred) {
+    return modelStrlen(call, state, pred);
+  };
   models_["strcpy"] = [this](PulseChecker &, const llvm::CallBase *call,
                              ExecutionDomain &state,
                              const llvm::BasicBlock *pred) {
@@ -324,6 +367,26 @@ void PulseModels::registerStandardModels() {
                               ExecutionDomain &state,
                               const llvm::BasicBlock *pred) {
     return modelStringCopy(call, state, pred);
+  };
+  models_["strcat"] = [this](PulseChecker &, const llvm::CallBase *call,
+                             ExecutionDomain &state,
+                             const llvm::BasicBlock *pred) {
+    return modelStrcat(call, state, pred, false);
+  };
+  models_["strncat"] = [this](PulseChecker &, const llvm::CallBase *call,
+                              ExecutionDomain &state,
+                              const llvm::BasicBlock *pred) {
+    return modelStrcat(call, state, pred, true);
+  };
+  models_["sprintf"] = [this](PulseChecker &, const llvm::CallBase *call,
+                              ExecutionDomain &state,
+                              const llvm::BasicBlock *pred) {
+    return modelSprintf(call, state, pred, false);
+  };
+  models_["snprintf"] = [this](PulseChecker &, const llvm::CallBase *call,
+                               ExecutionDomain &state,
+                               const llvm::BasicBlock *pred) {
+    return modelSprintf(call, state, pred, true);
   };
   models_["strdup"] = [this](PulseChecker &, const llvm::CallBase *call,
                              ExecutionDomain &state,
@@ -440,6 +503,112 @@ void PulseModels::registerCppModels() {
     models_[name] = cppDeleteArray;
   }
 
+  // std::move / std::forward (identity pass-through)
+  pattern_models_.push_back(
+      {"std::", "move<", "_ZSt4move*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdIdentityPassThrough(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"", "", "_ZNSt3__14move*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdIdentityPassThrough(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"std::", "forward<", "_ZSt7forward*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdIdentityPassThrough(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"", "", "_ZNSt3__17forward*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdIdentityPassThrough(call, state, pred);
+       }});
+
+  // std::make_unique / std::make_shared (must precede unique_ptr/shared_ptr!)
+  pattern_models_.push_back(
+      {"std::", "make_unique", "_ZSt11make_unique*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdMakeUnique(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"", "", "_ZNSt3__111make_unique*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdMakeUnique(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"std::", "make_shared", "_ZSt11make_shared*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdMakeShared(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"", "", "_ZNSt3__111make_shared*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdMakeShared(call, state, pred);
+       }});
+
+  // std::weak_ptr (must precede std::shared_ptr!)
+  pattern_models_.push_back(
+      {"weak_ptr<", "::lock", "_ZN*weak_ptr*4lock*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdWeakPtrLock(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"weak_ptr<", "::expired", "_ZN*weak_ptr*expired*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdWeakPtrExpired(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"weak_ptr<", "::reset", "_ZN*weak_ptr*reset*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdWeakPtrReset(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"weak_ptr<", "::~weak_ptr", "_ZN*weak_ptr*D1Ev",
+       [](PulseChecker &, const llvm::CallBase *call,
+          ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         (void)call;
+         (void)pred;
+         return ModelResult::success(std::move(state));
+       }});
+  pattern_models_.push_back(
+      {"weak_ptr<", "::~weak_ptr", "_ZN*weak_ptr*D2Ev",
+       [](PulseChecker &, const llvm::CallBase *call,
+          ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         (void)call;
+         (void)pred;
+         return ModelResult::success(std::move(state));
+       }});
+  pattern_models_.push_back(
+      {"weak_ptr<", "::operator=", "_ZN*weak_ptr*aSE*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdWeakPtrCtor(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"weak_ptr<", "::weak_ptr", "_ZN*weak_ptr*C1*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdWeakPtrCtor(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"weak_ptr<", "::weak_ptr", "_ZN*weak_ptr*C2*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdWeakPtrCtor(call, state, pred);
+       }});
+
   // std::vector
   pattern_models_.push_back(
       {"vector<", "::push_back", "_ZN*vector*push_back*",
@@ -522,6 +691,18 @@ void PulseModels::registerCppModels() {
          return modelStdUniquePtrGet(call, state, pred);
        }});
   pattern_models_.push_back(
+      {"unique_ptr<", "::operator->", "_ZN*unique_ptr*ptEv",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdUniquePtrGet(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"unique_ptr<", "::operator*", "_ZN*unique_ptr*deEv",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdUniquePtrGet(call, state, pred);
+       }});
+  pattern_models_.push_back(
       {"unique_ptr<", "::~unique_ptr", "_ZN*unique_ptr*D1Ev",
        [this](PulseChecker &, const llvm::CallBase *call,
               ExecutionDomain &state, const llvm::BasicBlock *pred) {
@@ -546,7 +727,13 @@ void PulseModels::registerCppModels() {
          return modelStdUniquePtrCtor(call, state, pred);
        }});
 
-  // std::shared_ptr (copy ctor must precede generic ctor!)
+  // std::shared_ptr (copy assign & copy ctor must precede generic ctor!)
+  pattern_models_.push_back(
+      {"shared_ptr<", "::operator=", "_ZN*shared_ptr*aSERKS*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdSharedPtrCopyAssign(call, state, pred);
+       }});
   pattern_models_.push_back(
       {"", "", "_ZN*shared_ptr*C1ERKS*",
        [this](PulseChecker &, const llvm::CallBase *call,
@@ -561,6 +748,18 @@ void PulseModels::registerCppModels() {
        }});
   pattern_models_.push_back(
       {"shared_ptr<", "::get", "_ZN*shared_ptr*3get*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdSharedPtrGet(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"shared_ptr<", "::operator->", "_ZN*shared_ptr*ptEv",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdSharedPtrGet(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"shared_ptr<", "::operator*", "_ZN*shared_ptr*deEv",
        [this](PulseChecker &, const llvm::CallBase *call,
               ExecutionDomain &state, const llvm::BasicBlock *pred) {
          return modelStdSharedPtrGet(call, state, pred);
@@ -622,9 +821,41 @@ void PulseModels::registerCppModels() {
          return modelStdOptionalHasValue(call, state, pred);
        }});
 
+  // std::basic_string_view / std::string_view (must precede basic_string!)
+  pattern_models_.push_back(
+      {"string_view", "::data", "_ZN*string_view*4data*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdStringViewData(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"string_view", "::begin", "_ZN*string_view*5begin*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdStringViewData(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"string_view", "::basic_string_view", "_ZN*string_view*C1*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdStringViewCtor(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"string_view", "::string_view", "_ZN*string_view*C2*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdStringViewCtor(call, state, pred);
+       }});
+
   // std::basic_string
   pattern_models_.push_back(
       {"basic_string<", "::c_str", "_ZN*basic_string*c_str*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdStringCStr(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"basic_string<", "::data", "_ZN*basic_string*4data*",
        [this](PulseChecker &, const llvm::CallBase *call,
               ExecutionDomain &state, const llvm::BasicBlock *pred) {
          return modelStdStringCStr(call, state, pred);
@@ -640,6 +871,64 @@ void PulseModels::registerCppModels() {
        [this](PulseChecker &, const llvm::CallBase *call,
               ExecutionDomain &state, const llvm::BasicBlock *pred) {
          return modelStdStringMutate(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"basic_string<", "::~basic_string", "_ZN*basic_string*D1Ev",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdVectorClear(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"basic_string<", "::~basic_string", "_ZN*basic_string*D2Ev",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdVectorClear(call, state, pred);
+       }});
+
+  // std::map / std::unordered_map
+  pattern_models_.push_back(
+      {"map<", "::operator[]", "_ZN*map*ixE*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdMapAccess(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"map<", "::find", "_ZN*map*4find*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdMapAccess(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"map<", "::at", "_ZN*map*2atE*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdMapAccess(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"map<", "::erase", "_ZN*map*erase*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdMapErase(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"map<", "::clear", "_ZN*map*clear*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdMapErase(call, state, pred);
+       }});
+
+  // std::variant / std::get
+  pattern_models_.push_back(
+      {"std::", "get<", "_ZSt3get*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdVariantGet(call, state, pred);
+       }});
+  pattern_models_.push_back(
+      {"", "", "_ZNSt3__13get*",
+       [this](PulseChecker &, const llvm::CallBase *call,
+              ExecutionDomain &state, const llvm::BasicBlock *pred) {
+         return modelStdVariantGet(call, state, pred);
        }});
 
   // std::mutex & std::lock_guard
@@ -678,7 +967,7 @@ ModelResult PulseModels::modelCxaThrow(const llvm::CallBase *call,
                                        const llvm::BasicBlock *pred) {
   auto *astate = state.getAstate();
   if (!astate) {
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   }
   auto exc_astate = std::make_unique<AbductiveDomain>(astate->clone());
   std::optional<AbstractValue> exc_val;
@@ -715,10 +1004,10 @@ ModelResult PulseModels::modelPthreadCreate(const llvm::CallBase *call,
                                             ExecutionDomain &state,
                                             const llvm::BasicBlock *pred) {
   if (call->arg_size() < 4)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto arg_opt = ops_.eval(*astate, call->getArgOperand(3), call, pred);
   if (arg_opt) {
@@ -726,17 +1015,17 @@ ModelResult PulseModels::modelPthreadCreate(const llvm::CallBase *call,
                             "Passing stack-derived context to pthread_create "
                             "(escapes to new thread)");
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelThrdCreate(const llvm::CallBase *call,
                                          ExecutionDomain &state,
                                          const llvm::BasicBlock *pred) {
   if (call->arg_size() < 3)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto arg_opt = ops_.eval(*astate, call->getArgOperand(2), call, pred);
   if (arg_opt) {
@@ -744,17 +1033,17 @@ ModelResult PulseModels::modelThrdCreate(const llvm::CallBase *call,
         *astate, call, *arg_opt,
         "Passing stack-derived context to thrd_create (escapes to new thread)");
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelDispatchAsyncF(const llvm::CallBase *call,
                                              ExecutionDomain &state,
                                              const llvm::BasicBlock *pred) {
   if (call->arg_size() < 3)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto ctx_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
   if (ctx_opt) {
@@ -762,7 +1051,7 @@ ModelResult PulseModels::modelDispatchAsyncF(const llvm::CallBase *call,
                             "Passing stack-derived context to dispatch_async_f "
                             "(escapes asynchronously)");
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelMalloc(const llvm::CallBase *call,
@@ -772,7 +1061,7 @@ ModelResult PulseModels::modelMalloc(const llvm::CallBase *call,
   (void)pred;
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   ExecutionDomain failure_state;
   const bool fork_null =
@@ -790,6 +1079,10 @@ ModelResult PulseModels::modelMalloc(const llvm::CallBase *call,
   if (call->arg_size() > 0) {
     if (auto size_opt = getConstUInt64(call->getArgOperand(0))) {
       astate->setAllocationSize(ret_val, *size_opt);
+    } else if (auto sym_opt =
+                   ops_.eval(*astate, call->getArgOperand(0), call, pred)) {
+      astate->setSymbolicAllocationSize(ret_val,
+                                        astate->getCanonical(sym_opt->addr));
     }
   }
   astate->getPostStack().add(call, ret_addr);
@@ -816,10 +1109,10 @@ ModelResult PulseModels::modelPosixMemalign(const llvm::CallBase *call,
                                             ExecutionDomain &state,
                                             const llvm::BasicBlock *pred) {
   if (call->arg_size() < 3)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto out_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (out_opt) {
     AbstractValue mem = factory_.createFresh(call);
@@ -833,7 +1126,7 @@ ModelResult PulseModels::modelPosixMemalign(const llvm::CallBase *call,
   AbstractValue zero = factory_.createFresh(call);
   (void)astate->getPathFormula().addBounds(zero, 0, 0);
   astate->getPostStack().add(call, Address(zero));
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelAlignedAlloc(const llvm::CallBase *call,
@@ -842,7 +1135,7 @@ ModelResult PulseModels::modelAlignedAlloc(const llvm::CallBase *call,
   (void)pred;
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   AbstractValue ret_val = factory_.createFresh(call);
   ops_.allocate(*astate, ret_val, call, AllocatorKind::CMalloc);
   astate->addNonNull(ret_val);
@@ -852,7 +1145,7 @@ ModelResult PulseModels::modelAlignedAlloc(const llvm::CallBase *call,
     }
   }
   astate->getPostStack().add(call, Address(ret_val));
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelMmap(const llvm::CallBase *call,
@@ -861,7 +1154,7 @@ ModelResult PulseModels::modelMmap(const llvm::CallBase *call,
   (void)pred;
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   AbstractValue ret_val = factory_.createFresh(call);
   ops_.allocate(*astate, ret_val, call, AllocatorKind::CustomResource);
   astate->addNonNull(ret_val);
@@ -871,7 +1164,7 @@ ModelResult PulseModels::modelMmap(const llvm::CallBase *call,
     }
   }
   astate->getPostStack().add(call, Address(ret_val));
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelMunmap(const llvm::CallBase *call,
@@ -885,11 +1178,11 @@ ModelResult PulseModels::modelFree(const llvm::CallBase *call,
                                    const llvm::BasicBlock *pred,
                                    InvalidationKind inv_kind) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   const llvm::Value *arg = call->getArgOperand(0);
   if (auto *BC = llvm::dyn_cast<llvm::BitCastInst>(arg)) {
@@ -904,7 +1197,7 @@ ModelResult PulseModels::modelFree(const llvm::CallBase *call,
   if (!ptr_opt) {
     ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
     if (!ptr_opt)
-      return ModelResult::success({state});
+      return ModelResult::success(std::move(state));
   }
 
   AbstractValue canon_ptr = astate->getCanonical(ptr_opt->addr);
@@ -912,7 +1205,7 @@ ModelResult PulseModels::modelFree(const llvm::CallBase *call,
   if (astate->getPathFormula().isNull(canon_ptr) ||
       (astate->getPostAttrs().has(canon_ptr, Attribute::Null) &&
        !astate->getPathFormula().isNonNull(canon_ptr))) {
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   }
 
   if (astate->getPostAttrs().has(canon_ptr, Attribute::Stack) ||
@@ -931,7 +1224,7 @@ ModelResult PulseModels::modelFree(const llvm::CallBase *call,
     DiagnosticManager::getInstance().report(std::move(diag));
     astate->setPathFormula(
         std::make_unique<PulseFormula>(PulseFormula::contradiction()));
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   }
 
   // Detect freeing an interior pointer (offset > 0 from a heap allocation).
@@ -949,7 +1242,7 @@ ModelResult PulseModels::modelFree(const llvm::CallBase *call,
     DiagnosticManager::getInstance().report(std::move(diag));
     astate->setPathFormula(
         std::make_unique<PulseFormula>(PulseFormula::contradiction()));
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   }
 
   if (astate->getPostAttrs().has(canon_ptr, Attribute::Invalid)) {
@@ -966,18 +1259,18 @@ ModelResult PulseModels::modelFree(const llvm::CallBase *call,
   }
 
   ops_.invalidate(*astate, *ptr_opt, call, inv_kind);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelRealloc(const llvm::CallBase *call,
                                       ExecutionDomain &state,
                                       const llvm::BasicBlock *pred) {
   if (call->arg_size() < 2)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   auto size_opt = getConstUInt64(call->getArgOperand(1));
 
@@ -994,7 +1287,7 @@ ModelResult PulseModels::modelRealloc(const llvm::CallBase *call,
     astate->getPostAttrs().add(null_val, Attribute::Null);
     (void)astate->getPathFormula().addNull(null_val);
     astate->getPostStack().add(call, Address(null_val));
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   }
 
   ExecutionDomain failure_state;
@@ -1048,7 +1341,7 @@ ModelResult PulseModels::modelFileOpen(const llvm::CallBase *call,
   (void)pred;
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue ret_val = factory_.createFresh(call);
   Address ret_addr(ret_val);
@@ -1059,19 +1352,19 @@ ModelResult PulseModels::modelFileOpen(const llvm::CallBase *call,
                             call->getFunction(), "Resource acquired");
   astate->getPostStack().add(call, ret_addr);
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelFileClose(const llvm::CallBase *call,
                                         ExecutionDomain &state,
                                         const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!ptr_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue canon = astate->getCanonical(ptr_opt->addr);
   if (astate->getPostAttrs().has(canon, Attribute::Invalid)) {
@@ -1081,7 +1374,7 @@ ModelResult PulseModels::modelFileClose(const llvm::CallBase *call,
   }
 
   ops_.invalidate(*astate, *ptr_opt, call, InvalidationKind::FClose);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelLock(const llvm::CallBase *call,
@@ -1089,7 +1382,7 @@ ModelResult PulseModels::modelLock(const llvm::CallBase *call,
                                    const llvm::BasicBlock *pred) {
   (void)call;
   (void)pred;
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelUnlock(const llvm::CallBase *call,
@@ -1097,14 +1390,14 @@ ModelResult PulseModels::modelUnlock(const llvm::CallBase *call,
                                      const llvm::BasicBlock *pred) {
   (void)call;
   (void)pred;
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStringCopy(const llvm::CallBase *call,
                                          ExecutionDomain &state,
                                          const llvm::BasicBlock *pred) {
   if (call->arg_size() < 2)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto dest_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
@@ -1136,7 +1429,7 @@ ModelResult PulseModels::modelStringCopy(const llvm::CallBase *call,
     astate->getPostStack().add(call, *dest_opt);
   }
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 //===----------------------------------------------------------------------===//
@@ -1147,14 +1440,14 @@ ModelResult PulseModels::modelStdVectorPushBack(const llvm::CallBase *call,
                                                 ExecutionDomain &state,
                                                 const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access data_field(0);
@@ -1167,21 +1460,21 @@ ModelResult PulseModels::modelStdVectorPushBack(const llvm::CallBase *call,
   ops_.allocate(*astate, new_buf, call, AllocatorKind::Stack);
   astate->getPostHeap().addEdge(this_av, data_field, Address(new_buf));
   astate->markWrittenTo(this_av, call);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdVectorClear(const llvm::CallBase *call,
                                              ExecutionDomain &state,
                                              const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access data_field(0);
@@ -1189,21 +1482,21 @@ ModelResult PulseModels::modelStdVectorClear(const llvm::CallBase *call,
     ops_.invalidate(*astate, *old_buf, call, InvalidationKind::StdVectorClear);
   }
   astate->markWrittenTo(this_av, call);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdVectorData(const llvm::CallBase *call,
                                             ExecutionDomain &state,
                                             const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access data_field(0);
@@ -1219,7 +1512,7 @@ ModelResult PulseModels::modelStdVectorData(const llvm::CallBase *call,
     astate->abduceToPre(this_av, data_field, ret_addr);
   }
   astate->getPostStack().add(call, ret_addr);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdVectorAccess(const llvm::CallBase *call,
@@ -1244,11 +1537,11 @@ ModelResult PulseModels::modelStdUniquePtrCtor(const llvm::CallBase *call,
                                                ExecutionDomain &state,
                                                const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access ptr_access(0);
@@ -1256,7 +1549,7 @@ ModelResult PulseModels::modelStdUniquePtrCtor(const llvm::CallBase *call,
     if (auto val_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred)) {
       astate->getPostHeap().addEdge(this_av, ptr_access, *val_opt);
       astate->markWrittenTo(this_av, call);
-      return ModelResult::success({state});
+      return ModelResult::success(std::move(state));
     }
   }
   AbstractValue null_val = factory_.createFresh(call);
@@ -1264,19 +1557,19 @@ ModelResult PulseModels::modelStdUniquePtrCtor(const llvm::CallBase *call,
   (void)astate->getPathFormula().addNull(null_val);
   astate->getPostHeap().addEdge(this_av, ptr_access, Address(null_val));
   astate->markWrittenTo(this_av, call);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdUniquePtrMove(const llvm::CallBase *call,
                                                ExecutionDomain &state,
                                                const llvm::BasicBlock *pred) {
   if (call->arg_size() < 2)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto dst_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   auto src_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
   if (!dst_opt || !src_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue dst_av = astate->getCanonical(dst_opt->addr);
   AbstractValue src_av = astate->getCanonical(src_opt->addr);
@@ -1302,7 +1595,7 @@ ModelResult PulseModels::modelStdUniquePtrMove(const llvm::CallBase *call,
   if (call->getType()->isPointerTy()) {
     astate->getPostStack().add(call, *dst_opt);
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult
@@ -1310,11 +1603,11 @@ PulseModels::modelStdUniquePtrRelease(const llvm::CallBase *call,
                                       ExecutionDomain &state,
                                       const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto this_ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_ptr_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_ptr_opt->addr);
   Access ptr_access(0);
@@ -1329,18 +1622,18 @@ PulseModels::modelStdUniquePtrRelease(const llvm::CallBase *call,
   astate->markWrittenTo(this_av, call);
   astate->getPostStack().add(call, ret_addr);
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdUniquePtrReset(const llvm::CallBase *call,
                                                 ExecutionDomain &state,
                                                 const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto this_ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_ptr_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_ptr_opt->addr);
   Access ptr_access(0);
@@ -1365,18 +1658,18 @@ ModelResult PulseModels::modelStdUniquePtrReset(const llvm::CallBase *call,
 
   astate->getPostHeap().addEdge(this_av, ptr_access, new_addr);
   astate->markWrittenTo(this_av, call);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdUniquePtrGet(const llvm::CallBase *call,
                                               ExecutionDomain &state,
                                               const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto this_ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_ptr_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_ptr_opt->addr);
   Access ptr_access(0);
@@ -1394,18 +1687,18 @@ ModelResult PulseModels::modelStdUniquePtrGet(const llvm::CallBase *call,
   }
 
   astate->getPostStack().add(call, ret_addr);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdUniquePtrDtor(const llvm::CallBase *call,
                                                ExecutionDomain &state,
                                                const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto this_ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_ptr_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_ptr_opt->addr);
   Access ptr_access(0);
@@ -1416,7 +1709,7 @@ ModelResult PulseModels::modelStdUniquePtrDtor(const llvm::CallBase *call,
       ops_.invalidate(*astate, *old_ptr, call, InvalidationKind::CppDelete);
     }
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 //===----------------------------------------------------------------------===//
@@ -1427,11 +1720,11 @@ ModelResult PulseModels::modelStdSharedPtrCtor(const llvm::CallBase *call,
                                                ExecutionDomain &state,
                                                const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access ptr_field(0);
@@ -1440,6 +1733,11 @@ ModelResult PulseModels::modelStdSharedPtrCtor(const llvm::CallBase *call,
 
   if (call->arg_size() >= 2) {
     if (auto val_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred)) {
+      AbstractValue val_c = astate->getCanonical(val_opt->addr);
+      if (!astate->getPathFormula().isNull(val_c) &&
+          !astate->getPostAttrs().has(val_c, Attribute::Null)) {
+        astate->addSharedPtrTarget(val_c);
+      }
       astate->getPostHeap().addEdge(this_av, ptr_field, *val_opt);
       AbstractValue cb = factory_.createFresh(call);
       AbstractValue one = factory_.createFresh(call);
@@ -1447,7 +1745,7 @@ ModelResult PulseModels::modelStdSharedPtrCtor(const llvm::CallBase *call,
       astate->getPostHeap().addEdge(cb, deref, Address(one));
       astate->getPostHeap().addEdge(this_av, cb_field, Address(cb));
       astate->markWrittenTo(this_av, call);
-      return ModelResult::success({state});
+      return ModelResult::success(std::move(state));
     }
   }
 
@@ -1456,7 +1754,7 @@ ModelResult PulseModels::modelStdSharedPtrCtor(const llvm::CallBase *call,
   (void)astate->getPathFormula().addNull(null_val);
   astate->getPostHeap().addEdge(this_av, ptr_field, Address(null_val));
   astate->markWrittenTo(this_av, call);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult
@@ -1464,12 +1762,12 @@ PulseModels::modelStdSharedPtrCopyCtor(const llvm::CallBase *call,
                                        ExecutionDomain &state,
                                        const llvm::BasicBlock *pred) {
   if (call->arg_size() < 2)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto dst_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   auto src_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
   if (!dst_opt || !src_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue dst_av = astate->getCanonical(dst_opt->addr);
   AbstractValue src_av = astate->getCanonical(src_opt->addr);
@@ -1478,6 +1776,11 @@ PulseModels::modelStdSharedPtrCopyCtor(const llvm::CallBase *call,
   Access deref(AccessKind::Dereference);
 
   if (Address *raw = astate->getPostHeap().findEdge(src_av, ptr_field)) {
+    AbstractValue raw_c = astate->getCanonical(raw->addr);
+    if (!astate->getPathFormula().isNull(raw_c) &&
+        !astate->getPostAttrs().has(raw_c, Attribute::Null)) {
+      astate->addSharedPtrTarget(raw_c);
+    }
     astate->getPostHeap().addEdge(dst_av, ptr_field, *raw);
   }
   if (Address *cb = astate->getPostHeap().findEdge(src_av, cb_field)) {
@@ -1494,7 +1797,44 @@ PulseModels::modelStdSharedPtrCopyCtor(const llvm::CallBase *call,
     }
   }
   astate->markWrittenTo(dst_av, call);
-  return ModelResult::success({state});
+  if (call->getType()->isPointerTy()) {
+    astate->getPostStack().add(call, *dst_opt);
+  }
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult
+PulseModels::modelStdSharedPtrCopyAssign(const llvm::CallBase *call,
+                                         ExecutionDomain &state,
+                                         const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 2)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+  auto dst_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  auto src_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
+  if (!dst_opt || !src_opt)
+    return ModelResult::success(std::move(state));
+  AbstractValue dst_av = astate->getCanonical(dst_opt->addr);
+  AbstractValue src_av = astate->getCanonical(src_opt->addr);
+  if (dst_av == src_av) {
+    if (call->getType()->isPointerTy()) {
+      astate->getPostStack().add(call, *dst_opt);
+    }
+    return ModelResult::success(std::move(state));
+  }
+  // Release previous target owned by dst if any.
+  Access ptr_field(0);
+  Access cb_field(1);
+  if (astate->getPostHeap().findEdge(dst_av, cb_field) != nullptr ||
+      astate->getPostHeap().findEdge(dst_av, ptr_field) != nullptr) {
+    auto dtor_res = modelStdSharedPtrDtor(call, state, pred);
+    if (!dtor_res.states.empty()) {
+      state = std::move(dtor_res.states[0]);
+    }
+  }
+  return modelStdSharedPtrCopyCtor(call, state, pred);
 }
 
 ModelResult PulseModels::modelStdSharedPtrGet(const llvm::CallBase *call,
@@ -1507,11 +1847,13 @@ ModelResult PulseModels::modelStdSharedPtrDtor(const llvm::CallBase *call,
                                                ExecutionDomain &state,
                                                const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access ptr_field(0);
@@ -1544,19 +1886,22 @@ ModelResult PulseModels::modelStdSharedPtrDtor(const llvm::CallBase *call,
       }
     }
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdSharedPtrReset(const llvm::CallBase *call,
                                                 ExecutionDomain &state,
                                                 const llvm::BasicBlock *pred) {
-  modelStdSharedPtrDtor(call, state, pred);
+  auto dtor_res = modelStdSharedPtrDtor(call, state, pred);
+  if (!dtor_res.states.empty()) {
+    state = std::move(dtor_res.states[0]);
+  }
   auto *astate = state.getAstate();
   if (!astate || call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access ptr_field(0);
@@ -1565,6 +1910,11 @@ ModelResult PulseModels::modelStdSharedPtrReset(const llvm::CallBase *call,
 
   if (call->arg_size() > 1) {
     if (auto val_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred)) {
+      AbstractValue val_c = astate->getCanonical(val_opt->addr);
+      if (!astate->getPathFormula().isNull(val_c) &&
+          !astate->getPostAttrs().has(val_c, Attribute::Null)) {
+        astate->addSharedPtrTarget(val_c);
+      }
       astate->getPostHeap().addEdge(this_av, ptr_field, *val_opt);
       AbstractValue cb = factory_.createFresh(call);
       AbstractValue one = factory_.createFresh(call);
@@ -1572,7 +1922,7 @@ ModelResult PulseModels::modelStdSharedPtrReset(const llvm::CallBase *call,
       astate->getPostHeap().addEdge(cb, deref, Address(one));
       astate->getPostHeap().addEdge(this_av, cb_field, Address(cb));
       astate->markWrittenTo(this_av, call);
-      return ModelResult::success({state});
+      return ModelResult::success(std::move(state));
     }
   }
 
@@ -1582,18 +1932,18 @@ ModelResult PulseModels::modelStdSharedPtrReset(const llvm::CallBase *call,
   astate->getPostHeap().addEdge(this_av, ptr_field, Address(null_val));
   astate->getPostHeap().removeEdge(this_av, cb_field);
   astate->markWrittenTo(this_av, call);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdOptionalReset(const llvm::CallBase *call,
                                                ExecutionDomain &state,
                                                const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access engaged_field(1);
@@ -1603,18 +1953,18 @@ ModelResult PulseModels::modelStdOptionalReset(const llvm::CallBase *call,
   astate->getPostHeap().addEdge(this_av, engaged_field, Address(zero_val));
   astate->getPostAttrs().add(this_av, Attribute::Null);
   astate->markWrittenTo(this_av, call);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStdOptionalValue(const llvm::CallBase *call,
                                                ExecutionDomain &state,
                                                const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access engaged_field(1);
@@ -1640,7 +1990,7 @@ ModelResult PulseModels::modelStdOptionalValue(const llvm::CallBase *call,
     astate->abduceToPre(this_av, val_field, ret_addr);
   }
   astate->getPostStack().add(call, ret_addr);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult
@@ -1648,11 +1998,11 @@ PulseModels::modelStdOptionalHasValue(const llvm::CallBase *call,
                                       ExecutionDomain &state,
                                       const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   auto *astate = state.getAstate();
   auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!this_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue this_av = astate->getCanonical(this_opt->addr);
   Access engaged_field(1);
@@ -1664,7 +2014,7 @@ PulseModels::modelStdOptionalHasValue(const llvm::CallBase *call,
     astate->getPostHeap().addEdge(this_av, engaged_field, Address(fresh));
     astate->getPostStack().add(call, Address(fresh));
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelSocket(const llvm::CallBase *call,
@@ -1680,7 +2030,7 @@ ModelResult PulseModels::modelTaintSource(const llvm::CallBase *call,
   (void)pred;
   auto *astate = state.getAstate();
   if (!astate || !call->getType()->isPointerTy()) {
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   }
 
   AbstractValue ret_val = factory_.createFresh(call);
@@ -1703,7 +2053,7 @@ ModelResult PulseModels::modelTaintSource(const llvm::CallBase *call,
                          call->getCalledFunction()
                              ? call->getCalledFunction()->getName().str()
                              : kind);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelTaintSink(const llvm::CallBase *call,
@@ -1712,7 +2062,7 @@ ModelResult PulseModels::modelTaintSink(const llvm::CallBase *call,
                                         const std::string &kind) {
   auto *astate = state.getAstate();
   if (!astate) {
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
   }
   const std::string sink_name =
       call->getCalledFunction() ? call->getCalledFunction()->getName().str()
@@ -1725,7 +2075,7 @@ ModelResult PulseModels::modelTaintSink(const llvm::CallBase *call,
     TaintOperations::checkSink(*astate, astate->getCanonical(arg_opt->addr),
                                sink_name, call);
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelCalloc(const llvm::CallBase *call,
@@ -1734,7 +2084,7 @@ ModelResult PulseModels::modelCalloc(const llvm::CallBase *call,
   (void)pred;
   auto *astate = state.getAstate();
   if (!astate)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   AbstractValue ret_val = factory_.createFresh(call);
   Address ret_addr(ret_val);
@@ -1754,19 +2104,19 @@ ModelResult PulseModels::modelCalloc(const llvm::CallBase *call,
 
   ret_addr.history.addAllocationEvent(call, &ret_val);
   astate->getPostStack().add(call, ret_addr);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStrdup(const llvm::CallBase *call,
                                      ExecutionDomain &state,
                                      const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto src_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!src_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto read_res = ops_.readDeref(*astate, *src_opt, call);
   if (read_res.first != OperationResult::Success) {
@@ -1787,19 +2137,19 @@ ModelResult PulseModels::modelStrdup(const llvm::CallBase *call,
   if (astate->isInPre(c_src)) {
     astate->addPropagateTaintFrom(ret_val, {{c_src}, "strdup"});
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStrchr(const llvm::CallBase *call,
                                      ExecutionDomain &state,
                                      const llvm::BasicBlock *pred) {
   if (call->arg_size() < 2)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto str_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!str_opt)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto read_res = ops_.readDeref(*astate, *str_opt, call);
   if (read_res.first != OperationResult::Success) {
@@ -1813,14 +2163,14 @@ ModelResult PulseModels::modelStrchr(const llvm::CallBase *call,
   astate->getPostStack().add(call, ret_addr);
   TaintOperations::propagate(*astate, astate->getCanonical(str_opt->addr),
                              ret_val, call);
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelStrstr(const llvm::CallBase *call,
                                      ExecutionDomain &state,
                                      const llvm::BasicBlock *pred) {
   if (call->arg_size() < 2)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto haystack_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
@@ -1850,14 +2200,14 @@ ModelResult PulseModels::modelStrstr(const llvm::CallBase *call,
     TaintOperations::propagate(*astate, astate->getCanonical(haystack_opt->addr),
                                ret_val, call);
   }
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelMemcpy(const llvm::CallBase *call,
                                      ExecutionDomain &state,
                                      const llvm::BasicBlock *pred) {
   if (call->arg_size() < 3)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto dest_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
@@ -1893,7 +2243,7 @@ ModelResult PulseModels::modelMemcpy(const llvm::CallBase *call,
     astate->getPostStack().add(call, *dest_opt);
   }
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelMemmove(const llvm::CallBase *call,
@@ -1906,7 +2256,7 @@ ModelResult PulseModels::modelMemset(const llvm::CallBase *call,
                                      ExecutionDomain &state,
                                      const llvm::BasicBlock *pred) {
   if (call->arg_size() < 3)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto dest_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
@@ -1920,14 +2270,14 @@ ModelResult PulseModels::modelMemset(const llvm::CallBase *call,
     astate->getPostStack().add(call, *dest_opt);
   }
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelRead(const llvm::CallBase *call,
                                    ExecutionDomain &state,
                                    const llvm::BasicBlock *pred) {
   if (call->arg_size() < 3)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto buf_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
@@ -1942,14 +2292,14 @@ ModelResult PulseModels::modelRead(const llvm::CallBase *call,
     astate->getPostStack().add(call, Address(ret_val));
   }
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelWrite(const llvm::CallBase *call,
                                     ExecutionDomain &state,
                                     const llvm::BasicBlock *pred) {
   if (call->arg_size() < 3)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto buf_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
@@ -1964,14 +2314,14 @@ ModelResult PulseModels::modelWrite(const llvm::CallBase *call,
     }
   }
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelFread(const llvm::CallBase *call,
                                     ExecutionDomain &state,
                                     const llvm::BasicBlock *pred) {
   if (call->arg_size() < 4)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto stream_opt = ops_.eval(*astate, call->getArgOperand(3), call, pred);
@@ -2000,14 +2350,14 @@ ModelResult PulseModels::modelFread(const llvm::CallBase *call,
     }
   }
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelFwrite(const llvm::CallBase *call,
                                      ExecutionDomain &state,
                                      const llvm::BasicBlock *pred) {
   if (call->arg_size() < 4)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto stream_opt = ops_.eval(*astate, call->getArgOperand(3), call, pred);
@@ -2036,14 +2386,14 @@ ModelResult PulseModels::modelFwrite(const llvm::CallBase *call,
     }
   }
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelFgets(const llvm::CallBase *call,
                                     ExecutionDomain &state,
                                     const llvm::BasicBlock *pred) {
   if (call->arg_size() < 3)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto str_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
@@ -2061,14 +2411,14 @@ ModelResult PulseModels::modelFgets(const llvm::CallBase *call,
     }
   }
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
 }
 
 ModelResult PulseModels::modelGets(const llvm::CallBase *call,
                                    ExecutionDomain &state,
                                    const llvm::BasicBlock *pred) {
   if (call->arg_size() < 1)
-    return ModelResult::success({state});
+    return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
   auto str_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
@@ -2079,7 +2429,579 @@ ModelResult PulseModels::modelGets(const llvm::CallBase *call,
     astate->getPostStack().add(call, *str_opt);
   }
 
-  return ModelResult::success({state});
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStrlen(const llvm::CallBase *call,
+                                     ExecutionDomain &state,
+                                     const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 1)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+
+  auto str_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  if (!str_opt)
+    return ModelResult::success(std::move(state));
+
+  auto read_res = ops_.readDeref(*astate, *str_opt, call);
+  if (read_res.first != OperationResult::Success) {
+    return ModelResult::success({reportModelAccessError(
+        checker_, *astate, read_res.first, *str_opt, call,
+        "Invalid pointer in strlen")});
+  }
+
+  AbstractValue ret_val = factory_.createFresh(call);
+  astate->getPathFormula().addIntegerConstraint(ret_val);
+  AbstractValue c_str = astate->getCanonical(str_opt->addr);
+  (void)astate->getPathFormula().addStringLength(c_str, ret_val);
+  astate->getPostStack().add(call, Address(ret_val));
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStrcat(const llvm::CallBase *call,
+                                     ExecutionDomain &state,
+                                     const llvm::BasicBlock *pred,
+                                     bool bounded) {
+  if (call->arg_size() < 2)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+
+  auto dest_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  auto src_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
+  if (!dest_opt || !src_opt)
+    return ModelResult::success(std::move(state));
+
+  if (bounded && call->arg_size() >= 3) {
+    checkLengthAgainstAllocation(*astate, *dest_opt, call->getArgOperand(2),
+                                 call,
+                                 "strncat writes beyond destination buffer");
+  }
+
+  auto src_read = ops_.readDeref(*astate, *src_opt, call);
+  if (src_read.first != OperationResult::Success) {
+    return ModelResult::success({reportModelAccessError(
+        checker_, *astate, src_read.first, *src_opt, call,
+        "Invalid source pointer in strcat/strncat")});
+  }
+  AbstractValue content =
+      src_read.second ? src_read.second->addr : factory_.createFresh(call);
+  auto write_res = ops_.writeDeref(*astate, *dest_opt, Address(content), call);
+  if (write_res != OperationResult::Success) {
+    return ModelResult::success({reportModelAccessError(
+        checker_, *astate, write_res, *dest_opt, call,
+        "Invalid destination pointer in strcat/strncat")});
+  }
+
+  AbstractValue c_src = astate->getCanonical(src_opt->addr);
+  AbstractValue c_dest = astate->getCanonical(dest_opt->addr);
+  if (auto d_str = astate->getPathFormula().asConstantString(c_dest)) {
+    if (auto s_str = astate->getPathFormula().asConstantString(c_src)) {
+      if (auto alloc_sz = astate->getAllocationSize(c_dest)) {
+        if (d_str->size() + s_str->size() + 1 > *alloc_sz) {
+          reportOutOfBoundsAccess(
+              call, *dest_opt,
+              "strcat writes beyond destination buffer capacity");
+          astate->getPostAttrs().add(c_dest, Attribute::OutOfBounds);
+        }
+      }
+      AbstractValue concat_av = factory_.createFresh(call);
+      (void)astate->getPathFormula().addStringConcat(concat_av, c_dest, c_src);
+    }
+  }
+  TaintOperations::propagate(*astate, c_src, c_dest, call);
+  if (astate->isInPre(c_src)) {
+    astate->addPropagateTaintFrom(c_dest,
+                                  {{c_src}, bounded ? "strncat" : "strcat"});
+  }
+  astate->getPostStack().add(call, *dest_opt);
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelSprintf(const llvm::CallBase *call,
+                                      ExecutionDomain &state,
+                                      const llvm::BasicBlock *pred,
+                                      bool bounded) {
+  const unsigned fmt_idx = bounded ? 2u : 1u;
+  if (call->arg_size() <= fmt_idx)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+
+  auto dest_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  auto fmt_opt = ops_.eval(*astate, call->getArgOperand(fmt_idx), call, pred);
+  if (!dest_opt)
+    return ModelResult::success(std::move(state));
+
+  if (bounded) {
+    checkLengthAgainstAllocation(*astate, *dest_opt, call->getArgOperand(1),
+                                 call,
+                                 "snprintf writes beyond destination buffer");
+  }
+  if (fmt_opt) {
+    auto fmt_read = ops_.readDeref(*astate, *fmt_opt, call);
+    if (fmt_read.first != OperationResult::Success) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, fmt_read.first, *fmt_opt, call,
+          "Invalid format string in sprintf/snprintf")});
+    }
+  }
+
+  AbstractValue dummy = factory_.createFresh(call);
+  auto write_res = ops_.writeDeref(*astate, *dest_opt, Address(dummy), call);
+  if (write_res != OperationResult::Success) {
+    return ModelResult::success({reportModelAccessError(
+        checker_, *astate, write_res, *dest_opt, call,
+        "Invalid destination buffer in sprintf/snprintf")});
+  }
+
+  AbstractValue c_dest = astate->getCanonical(dest_opt->addr);
+  std::vector<AbstractValue> pre_srcs;
+  for (unsigned i = fmt_idx; i < call->arg_size(); ++i) {
+    if (auto arg_opt = ops_.eval(*astate, call->getArgOperand(i), call, pred)) {
+      AbstractValue c_arg = astate->getCanonical(arg_opt->addr);
+      TaintOperations::propagate(*astate, c_arg, c_dest, call);
+      if (astate->isInPre(c_arg)) {
+        pre_srcs.push_back(c_arg);
+      }
+    }
+  }
+  if (!pre_srcs.empty()) {
+    astate->addPropagateTaintFrom(
+        c_dest, {std::move(pre_srcs), bounded ? "snprintf" : "sprintf"});
+  }
+
+  AbstractValue ret_val = factory_.createFresh(call);
+  astate->getPathFormula().addIntegerConstraint(ret_val);
+  astate->getPostStack().add(call, Address(ret_val));
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelPipe(const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 1)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+
+  auto fds_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  if (!fds_opt)
+    return ModelResult::success(std::move(state));
+
+  AbstractValue fd0 = factory_.createFresh(call);
+  AbstractValue fd1 = factory_.createFresh(call);
+  ops_.allocate(*astate, fd0, call, AllocatorKind::FileHandle);
+  ops_.allocate(*astate, fd1, call, AllocatorKind::FileHandle);
+  astate->getPostAttrs().add(fd0, Attribute::FileHandle);
+  astate->getPostAttrs().add(fd1, Attribute::FileHandle);
+  astate->addNonNull(fd0);
+  astate->addNonNull(fd1);
+
+  Address fd0_addr(fd0);
+  fd0_addr.history.addEvent(ValueHistory::EventKind::Allocation, call,
+                            call->getFunction(), "Pipe read fd acquired");
+  Address fd1_addr(fd1);
+  fd1_addr.history.addEvent(ValueHistory::EventKind::Allocation, call,
+                            call->getFunction(), "Pipe write fd acquired");
+
+  auto w0 = ops_.writeDeref(*astate, *fds_opt, fd0_addr, call);
+  if (w0 != OperationResult::Success) {
+    return ModelResult::success({reportModelAccessError(
+        checker_, *astate, w0, *fds_opt, call, "Invalid fd array in pipe()")});
+  }
+
+  // Also bind fds[1] at element stride 4 (both i64 1 and i32 1 index keys)
+  // so `close(fds[0]); close(fds[1]);` cleanly releases both descriptors.
+  AbstractValue slot1 = factory_.createFresh(call);
+  astate->getPostHeap().addEdge(slot1, Access(AccessKind::Dereference),
+                                fd1_addr);
+  AbstractValue fds_c = astate->getCanonical(fds_opt->addr);
+  llvm::LLVMContext &ctx = call->getContext();
+  AbstractValue idx1_i64 =
+      factory_.getOrCreate(llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx), 1));
+  AbstractValue idx1_i32 =
+      factory_.getOrCreate(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 1));
+  astate->getPostHeap().addEdge(fds_c, Access::arrayIndex(idx1_i64, 4),
+                                Address(slot1));
+  astate->getPostHeap().addEdge(fds_c, Access::arrayIndex(idx1_i32, 4),
+                                Address(slot1));
+
+  // If pipe() was called with `gep [2 x i32], %fds, 0, 0`, also wire index 1
+  // directly onto the intermediate array node for `gep [2 x i32], %fds, 0, 1`.
+  if (const auto *GEP = llvm::dyn_cast<llvm::GEPOperator>(
+          call->getArgOperand(0)->stripPointerCasts())) {
+    if (GEP->getNumIndices() >= 2) {
+      if (auto arr_base =
+              ops_.eval(*astate, GEP->getPointerOperand(), call, pred)) {
+        AbstractValue arr_c = astate->getCanonical(arr_base->addr);
+        AbstractValue idx0_i64 = factory_.getOrCreate(
+            llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx), 0));
+        AbstractValue idx0_i32 = factory_.getOrCreate(
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 0));
+        const Address *row =
+            astate->getPostHeap().findEdge(arr_c, Access::arrayIndex(idx0_i64, 8));
+        if (!row) {
+          row = astate->getPostHeap().findEdge(arr_c,
+                                               Access::arrayIndex(idx0_i32, 8));
+        }
+        if (row) {
+          AbstractValue row_c = astate->getCanonical(row->addr);
+          astate->getPostHeap().addEdge(row_c, Access::arrayIndex(idx1_i64, 4),
+                                        Address(slot1));
+          astate->getPostHeap().addEdge(row_c, Access::arrayIndex(idx1_i32, 4),
+                                        Address(slot1));
+        }
+      }
+    }
+  }
+
+  AbstractValue zero = factory_.createFresh(call);
+  astate->getPathFormula().addIntegerConstraint(zero);
+  (void)astate->getPathFormula().addBounds(zero, 0, 0);
+  astate->getPostStack().add(call, Address(zero));
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelDup2(const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 2)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+
+  if (auto old_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred)) {
+    AbstractValue old_c = astate->getCanonical(old_opt->addr);
+    if (astate->getPostAttrs().has(old_c, Attribute::Invalid)) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, OperationResult::UseAfterFree, *old_opt, call,
+          "dup2 on already closed file descriptor")});
+    }
+  }
+  if (auto new_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred)) {
+    astate->getPostStack().add(call, *new_opt);
+  } else {
+    AbstractValue ret = factory_.createFresh(call);
+    astate->getPathFormula().addIntegerConstraint(ret);
+    astate->getPostStack().add(call, Address(ret));
+  }
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStdMakeUnique(const llvm::CallBase *call,
+                                            ExecutionDomain &state,
+                                            const llvm::BasicBlock *pred) {
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+
+  AbstractValue obj = factory_.createFresh(call);
+  Address obj_addr(obj);
+  ops_.allocate(*astate, obj, call, AllocatorKind::CppNew);
+  astate->addNonNull(obj);
+  obj_addr.history.addEvent(ValueHistory::EventKind::Allocation, call,
+                            call->getFunction(), "std::make_unique");
+
+  Access ptr_field(0);
+  if (call->getType()->isVoidTy() && call->arg_size() >= 1) {
+    if (auto sret_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred)) {
+      AbstractValue sret_c = astate->getCanonical(sret_opt->addr);
+      astate->getPostHeap().addEdge(sret_c, ptr_field, obj_addr);
+      astate->markWrittenTo(sret_c, call);
+    }
+  } else {
+    AbstractValue wrapper = factory_.createFresh(call);
+    astate->getPostHeap().addEdge(wrapper, ptr_field, obj_addr);
+    astate->getPostStack().add(call, Address(wrapper));
+  }
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStdMakeShared(const llvm::CallBase *call,
+                                            ExecutionDomain &state,
+                                            const llvm::BasicBlock *pred) {
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+
+  AbstractValue obj = factory_.createFresh(call);
+  Address obj_addr(obj);
+  ops_.allocate(*astate, obj, call, AllocatorKind::CppNew);
+  astate->addNonNull(obj);
+  astate->addSharedPtrTarget(obj);
+  obj_addr.history.addEvent(ValueHistory::EventKind::Allocation, call,
+                            call->getFunction(), "std::make_shared");
+
+  Access ptr_field(0);
+  Access cb_field(1);
+  Access deref(AccessKind::Dereference);
+  AbstractValue cb = factory_.createFresh(call);
+  AbstractValue one = factory_.createFresh(call);
+  (void)astate->getPathFormula().addBounds(one, 1, 1);
+  astate->getPostHeap().addEdge(cb, deref, Address(one));
+
+  if (call->getType()->isVoidTy() && call->arg_size() >= 1) {
+    if (auto sret_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred)) {
+      AbstractValue sret_c = astate->getCanonical(sret_opt->addr);
+      astate->getPostHeap().addEdge(sret_c, ptr_field, obj_addr);
+      astate->getPostHeap().addEdge(sret_c, cb_field, Address(cb));
+      astate->markWrittenTo(sret_c, call);
+    }
+  } else {
+    AbstractValue wrapper = factory_.createFresh(call);
+    astate->getPostHeap().addEdge(wrapper, ptr_field, obj_addr);
+    astate->getPostHeap().addEdge(wrapper, cb_field, Address(cb));
+    astate->getPostStack().add(call, Address(wrapper));
+  }
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStdWeakPtrCtor(const llvm::CallBase *call,
+                                             ExecutionDomain &state,
+                                             const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 1)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+  auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  if (!this_opt)
+    return ModelResult::success(std::move(state));
+
+  AbstractValue this_av = astate->getCanonical(this_opt->addr);
+  Access weak_ptr_field(kWeakPtrField);
+  Access weak_cb_field(kWeakCbField);
+
+  if (call->arg_size() >= 2) {
+    if (auto src_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred)) {
+      AbstractValue src_av = astate->getCanonical(src_opt->addr);
+      // Copy pointer & control block WITHOUT incrementing strong refcount and
+      // WITHOUT adding a strong ownership edge (uses kWeakPtrField).
+      Address *raw = astate->getPostHeap().findEdge(src_av, Access(0));
+      if (!raw) {
+        raw = astate->getPostHeap().findEdge(src_av, weak_ptr_field);
+      }
+      if (raw) {
+        astate->getPostHeap().addEdge(this_av, weak_ptr_field, *raw);
+      }
+      Address *cb = astate->getPostHeap().findEdge(src_av, Access(1));
+      if (!cb) {
+        cb = astate->getPostHeap().findEdge(src_av, weak_cb_field);
+      }
+      if (cb) {
+        astate->getPostHeap().addEdge(this_av, weak_cb_field, *cb);
+      }
+      astate->markWrittenTo(this_av, call);
+      if (call->getType()->isPointerTy()) {
+        astate->getPostStack().add(call, *this_opt);
+      }
+      return ModelResult::success(std::move(state));
+    }
+  }
+
+  AbstractValue null_val = factory_.createFresh(call);
+  astate->getPostAttrs().add(null_val, Attribute::Null);
+  (void)astate->getPathFormula().addNull(null_val);
+  astate->getPostHeap().addEdge(this_av, weak_ptr_field, Address(null_val));
+  astate->markWrittenTo(this_av, call);
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStdWeakPtrExpired(const llvm::CallBase *call,
+                                                ExecutionDomain &state,
+                                                const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 1)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+  auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  if (!this_opt)
+    return ModelResult::success(std::move(state));
+
+  AbstractValue this_av = astate->getCanonical(this_opt->addr);
+  AbstractValue ret_val = factory_.createFresh(call);
+  astate->getPathFormula().addIntegerConstraint(ret_val);
+
+  if (Address *raw =
+          astate->getPostHeap().findEdge(this_av, Access(kWeakPtrField))) {
+    AbstractValue raw_c = astate->getCanonical(raw->addr);
+    const bool expired =
+        astate->getPostAttrs().has(raw_c, Attribute::Invalid) ||
+        astate->getPostAttrs().has(raw_c, Attribute::Null) ||
+        astate->getPathFormula().isNull(raw_c);
+    (void)astate->getPathFormula().addBounds(ret_val, expired ? 1 : 0,
+                                             expired ? 1 : 0);
+  }
+  astate->getPostStack().add(call, Address(ret_val));
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStdWeakPtrLock(const llvm::CallBase *call,
+                                             ExecutionDomain &state,
+                                             const llvm::BasicBlock *pred) {
+  auto *astate = state.getAstate();
+  if (!astate || call->arg_size() < 1)
+    return ModelResult::success(std::move(state));
+
+  const bool is_sret = call->getType()->isVoidTy() && call->arg_size() >= 2;
+  auto this_opt =
+      ops_.eval(*astate, call->getArgOperand(is_sret ? 1 : 0), call, pred);
+  if (!this_opt)
+    return ModelResult::success(std::move(state));
+  AbstractValue this_av = astate->getCanonical(this_opt->addr);
+
+  AbstractValue out_sp = factory_.createFresh(call);
+  if (is_sret) {
+    if (auto sret_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred)) {
+      out_sp = astate->getCanonical(sret_opt->addr);
+    }
+  }
+
+  Access ptr_field(0);
+  Access cb_field(1);
+  Access deref(AccessKind::Dereference);
+  Address *raw =
+      astate->getPostHeap().findEdge(this_av, Access(kWeakPtrField));
+  bool expired = true;
+  if (raw) {
+    AbstractValue raw_c = astate->getCanonical(raw->addr);
+    expired = astate->getPostAttrs().has(raw_c, Attribute::Invalid) ||
+              astate->getPostAttrs().has(raw_c, Attribute::Null) ||
+              astate->getPathFormula().isNull(raw_c);
+  }
+
+  if (expired || !raw) {
+    AbstractValue null_val = factory_.createFresh(call);
+    astate->getPostAttrs().add(null_val, Attribute::Null);
+    (void)astate->getPathFormula().addNull(null_val);
+    astate->getPostHeap().addEdge(out_sp, ptr_field, Address(null_val));
+  } else {
+    AbstractValue raw_c = astate->getCanonical(raw->addr);
+    astate->addSharedPtrTarget(raw_c);
+    astate->getPostHeap().addEdge(out_sp, ptr_field, *raw);
+    if (Address *cb =
+            astate->getPostHeap().findEdge(this_av, Access(kWeakCbField))) {
+      AbstractValue cb_c = astate->getCanonical(cb->addr);
+      astate->getPostHeap().addEdge(out_sp, cb_field, *cb);
+      if (Address *rc_edge = astate->getPostHeap().findEdge(cb_c, deref)) {
+        if (auto cur_rc = astate->getPathFormula().asConstantInt(
+                astate->getCanonical(rc_edge->addr))) {
+          AbstractValue next_rc = factory_.createFresh(call);
+          (void)astate->getPathFormula().addBounds(next_rc, *cur_rc + 1,
+                                                   *cur_rc + 1);
+          astate->getPostHeap().addEdge(cb_c, deref, Address(next_rc));
+        }
+      }
+    }
+  }
+  astate->markWrittenTo(out_sp, call);
+  if (!is_sret) {
+    astate->getPostStack().add(call, Address(out_sp));
+  }
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStdWeakPtrReset(const llvm::CallBase *call,
+                                              ExecutionDomain &state,
+                                              const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 1)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+  auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  if (!this_opt)
+    return ModelResult::success(std::move(state));
+  AbstractValue this_av = astate->getCanonical(this_opt->addr);
+  AbstractValue null_val = factory_.createFresh(call);
+  astate->getPostAttrs().add(null_val, Attribute::Null);
+  (void)astate->getPathFormula().addNull(null_val);
+  astate->getPostHeap().addEdge(this_av, Access(kWeakPtrField),
+                                Address(null_val));
+  astate->getPostHeap().removeEdge(this_av, Access(kWeakCbField));
+  astate->markWrittenTo(this_av, call);
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStdStringViewCtor(const llvm::CallBase *call,
+                                                ExecutionDomain &state,
+                                                const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 1)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+  auto this_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  if (!this_opt)
+    return ModelResult::success(std::move(state));
+
+  AbstractValue this_av = astate->getCanonical(this_opt->addr);
+  Access data_field(0);
+  if (call->arg_size() >= 2) {
+    if (auto src_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred)) {
+      AbstractValue src_av = astate->getCanonical(src_opt->addr);
+      // If constructed from a std::string / std::string_view that already
+      // exposes its borrowed buffer at field 0, borrow that buffer directly.
+      if (Address *buf = astate->getPostHeap().findEdge(src_av, data_field)) {
+        astate->getPostHeap().addEdge(this_av, data_field, *buf);
+      } else {
+        astate->getPostHeap().addEdge(this_av, data_field, *src_opt);
+      }
+      astate->markWrittenTo(this_av, call);
+      return ModelResult::success(std::move(state));
+    }
+  }
+  AbstractValue null_val = factory_.createFresh(call);
+  astate->getPostAttrs().add(null_val, Attribute::Null);
+  (void)astate->getPathFormula().addNull(null_val);
+  astate->getPostHeap().addEdge(this_av, data_field, Address(null_val));
+  astate->markWrittenTo(this_av, call);
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelStdStringViewData(const llvm::CallBase *call,
+                                                ExecutionDomain &state,
+                                                const llvm::BasicBlock *pred) {
+  return modelStdVectorData(call, state, pred);
+}
+
+ModelResult PulseModels::modelStdMapAccess(const llvm::CallBase *call,
+                                           ExecutionDomain &state,
+                                           const llvm::BasicBlock *pred) {
+  return modelStdVectorData(call, state, pred);
+}
+
+ModelResult PulseModels::modelStdMapErase(const llvm::CallBase *call,
+                                          ExecutionDomain &state,
+                                          const llvm::BasicBlock *pred) {
+  return modelStdVectorClear(call, state, pred);
+}
+
+ModelResult PulseModels::modelStdVariantGet(const llvm::CallBase *call,
+                                            ExecutionDomain &state,
+                                            const llvm::BasicBlock *pred) {
+  return modelStdVectorData(call, state, pred);
+}
+
+ModelResult
+PulseModels::modelStdIdentityPassThrough(const llvm::CallBase *call,
+                                         ExecutionDomain &state,
+                                         const llvm::BasicBlock *pred) {
+  auto *astate = state.getAstate();
+  if (!astate || call->arg_size() < 1)
+    return ModelResult::success(std::move(state));
+  if (auto arg_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred)) {
+    astate->getPostStack().add(call, *arg_opt);
+  }
+  return ModelResult::success(std::move(state));
 }
 
 } // namespace pulse

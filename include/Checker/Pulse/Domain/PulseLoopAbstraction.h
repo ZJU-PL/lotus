@@ -43,6 +43,7 @@ private:
    */
   struct LoopInfo {
     const llvm::Loop *loop;
+    std::set<const llvm::BasicBlock *> body_blocks; // Owned block set (safe after LoopInfo dies)
     unsigned iterations;          // Number of times we've visited this header
     ExecutionDomain header_state; // State at loop header (first iteration)
     ExecutionDomain entry_state;  // State when entering loop
@@ -50,8 +51,10 @@ private:
     PulseFormula local_path_condition;          // Path condition local to loop
     std::vector<IterationInfo> iteration_stack; // Stack of iteration info
     std::vector<ExecutionDomain> seen_states;   // Bounded history for leq check
+    std::vector<ExecutionDomain> seen_backedge_states; // Back-edge history
+    unsigned backedge_visits;
 
-    LoopInfo() : loop(nullptr), iterations(0) {}
+    LoopInfo() : loop(nullptr), iterations(0), backedge_visits(0) {}
   };
 
   std::map<const llvm::BasicBlock *, LoopInfo> loop_headers_;
@@ -101,6 +104,12 @@ public:
    * Check if basic block is in a loop
    */
   bool isInLoop(const llvm::BasicBlock *BB) const;
+
+  /**
+   * Check if `BB` belongs to the loop headed by `header` (lifetime-safe).
+   */
+  bool isInLoopBody(const llvm::BasicBlock *header,
+                    const llvm::BasicBlock *BB) const;
 
   /**
    * Get all loop headers
@@ -173,6 +182,17 @@ public:
    */
   bool hasConverged(const llvm::BasicBlock *BB,
                     const ExecutionDomain &state) const;
+
+  /**
+   * True if `state` repeats an exact prior un-widened header state
+   * (bidirectional leq) — used for sound InfiniteLoop detection.
+   */
+  bool hasExactRepeatingState(const llvm::BasicBlock *BB,
+                              const ExecutionDomain &state) const;
+
+  void recordBackedgeState(const llvm::BasicBlock *BB,
+                           const ExecutionDomain &state);
+  unsigned getBackedgeVisits(const llvm::BasicBlock *BB) const;
 
   /**
    * Get entry state for a loop header

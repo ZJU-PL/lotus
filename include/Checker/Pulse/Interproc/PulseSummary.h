@@ -37,10 +37,11 @@ public:
   };
 
 private:
-  std::unique_ptr<AbductiveDomain> pre_;
+  std::shared_ptr<const AbductiveDomain> pre_;
   PulseFormula pre_formula_;
-  std::unique_ptr<AbductiveDomain> post_;
+  std::shared_ptr<const AbductiveDomain> post_;
   PulseFormula post_formula_;
+  bool post_formula_shared_with_pre_{false};
   std::optional<AbstractValue> return_value_;
 
   std::optional<LatentIssueSummary> latent_issue_;
@@ -57,6 +58,14 @@ public:
                std::optional<AbstractValue> exception_value = std::nullopt,
                std::string exception_type = "");
 
+  SummaryEntry(std::shared_ptr<const AbductiveDomain> shared_domain,
+               PulseFormula unified_formula,
+               std::optional<AbstractValue> ret_val,
+               std::optional<LatentIssueSummary> latent_issue = std::nullopt,
+               bool is_exception_raised = false,
+               std::optional<AbstractValue> exception_value = std::nullopt,
+               std::string exception_type = "");
+
   SummaryEntry(SummaryEntry &&) = default;
   SummaryEntry &operator=(SummaryEntry &&) = default;
 
@@ -66,7 +75,10 @@ public:
   const AbductiveDomain *getPre() const { return pre_.get(); }
   const AbductiveDomain *getPost() const { return post_.get(); }
   const PulseFormula &getPreFormula() const { return pre_formula_; }
-  const PulseFormula &getPostFormula() const { return post_formula_; }
+  const PulseFormula &getPostFormula() const {
+    return post_formula_shared_with_pre_ ? pre_formula_ : post_formula_;
+  }
+  bool hasDistinctPostFormula() const { return !post_formula_shared_with_pre_; }
   std::optional<AbstractValue> getReturnValue() const { return return_value_; }
   const std::optional<LatentIssueSummary> &getLatentIssue() const {
     return latent_issue_;

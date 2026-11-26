@@ -5,6 +5,7 @@
 #include "Checker/Pulse/Report/PulseLogger.h"
 
 #include <algorithm>
+#include <deque>
 #include <limits>
 #include <optional>
 
@@ -29,6 +30,9 @@ namespace pulse {
 
 static ValueHistory joinHistories(const ValueHistory &hist1,
                                   const ValueHistory &hist2) {
+  if (hist1.sharesHead(hist2)) {
+    return hist1;
+  }
   // If histories are equal, return one of them
   if (hist1.isEmpty() && hist2.isEmpty()) {
     return hist1;
@@ -102,7 +106,7 @@ static ValueHistory joinHistoriesOpts(std::optional<ValueHistory> hist1_opt,
 // Value Joining
 //===----------------------------------------------------------------------===//
 
-std::pair<PulseJoin::JoinState &, std::pair<AbstractValue, ValueHistory>>
+std::pair<AbstractValue, ValueHistory>
 PulseJoin::joinValuesHists(JoinState &state, const AbstractValue &lhs_val,
                            const ValueHistory &lhs_hist,
                            const AbstractValue &rhs_val,
@@ -114,10 +118,8 @@ PulseJoin::joinValuesHists(JoinState &state, const AbstractValue &lhs_val,
     // Same value: x↦v ⊔ x↦v = x↦v
     Key key{std::optional<AbstractValue>(lhs_val),
             std::optional<AbstractValue>(rhs_val)};
-    auto &rev_subst = state.rev_subst;
-    rev_subst[lhs_val] = key;
-    ValueHistory hist_join = joinHistories(lhs_hist, rhs_hist);
-    return {state, {lhs_val, hist_join}};
+    state.rev_subst[lhs_val] = key;
+    return {lhs_val, joinHistories(lhs_hist, rhs_hist)};
   }
 
   // Different values: x↦v ⊔ x↦v' = x↦v''
@@ -126,8 +128,7 @@ PulseJoin::joinValuesHists(JoinState &state, const AbstractValue &lhs_val,
   auto it = state.subst.find(key);
   if (it != state.subst.end()) {
     // Already joined this pair
-    ValueHistory hist_join = joinHistories(lhs_hist, rhs_hist);
-    return {state, {it->second, hist_join}};
+    return {it->second, joinHistories(lhs_hist, rhs_hist)};
   }
 
   // Create fresh joined value
@@ -135,16 +136,16 @@ PulseJoin::joinValuesHists(JoinState &state, const AbstractValue &lhs_val,
   state.subst[key] = v_join;
   state.rev_subst[v_join] = key;
 
-  ValueHistory hist_join = joinHistories(lhs_hist, rhs_hist);
-  return {state, {v_join, hist_join}};
+  return {v_join, joinHistories(lhs_hist, rhs_hist)};
 }
 
-std::pair<PulseJoin::JoinState &, std::pair<AbstractValue, ValueHistory>>
-PulseJoin::joinValuesHistsOpts(
+std::pair<AbstractValue, ValueHistory> PulseJoin::joinValuesHistsOpts(
     JoinState &state, const AbductiveDomain &lhs_astate,
-    std::optional<std::pair<AbstractValue, ValueHistory>> lhs_opt,
+    const std::optional<std::pair<AbstractValue, ValueHistory>> &lhs_opt,
     const AbductiveDomain &rhs_astate,
-    std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt) {
+    const std::optional<std::pair<AbstractValue, ValueHistory>> &rhs_opt) {
+  (void)lhs_astate;
+  (void)rhs_astate;
   using Key =
       std::pair<std::optional<AbstractValue>, std::optional<AbstractValue>>;
 
@@ -152,16 +153,24 @@ PulseJoin::joinValuesHistsOpts(
     // Both empty - shouldn't happen
     assert(false && "Both sides empty in join");
     AbstractValue v_join = state.factory->createFresh();
-    return {state, {v_join, ValueHistory()}};
+    return {v_join, ValueHistory()};
   }
 
   if (!lhs_opt || !rhs_opt) {
-    // One-sided: x↦v ⊔ emp = x↦v' (v' fresh)
+    // One-sided: x↦v ⊔ emp = x↦v' (memoized to prevent fresh-AV blowup)
+    Key key{lhs_opt ? std::optional<AbstractValue>(lhs_opt->first) : std::nullopt,
+            rhs_opt ? std::optional<AbstractValue>(rhs_opt->first) : std::nullopt};
+    auto it = state.subst.find(key);
+    if (it != state.subst.end()) {
+      return {it->second, ValueHistory()};
+    }
     AbstractValue v_join = state.factory->createFresh(nullptr);
+    state.subst[key] = v_join;
+    state.rev_subst[v_join] = key;
     ValueHistory hist_join = joinHistoriesOpts(
         lhs_opt ? std::optional<ValueHistory>(lhs_opt->second) : std::nullopt,
         rhs_opt ? std::optional<ValueHistory>(rhs_opt->second) : std::nullopt);
-    return {state, {v_join, hist_join}};
+    return {v_join, hist_join};
   }
 
   // Both sides have values
@@ -170,8 +179,7 @@ PulseJoin::joinValuesHistsOpts(
     Key key{std::optional<AbstractValue>(lhs_opt->first),
             std::optional<AbstractValue>(rhs_opt->first)};
     state.rev_subst[lhs_opt->first] = key;
-    ValueHistory hist_join = joinHistories(lhs_opt->second, rhs_opt->second);
-    return {state, {lhs_opt->first, hist_join}};
+    return {lhs_opt->first, joinHistories(lhs_opt->second, rhs_opt->second)};
   }
 
   // Different values: use cached join
@@ -179,8 +187,7 @@ PulseJoin::joinValuesHistsOpts(
           std::optional<AbstractValue>(rhs_opt->first)};
   auto it = state.subst.find(key);
   if (it != state.subst.end()) {
-    ValueHistory hist_join = joinHistories(lhs_opt->second, rhs_opt->second);
-    return {state, {it->second, hist_join}};
+    return {it->second, joinHistories(lhs_opt->second, rhs_opt->second)};
   }
 
   return joinValuesHists(state, lhs_opt->first, lhs_opt->second, rhs_opt->first,
@@ -188,114 +195,143 @@ PulseJoin::joinValuesHistsOpts(
 }
 
 //===----------------------------------------------------------------------===//
-// Heap Joining
+// Heap Joining (iterative, in-place, bounded)
 //===----------------------------------------------------------------------===//
 
-std::pair<PulseJoin::JoinState &, Heap> PulseJoin::joinHeaps(
+void PulseJoin::joinHeaps(
     JoinState &state, Heap &heap_join, const AbductiveDomain &lhs_astate,
-    std::optional<std::pair<AbstractValue, ValueHistory>> lhs_opt,
+    const std::optional<std::pair<AbstractValue, ValueHistory>> &root_lhs_opt,
     const AbductiveDomain &rhs_astate,
-    std::optional<std::pair<AbstractValue, ValueHistory>> rhs_opt,
+    const std::optional<std::pair<AbstractValue, ValueHistory>> &root_rhs_opt,
     bool use_pre_heap) {
   using Key =
       std::pair<std::optional<AbstractValue>, std::optional<AbstractValue>>;
+  using OptVH = std::optional<std::pair<AbstractValue, ValueHistory>>;
 
-  if (!lhs_opt && !rhs_opt) {
-    return {state, heap_join};
+  if (!root_lhs_opt && !root_rhs_opt) {
+    return;
   }
 
-  Key visited_key{
-      lhs_opt ? std::optional<AbstractValue>(lhs_opt->first) : std::nullopt,
-      rhs_opt ? std::optional<AbstractValue>(rhs_opt->first) : std::nullopt};
-
-  if (state.visited.count(visited_key) > 0) {
-    return {state, heap_join}; // Already visited
-  }
-  state.visited.insert(visited_key);
-
-  // Join the values first
-  auto value_result =
-      joinValuesHistsOpts(state, lhs_astate, lhs_opt, rhs_astate, rhs_opt);
-  state = value_result.first;
-  auto v_hist_join = value_result.second;
-  if (use_pre_heap) {
-    heap_join.registerAddress(v_hist_join.first);
-  }
+  constexpr size_t kMaxJoinVisitedPairs = 512;
+  constexpr unsigned kMaxJoinDepth = 24;
 
   const Heap &lhs_heap =
       use_pre_heap ? lhs_astate.getPreHeap() : lhs_astate.getPostHeap();
   const Heap &rhs_heap =
       use_pre_heap ? rhs_astate.getPreHeap() : rhs_astate.getPostHeap();
+  const auto &lhs_edges_map = lhs_heap.getEdges();
+  const auto &rhs_edges_map = rhs_heap.getEdges();
 
-  // Collect edges from both sides
-  std::set<Access> all_accesses;
-  if (lhs_opt) {
-    const auto &lhs_edges = lhs_heap.getEdges();
-    auto lhs_it = lhs_edges.find(lhs_opt->first);
-    if (lhs_it != lhs_edges.end()) {
-      for (const auto &edge_kv : lhs_it->second) {
-        all_accesses.insert(edge_kv.first);
-      }
-    }
-  }
-  if (rhs_opt) {
-    const auto &rhs_edges = rhs_heap.getEdges();
-    auto rhs_it = rhs_edges.find(rhs_opt->first);
-    if (rhs_it != rhs_edges.end()) {
-      for (const auto &edge_kv : rhs_it->second) {
-        all_accesses.insert(edge_kv.first);
-      }
-    }
-  }
+  struct WorkItem {
+    OptVH lhs_opt;
+    OptVH rhs_opt;
+    unsigned depth;
+  };
+  std::deque<WorkItem> worklist;
+  worklist.push_back(WorkItem{root_lhs_opt, root_rhs_opt, 0});
 
-  // Join edges
-  for (const Access &access : all_accesses) {
-    std::optional<std::pair<AbstractValue, ValueHistory>> lhs_target_opt;
-    std::optional<std::pair<AbstractValue, ValueHistory>> rhs_target_opt;
+  while (!worklist.empty()) {
+    WorkItem item = std::move(worklist.front());
+    worklist.pop_front();
 
-    if (lhs_opt) {
-      const auto *lhs_target = lhs_heap.findEdge(lhs_opt->first, access);
-      if (lhs_target) {
-        lhs_target_opt = {{lhs_target->addr, lhs_target->history}};
-      }
-    }
-    if (rhs_opt) {
-      const auto *rhs_target = rhs_heap.findEdge(rhs_opt->first, access);
-      if (rhs_target) {
-        rhs_target_opt = {{rhs_target->addr, rhs_target->history}};
-      }
+    if (!item.lhs_opt && !item.rhs_opt) {
+      continue;
     }
 
-    // Recursively join target values
-    auto target_result = joinValuesHistsOpts(state, lhs_astate, lhs_target_opt,
-                                             rhs_astate, rhs_target_opt);
-    state = target_result.first;
-    auto target_v_hist = target_result.second;
+    Key visited_key{
+        item.lhs_opt ? std::optional<AbstractValue>(item.lhs_opt->first)
+                     : std::nullopt,
+        item.rhs_opt ? std::optional<AbstractValue>(item.rhs_opt->first)
+                     : std::nullopt};
 
-    // Recursively join heaps from targets
-    auto heap_result =
-        joinHeaps(state, heap_join, lhs_astate, lhs_target_opt, rhs_astate,
-                  rhs_target_opt, use_pre_heap);
-    state = heap_result.first;
-    heap_join = heap_result.second;
+    if (state.visited.count(visited_key) > 0) {
+      continue;
+    }
+    if (state.visited.size() >= kMaxJoinVisitedPairs) {
+      break;
+    }
+    state.visited.insert(visited_key);
 
-    // Add edge to joined heap
-    Address target_addr(target_v_hist.first);
-    target_addr.history = target_v_hist.second;
-    heap_join.addEdge(v_hist_join.first, access, target_addr);
+    auto v_hist_join = joinValuesHistsOpts(state, lhs_astate, item.lhs_opt,
+                                           rhs_astate, item.rhs_opt);
     if (use_pre_heap) {
-      heap_join.registerAddress(target_v_hist.first);
+      heap_join.registerAddress(v_hist_join.first);
+    }
+
+    if (item.depth >= kMaxJoinDepth) {
+      continue;
+    }
+
+    // Collect edges from both sides
+    const std::map<Access, Address> *lhs_edges = nullptr;
+    const std::map<Access, Address> *rhs_edges = nullptr;
+    if (item.lhs_opt) {
+      auto lhs_it = lhs_edges_map.find(item.lhs_opt->first);
+      if (lhs_it != lhs_edges_map.end() && !lhs_it->second.empty()) {
+        lhs_edges = &lhs_it->second;
+      }
+    }
+    if (item.rhs_opt) {
+      auto rhs_it = rhs_edges_map.find(item.rhs_opt->first);
+      if (rhs_it != rhs_edges_map.end() && !rhs_it->second.empty()) {
+        rhs_edges = &rhs_it->second;
+      }
+    }
+    if (!lhs_edges && !rhs_edges) {
+      continue;
+    }
+
+    std::set<Access> all_accesses;
+    if (lhs_edges) {
+      for (const auto &edge_kv : *lhs_edges) {
+        all_accesses.insert(edge_kv.first);
+      }
+    }
+    if (rhs_edges) {
+      for (const auto &edge_kv : *rhs_edges) {
+        all_accesses.insert(edge_kv.first);
+      }
+    }
+
+    for (const Access &access : all_accesses) {
+      OptVH lhs_target_opt;
+      OptVH rhs_target_opt;
+      if (lhs_edges) {
+        auto it = lhs_edges->find(access);
+        if (it != lhs_edges->end()) {
+          lhs_target_opt = {{it->second.addr, it->second.history}};
+        }
+      }
+      if (rhs_edges) {
+        auto it = rhs_edges->find(access);
+        if (it != rhs_edges->end()) {
+          rhs_target_opt = {{it->second.addr, it->second.history}};
+        }
+      }
+
+      auto target_v_hist = joinValuesHistsOpts(
+          state, lhs_astate, lhs_target_opt, rhs_astate, rhs_target_opt);
+
+      Address target_addr(target_v_hist.first);
+      target_addr.history = target_v_hist.second;
+      heap_join.addEdge(v_hist_join.first, access, target_addr);
+      if (use_pre_heap) {
+        heap_join.registerAddress(target_v_hist.first);
+      }
+
+      if (state.visited.size() < kMaxJoinVisitedPairs) {
+        worklist.push_back(WorkItem{std::move(lhs_target_opt),
+                                    std::move(rhs_target_opt), item.depth + 1});
+      }
     }
   }
-
-  return {state, heap_join};
 }
 
 //===----------------------------------------------------------------------===//
 // Stack Joining
 //===----------------------------------------------------------------------===//
 
-std::pair<PulseJoin::JoinState &, std::pair<Stack, Heap>>
+std::pair<Stack, Heap>
 PulseJoin::joinStacks(JoinState &state, const AbductiveDomain &lhs_astate,
                       const AbductiveDomain &rhs_astate) {
   Stack stack_pre_join;
@@ -325,27 +361,17 @@ PulseJoin::joinStacks(JoinState &state, const AbductiveDomain &lhs_astate,
       rhs_opt = {{rhs_addr->addr, rhs_addr->history}};
     }
 
-    // Join values
-    auto result =
+    auto v_hist_join =
         joinValuesHistsOpts(state, lhs_astate, lhs_opt, rhs_astate, rhs_opt);
-    state = result.first;
-    auto v_hist_join = result.second;
+    joinHeaps(state, heap_pre_join, lhs_astate, lhs_opt, rhs_astate, rhs_opt,
+              /*use_pre_heap=*/true);
 
-    // Join heaps from pre stack values
-    auto heap_result =
-        joinHeaps(state, heap_pre_join, lhs_astate, lhs_opt, rhs_astate,
-                  rhs_opt, /*use_pre_heap=*/true);
-    state = heap_result.first;
-    heap_pre_join = heap_result.second;
-
-    // Add to joined pre stack
     Address joined_addr(v_hist_join.first);
     joined_addr.history = v_hist_join.second;
     stack_pre_join.add(var, joined_addr);
   }
 
-  // Return pre stack and heap
-  return {state, {stack_pre_join, heap_pre_join}};
+  return {std::move(stack_pre_join), std::move(heap_pre_join)};
 }
 
 //===----------------------------------------------------------------------===//
@@ -526,17 +552,9 @@ PulseFormula PulseJoin::joinFormulas(const AbductiveDomain &lhs,
   const PulseFormula &rhs_formula = rhs.getPathFormula();
 
   // Join formulas (disjunction): represent "lhs path condition OR rhs path
-  // condition". This must NOT conjoin constraints, otherwise feasible paths get
-  // dropped.
-  PulseFormula joined = PulseFormula::join(lhs_formula, rhs_formula);
-
-  // TODO: Add equalities from rev_subst to formula
-  // For each v_join in rev_subst mapping to (v_lhs, v_rhs),
-  // we should add: v_join = v_lhs ∨ v_join = v_rhs
-  // This requires access to join_state, which we'll add in the main join
-  // function
-
-  return joined;
+  // condition". Disjunctive equalities from rev_subst are attached in
+  // joinAbductive once the join substitution map has been built.
+  return PulseFormula::join(lhs_formula, rhs_formula);
 }
 
 //===----------------------------------------------------------------------===//
@@ -567,11 +585,10 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
   AbstractValueFactory factory;
   JoinState join_state(&factory);
 
-  // Join pre stacks (this also joins pre heaps recursively)
+  // Join pre stacks (this also joins pre heaps iteratively in place)
   auto pre_result = joinStacks(join_state, lhs, rhs);
-  join_state = pre_result.first;
-  Stack stack_pre_join = pre_result.second.first;
-  Heap heap_pre_join = pre_result.second.second;
+  Stack stack_pre_join = std::move(pre_result.first);
+  Heap heap_pre_join = std::move(pre_result.second);
 
   // Join post stacks and heaps separately
   Stack stack_post_join;
@@ -604,18 +621,10 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
       rhs_opt = {{rhs_addr->addr, rhs_addr->history}};
     }
 
-    // Join values
-    auto result = joinValuesHistsOpts(join_state, lhs, lhs_opt, rhs, rhs_opt);
-    join_state = result.first;
-    auto v_hist_join = result.second;
+    auto v_hist_join =
+        joinValuesHistsOpts(join_state, lhs, lhs_opt, rhs, rhs_opt);
+    joinHeaps(join_state, heap_post_join, lhs, lhs_opt, rhs, rhs_opt);
 
-    // Join heaps from stack values
-    auto heap_result =
-        joinHeaps(join_state, heap_post_join, lhs, lhs_opt, rhs, rhs_opt);
-    join_state = heap_result.first;
-    heap_post_join = heap_result.second;
-
-    // Add to joined stack
     Address joined_addr(v_hist_join.first);
     joined_addr.history = v_hist_join.second;
     stack_post_join.add(var, joined_addr);
@@ -649,8 +658,8 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
     }
   }
 
-  // Join formulas
-  PulseFormula joined_formula = joinFormulas(lhs, rhs);
+  // Reuse already-computed formula join instead of joining a second time.
+  PulseFormula joined_formula = std::move(preliminary_formula);
 
   // Add disjunctive equalities from rev_subst: for each v_join mapping to
   // (v_lhs, v_rhs), record `v_join = v_lhs ∨ v_join = v_rhs` (and exact
@@ -700,14 +709,39 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
         if (t1 && t2 && *t1 == *t2) {
           (void)joined_formula.addExactType(v_join, *t1);
         }
-        (void)joined_formula.addDisjunctiveEquality(v_join, l_av, r_av);
+        if (lhs_f.hasValueConstraints(l_av) ||
+            rhs_f.hasValueConstraints(r_av)) {
+          (void)joined_formula.addDisjunctiveEquality(v_join, l_av, r_av);
+        }
       }
-    } else if (pair_opt.first) {
-      // Only lhs: v_join = v_lhs
-      (void)joined_formula.addEquality(v_join, *pair_opt.first);
-    } else if (pair_opt.second) {
-      // Only rhs: v_join = v_rhs
-      (void)joined_formula.addEquality(v_join, *pair_opt.second);
+    } else if (pair_opt.first || pair_opt.second) {
+      // Transfer unary facts from the present side directly onto `v_join`
+      // without adding `v_join = v_side` into `equalities_`, which would
+      // accumulate unbounded dead equality chains across repeated joins.
+      const PulseFormula &src_f = pair_opt.first ? lhs_f : rhs_f;
+      AbstractValue src_av = pair_opt.first ? *pair_opt.first : *pair_opt.second;
+      auto lo = src_f.getLowerBound(src_av);
+      auto hi = src_f.getUpperBound(src_av);
+      if (lo && hi) {
+        (void)joined_formula.addBounds(v_join, *lo, *hi);
+      } else if (lo) {
+        (void)joined_formula.addBounds(v_join, *lo,
+                                       std::numeric_limits<int64_t>::max());
+      } else if (hi) {
+        (void)joined_formula.addBounds(v_join,
+                                       std::numeric_limits<int64_t>::min(), *hi);
+      }
+      if (src_f.isNonNull(src_av)) {
+        (void)joined_formula.addNonNull(v_join);
+      } else if (src_f.isNull(src_av)) {
+        (void)joined_formula.addNull(v_join);
+      }
+      if (src_f.isInteger(src_av)) {
+        joined_formula.addIntegerConstraint(v_join);
+      }
+      if (auto t = src_f.getExactType(src_av)) {
+        (void)joined_formula.addExactType(v_join, *t);
+      }
     }
   }
 

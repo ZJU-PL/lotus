@@ -46,5 +46,33 @@ inline bool &enableMemoryLeaksRef() {
 inline bool enableMemoryLeaks() { return enableMemoryLeaksRef(); }
 inline void setEnableMemoryLeaks(bool b) { enableMemoryLeaksRef() = b; }
 
+/** Tunable analysis budgets (aligned with Infer Pulse CLI options). */
+inline unsigned &maxDisjunctsRef() {
+  static unsigned value = 10u;
+  return value;
+}
+inline unsigned maxDisjuncts() { return maxDisjunctsRef(); }
+inline void setMaxDisjuncts(unsigned n) {
+  maxDisjunctsRef() = (n == 0u ? 1u : n);
+}
+
+inline unsigned &maxLoopIterationsRef() {
+  static unsigned value = 10u;
+  return value;
+}
+inline unsigned maxLoopIterations() { return maxLoopIterationsRef(); }
+inline void setMaxLoopIterations(unsigned n) {
+  maxLoopIterationsRef() = (n == 0u ? 1u : n);
+}
+
+inline unsigned &widenThresholdRef() {
+  static unsigned value = 2u;
+  return value;
+}
+inline unsigned widenThreshold() { return widenThresholdRef(); }
+inline void setWidenThreshold(unsigned n) {
+  widenThresholdRef() = (n == 0u ? 1u : n);
+}
+
 } // namespace options
 } // namespace pulse

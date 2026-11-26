@@ -40,6 +40,9 @@ constexpr NativeCheckDescriptor PULSE_CHECKS[] = {
     {"memory-leak", "Memory leak"},
     {"resource-leak", "Resource leak"},
     {"mutual-recursion-cycle", "Mutual recursion cycle"},
+    {"retain-cycle", "Strong reference retain cycle"},
+    {"infinite-loop", "Non-terminating infinite loop"},
+    {"transitive-access", "Forbidden transitive call policy violation"},
 };
 constexpr NativeCheckDescriptor KINT_CHECKS[] = {
     {"int-overflow", "Integer overflow"},

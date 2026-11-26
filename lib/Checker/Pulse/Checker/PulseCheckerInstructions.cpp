@@ -23,6 +23,7 @@
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Operator.h>
@@ -47,6 +48,17 @@ static bool isExpensiveAggregateType(const llvm::Type *ty,
     return false;
   if (!ty->isStructTy() && !ty->isArrayTy()) {
     return false;
+  }
+  if (const auto *ST = llvm::dyn_cast<llvm::StructType>(ty)) {
+    if (ST->hasName()) {
+      llvm::StringRef n = ST->getName();
+      if (n.contains("string_view") || n.contains("basic_string_view") ||
+          n.contains("span") || n.contains("iterator") ||
+          n.contains("unique_ptr") || n.contains("weak_ptr") ||
+          n.contains("reference_wrapper")) {
+        return false;
+      }
+    }
   }
   if (M && ty->isSized()) {
     return M->getDataLayout().getTypeAllocSize(const_cast<llvm::Type *>(ty)) >=
@@ -175,16 +187,36 @@ atomKindFromIcmpPred(llvm::ICmpInst::Predicate pred) {
   }
 }
 
+static inline std::vector<ExecutionDomain>
+singleState(ExecutionDomain &&st) {
+  std::vector<ExecutionDomain> out;
+  out.reserve(1);
+  out.push_back(std::move(st));
+  return out;
+}
+
 } // namespace
 
 std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     const llvm::Instruction *I, ExecutionDomain exec_state,
     const llvm::BasicBlock *pred, unsigned call_depth) {
   if (exec_state.isStopped() || exec_state.isExceptionRaised())
-    return {exec_state};
+    return singleState(std::move(exec_state));
   auto *astate = exec_state.getAstate();
   if (!astate)
-    return {exec_state};
+    return singleState(std::move(exec_state));
+
+  // Fast O(1) feasibility check for straight-line non-branching instructions
+  // (avoids re-invoking Z3 on every Load/Store/GEP/Cast/PHI when SMT is on).
+  auto pruneInfeasibleFast = [](ExecutionDomain &st) -> bool {
+    if (st.isStopped() || st.isExceptionRaised())
+      return true;
+    AbductiveDomain *a = st.getAstate();
+    if (!a)
+      return true;
+    const PulseFormula &f = a->getPathFormula();
+    return !f.isContradiction() && f.isConsistent();
+  };
 
   auto pruneInfeasible = [](ExecutionDomain &st) -> bool {
     if (st.isStopped() || st.isExceptionRaised())
@@ -192,8 +224,13 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     AbductiveDomain *a = st.getAstate();
     if (!a)
       return true;
-    const PulseFormula &f = a->getPathFormula();
-    return f.isConsistent() && !f.isUnsat();
+    return !a->getPathFormula().isUnsat();
+  };
+
+  auto pruneSingleState = [&](ExecutionDomain &&st) -> std::vector<ExecutionDomain> {
+    if (!pruneInfeasibleFast(st))
+      return {};
+    return singleState(std::move(st));
   };
 
   auto pruneStates =
@@ -225,21 +262,78 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
         }
       };
 
-      std::vector<ExecutionDomain> selected_states;
-      for (bool choose_true : {true, false}) {
-        auto selected = assumeCondition(exec_state.clone(), Sel->getCondition(),
-                                        choose_true, Sel, pred);
-        if (!selected)
-          continue;
-        if (!selected->isStopped()) {
-          apply_choice(*selected, choose_true ? Sel->getTrueValue()
-                                              : Sel->getFalseValue());
+      // Fast path when condition is a compile-time constant boolean.
+      if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(Sel->getCondition())) {
+        apply_choice(exec_state,
+                     CI->isOne() ? Sel->getTrueValue() : Sel->getFalseValue());
+        return singleState(std::move(exec_state));
+      }
+
+      // For branchless scalar integer selects (min/max/clamp/bit-twiddling),
+      // avoid 2^N disjunctive explosion by joining interval bounds into a
+      // single abstract value instead of forking the entire AbductiveDomain.
+      if (Sel->getType()->isIntegerTy()) {
+        auto tv_opt = ops_.eval(*astate, Sel->getTrueValue(), I, pred);
+        auto fv_opt = ops_.eval(*astate, Sel->getFalseValue(), I, pred);
+        AbstractValue res_av = factory_.getOrCreate(Sel);
+        astate->getPathFormula().addIntegerConstraint(res_av);
+        astate->getPathFormula().setBitWidth(
+            res_av, Sel->getType()->getIntegerBitWidth());
+        if (tv_opt && fv_opt) {
+          AbstractValue tc = astate->getCanonical(tv_opt->addr);
+          AbstractValue fc = astate->getCanonical(fv_opt->addr);
+          if (tc == fc) {
+            (void)astate->getPathFormula().addEquality(res_av, tc);
+          } else {
+            const PulseFormula &pf = astate->getPathFormula();
+            auto lo1 = pf.getLowerBound(tc);
+            auto lo2 = pf.getLowerBound(fc);
+            auto hi1 = pf.getUpperBound(tc);
+            auto hi2 = pf.getUpperBound(fc);
+            if (lo1 && lo2 && hi1 && hi2) {
+              (void)astate->getPathFormula().addBounds(
+                  res_av, std::min(*lo1, *lo2), std::max(*hi1, *hi2));
+            } else if (lo1 && lo2) {
+              (void)astate->getPathFormula().addBounds(
+                  res_av, std::min(*lo1, *lo2),
+                  std::numeric_limits<int64_t>::max());
+            } else if (hi1 && hi2) {
+              (void)astate->getPathFormula().addBounds(
+                  res_av, std::numeric_limits<int64_t>::min(),
+                  std::max(*hi1, *hi2));
+            }
+            if (pf.isNonNull(tc) && pf.isNonNull(fc)) {
+              (void)astate->getPathFormula().addNonNull(res_av);
+            }
+          }
+          TaintOperations::propagate(*astate, tc, res_av, I);
+          TaintOperations::propagate(*astate, fc, res_av, I);
         }
-        selected_states.push_back(std::move(*selected));
+        astate->getPostStack().add(Sel, Address(res_av));
+        return singleState(std::move(exec_state));
+      }
+
+      std::vector<ExecutionDomain> selected_states;
+      selected_states.reserve(2);
+      auto true_state = assumeCondition(exec_state.clone(), Sel->getCondition(),
+                                        true, Sel, pred);
+      if (true_state) {
+        if (!true_state->isStopped()) {
+          apply_choice(*true_state, Sel->getTrueValue());
+        }
+        selected_states.push_back(std::move(*true_state));
+      }
+      auto false_state = assumeCondition(std::move(exec_state),
+                                         Sel->getCondition(), false, Sel, pred);
+      if (false_state) {
+        if (!false_state->isStopped()) {
+          apply_choice(*false_state, Sel->getFalseValue());
+        }
+        selected_states.push_back(std::move(*false_state));
       }
       return pruneStates(std::move(selected_states));
     }
-    return pruneStates({exec_state});
+    return pruneSingleState(std::move(exec_state));
   }
 
   if (auto *Phi = llvm::dyn_cast<llvm::PHINode>(I)) {
@@ -267,7 +361,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
                                     I->getFunction());
       astate->getPostStack().add(Phi, canon_result);
     }
-    return pruneStates({exec_state});
+    return pruneSingleState(std::move(exec_state));
   }
 
   if (auto *GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(I)) {
@@ -275,7 +369,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     if (gep_opt) {
       astate->getPostStack().add(GEP, *gep_opt);
     }
-    return pruneStates({exec_state});
+    return pruneSingleState(std::move(exec_state));
   }
 
   if (auto *BC = llvm::dyn_cast<llvm::BitCastInst>(I)) {
@@ -283,7 +377,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     if (src_opt) {
       astate->getPostStack().add(BC, *src_opt);
     }
-    return pruneStates({exec_state});
+    return pruneSingleState(std::move(exec_state));
   }
 
   if (llvm::isa<llvm::ZExtInst>(I) || llvm::isa<llvm::SExtInst>(I) ||
@@ -293,7 +387,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     if (src_opt) {
       astate->getPostStack().add(I, *src_opt);
     }
-    return pruneStates({exec_state});
+    return pruneSingleState(std::move(exec_state));
   }
 
   if (auto *IVI = llvm::dyn_cast<llvm::InsertValueInst>(I)) {
@@ -325,7 +419,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
       }
     }
     astate->getPostStack().add(IVI, res_addr);
-    return pruneStates({exec_state});
+    return pruneSingleState(std::move(exec_state));
   }
 
   if (auto *EVI = llvm::dyn_cast<llvm::ExtractValueInst>(I)) {
@@ -351,13 +445,13 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
       extracted.history = hist;
       astate->getPostStack().add(EVI, extracted);
     }
-    return pruneStates({exec_state});
+    return pruneSingleState(std::move(exec_state));
   }
 
   if (auto *RMW = llvm::dyn_cast<llvm::AtomicRMWInst>(I)) {
     auto ptr_opt = ops_.eval(*astate, RMW->getPointerOperand(), RMW, pred);
     if (!ptr_opt)
-      return pruneStates({exec_state});
+      return pruneSingleState(std::move(exec_state));
     auto read_res = ops_.readDeref(*astate, *ptr_opt, RMW);
     if (read_res.first != OperationResult::Success) {
       Trace trace = Trace::fromValueHistory(ptr_opt->history);
@@ -397,13 +491,13 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
       }
     }
     ops_.writeDeref(*astate, *ptr_opt, new_addr, RMW);
-    return pruneStates({exec_state});
+    return pruneSingleState(std::move(exec_state));
   }
 
   if (auto *CX = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(I)) {
     auto ptr_opt = ops_.eval(*astate, CX->getPointerOperand(), CX, pred);
     if (!ptr_opt)
-      return pruneStates({exec_state});
+      return pruneSingleState(std::move(exec_state));
     auto read_res = ops_.readDeref(*astate, *ptr_opt, CX);
     if (read_res.first != OperationResult::Success) {
       Trace trace = Trace::fromValueHistory(ptr_opt->history);
@@ -472,6 +566,77 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     return pruneStates(std::move(out));
   }
 
+  if (auto *IEI = llvm::dyn_cast<llvm::InsertElementInst>(I)) {
+    AbstractValue res_av = factory_.createFresh(IEI);
+    if (auto vec_opt = ops_.eval(*astate, IEI->getOperand(0), IEI, pred)) {
+      ops_.copySubgraph(*astate, astate->getCanonical(vec_opt->addr), res_av, 2);
+    }
+    if (auto elem_opt = ops_.eval(*astate, IEI->getOperand(1), IEI, pred)) {
+      if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(IEI->getOperand(2))) {
+        astate->getPostHeap().addEdge(
+            res_av, Access(static_cast<unsigned>(CI->getZExtValue())),
+            *elem_opt);
+      }
+    }
+    astate->getPostStack().add(IEI, Address(res_av));
+    return pruneSingleState(std::move(exec_state));
+  }
+
+  if (auto *EEI = llvm::dyn_cast<llvm::ExtractElementInst>(I)) {
+    if (auto vec_opt = ops_.eval(*astate, EEI->getOperand(0), EEI, pred)) {
+      AbstractValue vec_c = astate->getCanonical(vec_opt->addr);
+      if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(EEI->getOperand(1))) {
+        Access acc(static_cast<unsigned>(CI->getZExtValue()));
+        if (const Address *elem = astate->getPostHeap().findEdge(vec_c, acc)) {
+          astate->getPostStack().add(EEI, *elem);
+          return pruneSingleState(std::move(exec_state));
+        }
+      }
+    }
+    astate->getPostStack().add(EEI, Address(factory_.createFresh(EEI)));
+    return pruneSingleState(std::move(exec_state));
+  }
+
+  if (auto *SVI = llvm::dyn_cast<llvm::ShuffleVectorInst>(I)) {
+    AbstractValue res_av = factory_.createFresh(SVI);
+    auto v0_opt = ops_.eval(*astate, SVI->getOperand(0), SVI, pred);
+    auto v1_opt = ops_.eval(*astate, SVI->getOperand(1), SVI, pred);
+    unsigned v0_elems = 0;
+    if (auto *FT = llvm::dyn_cast<llvm::FixedVectorType>(
+            SVI->getOperand(0)->getType())) {
+      v0_elems = FT->getNumElements();
+    }
+    auto mask = SVI->getShuffleMask();
+    for (unsigned out_i = 0; out_i < mask.size(); ++out_i) {
+      int m = mask[out_i];
+      if (m < 0)
+        continue;
+      const Address *src_elem = nullptr;
+      if (static_cast<unsigned>(m) < v0_elems && v0_opt) {
+        src_elem = astate->getPostHeap().findEdge(
+            astate->getCanonical(v0_opt->addr), Access(static_cast<unsigned>(m)));
+      } else if (v1_opt && v0_elems > 0) {
+        src_elem = astate->getPostHeap().findEdge(
+            astate->getCanonical(v1_opt->addr),
+            Access(static_cast<unsigned>(m) - v0_elems));
+      }
+      if (src_elem) {
+        astate->getPostHeap().addEdge(res_av, Access(out_i), *src_elem);
+      }
+    }
+    astate->getPostStack().add(SVI, Address(res_av));
+    return pruneSingleState(std::move(exec_state));
+  }
+
+  if (auto *VAI = llvm::dyn_cast<llvm::VAArgInst>(I)) {
+    AbstractValue res_av = factory_.createFresh(VAI);
+    if (VAI->getType()->isIntegerTy()) {
+      astate->getPathFormula().addIntegerConstraint(res_av);
+    }
+    astate->getPostStack().add(VAI, Address(res_av));
+    return pruneSingleState(std::move(exec_state));
+  }
+
   if (auto *LPI = llvm::dyn_cast<llvm::LandingPadInst>(I)) {
     AbstractValue lp_av = factory_.createFresh(LPI);
     AbstractValue exc_ptr = exec_state.getExceptionValue()
@@ -491,10 +656,9 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
         std::string clause_type =
             detail::normalizeRttiTypeName(LPI->getClause(i));
         if (clause_type.empty()) {
-          // Catch-all (`catch i8* null`) matches if no more specific clause did.
           if (!matched_sel)
             matched_sel = 1;
-        } else if (clause_type == exc_type) {
+        } else if (PulseFormula::isSubtypeOf(exc_type, clause_type)) {
           matched_sel = detail::rttiTypeIdForName(clause_type);
           break;
         }
@@ -511,7 +675,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
     astate->getPostHeap().addEdge(lp_av, Access(0u), Address(exc_ptr));
     astate->getPostHeap().addEdge(lp_av, Access(1u), Address(sel));
     astate->getPostStack().add(LPI, Address(lp_av));
-    return pruneStates({exec_state});
+    return pruneSingleState(std::move(exec_state));
   }
 
   if (auto *ResI = llvm::dyn_cast<llvm::ResumeInst>(I)) {
@@ -533,10 +697,10 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
   }
 
   if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(I))
-    return pruneStates({handleLoad(LI, exec_state, pred)});
+    return pruneSingleState(handleLoad(LI, std::move(exec_state), pred));
 
   if (auto *SI = llvm::dyn_cast<llvm::StoreInst>(I)) {
-    auto result = handleStore(SI, exec_state, pred);
+    auto result = handleStore(SI, std::move(exec_state), pred);
     if (!result.isStopped() && result.getAstate() &&
         topl_program_.observes(ToplEvent::Kind::ArrayWrite, "#ArrayWrite")) {
       const auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(
@@ -554,7 +718,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
         recordToplEvent(state, std::move(event));
       }
     }
-    return pruneStates({std::move(result)});
+    return pruneSingleState(std::move(result));
   }
 
   if (auto *CB = llvm::dyn_cast<llvm::CallBase>(I)) {
@@ -570,7 +734,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
       for (const auto &arg : CB->args())
         event.arguments.push_back(toplValue(*astate, arg.get(), CB, pred));
     }
-    auto results = handleCallBase(CB, exec_state, pred, call_depth);
+    auto results = handleCallBase(CB, std::move(exec_state), pred, call_depth);
     if (observe) {
       for (auto &result : results) {
         if (result.isStopped() || result.isExceptionRaised() ||
@@ -586,9 +750,9 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
   }
 
   if (auto *AI = llvm::dyn_cast<llvm::AllocaInst>(I))
-    return pruneStates({handleAlloca(AI, exec_state)});
+    return pruneSingleState(handleAlloca(AI, std::move(exec_state)));
   if (auto *RI = llvm::dyn_cast<llvm::ReturnInst>(I))
-    return pruneStates({handleReturn(RI, exec_state)});
+    return pruneSingleState(handleReturn(RI, std::move(exec_state)));
 
   if (auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(I)) {
     if (BO->getType()->isFloatingPointTy()) {
@@ -623,7 +787,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
           }
         }
       }
-      return pruneStates({exec_state});
+      return singleState(std::move(exec_state));
     }
     if (BO->getType()->isIntegerTy()) {
       auto lhs_opt = ops_.eval(*astate, BO->getOperand(0), BO, pred);
@@ -685,7 +849,7 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
         }
       }
     }
-    return pruneStates({exec_state});
+    return singleState(std::move(exec_state));
   }
 
   if (llvm::isa<llvm::ICmpInst>(I) || llvm::isa<llvm::FCmpInst>(I)) {
@@ -696,12 +860,12 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
       if (BI->isConditional() &&
           BI->getCondition() ==
               static_cast<llvm::Value *>(const_cast<llvm::Instruction *>(I)))
-        return {exec_state};
+        return singleState(std::move(exec_state));
     }
-    return pruneStates({handleComparison(I, exec_state, pred)});
+    return pruneSingleState(handleComparison(I, std::move(exec_state), pred));
   }
 
-  return pruneStates({exec_state});
+  return pruneSingleState(std::move(exec_state));
 }
 
 std::vector<ExecutionDomain> PulseChecker::handleLibraryCall(
@@ -1098,13 +1262,24 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
   (void)call_depth;
   auto *astate = exec_state.getAstate();
   if (!astate) {
-    return {exec_state};
+    return singleState(std::move(exec_state));
   }
 
   // Handle LLVM intrinsics (eh.typeid.for, lifetime, memcpy/memmove/memset).
   if (auto *II = llvm::dyn_cast<llvm::IntrinsicInst>(
           const_cast<llvm::CallBase *>(CB))) {
     const auto iid = II->getIntrinsicID();
+    if (auto *DVI = llvm::dyn_cast<llvm::DbgVariableIntrinsic>(II)) {
+      if (const llvm::DILocalVariable *var = DVI->getVariable()) {
+        if (const llvm::Value *loc_val = DVI->getVariableLocationOp(0)) {
+          if (auto addr_opt = ops_.eval(*astate, loc_val, CB, pred)) {
+            astate->setDecompilerName(astate->getCanonical(addr_opt->addr),
+                                      var->getName().str());
+          }
+        }
+      }
+      return singleState(std::move(exec_state));
+    }
     if (iid == llvm::Intrinsic::eh_typeid_for && CB->arg_size() >= 1) {
       std::string rtti_name =
           detail::normalizeRttiTypeName(CB->getArgOperand(0));
@@ -1113,7 +1288,7 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
       astate->getPathFormula().addIntegerConstraint(ret_val);
       (void)astate->getPathFormula().addBounds(ret_val, tid, tid);
       astate->getPostStack().add(CB, Address(ret_val));
-      return {exec_state};
+      return singleState(std::move(exec_state));
     }
     if (iid == llvm::Intrinsic::lifetime_start ||
         iid == llvm::Intrinsic::lifetime_end) {
@@ -1130,14 +1305,14 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
           }
         }
       }
-      return {exec_state};
+      return singleState(std::move(exec_state));
     }
 
     if (iid == llvm::Intrinsic::memcpy || iid == llvm::Intrinsic::memmove ||
         iid == llvm::Intrinsic::memset) {
       auto *a = exec_state.getAstate();
       if (!a)
-        return {exec_state};
+        return singleState(std::move(exec_state));
       auto check_len = [&](const Address &addr, const llvm::Value *len_val,
                            const char *detail) {
         auto *CI_len = llvm::dyn_cast<llvm::ConstantInt>(len_val);
@@ -1156,7 +1331,7 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
 
       auto dest_opt = ops_.eval(*a, CB->getArgOperand(0), CB, pred);
       if (!dest_opt)
-        return {exec_state};
+        return singleState(std::move(exec_state));
       if (iid == llvm::Intrinsic::memset) {
         check_len(*dest_opt, CB->getArgOperand(2),
                   "memset writes beyond destination buffer");
@@ -1182,7 +1357,7 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
             break;
           }
         }
-        return {exec_state};
+        return singleState(std::move(exec_state));
       }
 
       auto src_opt = ops_.eval(*a, CB->getArgOperand(1), CB, pred);
@@ -1234,7 +1409,7 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
           break;
         }
       }
-      return {exec_state};
+      return singleState(std::move(exec_state));
     }
   }
 
@@ -1291,26 +1466,50 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
     astate->addSkippedCall("<indirect>");
     astate->declareUnknownValues();
     modelUnknownCallEffects(ops_, *astate, CB, pred, factory_);
-    return {exec_state};
+    return singleState(std::move(exec_state));
   }
 
   std::string func_name = F->getName().str();
-  astate->getTransitiveInfo().recordCallResolution(
-      CB, CB->getFunction(), TransitiveInfo::CallResolution::Resolved, {F});
+  if (!transitive_access_policies_.empty()) {
+    astate->getTransitiveInfo().recordCallResolution(
+        CB, CB->getFunction(), TransitiveInfo::CallResolution::Resolved, {F});
+  }
+
+  // No-return termination (`exit`, `_exit`, `abort`, `__assert_fail`, or
+  // LLVM `noreturn` attribute): stop path cleanly without emitting spurious
+  // post-exit leaks or UAFs.
+  if (F->doesNotReturn() || func_name == "exit" || func_name == "_exit" ||
+      func_name == "_Exit" || func_name == "abort" ||
+      func_name == "__assert_fail" || func_name == "__assert_rtn" ||
+      func_name == "_ZSt9terminatev") {
+    return {ExecutionDomain::abortProgram(
+        std::make_unique<AbductiveDomain>(astate->clone()),
+        OperationResult::Success, Trace())};
+  }
 
   const TaintConfig &taint_cfg = TaintOperations::getConfig();
 
-  // Taint sources (driven by unified TaintConfig ProcedureUnit targets)
+  // Taint sources & source blocks (driven by unified TaintConfig ProcedureUnit
+  // targets, including optional field_index for field-sensitive tainting).
   auto source_units = taint_cfg.matchSources(F);
+  auto block_units = taint_cfg.matchSourceBlocks(F);
+  source_units.insert(source_units.end(), block_units.begin(),
+                      block_units.end());
   if (!source_units.empty()) {
     bool tainted_return = false;
     bool tainted_any_arg = false;
     for (const ProcedureUnit *unit : source_units) {
-      TaintKind kind =
-          unit->kinds.empty() ? TaintKind::UserInput() : unit->kinds.front();
+      std::vector<TaintKind> kinds =
+          unit->kinds.empty() ? std::vector<TaintKind>{TaintKind::UserInput()}
+                              : unit->kinds;
       if (unit->appliesToReturn()) {
         AbstractValue ret_val = factory_.createFresh(CB);
-        TaintOperations::taint(*astate, ret_val, kind, func_name);
+        if (unit->field_index) {
+          TaintOperations::taintField(*astate, ret_val, *unit->field_index,
+                                      kinds, CB, factory_);
+        } else {
+          TaintOperations::taint(*astate, ret_val, kinds, CB);
+        }
         astate->getPostStack().add(CB, Address(ret_val));
         tainted_return = true;
       } else {
@@ -1321,7 +1520,13 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
           if (arg_opt) {
             AbstractValue canon_arg = astate->getCanonical(arg_opt->addr);
             astate->getPostAttrs().remove(canon_arg, Attribute::Uninitialized);
-            TaintOperations::taint(*astate, canon_arg, kind, func_name);
+            if (unit->field_index) {
+              TaintOperations::taintField(*astate, canon_arg,
+                                          *unit->field_index, kinds, CB,
+                                          factory_);
+            } else {
+              TaintOperations::taint(*astate, canon_arg, kinds, CB);
+            }
             tainted_any_arg = true;
           }
         }
@@ -1339,25 +1544,41 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
           astate->getPathFormula().addIntegerConstraint(ret_val);
         }
       }
-      return {exec_state};
+      return singleState(std::move(exec_state));
+    }
+  }
+
+  // Allocation sources matching constructor / factory names.
+  std::vector<TaintKind> alloc_src_kinds =
+      taint_cfg.matchAllocationSourceForName(func_name);
+  if (!alloc_src_kinds.empty() && CB->getType()->isVoidTy() &&
+      CB->arg_size() >= 1) {
+    if (auto this_opt = ops_.eval(*astate, CB->getArgOperand(0), CB, pred)) {
+      TaintOperations::taint(*astate, astate->getCanonical(this_opt->addr),
+                             alloc_src_kinds, CB);
     }
   }
 
   // Taint sinks (both intraprocedural check AND interprocedural
-  // MustNotBeTainted abduction!)
+  // MustNotBeTainted abduction, supporting field-sensitive `field_index`!)
   auto sink_units = taint_cfg.matchSinks(F);
   if (!sink_units.empty()) {
-    std::set<unsigned> checked_args;
+    std::set<std::pair<unsigned, std::optional<unsigned>>> checked_args;
     for (const ProcedureUnit *unit : sink_units) {
       for (unsigned i = 0; i < CB->arg_size(); ++i) {
-        if (!unit->appliesToArgument(i) || !checked_args.insert(i).second)
+        if (!unit->appliesToArgument(i) ||
+            !checked_args.insert({i, unit->field_index}).second)
           continue;
         auto arg_opt = ops_.eval(*astate, CB->getArgOperand(i), CB, pred);
         if (arg_opt) {
           AbstractValue canon_arg = astate->getCanonical(arg_opt->addr);
           bool reported =
-              TaintOperations::checkSink(*astate, canon_arg, func_name, CB);
-          if (!reported && astate->isInPre(canon_arg)) {
+              unit->field_index
+                  ? TaintOperations::checkSinkField(
+                        *astate, canon_arg, *unit->field_index, func_name, CB)
+                  : TaintOperations::checkSink(*astate, canon_arg, func_name,
+                                               CB);
+          if (!reported && !unit->field_index && astate->isInPre(canon_arg)) {
             Trace sink_trace;
             sink_trace.addEvent(CB, "Taint sink: " + func_name);
             std::vector<TaintKind> kinds =
@@ -1375,7 +1596,8 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
     }
   }
 
-  // Taint sanitizers (both local sanitization AND interprocedural post record)
+  // Taint sanitizers (both local sanitization AND interprocedural post record,
+  // supporting field-sensitive `field_index`).
   auto sanitizer_units = taint_cfg.matchSanitizers(F);
   if (!sanitizer_units.empty()) {
     for (const ProcedureUnit *unit : sanitizer_units) {
@@ -1387,10 +1609,16 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
         auto arg_opt = ops_.eval(*astate, CB->getArgOperand(i), CB, pred);
         if (arg_opt) {
           AbstractValue canon_arg = astate->getCanonical(arg_opt->addr);
-          TaintOperations::sanitize(*astate, canon_arg, sanitizer_kind, CB);
-          astate->addTaintSanitized(
-              canon_arg,
-              SanitizerRecord{sanitizer_kind, CB, astate->nextTimestamp()});
+          if (unit->field_index) {
+            TaintOperations::sanitizeField(*astate, canon_arg,
+                                           *unit->field_index, sanitizer_kind,
+                                           CB);
+          } else {
+            TaintOperations::sanitize(*astate, canon_arg, sanitizer_kind, CB);
+            astate->addTaintSanitized(
+                canon_arg,
+                SanitizerRecord{sanitizer_kind, CB, astate->nextTimestamp()});
+          }
         }
       }
     }
@@ -1419,14 +1647,51 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
               ret_val, PropagateTaintFromInfo{{src}, func_name});
         }
       }
-      return {exec_state};
+      return singleState(std::move(exec_state));
     }
   }
 
-  // Try library models first (forwarding resolved indirect callee if any)
-  auto lib_result = handleLibraryCall(CB, exec_state, pred, F);
-  if (!lib_result.empty()) {
-    return lib_result;
+  // Try library models first (forwarding resolved indirect callee if any).
+  // Fast O(1) lookup avoids cloning exec_state on every user-function call.
+  if (models_->hasModel(F)) {
+    auto model_res = models_->dispatch(CB, exec_state, pred, F);
+    if (model_res.handled) {
+      auto &lib_result = model_res.states;
+      if (!lib_result.empty()) {
+        // Check if an allocator result (malloc/operator new) is cast to a
+        // struct type registered in `allocation_sources_` (or factory returns
+        // one).
+        std::vector<TaintKind> ret_alloc_kinds = alloc_src_kinds;
+        if (ret_alloc_kinds.empty() && CB->getType()->isPointerTy()) {
+          for (const llvm::User *U : CB->users()) {
+            if (const auto *BC = llvm::dyn_cast<llvm::BitCastInst>(U)) {
+              if (auto *PT = llvm::dyn_cast<llvm::PointerType>(BC->getType())) {
+                if (auto *ST = llvm::dyn_cast<llvm::StructType>(
+                        PT->getPointerElementType())) {
+                  if (ST->hasName()) {
+                    ret_alloc_kinds = taint_cfg.matchAllocationSourceForName(
+                        ST->getName().str());
+                    if (!ret_alloc_kinds.empty())
+                      break;
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (!ret_alloc_kinds.empty() && !CB->getType()->isVoidTy()) {
+          for (auto &st : lib_result) {
+            if (auto *a = st.getAstate()) {
+              if (const Address *ret_addr = a->getPostStack().find(CB)) {
+                TaintOperations::taint(*a, a->getCanonical(ret_addr->addr),
+                                       ret_alloc_kinds, CB);
+              }
+            }
+          }
+        }
+      }
+      return lib_result;
+    }
   }
 
   // Fallback for malloc/calloc/realloc/free if invoked via InvokeInst before
@@ -1463,7 +1728,7 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
       }
     }
     astate->getPostStack().add(CB, Address(av));
-    return {exec_state};
+    return singleState(std::move(exec_state));
   }
   if (F->getName() == "free") {
     if (CB->arg_size() > 0) {
@@ -1472,7 +1737,7 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
         ops_.invalidate(*astate, *ptr_opt, CB, InvalidationKind::CFree);
       }
     }
-    return {exec_state};
+    return singleState(std::move(exec_state));
   }
 
   // Helper to check whether a recursive call re-enters `caller_fn` with
@@ -1535,14 +1800,20 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
     astate->addSkippedCall(F->getName().str());
     astate->declareUnknownValues();
     modelUnknownCallEffects(ops_, *astate, CB, pred, factory_);
-    return {exec_state};
+    return singleState(std::move(exec_state));
   }
 
   if (F->isDeclaration()) {
     astate->addSkippedCall(F->getName().str());
     astate->declareUnknownValues();
     modelUnknownCallEffects(ops_, *astate, CB, pred, factory_);
-    return {exec_state};
+    if (!alloc_src_kinds.empty() && !CB->getType()->isVoidTy()) {
+      if (const Address *ret_addr = astate->getPostStack().find(CB)) {
+        TaintOperations::taint(*astate, astate->getCanonical(ret_addr->addr),
+                               alloc_src_kinds, CB);
+      }
+    }
+    return singleState(std::move(exec_state));
   }
 
   // On-demand analysis for indirectly resolved functions not visited earlier
@@ -1595,7 +1866,7 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
   astate->addSkippedCall(F->getName().str());
   astate->declareUnknownValues();
   modelUnknownCallEffects(ops_, *astate, CB, pred, factory_);
-  return {exec_state};
+  return singleState(std::move(exec_state));
 }
 
 ExecutionDomain PulseChecker::handleAlloca(const llvm::AllocaInst *AI,
@@ -1617,6 +1888,10 @@ ExecutionDomain PulseChecker::handleAlloca(const llvm::AllocaInst *AI,
         total_size = elem_size * count;
       } else {
         total_size = 0;
+        if (auto sz_opt = ops_.eval(*astate, AI->getArraySize(), AI, nullptr)) {
+          astate->setSymbolicAllocationSize(
+              av, astate->getCanonical(sz_opt->addr));
+        }
       }
     }
     if (total_size > 0) {
@@ -1626,6 +1901,16 @@ ExecutionDomain PulseChecker::handleAlloca(const llvm::AllocaInst *AI,
   astate->getPostAttrs().add(av, Attribute::Stack);
   astate->getPostAttrs().add(av, Attribute::Uninitialized);
   astate->getPostStack().add(AI, Address(av));
+  if (auto *ST = llvm::dyn_cast<llvm::StructType>(AI->getAllocatedType())) {
+    if (ST->hasName()) {
+      auto alloc_kinds =
+          TaintOperations::getConfig().matchAllocationSourceForName(
+              ST->getName().str());
+      if (!alloc_kinds.empty()) {
+        TaintOperations::taint(*astate, av, alloc_kinds, AI);
+      }
+    }
+  }
   return exec_state;
 }
 
@@ -1716,7 +2001,7 @@ std::optional<ExecutionDomain> PulseChecker::assumeCondition(
                : std::nullopt;
   }
 
-  ExecutionDomain forked = state.clone();
+  ExecutionDomain forked = std::move(state);
   auto *astate = forked.getAstate();
   if (!astate)
     return std::nullopt;
@@ -1734,7 +2019,7 @@ std::optional<ExecutionDomain> PulseChecker::assumeCondition(
           {});
     }
     const PulseFormula &formula = astate->getPathFormula();
-    if (!formula.isConsistent() || formula.isUnsat())
+    if (formula.isUnsat())
       return std::nullopt;
     return std::optional<ExecutionDomain>(std::move(forked));
   };

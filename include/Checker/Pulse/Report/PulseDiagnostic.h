@@ -27,6 +27,9 @@ constexpr const char *ConstRefableParam = "Const-Refable Parameter";
 constexpr const char *StackVariableAddressEscape =
     "Stack Variable Address Escape";
 constexpr const char *MutualRecursionCycle = "Mutual Recursion Cycle";
+constexpr const char *RetainCycle = "Retain Cycle";
+constexpr const char *InfiniteLoop = "Infinite Loop";
+constexpr const char *TransitiveAccess = "Transitive Access";
 } // namespace IssueType
 
 class Diagnostic {
@@ -284,6 +287,73 @@ public:
   std::string getSuggestion() const override;
   std::string getIssueType() const override {
     return IssueType::MutualRecursionCycle;
+  }
+  const llvm::Instruction *getLocation() const override { return location_; }
+  const Trace *getTrace() const override { return &trace_; }
+
+  size_t getHash() const override;
+  bool equals(const Diagnostic &other) const override;
+};
+
+class RetainCycle : public Diagnostic {
+  const llvm::Instruction *location_;
+  std::string cycle_description_;
+  Trace trace_;
+
+public:
+  RetainCycle(const llvm::Instruction *loc, const std::string &desc,
+              Trace trace)
+      : location_(loc), cycle_description_(desc), trace_(std::move(trace)) {}
+
+  std::string getMessage() const override;
+  std::string getDescription() const override;
+  std::string getSuggestion() const override;
+  std::string getIssueType() const override { return IssueType::RetainCycle; }
+  const llvm::Instruction *getLocation() const override { return location_; }
+  const Trace *getTrace() const override { return &trace_; }
+
+  size_t getHash() const override;
+  bool equals(const Diagnostic &other) const override;
+};
+
+class InfiniteLoop : public Diagnostic {
+  const llvm::Instruction *location_;
+  std::string description_;
+  Trace trace_;
+
+public:
+  InfiniteLoop(const llvm::Instruction *loc, const std::string &desc,
+               Trace trace)
+      : location_(loc), description_(desc), trace_(std::move(trace)) {}
+
+  std::string getMessage() const override;
+  std::string getDescription() const override;
+  std::string getSuggestion() const override;
+  std::string getIssueType() const override { return IssueType::InfiniteLoop; }
+  const llvm::Instruction *getLocation() const override { return location_; }
+  const Trace *getTrace() const override { return &trace_; }
+
+  size_t getHash() const override;
+  bool equals(const Diagnostic &other) const override;
+};
+
+class TransitiveAccess : public Diagnostic {
+  const llvm::Instruction *location_;
+  std::string policy_name_;
+  std::string detail_;
+  Trace trace_;
+
+public:
+  TransitiveAccess(const llvm::Instruction *loc, const std::string &policy,
+                   const std::string &detail, Trace trace)
+      : location_(loc), policy_name_(policy), detail_(detail),
+        trace_(std::move(trace)) {}
+
+  std::string getMessage() const override;
+  std::string getDescription() const override;
+  std::string getSuggestion() const override;
+  std::string getIssueType() const override {
+    return IssueType::TransitiveAccess;
   }
   const llvm::Instruction *getLocation() const override { return location_; }
   const Trace *getTrace() const override { return &trace_; }

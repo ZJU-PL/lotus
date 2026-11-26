@@ -29,16 +29,25 @@ static llvm::Expected<ProcedureUnit>
 parseProcedureUnit(const llvm::json::Object &obj,
                    ProcedureTarget default_target,
                    const std::vector<TaintKind> &default_kinds) {
+  const bool default_df_only =
+      obj.getBoolean("data_flow_only").getValueOr(false);
   std::vector<TaintKind> kinds;
   if (const auto *arr = obj.getArray("kinds")) {
     for (const auto &v : *arr) {
       if (auto s = v.getAsString()) {
-        kinds.emplace_back(s->str());
+        kinds.emplace_back(s->str(), default_df_only);
+      } else if (const auto *kobj = v.getAsObject()) {
+        if (auto kn = kobj->getString("name")) {
+          bool df = kobj->getBoolean("data_flow_only").getValueOr(default_df_only);
+          kinds.emplace_back(kn->str(), df);
+        }
       }
     }
   }
   if (kinds.empty()) {
-    kinds = default_kinds;
+    for (const auto &dk : default_kinds) {
+      kinds.emplace_back(dk.getName(), dk.isDataFlowOnly() || default_df_only);
+    }
   }
 
   ProcedureTarget target = default_target;
@@ -55,16 +64,25 @@ parseProcedureUnit(const llvm::json::Object &obj,
     }
   }
 
+  std::optional<unsigned> field_idx;
+  if (auto fi = obj.getInteger("field_index")) {
+    if (*fi >= 0) {
+      field_idx = static_cast<unsigned>(*fi);
+    }
+  }
+
   if (auto proc = obj.getString("procedure")) {
     ProcedureMatcher matcher(ProcedureMatcher::Type::ProcedureName,
                              proc->str());
-    return ProcedureUnit(matcher, kinds, target, std::move(positions));
+    return ProcedureUnit(matcher, kinds, target, std::move(positions),
+                         field_idx);
   }
   if (auto proc_re = obj.getString("procedure_regex")) {
     try {
       ProcedureMatcher matcher(ProcedureMatcher::Type::ProcedureNameRegex,
                                proc_re->str());
-      return ProcedureUnit(matcher, kinds, target, std::move(positions));
+      return ProcedureUnit(matcher, kinds, target, std::move(positions),
+                           field_idx);
     } catch (const std::regex_error &e) {
       return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                      "invalid procedure_regex '%s': %s",
@@ -87,7 +105,8 @@ parseProcedureUnit(const llvm::json::Object &obj,
     ProcedureMatcher matcher =
         ProcedureMatcher::forClassAndMethods(std::move(cls_vec),
                                              std::move(mth_vec));
-    return ProcedureUnit(matcher, kinds, target, std::move(positions));
+    return ProcedureUnit(matcher, kinds, target, std::move(positions),
+                         field_idx);
   }
 
   return llvm::createStringError(
@@ -166,92 +185,99 @@ bool ProcedureMatcher::matches(const llvm::Function *func) const {
   return matchesName(func->getName().str(), func->isIntrinsic());
 }
 
-std::vector<const ProcedureUnit *>
-TaintConfig::matchSources(const llvm::Function *func) const {
+namespace {
+static std::vector<const ProcedureUnit *> matchUnitsCached(
+    const std::vector<ProcedureUnit> &units,
+    std::unordered_map<std::string, std::vector<size_t>> &cache,
+    const std::string &func_name, bool is_intrinsic) {
   std::vector<const ProcedureUnit *> out;
-  for (const auto &unit : source_procedures_) {
-    if (unit.matcher.matches(func)) {
-      out.push_back(&unit);
+  if (units.empty() || func_name.empty()) {
+    return out;
+  }
+  std::string key;
+  key.reserve(func_name.size() + 2);
+  key.push_back(is_intrinsic ? 'I' : 'F');
+  key.push_back(':');
+  key.append(func_name);
+
+  auto it = cache.find(key);
+  if (it == cache.end()) {
+    std::vector<size_t> indices;
+    for (size_t i = 0; i < units.size(); ++i) {
+      if (units[i].matcher.matchesName(func_name, is_intrinsic)) {
+        indices.push_back(i);
+      }
     }
+    it = cache.emplace(std::move(key), std::move(indices)).first;
+  }
+  out.reserve(it->second.size());
+  for (size_t idx : it->second) {
+    out.push_back(&units[idx]);
   }
   return out;
+}
+} // namespace
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchSources(const llvm::Function *func) const {
+  if (!func)
+    return {};
+  return matchUnitsCached(source_procedures_, source_cache_,
+                          func->getName().str(), func->isIntrinsic());
 }
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchSourcesByName(const std::string &func_name) const {
-  std::vector<const ProcedureUnit *> out;
-  for (const auto &unit : source_procedures_) {
-    if (unit.matcher.matchesName(func_name)) {
-      out.push_back(&unit);
-    }
-  }
-  return out;
+  return matchUnitsCached(source_procedures_, source_cache_, func_name, false);
+}
+
+std::vector<const ProcedureUnit *>
+TaintConfig::matchSourceBlocks(const llvm::Function *func) const {
+  if (!func)
+    return {};
+  return matchUnitsCached(source_blocks_, source_block_cache_,
+                          func->getName().str(), func->isIntrinsic());
 }
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchSinks(const llvm::Function *func) const {
-  std::vector<const ProcedureUnit *> out;
-  for (const auto &unit : sink_procedures_) {
-    if (unit.matcher.matches(func)) {
-      out.push_back(&unit);
-    }
-  }
-  return out;
+  if (!func)
+    return {};
+  return matchUnitsCached(sink_procedures_, sink_cache_, func->getName().str(),
+                          func->isIntrinsic());
 }
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchSinksByName(const std::string &func_name) const {
-  std::vector<const ProcedureUnit *> out;
-  for (const auto &unit : sink_procedures_) {
-    if (unit.matcher.matchesName(func_name)) {
-      out.push_back(&unit);
-    }
-  }
-  return out;
+  return matchUnitsCached(sink_procedures_, sink_cache_, func_name, false);
 }
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchSanitizers(const llvm::Function *func) const {
-  std::vector<const ProcedureUnit *> out;
-  for (const auto &unit : sanitizer_procedures_) {
-    if (unit.matcher.matches(func)) {
-      out.push_back(&unit);
-    }
-  }
-  return out;
+  if (!func)
+    return {};
+  return matchUnitsCached(sanitizer_procedures_, sanitizer_cache_,
+                          func->getName().str(), func->isIntrinsic());
 }
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchSanitizersByName(const std::string &func_name) const {
-  std::vector<const ProcedureUnit *> out;
-  for (const auto &unit : sanitizer_procedures_) {
-    if (unit.matcher.matchesName(func_name)) {
-      out.push_back(&unit);
-    }
-  }
-  return out;
+  return matchUnitsCached(sanitizer_procedures_, sanitizer_cache_, func_name,
+                          false);
 }
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchPropagators(const llvm::Function *func) const {
-  std::vector<const ProcedureUnit *> out;
-  for (const auto &unit : propagator_procedures_) {
-    if (unit.matcher.matches(func)) {
-      out.push_back(&unit);
-    }
-  }
-  return out;
+  if (!func)
+    return {};
+  return matchUnitsCached(propagator_procedures_, propagator_cache_,
+                          func->getName().str(), func->isIntrinsic());
 }
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchPropagatorsByName(const std::string &func_name) const {
-  std::vector<const ProcedureUnit *> out;
-  for (const auto &unit : propagator_procedures_) {
-    if (unit.matcher.matchesName(func_name)) {
-      out.push_back(&unit);
-    }
-  }
-  return out;
+  return matchUnitsCached(propagator_procedures_, propagator_cache_, func_name,
+                          false);
 }
 
 std::vector<TaintKind> TaintConfig::isSource(const llvm::Function *func) const {
@@ -300,6 +326,30 @@ TaintConfig::getAllocationSourceKinds(const std::string &class_name) const {
   auto it = allocation_sources_.find(class_name);
   if (it != allocation_sources_.end()) {
     return it->second;
+  }
+  return {};
+}
+
+std::vector<TaintKind>
+TaintConfig::matchAllocationSourceForName(const std::string &name) const {
+  if (name.empty() || allocation_sources_.empty())
+    return {};
+  auto exact = allocation_sources_.find(name);
+  if (exact != allocation_sources_.end()) {
+    return exact->second;
+  }
+  const std::string demangled = llvm::demangle(name);
+  const std::string demangled_no_args =
+      demangled.substr(0, demangled.find('('));
+  for (const auto &kv : allocation_sources_) {
+    const std::string &cls = kv.first;
+    if (cls.empty())
+      continue;
+    if (name == "struct." + cls || name == "class." + cls ||
+        name.find(cls) != std::string::npos ||
+        demangled_no_args.find(cls) != std::string::npos) {
+      return kv.second;
+    }
   }
   return {};
 }
@@ -442,6 +492,41 @@ TaintConfig::loadFromJson(llvm::StringRef json_text, bool extend_default) {
       if (!unit)
         return unit.takeError();
       cfg.addPropagatorProcedure(*unit);
+    }
+  }
+  if (const auto *alloc_srcs = root->getArray("allocation_sources")) {
+    for (const auto &v : *alloc_srcs) {
+      const auto *obj = v.getAsObject();
+      if (!obj)
+        continue;
+      auto cls = obj->getString("class_name");
+      if (!cls || cls->empty())
+        continue;
+      const bool df_only = obj->getBoolean("data_flow_only").getValueOr(false);
+      std::vector<TaintKind> kinds;
+      if (const auto *karr = obj->getArray("kinds")) {
+        for (const auto &kv : *karr) {
+          if (auto s = kv.getAsString()) {
+            kinds.emplace_back(s->str(), df_only);
+          }
+        }
+      }
+      if (kinds.empty()) {
+        kinds.emplace_back(TaintKind::UserInput().getName(), df_only);
+      }
+      cfg.addAllocationSource(cls->str(), kinds);
+    }
+  }
+  if (const auto *src_blocks = root->getArray("source_blocks")) {
+    for (const auto &v : *src_blocks) {
+      const auto *obj = v.getAsObject();
+      if (!obj)
+        continue;
+      auto unit = parseProcedureUnit(*obj, ProcedureTarget::ReturnValue,
+                                     {TaintKind::UserInput()});
+      if (!unit)
+        return unit.takeError();
+      cfg.addSourceBlock(*unit);
     }
   }
   if (const auto *policies = root->getArray("policies")) {

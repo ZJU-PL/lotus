@@ -3,6 +3,7 @@
 #include "Checker/Framework/BugReport.h"
 #include "Checker/Framework/BugReportMgr.h"
 #include "Checker/Pulse/Domain/PulseDomain.h"
+#include "Checker/Pulse/Domain/PulseOperations.h"
 #include "Checker/Pulse/Report/PulseDiagnostic.h"
 
 #include <queue>
@@ -81,6 +82,44 @@ static bool itemSanitizedGeneric(const TaintItem &item) {
   return false;
 }
 
+static std::vector<AbstractValue>
+collectFieldTargetAVs(const AbductiveDomain &astate, AbstractValue base,
+                      unsigned field_idx) {
+  std::vector<AbstractValue> out;
+  std::set<AbstractValue> seen;
+  AbstractValue base_c = astate.getCanonical(base);
+  Access field_acc(field_idx);
+
+  auto addNode = [&](AbstractValue av) {
+    AbstractValue c = astate.getCanonical(av);
+    if (seen.insert(c).second) {
+      out.push_back(c);
+    }
+  };
+
+  if (const Address *direct = astate.getPostHeap().findEdge(base_c, field_acc)) {
+    addNode(direct->addr);
+  }
+  // Also match LLVM struct GEP paths: `base --ArrayIndex(0, stride)--> row0 --FieldAccess(field_idx)--> target`.
+  auto edge_it = astate.getPostHeap().getEdges().find(base_c);
+  if (edge_it != astate.getPostHeap().getEdges().end()) {
+    for (const auto &ekv : edge_it->second) {
+      if (ekv.first.kind != AccessKind::ArrayIndex)
+        continue;
+      auto idx_c = astate.getPathFormula().asConstantInt(
+          astate.getCanonical(ekv.first.index));
+      if (!idx_c || *idx_c != 0)
+        continue;
+      AbstractValue row_c = astate.getCanonical(ekv.second.addr);
+      if (const Address *gep_field =
+              astate.getPostHeap().findEdge(row_c, field_acc)) {
+        addNode(gep_field->addr);
+      }
+    }
+  }
+  return out;
+}
+
 } // namespace
 
 void TaintOperations::taint(AbductiveDomain &astate, AbstractValue v,
@@ -113,6 +152,89 @@ void TaintOperations::taint(AbductiveDomain &astate, AbstractValue v,
   TaintItem item({std::move(kind)}, value_tuple, nullptr, nullptr, timestamp);
   astate.getTaintDomain().add(canon, std::move(item));
   astate.getPostAttrs().add(canon, Attribute::Tainted);
+}
+
+void TaintOperations::taintField(AbductiveDomain &astate, AbstractValue base,
+                                 unsigned field_idx,
+                                 const std::vector<TaintKind> &kinds,
+                                 const llvm::Instruction *source,
+                                 AbstractValueFactory &factory) {
+  AbstractValue base_c = astate.getCanonical(base);
+  Access field_acc(field_idx);
+  if (!astate.getPostHeap().findEdge(base_c, field_acc)) {
+    AbstractValue fv = factory.createFresh(source);
+    astate.getPostHeap().addEdge(base_c, field_acc, Address(fv));
+  }
+  const llvm::Function *func =
+      (source && source->getParent()) ? source->getParent()->getParent()
+                                      : nullptr;
+  for (AbstractValue target : collectFieldTargetAVs(astate, base_c, field_idx)) {
+    unsigned timestamp = getNextTimestamp();
+    TaintValue tv(TaintValue::Type::TaintField);
+    tv.field_name = "field_" + std::to_string(field_idx);
+    tv.procedure_name = func ? func->getName().str() : "";
+    TaintValueTuple vt(tv, TaintOrigin::FieldOfValue);
+    TaintItem item(kinds, vt, source, func, timestamp);
+    item.history.addEvent(ValueHistory::EventKind::Unknown, source, func);
+    astate.getTaintDomain().add(target, std::move(item));
+    astate.getPostAttrs().add(target, Attribute::Tainted);
+    if (const Address *deref = astate.getPostHeap().findEdge(
+            target, Access(AccessKind::Dereference))) {
+      propagate(astate, target, deref->addr, source);
+    }
+  }
+}
+
+void TaintOperations::taintField(AbductiveDomain &astate, AbstractValue base,
+                                 unsigned field_idx, TaintKind kind,
+                                 const std::string &procedure_name,
+                                 AbstractValueFactory &factory) {
+  AbstractValue base_c = astate.getCanonical(base);
+  Access field_acc(field_idx);
+  if (!astate.getPostHeap().findEdge(base_c, field_acc)) {
+    AbstractValue fv = factory.createFresh(nullptr);
+    astate.getPostHeap().addEdge(base_c, field_acc, Address(fv));
+  }
+  for (AbstractValue target : collectFieldTargetAVs(astate, base_c, field_idx)) {
+    unsigned timestamp = getNextTimestamp();
+    TaintValue tv(TaintValue::Type::TaintField);
+    tv.field_name = "field_" + std::to_string(field_idx);
+    tv.procedure_name = procedure_name;
+    TaintValueTuple vt(tv, TaintOrigin::FieldOfValue);
+    TaintItem item({kind}, vt, nullptr, nullptr, timestamp);
+    astate.getTaintDomain().add(target, std::move(item));
+    astate.getPostAttrs().add(target, Attribute::Tainted);
+    if (const Address *deref = astate.getPostHeap().findEdge(
+            target, Access(AccessKind::Dereference))) {
+      propagate(astate, target, deref->addr, nullptr);
+    }
+  }
+}
+
+void TaintOperations::sanitizeField(AbductiveDomain &astate, AbstractValue base,
+                                    unsigned field_idx,
+                                    TaintKind sanitizer_kind,
+                                    const llvm::Instruction *sanitizer_loc) {
+  for (AbstractValue target : collectFieldTargetAVs(astate, base, field_idx)) {
+    sanitize(astate, target, sanitizer_kind, sanitizer_loc);
+    if (const Address *deref = astate.getPostHeap().findEdge(
+            target, Access(AccessKind::Dereference))) {
+      sanitize(astate, deref->addr, sanitizer_kind, sanitizer_loc);
+    }
+  }
+}
+
+bool TaintOperations::checkSinkField(AbductiveDomain &astate,
+                                     AbstractValue base, unsigned field_idx,
+                                     const std::string &sink_name,
+                                     const llvm::Instruction *sink_loc) {
+  bool reported = false;
+  for (AbstractValue target : collectFieldTargetAVs(astate, base, field_idx)) {
+    if (checkSink(astate, target, sink_name, sink_loc)) {
+      reported = true;
+    }
+  }
+  return reported;
 }
 
 bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
@@ -152,6 +274,7 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
 
   const TaintConfig &config = getConfig();
   std::vector<SinkPolicy> policies;
+  bool used_default_fallback = false;
   auto matched_sinks = config.matchSinksByName(sink_name);
   std::set<TaintKind> seen_sink_kinds;
   for (const ProcedureUnit *unit : matched_sinks) {
@@ -165,6 +288,7 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
   if (policies.empty() && !seen_sink_kinds.empty()) {
     const auto &fallback = config.getSinkPolicies(TaintKind::UserInput());
     policies.insert(policies.end(), fallback.begin(), fallback.end());
+    used_default_fallback = true;
   }
 
   TaintKind sink_kind =
@@ -175,7 +299,14 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
   for (const TaintItem *item_ptr : candidate_items) {
     const TaintItem &item = *item_ptr;
     if (policies.empty()) {
-      if (!itemSanitizedGeneric(item)) {
+      bool has_reportable_kind = false;
+      for (const auto &k : item.kinds) {
+        if (!k.isDataFlowOnly()) {
+          has_reportable_kind = true;
+          break;
+        }
+      }
+      if (has_reportable_kind && !itemSanitizedGeneric(item)) {
         unsanitized_taints.push_back(&item);
       }
       continue;
@@ -187,8 +318,14 @@ bool TaintOperations::checkSink(AbductiveDomain &astate, AbstractValue v,
         continue;
       }
       for (const auto &item_kind : item.kinds) {
+        if (item_kind.isDataFlowOnly() &&
+            (used_default_fallback || policy.policy_id == 1)) {
+          continue;
+        }
         for (const auto &source_kind : policy.source_kinds) {
-          if (item_kind == source_kind || item_kind == TaintKind::Unknown()) {
+          if (item_kind == source_kind ||
+              (!item_kind.isDataFlowOnly() &&
+               item_kind == TaintKind::Unknown())) {
             matched_policy = true;
             break;
           }

@@ -106,6 +106,115 @@ collectBoundaryRoots(const llvm::Function *F, const AbductiveDomain &astate,
 }
 
 /**
+ * Infer-style retain-cycle checker (PulseRetainCycleChecker.ml):
+ * Detects unreachable ownership cycles among strong-refcounted (shared_ptr)
+ * objects in post_heap_ whose cycles prevent deallocation at exit.
+ */
+static std::set<AbstractValue>
+checkRetainCyclesOnExit(const llvm::Function *F, const AbductiveDomain &astate,
+                        const std::set<AbstractValue> &live_post,
+                        const llvm::Instruction *exit_loc) {
+  std::set<AbstractValue> cycle_nodes;
+  if (astate.getSharedPtrTargets().empty()) {
+    return cycle_nodes;
+  }
+
+  auto is_allocated = [&astate](AbstractValue v) {
+    return astate.isAllocated(v);
+  };
+  if (!astate.getPathFormula().isManifest(is_allocated) ||
+      astate.preHeapHasAssumptions()) {
+    return cycle_nodes;
+  }
+
+  std::set<AbstractValue> live_roots;
+  for (AbstractValue lv : live_post) {
+    live_roots.insert(astate.getCanonical(lv));
+    live_roots.insert(astate.getAllocationRoot(lv));
+  }
+
+  const auto &edges = astate.getPostHeap().getEdges();
+  for (AbstractValue raw_target : astate.getSharedPtrTargets()) {
+    AbstractValue start = astate.getCanonical(raw_target);
+    if (cycle_nodes.count(start) > 0 ||
+        astate.getPostAttrs().has(start, Attribute::Invalid) ||
+        live_post.count(start) > 0 || live_roots.count(start) > 0 ||
+        live_roots.count(astate.getAllocationRoot(start)) > 0) {
+      continue;
+    }
+
+    // Bounded BFS/DFS from `start` through post_heap_ to find a cycle back to
+    // `start`.
+    std::vector<AbstractValue> path;
+    std::set<AbstractValue> visiting;
+    std::function<bool(AbstractValue, unsigned)> dfs =
+        [&](AbstractValue cur, unsigned depth) -> bool {
+      if (depth > 8)
+        return false;
+      auto it = edges.find(cur);
+      if (it == edges.end())
+        return false;
+      for (const auto &ekv : it->second) {
+        // Weak references (std::weak_ptr) do not participate in strong
+        // ownership cycles.
+        if (ekv.first.kind == AccessKind::Field &&
+            (ekv.first.field_idx == 0x7FFFFFF0u ||
+             ekv.first.field_idx == 0x7FFFFFF1u)) {
+          continue;
+        }
+        AbstractValue nxt = astate.getCanonical(ekv.second.addr);
+        if (astate.getPostAttrs().has(nxt, Attribute::Invalid)) {
+          continue;
+        }
+        if (nxt == start) {
+          return true;
+        }
+        if (visiting.insert(nxt).second) {
+          path.push_back(nxt);
+          if (dfs(nxt, depth + 1)) {
+            return true;
+          }
+          path.pop_back();
+        }
+      }
+      return false;
+    };
+
+    if (dfs(start, 0)) {
+      cycle_nodes.insert(start);
+      for (AbstractValue n : path) {
+        cycle_nodes.insert(n);
+      }
+
+      const llvm::Instruction *report_loc = exit_loc;
+      Trace trace;
+      if (auto info = astate.getAllocationInfo(start)) {
+        if (info->location) {
+          trace.addEvent(info->location, "Strong-refcounted object allocated");
+          if (!report_loc)
+            report_loc = info->location;
+        }
+      }
+      if (!report_loc && !F->empty()) {
+        report_loc = F->back().getTerminator();
+      }
+      if (report_loc) {
+        trace.addEvent(report_loc,
+                       "Strong reference cycle keeps refcount > 0 at exit");
+        std::string name =
+            astate.getDecompilerName(start).value_or("shared_ptr object");
+        auto diag = std::make_unique<RetainCycle>(
+            report_loc, name + " participates in a strong reference cycle",
+            std::move(trace));
+        DiagnosticManager::getInstance().report(std::move(diag));
+      }
+    }
+  }
+
+  return cycle_nodes;
+}
+
+/**
  * Infer-style leak detection at function exit (PulseAbductiveDomain.check_memory_leaks):
  * Reports MemoryLeak / ResourceLeak for any heap/resource allocation that is
  * unreachable from formals, return value, or globals (and not reachable via
@@ -116,6 +225,9 @@ static void checkLeaksOnExit(const llvm::Function *F,
                              const AbductiveDomain &astate,
                              const std::set<AbstractValue> &live_post,
                              const llvm::Instruction *exit_loc) {
+  std::set<AbstractValue> retain_cycle_nodes =
+      checkRetainCyclesOnExit(F, astate, live_post, exit_loc);
+
   if (!options::enableMemoryLeaks()) {
     return;
   }
@@ -140,6 +252,10 @@ static void checkLeaksOnExit(const llvm::Function *F,
   for (const auto &kv : astate.getPostAllocationInfo()) {
     AbstractValue addr = astate.getCanonical(kv.first);
     const AllocationInfo &info = kv.second;
+
+    if (retain_cycle_nodes.count(addr) > 0) {
+      continue; // Already diagnosed as a RetainCycle.
+    }
 
     if (!isHeapAllocator(info.kind) && !isResourceAllocator(info.kind)) {
       continue;
@@ -458,7 +574,7 @@ void PulseChecker::createSummary(
                      std::to_string(latent_exit_states.size()) +
                      " latent states)");
   PulseLogger::incrementCounter("summaries.created");
-  if (exit_states.empty() && latent_exit_states.empty())
+  if (exit_states.empty() && latent_exit_states.empty() && spec_key)
     return;
 
   auto summary_ptr = std::make_unique<PulseSummary>(F);
@@ -507,21 +623,23 @@ void PulseChecker::createSummary(
     }
 
     AbductiveDomain pruned = pruneForSummary(F, *astate, std::nullopt, false);
-    const PulseFormula formula = pruned.getPathFormula().clone();
+    PulseFormula formula = pruned.getPathFormula().clone();
     merged_transitive =
         TransitiveInfo::merge(merged_transitive, pruned.getTransitiveInfo());
-    auto pre = std::make_unique<AbductiveDomain>(pruned.clone());
-    auto post = std::make_unique<AbductiveDomain>(std::move(pruned));
+    auto shared_dom =
+        std::make_shared<const AbductiveDomain>(std::move(pruned));
     summary.addPrePost(SummaryEntry(
-        std::move(pre), formula.clone(), std::move(post), formula.clone(),
-        std::nullopt,
+        std::move(shared_dom), std::move(formula), std::nullopt,
         std::optional<SummaryEntry::LatentIssueSummary>(std::move(latent))));
     latent_added++;
   }
 
   bool has_any_entry = latent_added > 0;
+  const unsigned kMaxSummaryNormalEntries = std::min(kMaxDisjuncts, 10u);
   const unsigned max_normal_entries =
-      kMaxDisjuncts > latent_added ? (kMaxDisjuncts - latent_added) : 0u;
+      kMaxSummaryNormalEntries > latent_added
+          ? (kMaxSummaryNormalEntries - latent_added)
+          : 0u;
   const bool run_leak_check = (spec_key == nullptr);
 
   for (const auto &exit_state : exit_states) {
@@ -573,18 +691,24 @@ void PulseChecker::createSummary(
       exc_val = pruned.getCanonical(*exc_val);
     }
 
-    const PulseFormula formula = pruned.getPathFormula().clone();
+    PulseFormula formula = pruned.getPathFormula().clone();
     merged_transitive =
         TransitiveInfo::merge(merged_transitive, pruned.getTransitiveInfo());
-    auto pre = std::make_unique<AbductiveDomain>(pruned.clone());
-    auto post = std::make_unique<AbductiveDomain>(std::move(pruned));
-    summary.addPrePost(SummaryEntry(std::move(pre), formula.clone(),
-                                    std::move(post), formula.clone(), ret_val,
-                                    std::nullopt, is_exception, exc_val,
-                                    std::move(exc_type)));
+    auto shared_dom =
+        std::make_shared<const AbductiveDomain>(std::move(pruned));
+    summary.addPrePost(SummaryEntry(std::move(shared_dom), std::move(formula),
+                                    ret_val, std::nullopt, is_exception,
+                                    exc_val, std::move(exc_type)));
   }
 
   if (!has_any_entry) {
+    if (!spec_key) {
+      // Cache an empty summary (preserving non-disjunctive and transitive info)
+      // so callers do not re-analyze this procedure from scratch on every call.
+      summary.setTransitiveInfo(std::move(merged_transitive));
+      summary.setNonDisj(analysis_non_disj_.createSummary());
+      summary_manager_.storeSummary(F, std::move(summary));
+    }
     return;
   }
 

@@ -132,8 +132,15 @@ static bool materializePreFromAddress(
     AbstractValueFactory &factory, const AbductiveDomain *callee_pre,
     const AbductiveDomain *callee_post, const PulseFormula &callee_pre_formula,
     AbstractValue callee_addr, AbstractValue caller_addr,
-    const ValueHistory &caller_hist, const CallState::LazyHeapPath &path,
-    CallState &call_state) {
+    ValueHistory caller_hist, const CallState::LazyHeapPath &path,
+    CallState &call_state, unsigned depth = 0) {
+  constexpr unsigned kMaxMaterializeDepth = 64;
+  constexpr size_t kMaxMaterializeVisited = 512;
+  if (depth >= kMaxMaterializeDepth ||
+      call_state.getVisited().size() >= kMaxMaterializeVisited) {
+    return true;
+  }
+
   AbstractValue c_callee = callee_pre->getCanonical(callee_addr);
   AbductiveDomain &caller_astate = call_state.getAstate();
   AbstractValue c_caller = caller_astate.getCanonical(caller_addr);
@@ -159,6 +166,9 @@ static bool materializePreFromAddress(
   }
 
   for (const auto &edge_kv : pre_it->second) {
+    // Refresh canonical caller rep in case an earlier iteration merged AVs.
+    c_caller = caller_astate.getCanonical(c_caller);
+
     const Access &access = edge_kv.first;
     const Address &callee_target = edge_kv.second;
     AbstractValue callee_target_canon =
@@ -179,6 +189,7 @@ static bool materializePreFromAddress(
       AbstractValue fresh_target = factory.createFresh();
       Address target_addr(fresh_target);
       target_addr.history = caller_hist;
+      ValueHistory target_hist = caller_hist;
 
       caller_astate.getPostHeap().addEdge(c_caller, access, target_addr);
       caller_astate.abduceToPre(c_caller, access, target_addr);
@@ -186,29 +197,32 @@ static bool materializePreFromAddress(
 
       if (!visitMapping(call_state, callee_pre, callee_post, callee_pre_formula,
                         callee_target_canon, callee_target.history,
-                        fresh_target, target_addr.history, next_path)) {
+                        fresh_target, target_hist, next_path)) {
         return false;
       }
+      fresh_target = caller_astate.getCanonical(fresh_target);
       if (!materializePreFromAddress(factory, callee_pre, callee_post,
                                      callee_pre_formula, callee_target_canon,
-                                     fresh_target, target_addr.history,
-                                     next_path, call_state)) {
+                                     fresh_target, target_hist, next_path,
+                                     call_state, depth + 1)) {
         return false;
       }
     } else {
+      // Copy history by value before visitMapping(), which may canonicalize
+      // caller_astate's heap and invalidate `caller_target`!
       AbstractValue caller_target_canon =
           caller_astate.getCanonical(caller_target->addr);
+      ValueHistory caller_target_hist = caller_target->history;
       if (!visitMapping(call_state, callee_pre, callee_post, callee_pre_formula,
                         callee_target_canon, callee_target.history,
-                        caller_target_canon, caller_target->history,
-                        next_path)) {
+                        caller_target_canon, caller_target_hist, next_path)) {
         return false;
       }
+      caller_target_canon = caller_astate.getCanonical(caller_target_canon);
       if (!materializePreFromAddress(factory, callee_pre, callee_post,
                                      callee_pre_formula, callee_target_canon,
-                                     caller_target_canon,
-                                     caller_target->history, next_path,
-                                     call_state)) {
+                                     caller_target_canon, caller_target_hist,
+                                     next_path, call_state, depth + 1)) {
         return false;
       }
     }
@@ -432,6 +446,20 @@ static void applyPostCondition(
     if (auto caller_opt = subst.substitute(callee_post->getCanonical(kv.first))) {
       caller_astate.setAllocationSize(caller_astate.getCanonical(*caller_opt),
                                       kv.second);
+    }
+  }
+  for (const auto &kv : callee_post->getSymbolicAllocationSizes()) {
+    auto c_addr = subst.substitute(callee_post->getCanonical(kv.first));
+    auto c_sz = subst.substitute(callee_post->getCanonical(kv.second));
+    if (c_addr && c_sz) {
+      caller_astate.setSymbolicAllocationSize(
+          caller_astate.getCanonical(*c_addr),
+          caller_astate.getCanonical(*c_sz));
+    }
+  }
+  for (AbstractValue sp : callee_post->getSharedPtrTargets()) {
+    if (auto c_sp = subst.substitute(callee_post->getCanonical(sp))) {
+      caller_astate.addSharedPtrTarget(caller_astate.getCanonical(*c_sp));
     }
   }
   for (const auto &kv : callee_post->getAllocationRoots()) {
@@ -685,52 +713,54 @@ std::vector<ExecutionDomain> PulseChecker::applySummaryImproved(
       // 5. Conjoin callee formula via Infer's andCalleeFormula (bumps condition
       //    depths by +1, discharges conditions entailed by caller facts, and
       //    returns discovered caller NewEqs).
-      auto merged_pre_opt = PulseFormula::andCalleeFormula(
-          work_astate.getPathFormula(), callee_pre_formula,
-          call_state.getSubst(), factory_);
-      if (!merged_pre_opt) {
-        merged_contradiction = mergeContradictions(
-            merged_contradiction,
-            Contradiction::makePathCondition(
-                "Caller formula contradicts callee precondition"));
-        continue;
-      }
-
-      work_astate.setPathFormula(
-          std::make_unique<PulseFormula>(std::move(merged_pre_opt->first)));
-      IncorporateResult inc_res =
-          call_state.incorporateNewEqs(merged_pre_opt->second);
-      if (inc_res.isUnsat()) {
-        merged_contradiction = mergeContradictions(
-            merged_contradiction,
-            Contradiction::makePathCondition(
-                "Incorporating callee equalities led to UNSAT"));
-        continue;
-      }
-      if (inc_res.isPotentialInvalidAccess()) {
-        Trace via_trace =
-            buildViaCallTrace(inc_res.must_be_valid.trace, callee, CI);
-        if (LatentIssue::isManifest(OperationResult::NullDereference,
-                                    work_astate, inc_res.address)) {
-          reportBug(OperationResult::NullDereference, CI, inc_res.address,
-                    via_trace, &work_astate);
-          results.push_back(ExecutionDomain::abortProgram(
-              call_state.takeAstate(), OperationResult::NullDereference,
-              std::move(via_trace)));
-        } else {
-          std::vector<
-              std::pair<const llvm::Function *, const llvm::Instruction *>>
-              cc;
-          cc.emplace_back(callee, CI);
-          results.push_back(ExecutionDomain::latentInvalidAccess(
-              call_state.takeAstate(), inc_res.address,
-              std::make_pair(std::move(via_trace),
-                             inc_res.must_be_valid.reason),
-              std::move(cc)));
+      if (!callee_pre_formula.isEmpty()) {
+        auto merged_pre_opt = PulseFormula::andCalleeFormula(
+            work_astate.getPathFormula(), callee_pre_formula,
+            call_state.getSubst(), factory_);
+        if (!merged_pre_opt) {
+          merged_contradiction = mergeContradictions(
+              merged_contradiction,
+              Contradiction::makePathCondition(
+                  "Caller formula contradicts callee precondition"));
+          continue;
         }
-        if (results.size() >= kMaxDisjuncts)
-          break;
-        continue;
+
+        work_astate.setPathFormula(
+            std::make_unique<PulseFormula>(std::move(merged_pre_opt->first)));
+        IncorporateResult inc_res =
+            call_state.incorporateNewEqs(merged_pre_opt->second);
+        if (inc_res.isUnsat()) {
+          merged_contradiction = mergeContradictions(
+              merged_contradiction,
+              Contradiction::makePathCondition(
+                  "Incorporating callee equalities led to UNSAT"));
+          continue;
+        }
+        if (inc_res.isPotentialInvalidAccess()) {
+          Trace via_trace =
+              buildViaCallTrace(inc_res.must_be_valid.trace, callee, CI);
+          if (LatentIssue::isManifest(OperationResult::NullDereference,
+                                      work_astate, inc_res.address)) {
+            reportBug(OperationResult::NullDereference, CI, inc_res.address,
+                      via_trace, &work_astate);
+            results.push_back(ExecutionDomain::abortProgram(
+                call_state.takeAstate(), OperationResult::NullDereference,
+                std::move(via_trace)));
+          } else {
+            std::vector<
+                std::pair<const llvm::Function *, const llvm::Instruction *>>
+                cc;
+            cc.emplace_back(callee, CI);
+            results.push_back(ExecutionDomain::latentInvalidAccess(
+                call_state.takeAstate(), inc_res.address,
+                std::make_pair(std::move(via_trace),
+                               inc_res.must_be_valid.reason),
+                std::move(cc)));
+          }
+          if (results.size() >= kMaxDisjuncts)
+            break;
+          continue;
+        }
       }
 
       // 6. Materialize delayed ArrayIndex edges (including nested array/struct
@@ -813,7 +843,8 @@ std::vector<ExecutionDomain> PulseChecker::applySummaryImproved(
         continue;
       }
 
-      // 7. Check for dynamic type specialization needed.
+      // 7. Check for dynamic type specialization needed (and bubble up to
+      //    caller's pre-footprint for multi-hop wrapper chains!).
       if (!post->getNeedDynamicTypeSpecialization().empty()) {
         std::map<HeapPath, AbstractValue> dt_paths;
         std::map<HeapPath, std::string> dt_names;
@@ -828,6 +859,11 @@ std::vector<ExecutionDomain> PulseChecker::applySummaryImproved(
                   dt_names[*hp] = *dyn_ty;
                 }
               }
+            } else if (work_astate.isInPre(c_av)) {
+              // Caller itself doesn't know the dynamic type yet, so propagate
+              // the specialization demand up to caller's callers (Infer
+              // PulseSpecializedCallGraph).
+              work_astate.addNeedDynamicTypeSpecialization(c_av);
             }
           }
         }
@@ -999,18 +1035,22 @@ std::vector<ExecutionDomain> PulseChecker::applySummaryImproved(
       //     allocations, taint transfers, sanitizers, transitive info).
       applyPostCondition(post, pre, call_state, factory_, ops_, callee, CI);
 
-      // Conjoin post formula if it adds facts beyond pre formula.
-      auto merged_post_opt = PulseFormula::andCalleeFormula(
-          work_astate.getPathFormula(), entry.getPostFormula(),
-          call_state.getSubst(), factory_);
-      if (!merged_post_opt) {
-        continue;
-      }
-      work_astate.setPathFormula(
-          std::make_unique<PulseFormula>(std::move(merged_post_opt->first)));
-      auto post_inc = call_state.incorporateNewEqs(merged_post_opt->second);
-      if (post_inc.isUnsat()) {
-        continue;
+      // Conjoin post formula only when distinct from pre formula (summary
+      // entries created by createSummary share a single unified formula that
+      // was already conjoined in step 5).
+      if (entry.hasDistinctPostFormula() && !entry.getPostFormula().isEmpty()) {
+        auto merged_post_opt = PulseFormula::andCalleeFormula(
+            work_astate.getPathFormula(), entry.getPostFormula(),
+            call_state.getSubst(), factory_);
+        if (!merged_post_opt) {
+          continue;
+        }
+        work_astate.setPathFormula(
+            std::make_unique<PulseFormula>(std::move(merged_post_opt->first)));
+        auto post_inc = call_state.incorporateNewEqs(merged_post_opt->second);
+        if (post_inc.isUnsat()) {
+          continue;
+        }
       }
 
       // 11. Interprocedural taint sink check (MustNotBeTainted in callee pre).
@@ -1147,14 +1187,23 @@ std::vector<ExecutionDomain> PulseChecker::applySummaryImproved(
       // caller's non-disjunctive domain (suppresses false UnnecessaryCopy /
       // ConstRefableParam warnings when callees mutate passed aggregates).
       if (!summary.getNonDisj().getModifiedParamIndices().empty()) {
-        AbductiveDomain eval_copy = caller_astate->clone();
+        std::unique_ptr<AbductiveDomain> eval_copy;
         for (unsigned arg_idx :
              summary.getNonDisj().getModifiedParamIndices()) {
-          if (arg_idx < actual_arg_count) {
-            if (auto actual_opt = ops_.eval(
-                    eval_copy, CI->getArgOperand(arg_idx), CI, pred)) {
+          if (arg_idx >= actual_arg_count)
+            continue;
+          const llvm::Value *arg = CI->getArgOperand(arg_idx);
+          if (const Address *addr = caller_astate->getPostStack().find(arg)) {
+            analysis_non_disj_.markAddressModified(
+                caller_astate->getCanonical(addr->addr), *caller_astate);
+          } else {
+            if (!eval_copy) {
+              eval_copy = std::make_unique<AbductiveDomain>(
+                  caller_astate->clone());
+            }
+            if (auto actual_opt = ops_.eval(*eval_copy, arg, CI, pred)) {
               analysis_non_disj_.markAddressModified(
-                  eval_copy.getCanonical(actual_opt->addr), eval_copy);
+                  eval_copy->getCanonical(actual_opt->addr), *eval_copy);
             }
           }
         }

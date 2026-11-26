@@ -13,6 +13,7 @@
 #include "Checker/Pulse/Checker/PulseChecker.h"
 #include "Checker/Pulse/Domain/PulseTaint.h"
 #include "Checker/Pulse/Domain/PulseTaintConfig.h"
+#include "Checker/Pulse/Interproc/PulseTransitiveInfo.h"
 #include "Checker/Pulse/Report/PulseDiagnostic.h"
 #include "Checker/Pulse/Report/PulseLogger.h"
 #include "Checker/Pulse/Report/PulseOptions.h"
@@ -59,6 +60,26 @@ static cl::opt<bool> ReportLatentIssues(
 static cl::opt<std::string> TaintConfigPath(
     "pulse.taint-config",
     cl::desc("JSON file specifying custom Pulse taint sources/sinks/policies"),
+    cl::init(""), cl::sub(lotus::checker::tooling::pulseSubCommand()));
+static cl::opt<unsigned> MaxDisjuncts(
+    "pulse.max-disjuncts",
+    cl::desc("Maximum number of disjuncts retained per program point"),
+    cl::init(10u), cl::sub(lotus::checker::tooling::pulseSubCommand()));
+static cl::opt<unsigned> MaxLoopIters(
+    "pulse.max-loop-iters",
+    cl::desc("Maximum number of loop iterations before stopping exploration"),
+    cl::init(10u), cl::sub(lotus::checker::tooling::pulseSubCommand()));
+static cl::opt<unsigned> WidenThreshold(
+    "pulse.widen-threshold",
+    cl::desc("Loop header visit threshold before widening / invariant inference"),
+    cl::init(2u), cl::sub(lotus::checker::tooling::pulseSubCommand()));
+static cl::opt<bool> NoMemoryLeaks(
+    "pulse.no-memory-leaks",
+    cl::desc("Disable Pulse memory and resource leak reporting"),
+    cl::init(false), cl::sub(lotus::checker::tooling::pulseSubCommand()));
+static cl::opt<std::string> TransitiveAccessConfigPath(
+    "pulse.transitive-access-config",
+    cl::desc("JSON file specifying forbidden transitive call policies"),
     cl::init(""), cl::sub(lotus::checker::tooling::pulseSubCommand()));
 
 int runPulseCheckerTool(const char *argv0) {
@@ -118,8 +139,28 @@ int runPulseCheckerTool(const char *argv0) {
   pulse::options::setDisableSMT(disableSMT);
   pulse::options::setModelMallocFailure(ModelMallocFailure);
   pulse::options::setReportLatentIssues(ReportLatentIssues);
+  pulse::options::setMaxDisjuncts(MaxDisjuncts);
+  pulse::options::setMaxLoopIterations(MaxLoopIters);
+  pulse::options::setWidenThreshold(WidenThreshold);
+  pulse::options::setEnableMemoryLeaks(!NoMemoryLeaks);
   if (disableSMT) {
     PulseLogger::info("Fast mode: SMT solving disabled");
+  }
+
+  std::vector<TransitiveAccessPolicy> transitivePolicies;
+  if (!TransitiveAccessConfigPath.empty()) {
+    auto buffer = MemoryBuffer::getFile(TransitiveAccessConfigPath);
+    if (!buffer) {
+      errs() << "error: cannot read transitive access config: "
+             << buffer.getError().message() << '\n';
+      return lotus::checker::tooling::EXIT_ERROR;
+    }
+    auto parsed = loadTransitiveAccessPoliciesFromJson((*buffer)->getBuffer());
+    if (!parsed) {
+      logAllUnhandledErrors(parsed.takeError(), errs(), "error: ");
+      return lotus::checker::tooling::EXIT_ERROR;
+    }
+    transitivePolicies = std::move(*parsed);
   }
 
   SMDiagnostic Err;
@@ -148,6 +189,8 @@ int runPulseCheckerTool(const char *argv0) {
   PulseChecker checker(M.get(), AA.get());
   if (topl && selected.count("topl"))
     checker.setToplProgram(std::move(*topl));
+  if (!transitivePolicies.empty())
+    checker.setTransitiveAccessPolicies(std::move(transitivePolicies));
 
   PulseLogger::startTimer("analysis");
   checker.analyze();
@@ -169,6 +212,9 @@ int runPulseCheckerTool(const char *argv0) {
       {"memory-leak", IssueType::MemoryLeak},
       {"resource-leak", IssueType::ResourceLeak},
       {"mutual-recursion-cycle", IssueType::MutualRecursionCycle},
+      {"retain-cycle", IssueType::RetainCycle},
+      {"infinite-loop", IssueType::InfiniteLoop},
+      {"transitive-access", IssueType::TransitiveAccess},
   };
   std::set<std::string> disabledBugTypes;
   for (const auto &[id, bugType] : checkBugTypes) {

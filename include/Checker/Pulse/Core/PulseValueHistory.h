@@ -59,15 +59,26 @@ private:
   struct Node {
     Event event;
     std::shared_ptr<const Node> parent;
+    size_t depth;
 
     Node(Event e, std::shared_ptr<const Node> p)
-        : event(std::move(e)), parent(std::move(p)) {}
+        : event(std::move(e)), parent(std::move(p)),
+          depth(parent ? parent->depth + 1 : 1) {}
   };
 
+  static constexpr size_t kMaxHistoryDepth = 64;
   std::shared_ptr<const Node> head_;
 
 public:
   ValueHistory() = default;
+  ~ValueHistory() {
+    // Iteratively release uniquely-owned chain nodes to avoid stack overflow.
+    while (head_ && head_.use_count() == 1) {
+      auto next = head_->parent;
+      head_.reset();
+      head_ = std::move(next);
+    }
+  }
 
   // Copy constructor shares the history (cheap)
   ValueHistory(const ValueHistory &) = default;
@@ -77,11 +88,21 @@ public:
 
   void addEvent(EventKind kind, const llvm::Instruction *loc,
                 const llvm::Function *func = nullptr, std::string desc = "") {
+    if (head_ && head_->depth >= kMaxHistoryDepth &&
+        kind != EventKind::Allocation) {
+      return;
+    }
+    if (head_ && head_->depth >= kMaxHistoryDepth + 16) {
+      return;
+    }
     Event e(kind, loc, func, std::move(desc));
     head_ = std::make_shared<Node>(std::move(e), head_);
   }
 
   void addAllocationEvent(const llvm::Instruction *loc, AbstractValue *av) {
+    if (head_ && head_->depth >= kMaxHistoryDepth + 16) {
+      return;
+    }
     Event e(EventKind::Allocation, loc);
     e.related_value = av;
     head_ = std::make_shared<Node>(std::move(e), head_);
@@ -90,7 +111,12 @@ public:
   // Get events in chronological order (oldest to newest)
   std::vector<Event> getEvents() const {
     std::vector<Event> events;
-    for (auto node = head_; node; node = node->parent) {
+    if (head_) {
+      events.reserve(std::min(head_->depth, kMaxHistoryDepth + 16));
+    }
+    size_t count = 0;
+    for (auto node = head_; node && count < kMaxHistoryDepth + 16;
+         node = node->parent, ++count) {
       events.push_back(node->event);
     }
     // The list is newest-first, so reverse to get chronological order
@@ -99,6 +125,9 @@ public:
   }
 
   bool isEmpty() const { return !head_; }
+  bool sharesHead(const ValueHistory &other) const {
+    return head_ == other.head_;
+  }
 
   ValueHistory clone() const {
     return *this; // Sharing is caring
