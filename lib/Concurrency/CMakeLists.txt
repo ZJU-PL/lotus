@@ -32,7 +32,7 @@ target_link_libraries(Concurrency
   # StaticThreadSharingAnalysis uses Sea-DSA directly, independently of the
   # wrapper's available backends.
   SeaDsaAnalysis
-  FlowSensitivePTA
+  SparsePTA
   SVFG
 )
 target_compile_definitions(Concurrency PRIVATE

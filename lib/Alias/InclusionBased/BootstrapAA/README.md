@@ -296,7 +296,7 @@ required a `ResourceLimit` fallback.
 - **Real LLVM IR differential audit**: Evaluated `lotus-alias-bootstrap
   --all-contexts` across all 62 regression IR benchmarks under
   `tests/regress/Alias/**/*.ll` (including `PTA/*.ll`, `spec-equake.ll`,
-  `spec-mesa.ll`, `spec-parser.ll`, and `FlowSensitive/differential/*.ll`):
+  `spec-mesa.ll`, `spec-parser.ll`, and `SparsePTA/differential/*.ll`):
   - `guarded` vs `tabulation`: **62/62 exit 0 (0 crashes, 0 fallbacks)**,
     **0 unsound results**, **61/62 byte-for-byte identical** (only
     `PTA/spec-mesa.ll` [8 coarser] is a slightly coarser sound superset).

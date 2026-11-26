@@ -123,7 +123,7 @@ set(_lotus_test_roots
   alias analysis checker cfl concurrency dataflow fuzzing ir
   security solvers symbolicexecution transform utils verification)
 set(_lotus_test_choices ${_lotus_test_roots})
-foreach(group dda aserpta bootstrapaa flowsensitive lotusaa sparrowaa tpa
+foreach(group dda aserpta bootstrapaa sparsepta valueflowpta lotusaa sparrowaa tpa
               cclyzeraa dyckaa seadsa allocaa underapproxaa ptsset
               aliaswrapper)
   list(APPEND _lotus_test_choices "alias/${group}")

@@ -31,22 +31,23 @@ The solver maintains:
 Location
 ========
 
-* ``include/Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h``
-* ``include/Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h``
-* ``include/Alias/InclusionBased/FlowSensitive/ValueFlow/ValueFlowPTA.h``
-* ``include/Alias/InclusionBased/FlowSensitive/ValueFlow/ValueFlowGraph.h``
-* ``lib/Alias/InclusionBased/FlowSensitive/``
+* ``include/Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h``
+* ``include/Alias/InclusionBased/SparsePTA/Versioned/VersionedFlowSensitivePTA.h``
+* ``lib/Alias/InclusionBased/SparsePTA/``
 
-Headers and implementations are grouped into matching ``Sparse/``,
-``Versioned/``, and ``ValueFlow/`` subdirectories. The value-flow graph belongs
-to the direct value-flow variant. All variants are built into the
-``FlowSensitivePTA`` library.
+Headers and implementations for the SVFG-based solvers are grouped into matching
+``Sparse/`` and ``Versioned/`` subdirectories and built into the ``SparsePTA``
+library (aliased as ``Lotus::SparsePTA`` and ``FlowSensitivePTA``). The direct
+LLVM-IR solver ``ValueFlowPTA`` lives in its own module under
+``include/Alias/InclusionBased/ValueFlowPTA/`` and
+``lib/Alias/InclusionBased/ValueFlowPTA/`` (``ValueFlowPTA`` library).
 
 Components
 ==========
 
-The module contains three flow-sensitive analyses. The first two are
-Lotus-native migrations of the corresponding SVF pipelines:
+The ``lotus-alias-fspta`` driver exposes three flow-sensitive analyses across
+``SparsePTA`` and ``ValueFlowPTA``. The first two are Lotus-native migrations of
+the corresponding SVF pipelines:
 
 1. **FlowSensitivePTA** implements the default exhaustive ``fspta`` analysis.
    It is the thread-independent sparse solver described above.
@@ -57,12 +58,13 @@ Lotus-native migrations of the corresponding SVF pipelines:
    object prelabeling and version-keyed consume/yield bookkeeping so that strong
    and weak updates, statement-level reliance, and on-the-fly delta-edge
    updates all operate on versioned memory state instead of on the whole
-   object. ``lib/Alias/InclusionBased/FlowSensitive/README.md`` lists the
+   object. ``lib/Alias/InclusionBased/SparsePTA/README.md`` lists the
    remaining mechanisms.
 
-3. **ValueFlowPTA** implements the ``vfpta`` analysis described in
-   :doc:`valueflowpta`. It constructs a field-insensitive value-flow graph
-   directly from LLVM IR and discovers indirect flows in object escape order.
+3. **ValueFlowPTA** (in ``lib/Alias/InclusionBased/ValueFlowPTA/``) implements
+   the ``vfpta`` analysis described in :doc:`valueflowpta`. It constructs a
+   field-insensitive value-flow graph directly from LLVM IR and discovers
+   indirect flows in object escape order.
 
 Inputs
 ------

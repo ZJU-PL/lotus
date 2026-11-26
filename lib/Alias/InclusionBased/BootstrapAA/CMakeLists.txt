@@ -29,3 +29,4 @@ target_link_libraries(CanaryBootstrapAA
     LLVMSupport
   PRIVATE
     AliasSpecManager)
+add_library(Lotus::BootstrapAA ALIAS CanaryBootstrapAA)

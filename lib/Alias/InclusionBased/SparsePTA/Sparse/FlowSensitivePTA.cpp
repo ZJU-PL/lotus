@@ -2,9 +2,9 @@
  * Flow-Sensitive Pointer Analysis for Millions of Lines of Code, CGO'11.
  */
 
-#include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h"
 
-#include "Alias/InclusionBased/FlowSensitive/Support/SVFGOrder.h"
+#include "Alias/InclusionBased/SparsePTA/Support/SVFGOrder.h"
 #include "IR/ICFG/CallGraph.h"
 
 #include <algorithm>

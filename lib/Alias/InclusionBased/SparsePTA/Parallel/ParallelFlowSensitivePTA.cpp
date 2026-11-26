@@ -1,6 +1,6 @@
 // Dependency-validated publication of partial sparse pointer-analysis effects.
 // The transfer functions are shared with the sequential FlowSensitivePTA.
-#include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h"
 
 #include <algorithm>
 #include <array>

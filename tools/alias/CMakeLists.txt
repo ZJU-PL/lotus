@@ -17,7 +17,8 @@ target_link_libraries(lotus-alias-aser-aa PRIVATE
 
 add_executable(lotus-alias-fspta lotus-alias-fspta.cpp)
 target_link_libraries(lotus-alias-fspta PRIVATE
-  FlowSensitivePTA
+  SparsePTA
+  ValueFlowPTA
   CanaryAliasCLIUtils
   ${LLVM_LINK_COMPONENTS}
 )

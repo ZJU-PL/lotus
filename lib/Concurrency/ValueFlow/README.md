@@ -23,7 +23,7 @@ concurrency checker:
 - `SparseValueFlowRefinement` is a lightweight concurrency-specific diagnostic
   refinement. It is not the alias-analysis oracle and cannot suppress race
   candidates.
-- `Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA` owns the general
+- `Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA` owns the general
   top-level points-to and per-node MemorySSA `IN/OUT` state. `FSMPTA` composes
   that solver with the thread-aware SVFG and sliced solve scope.
 - `WholeProgramSparseRefinement` owns the ICFG, SVFG, overlay, and solver for a

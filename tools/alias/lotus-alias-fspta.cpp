@@ -2,11 +2,11 @@
  * @file lotus-alias-fspta.cpp
  * @brief Driver for Lotus flow-sensitive pointer analyses.
  */
-#include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
-#include "Alias/InclusionBased/FlowSensitive/Support/ComparisonSampling.h"
-#include "Alias/InclusionBased/FlowSensitive/Support/PointerOnlyView.h"
-#include "Alias/InclusionBased/FlowSensitive/ValueFlow/ValueFlowPTA.h"
-#include "Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Support/ComparisonSampling.h"
+#include "Alias/InclusionBased/SparsePTA/Support/PointerOnlyView.h"
+#include "Alias/InclusionBased/SparsePTA/Versioned/VersionedFlowSensitivePTA.h"
+#include "Alias/InclusionBased/ValueFlowPTA/ValueFlowPTA.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/CLIUtils.h"
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/MemorySSADump.h"

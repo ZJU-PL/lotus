@@ -166,6 +166,27 @@ struct AAConfig {
 
   // Factory methods for common configurations
 
+  // Precision-oriented presets (select a default integrated backend for each
+  // flow/context-sensitivity tier):
+  //   FICI: Flow-Insensitive, Context-Insensitive  -> SparrowAA (0-CFA)
+  //   FICS: Flow-Insensitive, Context-Sensitive    -> SparrowAA (k-CFA)
+  //   FSCI: Flow-Sensitive,   Context-Insensitive  -> TPA (0-CFA)
+  //   FSCS: Flow-Sensitive,   Context-Sensitive    -> TPA (k-CFA)
+  static AAConfig FICI() { return SparrowAA_NoCtx(); }
+
+  static AAConfig FICS(unsigned k = 1) {
+    if (k == 0)
+      return SparrowAA_NoCtx();
+    return {Implementation::SparrowAA, ContextSensitivity::KCallSite, k, true,
+            Solver::Default};
+  }
+
+  static AAConfig FSCI() { return TPA_NoCtx(); }
+
+  static AAConfig FSCS(unsigned k = 1) {
+    return k == 0 ? TPA_NoCtx() : TPA_KCFA(k);
+  }
+
   // SparrowAA variants
   static AAConfig SparrowAA_NoCtx() {
     return {Implementation::SparrowAA, ContextSensitivity::None, 0, true,
@@ -448,6 +469,11 @@ public:
  *
  * Parses common string representations of alias analysis configurations
  * and returns the corresponding AAConfig. Supports:
+ * - Precision presets:
+ *   - "fici" -> FICI() (SparrowAA_NoCtx)
+ *   - "fics", "fics-1cfa", "fics-<k>[cfa]" -> FICS(k) (SparrowAA k-CFA)
+ *   - "fsci" -> FSCI() (TPA_NoCtx)
+ *   - "fscs", "fscs-1cfa", "fscs-<k>[cfa]" -> FSCS(k) (TPA k-CFA)
  * - "andersen", "sparrow-aa", "sparrowaa" -> SparrowAA_NoCtx
  * - "andersen-1cfa", "sparrow-aa-1cfa", "1cfa" -> SparrowAA_1CFA
  * - "andersen-2cfa", "sparrow-aa-2cfa", "2cfa" -> SparrowAA_2CFA

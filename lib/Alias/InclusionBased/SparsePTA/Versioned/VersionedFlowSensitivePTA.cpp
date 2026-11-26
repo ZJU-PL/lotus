@@ -1,6 +1,6 @@
-#include "Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Versioned/VersionedFlowSensitivePTA.h"
 
-#include "Alias/InclusionBased/FlowSensitive/Support/SVFGOrder.h"
+#include "Alias/InclusionBased/SparsePTA/Support/SVFGOrder.h"
 #include "IR/ICFG/CallGraph.h"
 
 #include <algorithm>

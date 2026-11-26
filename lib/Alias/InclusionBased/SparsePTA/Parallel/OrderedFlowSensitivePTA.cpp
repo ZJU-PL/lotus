@@ -1,6 +1,6 @@
 // Speculate on partial effects; certify their reads and commit in the exact
 // reference worklist order. This preserves non-monotone replacement semantics.
-#include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h"
 
 #include <algorithm>
 #include <array>

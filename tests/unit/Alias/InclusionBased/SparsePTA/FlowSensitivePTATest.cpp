@@ -1,4 +1,4 @@
-#include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h"
 
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/SVFGBuilder.h"

@@ -3,8 +3,10 @@ lotus_add_test_group(alias dda DemandDriven/DDA alias_tests LINK_LIBS DDA)
 lotus_add_test_group(alias aserpta InclusionBased/AserPTA alias_tests LINK_LIBS AserPTA)
 lotus_add_test_group(alias bootstrapaa InclusionBased/BootstrapAA alias_tests
   LINK_LIBS CanaryBootstrapAA)
-lotus_add_test_group(alias flowsensitive InclusionBased/FlowSensitive alias_tests
-  LINK_LIBS FlowSensitivePTA)
+lotus_add_test_group(alias sparsepta InclusionBased/SparsePTA alias_tests
+  LINK_LIBS SparsePTA)
+lotus_add_test_group(alias valueflowpta InclusionBased/ValueFlowPTA alias_tests
+  LINK_LIBS ValueFlowPTA)
 lotus_add_test_group(alias lotusaa InclusionBased/LotusAA alias_tests
   LINK_LIBS LotusAA CanaryGuardedValueFlow CanaryAliasAnalysisWrapper
     LLVMAnalysis LLVMTransformUtils)

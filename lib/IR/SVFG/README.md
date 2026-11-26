@@ -290,7 +290,7 @@ never gets a worse layout than it started with.
 Because the graph's IDs change, `--read-pts` result files written by a
 clustered build must be loaded by a build using the same setting. This is the
 same contract as the `--cluster-objects` merge policy in
-`Alias/InclusionBased/FlowSensitive`.
+`Alias/InclusionBased/SparsePTA`.
 
 ## DOT export
 

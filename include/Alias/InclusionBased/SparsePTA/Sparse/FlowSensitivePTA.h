@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "Alias/InclusionBased/FlowSensitive/Support/ObjectClustering.h"
+#include "Alias/InclusionBased/SparsePTA/Support/ObjectClustering.h"
 #include "Alias/Infrastructure/PtsSet/HashConsedPointsToSet.h"
 #include "IR/GraphView.h"
 

@@ -166,7 +166,7 @@ binary, so full builds do not acquire a separate link step for every group.
 
 Supported groups:
 
-* ``alias``: ``dda``, ``aserpta``, ``bootstrapaa``, ``flowsensitive``,
+* ``alias``: ``dda``, ``aserpta``, ``bootstrapaa``, ``sparsepta``, ``valueflowpta``,
   ``lotusaa``, ``sparrowaa``, ``tpa``, ``cclyzeraa``, ``dyckaa``, ``seadsa``,
   ``allocaa``, ``underapproxaa``, ``ptsset``, ``aliaswrapper``.
 * ``analysis``: ``cfg``, ``controldependence``, ``debuginfo``,

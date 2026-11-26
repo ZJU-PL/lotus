@@ -311,7 +311,7 @@ Thread-Aware Sparse Value-Flow Refinement
 The ``ValueFlow/`` subdirectory implements the optional whole-program refinement
 used by the concurrency checker: a thread-aware sparse value-flow analysis that
 refines data-race alias pairs with a flow-sensitive points-to solve over the
-SVFG. The general solver lives in ``Alias/InclusionBased/FlowSensitive/`` and is
+SVFG. The general solver lives in ``Alias/InclusionBased/SparsePTA/`` and is
 composed with the thread-aware SVFG by ``FSMPTA``; the concurrency layer does
 not duplicate it.
 
@@ -361,7 +361,7 @@ returns ``nullopt`` when refinement is unavailable, otherwise whether two
 accesses may still address a common abstract object). Mutable and hash-consed
 points-to set backends are supported.
 
-**FlowSensitivePTA** (``Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h``):
+**FlowSensitivePTA** (``Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h``):
 the general sparse flow-sensitive inclusion-based pointer analysis. It owns the
 top-level points-to sets and per-node MemorySSA ``IN``/``OUT`` state.
 

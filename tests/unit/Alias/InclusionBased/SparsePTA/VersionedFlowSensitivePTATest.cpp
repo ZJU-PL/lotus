@@ -1,8 +1,8 @@
-#include "Alias/InclusionBased/FlowSensitive/Versioned/VersionedFlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Versioned/VersionedFlowSensitivePTA.h"
 
-#include "Alias/InclusionBased/FlowSensitive/Sparse/FlowSensitivePTA.h"
-#include "Alias/InclusionBased/FlowSensitive/Support/BitvectorClusterer.h"
-#include "Alias/InclusionBased/FlowSensitive/Support/PointerOnlyView.h"
+#include "Alias/InclusionBased/SparsePTA/Sparse/FlowSensitivePTA.h"
+#include "Alias/InclusionBased/SparsePTA/Support/BitvectorClusterer.h"
+#include "Alias/InclusionBased/SparsePTA/Support/PointerOnlyView.h"
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/SVFGBuilder.h"
 #include "TestUtils/LLVMHelpers.h"

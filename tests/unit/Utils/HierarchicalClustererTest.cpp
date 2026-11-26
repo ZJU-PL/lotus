@@ -1,6 +1,6 @@
 #include "Utils/ADT/HierarchicalClusterer.h"
 
-#include "Alias/InclusionBased/FlowSensitive/Support/BitvectorClusterer.h"
+#include "Alias/InclusionBased/SparsePTA/Support/BitvectorClusterer.h"
 
 #include <algorithm>
 #include <cstdint>
