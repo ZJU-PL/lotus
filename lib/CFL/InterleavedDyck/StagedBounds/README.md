@@ -68,7 +68,10 @@ build/bin/lotus-cfl-interleaved-dyck staged-bounds \
 `mutual-refinement`, `stronger-grammar`, `on-demand`, or `all`. Use
 `--analysis taint|value-flow` to select the client analysis (default
 `taint`), `--print-lower` for certified reachable pairs, or `--print-result`
-for the selected method's pairs. The tool never adds reverse arcs.
+for the selected method's pairs. The tool never adds reverse arcs. MR uses the
+optimized semantics by default; pass `--plain-mr` to keep reflexive tracing
+roots internally and skip pre-MR candidate-path pruning. In either mode,
+reflexive pairs are omitted from the public result.
 
 Use `--factorized-tracing` to reconstruct the union of contributing terminal
 edges without eager derivation records. Saturation and reconstruction share

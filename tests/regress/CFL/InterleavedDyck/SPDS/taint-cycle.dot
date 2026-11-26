@@ -1,0 +1,6 @@
+digraph G {
+  0 -> 1 [label="op--7"];
+  1 -> 2 [label="ob--9"];
+  2 -> 1 [label="cb--9"];
+  1 -> 3 [label="cp--7"];
+}

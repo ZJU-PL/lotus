@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate captured RQ3 relations and produce method/bound CSV files."""
+"""Compare typed upper bounds with ACF and summarize RQ3 performance."""
 
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import config
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from rq3 import config_rq3 as config
+from rq3.run_rq3 import valid_measurements, validate_logs, validate_performance_source
 
 
 Pair = tuple[int, int]
@@ -21,18 +23,12 @@ BOUNDS_COLUMNS = [
     "dataset",
     "dot_name",
     "dot_path",
+    "experiment",
     "status",
-    "lower_size",
-    "staged_upper_size",
-    "acf_upper_size",
-    "staged_gap_size",
-    "acf_gap_size",
-    "staged_certification_ratio",
-    "acf_certification_ratio",
+    "typed_upper_size",
+    "intersection_size",
     "upper_reduction",
-    "gap_reduction",
     "newly_excluded_size",
-    "violations",
 ]
 
 METHOD_COLUMNS = [
@@ -42,6 +38,7 @@ METHOD_COLUMNS = [
     "experiment",
     "tool",
     "status",
+    "capture_status",
     "relation_size",
     "median_time_ms",
     "median_peak_rss_bytes",
@@ -104,19 +101,18 @@ def write_rows(path: Path, columns: list[str], rows: list[dict[str, Any]]) -> No
     os.fsync(stream.fileno())
 
 
-def successful(row: dict[str, str]) -> bool:
+def measurement_successful(row: dict[str, str]) -> bool:
   configured = int(row["configured_repetitions"] or 0)
   completed = int(row["completed_repetitions"] or 0)
   successes = int(row["successful_repetitions"] or 0)
   statuses = json.loads(row["statuses"])
-  relation_files = json.loads(row["relation_files"])
   return (
       configured > 0
+      and valid_measurements(row)
       and configured == config.MEASURED_REPETITIONS
       and completed == configured
       and successes == configured
       and statuses == ["success"] * configured
-      and bool(relation_files)
       and row.get("warmup_repetitions") == str(config.WARMUP_REPETITIONS)
       and row.get("timeout_seconds")
       == ("" if config.TIMEOUT_SECONDS is None else str(config.TIMEOUT_SECONDS))
@@ -126,6 +122,15 @@ def successful(row: dict[str, str]) -> bool:
           if config.MEMORY_LIMIT_GIB is None
           else str(int(config.MEMORY_LIMIT_GIB * 1024**3))
       )
+  )
+
+
+def successful(row: dict[str, str]) -> bool:
+  """Precision comparisons additionally require a successful relation capture."""
+  return (
+      measurement_successful(row)
+      and row.get("capture_status") == "success"
+      and bool(json.loads(row["relation_files"]))
   )
 
 
@@ -161,10 +166,6 @@ def relation_path(row: dict[str, str], filename: str) -> Path:
   return path
 
 
-def samples(pairs: set[Pair], limit: int = 5) -> list[list[int]]:
-  return [list(pair) for pair in sorted(pairs)[:limit]]
-
-
 def primary_relation_size(row: dict[str, str]) -> int | None:
   if not successful(row):
     return None
@@ -176,18 +177,12 @@ def primary_relation_size(row: dict[str, str]) -> int | None:
     for component in components.values():
       sizes[component] = sizes.get(component, 0) + 1
     return sum(size * (size - 1) for size in sizes.values())
-  if kind == "union":
-    filename = "union.pairs"
-  elif kind == "staged":
-    filename = "on-demand.pairs"
-  else:
-    filename = f"g-{configuration['family']}-{configuration['dimension']}.pairs"
-  return len(load_pairs(relation_path(row, filename)))
+  return len(load_pairs(relation_path(row, "upper.pairs")))
 
 
 def method_status(row: dict[str, str]) -> str:
   statuses = json.loads(row["statuses"])
-  if successful(row):
+  if measurement_successful(row):
     return "success"
   if statuses and all(status == "success" for status in statuses):
     return "protocol-mismatch"
@@ -205,12 +200,36 @@ def configuration_matches(
   return json.loads(row["configuration"]) == expected
 
 
+def validate_run_identities(rows: list[dict[str, str]]) -> None:
+  """Check fixed inputs/environment and, when enabled, one binary."""
+  identities: dict[tuple[str, str], tuple[str, str]] = {}
+  for row in rows:
+    for field in ("input_sha256", "binary_sha256"):
+      value = row.get(field, "")
+      if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError(f"missing or invalid {field}: {row['dot_path']}")
+    key = (row["dataset"], row["dot_path"])
+    identity = (row["analysis"], row["input_sha256"])
+    if key in identities and identities[key] != identity:
+      raise ValueError(f"mixed input contents or client analyses: {key}")
+    identities[key] = identity
+  if len({row["extra_environment"] for row in rows}) > 1:
+    raise ValueError("RQ3 rows mix different EXTRA_ENVIRONMENT settings")
+  if config.REQUIRE_BINARY_IDENTITY and len({row["binary_sha256"] for row in rows}) > 1:
+    raise ValueError("RQ3 rows mix different binaries")
+
+
 def main() -> int:
   arguments = parse_arguments()
   with arguments.runs.resolve().open("r", encoding="utf-8", newline="") as stream:
     run_rows = list(csv.DictReader(stream))
   if not run_rows:
     raise RuntimeError(f"no run rows in {arguments.runs}")
+  validate_run_identities(run_rows)
+  for row in run_rows:
+    if "log_sha256" in row:
+      validate_logs(row)
+      validate_performance_source(row)
 
   enabled = [item for item in config.EXPERIMENTS if item.get("enabled", True)]
   experiment_by_name = {str(item["name"]): item for item in enabled}
@@ -227,11 +246,12 @@ def main() -> int:
     experiment_rows[row["experiment"]] = row
     experiment = experiment_by_name.get(row["experiment"])
     status = method_status(row)
-    if experiment is None:
+    if experiment is None or not config.supports_analysis(experiment, row["analysis"]):
       status = "unexpected"
       unexpected_methods += 1
     elif not configuration_matches(row, experiment):
       status = "configuration-mismatch"
+    costs_ready = status == "success"
     method_rows.append(
         {
             "dataset": row["dataset"],
@@ -240,29 +260,30 @@ def main() -> int:
             "experiment": row["experiment"],
             "tool": row["tool"],
             "status": status,
+            "capture_status": row["capture_status"],
             "relation_size": (
                 primary_relation_size(row) if status == "success" else None
             ),
-            "median_time_ms": row["median_time_ms"],
-            "median_peak_rss_bytes": row["median_peak_rss_bytes"],
-            "median_wall_time_seconds": row["median_wall_time_seconds"],
+            "median_time_ms": row["median_time_ms"] if costs_ready else None,
+            "median_peak_rss_bytes": row["median_peak_rss_bytes"] if costs_ready else None,
+            "median_wall_time_seconds": row["median_wall_time_seconds"] if costs_ready else None,
             "successful_repetitions": row["successful_repetitions"],
         }
     )
 
-  expected_names = {str(item["name"]) for item in enabled}
-  required_names = {
-      str(item["name"]) for item in enabled if item.get("required", True)
-  }
-  core_names = {"union-dyck", "staged-on-demand", "acf"}
-  if expected_names != core_names:
-    raise ValueError(
-        "reduced RQ3 requires exactly union-dyck, staged-on-demand, and acf"
-    )
+  if "acf" not in experiment_by_name or any(
+      item["artifact_kind"] not in {"upper", "components"} for item in enabled
+  ):
+    raise ValueError("RQ3 requires ACF and typed upper-bound methods")
   missing_methods = 0
   failed_methods = 0
   bounds_rows: list[dict[str, Any]] = []
   for (dataset, dot_path), rows in sorted(index.items()):
+    representative = next(iter(rows.values()))
+    applicable = [item for item in enabled
+                  if config.supports_analysis(item, representative["analysis"])]
+    expected_names = {item["name"] for item in applicable}
+    required_names = {item["name"] for item in applicable if item.get("required", True)}
     missing = sorted(expected_names - rows.keys())
     if missing:
       missing_methods += len(missing)
@@ -273,127 +294,72 @@ def main() -> int:
     failed_methods += sum(
         name in rows
         and (
-            not successful(rows[name])
+            not measurement_successful(rows[name])
             or not configuration_matches(rows[name], experiment_by_name[name])
         )
         for name in required_names
     )
-    staged = rows.get("staged-on-demand")
     acf = rows.get("acf")
-    union_row = rows.get("union-dyck")
-    common_ready = (
-        staged is not None
-        and acf is not None
-        and union_row is not None
-        and successful(staged)
-        and successful(acf)
-        and successful(union_row)
-        and configuration_matches(staged, experiment_by_name["staged-on-demand"])
+    acf_ready = (
+        acf is not None and successful(acf)
         and configuration_matches(acf, experiment_by_name["acf"])
-        and configuration_matches(union_row, experiment_by_name["union-dyck"])
     )
-    union: set[Pair] = set()
-    approx: set[Pair] = set()
-    components: dict[int, int] = {}
-    upper: set[Pair] = set()
-    violations: dict[str, Any] = {}
-    status = "success" if common_ready else "incomplete"
-    if common_ready:
-      union = load_pairs(relation_path(staged, "union.pairs"))
-      approx = load_pairs(relation_path(staged, "on-demand.pairs"))
+    components = {}
+    if acf_ready:
       components = load_components(relation_path(acf, "components.map"))
-      missing_vertices = {
-          vertex for pair in approx for vertex in pair if vertex not in components
-      }
-      if missing_vertices:
-        raise ValueError(
-            f"{staged['dot_path']}: ACF map misses vertices "
-            f"{sorted(missing_vertices)[:5]}"
-        )
-      upper = {
-          pair for pair in approx if components[pair[0]] == components[pair[1]]
-      }
-      standalone_union = load_pairs(relation_path(union_row, "union.pairs"))
-      if standalone_union != union:
-        raise ValueError(
-            f"{staged['dot_path']}: standalone and pipeline Union-Dyck differ"
-        )
-
-      checks = {
-          "lower_not_in_staged_upper": union - approx,
-          "lower_not_in_acf": {
-              pair
-              for pair in union
-              if components.get(pair[0]) != components.get(pair[1])
-          },
-      }
-      for name, bad in checks.items():
-        if bad:
-          violations[name] = {"count": len(bad), "sample": samples(bad)}
-      if violations:
-        status = "invalid"
-
-    staged_gap = approx - union if common_ready else set()
-    acf_gap = upper - union if common_ready else set()
-    representative = next(iter(rows.values()))
-    bounds_rows.append(
-        {
-            "dataset": representative["dataset"],
-            "dot_name": representative["dot_name"],
-            "dot_path": representative["dot_path"],
-            "status": status,
-            "lower_size": len(union) if common_ready else None,
-            "staged_upper_size": len(approx) if common_ready else None,
-            "acf_upper_size": len(upper) if common_ready else None,
-            "staged_gap_size": len(staged_gap) if common_ready else None,
-            "acf_gap_size": len(acf_gap) if common_ready else None,
-            "staged_certification_ratio": (
-                1.0 if not approx else len(union) / len(approx)
-            )
-            if common_ready
-            else None,
-            "acf_certification_ratio": (
-                1.0 if not upper else len(union) / len(upper)
-            )
-            if common_ready
-            else None,
-            "upper_reduction": (
-                None if not approx else 1.0 - len(upper) / len(approx)
-            )
-            if common_ready
-            else None,
-            "gap_reduction": (
-                None
-                if not staged_gap
-                else 1.0 - len(acf_gap) / len(staged_gap)
-            )
-            if common_ready
-            else None,
-            "newly_excluded_size": (
-                len(approx - upper) if common_ready else None
-            ),
-            "violations": json.dumps(
-                violations, ensure_ascii=False, separators=(",", ":")
-            ),
+    for name in (item["name"] for item in applicable if item["artifact_kind"] == "upper"):
+      typed = rows.get(name)
+      typed_ready = (
+          typed is not None and successful(typed)
+          and configuration_matches(typed, experiment_by_name[name])
+      )
+      approx = load_pairs(relation_path(typed, "upper.pairs")) if typed_ready else set()
+      common_ready = typed_ready and acf_ready
+      intersection_size = None
+      if common_ready:
+        missing_vertices = {
+            vertex for pair in approx for vertex in pair if vertex not in components
         }
-    )
+        if missing_vertices:
+          raise ValueError(
+              f"{dot_path}: ACF map misses vertices {sorted(missing_vertices)[:5]}"
+          )
+        intersection_size = sum(
+            components[source] == components[target] for source, target in approx
+        )
+      bounds_rows.append(
+          {
+              "dataset": representative["dataset"],
+              "dot_name": representative["dot_name"],
+              "dot_path": representative["dot_path"],
+              "experiment": name,
+              "status": "success" if common_ready else "incomplete",
+              "typed_upper_size": len(approx) if typed_ready else None,
+              "intersection_size": intersection_size,
+              "upper_reduction": (
+                  1.0 - intersection_size / len(approx)
+                  if common_ready and approx else None
+              ),
+              "newly_excluded_size": (
+                  len(approx) - intersection_size if common_ready else None
+              ),
+          }
+      )
 
   write_rows(arguments.methods.resolve(), METHOD_COLUMNS, method_rows)
   write_rows(arguments.bounds.resolve(), BOUNDS_COLUMNS, bounds_rows)
-  invalid = sum(row["status"] == "invalid" for row in bounds_rows)
   incomplete = sum(row["status"] == "incomplete" for row in bounds_rows)
   print(f"Methods: {arguments.methods.resolve()}")
   print(f"Bounds: {arguments.bounds.resolve()}")
   print(
-      f"Bound rows: {len(bounds_rows)}; invalid: {invalid}; "
+      f"Bound rows: {len(bounds_rows)}; "
       f"incomplete: {incomplete}; "
       f"missing methods: {missing_methods}; "
       f"failed methods: {failed_methods}; unexpected methods: "
       f"{unexpected_methods}"
   )
   return 1 if (
-      invalid
-      or incomplete
+      incomplete
       or missing_methods
       or failed_methods
       or unexpected_methods

@@ -13,8 +13,10 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-import rq2_breakdown_config as config
-import run_experiments as base_runner
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from rq2 import config_rq2 as config
+from rq1 import run_rq1 as base_runner
+import provenance
 
 
 BASE_COLUMNS = [
@@ -29,12 +31,16 @@ BASE_COLUMNS = [
     "exit_codes",
     "missing_phase_stats",
     "time_ms",
+    "median_time_ms",
     "average_time_ms",
     "total_time_us",
+    "median_total_time_us",
     "average_total_time_us",
     "peak_rss_bytes",
+    "median_peak_rss_bytes",
     "average_peak_rss_bytes",
     "wall_time_seconds",
+    "median_wall_time_seconds",
     "average_wall_time_seconds",
     "components",
     "memory_limit_bytes",
@@ -44,12 +50,14 @@ BASE_COLUMNS = [
 def csv_columns() -> list[str]:
   columns = list(BASE_COLUMNS)
   for name, _ in config.PHASE_STAT_KEYS:
-    columns.extend((name, f"average_{name}"))
+    columns.extend((name, f"median_{name}", f"average_{name}"))
   columns.extend(
       (
           "phase_sum_us",
+          "median_phase_sum_us",
           "average_phase_sum_us",
           "unaccounted_us",
+          "median_unaccounted_us",
           "average_unaccounted_us",
           "log_files",
           "command",
@@ -58,7 +66,7 @@ def csv_columns() -> list[str]:
   return columns
 
 
-CSV_COLUMNS = csv_columns()
+CSV_COLUMNS = csv_columns() + [name for name in provenance.COLUMNS if name not in BASE_COLUMNS] + ["stats_per_run"]
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -79,9 +87,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def validate_configuration() -> None:
-  base_runner.validate_experiments()
-  if config.MEASURED_REPETITIONS <= 0:
-    raise ValueError("MEASURED_REPETITIONS must be positive")
+  base_runner.validate_execution_settings(config)
   names = [name for name, _ in config.PHASE_STAT_KEYS]
   keys = [key for _, key in config.PHASE_STAT_KEYS]
   if len(names) != len(set(names)):
@@ -183,20 +189,11 @@ def total_time_us(stats: dict[str, str]) -> int | None:
   return split_stat(stats, "solving/lifting/total (us)", 2)
 
 
-def prepare_csv(path: Path, resume: bool) -> set[tuple[str, str]]:
+def prepare_csv(path: Path, resume: bool, expected: dict) -> set[tuple[str, str]]:
   path.parent.mkdir(parents=True, exist_ok=True)
-  completed: set[tuple[str, str]] = set()
+  completed = set()
   if resume and path.exists() and path.stat().st_size:
-    with path.open("r", encoding="utf-8", newline="") as stream:
-      reader = csv.DictReader(stream)
-      if reader.fieldnames != CSV_COLUMNS:
-        raise RuntimeError(
-            f"existing RQ2.2 CSV header does not match: {path}; "
-            "use --restart or change OUTPUT_CSV"
-        )
-      for row in reader:
-        completed.add((row["dataset"], row["dot_path"]))
-    return completed
+    return provenance.resume_rows(path, CSV_COLUMNS, ("dataset", "dot_path"), expected)
 
   with path.open("w", encoding="utf-8", newline="") as stream:
     writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS)
@@ -207,6 +204,7 @@ def prepare_csv(path: Path, resume: bool) -> set[tuple[str, str]]:
 
 
 def append_csv_row(path: Path, row: dict[str, Any]) -> None:
+  provenance.validate(row)
   with path.open("a", encoding="utf-8", newline="") as stream:
     csv.DictWriter(stream, fieldnames=CSV_COLUMNS).writerow(row)
     stream.flush()
@@ -217,6 +215,7 @@ def create_csv_row(
     benchmark: base_runner.Benchmark,
     command: Sequence[str],
     results: Sequence[base_runner.RunResult],
+    identity: dict[str, str],
 ) -> dict[str, Any]:
   phase_runs: list[dict[str, int | None]] = []
   missing_runs: list[list[str]] = []
@@ -269,18 +268,24 @@ def create_csv_row(
       "exit_codes": base_runner.json_cell([r.exit_code for r in results]),
       "missing_phase_stats": base_runner.json_cell(missing_runs),
       "time_ms": base_runner.json_cell(times),
+      "median_time_ms": base_runner.median_value(times),
       "average_time_ms": base_runner.average(times),
       "total_time_us": base_runner.json_cell(totals),
+      "median_total_time_us": base_runner.median_value(totals),
       "average_total_time_us": base_runner.average(totals),
       "peak_rss_bytes": base_runner.json_cell(rss_values),
+      "median_peak_rss_bytes": base_runner.median_value(rss_values),
       "average_peak_rss_bytes": base_runner.average(rss_values),
       "wall_time_seconds": base_runner.json_cell(wall_times),
+      "median_wall_time_seconds": base_runner.median_value(wall_times),
       "average_wall_time_seconds": base_runner.average(wall_times),
       "components": base_runner.json_cell(components),
-      "memory_limit_bytes": base_runner.configured_memory_limit_bytes(),
+      "memory_limit_bytes": base_runner.configured_memory_limit_bytes(config),
       "phase_sum_us": base_runner.json_cell(phase_sums),
+      "median_phase_sum_us": base_runner.median_value(phase_sums),
       "average_phase_sum_us": base_runner.average(phase_sums),
       "unaccounted_us": base_runner.json_cell(unaccounted),
+      "median_unaccounted_us": base_runner.median_value(unaccounted),
       "average_unaccounted_us": base_runner.average(unaccounted),
       "log_files": base_runner.json_cell(log_files),
       "command": shlex.join(command),
@@ -288,8 +293,11 @@ def create_csv_row(
   for name, _ in config.PHASE_STAT_KEYS:
     values = [phase[name] for phase in phase_runs]
     row[name] = base_runner.json_cell(values)
+    row[f"median_{name}"] = base_runner.median_value(values)
     row[f"average_{name}"] = base_runner.average(values)
-  return row
+  row.update(identity)
+  row["stats_per_run"] = base_runner.json_cell([r.stats for r in results])
+  return provenance.seal(row)
 
 
 def run_benchmark(
@@ -304,7 +312,7 @@ def run_benchmark(
         f"[warm-up {repetition}/{config.WARMUP_REPETITIONS}] {command_text}",
         flush=True,
     )
-    base_runner.run_once(command, path)
+    base_runner.run_once(command, path, settings=config)
 
   results: list[base_runner.RunResult] = []
   for repetition in range(1, config.MEASURED_REPETITIONS + 1):
@@ -313,7 +321,7 @@ def run_benchmark(
         f"[run {repetition}/{config.MEASURED_REPETITIONS}] {command_text}",
         flush=True,
     )
-    result = base_runner.run_once(command, path)
+    result = base_runner.run_once(command, path, settings=config)
     results.append(result)
     if result.status == "memory-limit" or (
         result.status != "success" and config.STOP_REPETITIONS_AFTER_FAILURE
@@ -343,7 +351,13 @@ def main() -> int:
   check_phase_timing_support(binary)
   csv_path = Path(config.OUTPUT_CSV).resolve()
   resume = config.RESUME_EXISTING_CSV and not arguments.restart
-  completed = prepare_csv(csv_path, resume)
+  fingerprints = {path: provenance.sha256(path) for path in {binary, *(b.dot for b in benchmarks)}}
+  identities = {
+      (b.dataset, str(b.dot.relative_to(config.REPOSITORY_ROOT))):
+      provenance.identity(b.dot, binary, make_command(binary, b), config, fingerprints)
+      for b in benchmarks
+  }
+  completed = prepare_csv(csv_path, resume, identities)
 
   for index, benchmark in enumerate(benchmarks, start=1):
     relative_dot = str(benchmark.dot.relative_to(config.REPOSITORY_ROOT))
@@ -356,10 +370,12 @@ def main() -> int:
         f"{benchmark.dataset}/{benchmark.dot.name}",
         flush=True,
     )
+    provenance.check_files(benchmark.dot, binary, identities[key])
     command, results = run_benchmark(binary, benchmark)
+    provenance.check_files(benchmark.dot, binary, identities[key])
     append_csv_row(
         csv_path,
-        create_csv_row(benchmark, command, results),
+        create_csv_row(benchmark, command, results, identities[key]),
     )
     print(f"  appended and synced: {csv_path}", flush=True)
 
@@ -371,5 +387,5 @@ if __name__ == "__main__":
   try:
     sys.exit(main())
   except (OSError, RuntimeError, TypeError, ValueError) as error:
-    print(f"run_rq2_breakdown.py: {error}", file=sys.stderr)
+    print(f"run_rq2.py: {error}", file=sys.stderr)
     sys.exit(1)

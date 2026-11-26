@@ -16,10 +16,12 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from statistics import fmean
+from statistics import fmean, median
 from typing import Any, Iterable, Sequence
 
-import config
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from rq1 import config_rq1 as config
+import provenance
 
 
 CSV_COLUMNS = [
@@ -30,20 +32,32 @@ CSV_COLUMNS = [
     "algorithm",
     "extra_arguments",
     "configured_repetitions",
+    "warmup_repetitions",
     "completed_repetitions",
     "successful_repetitions",
     "statuses",
     "exit_codes",
     "time_ms",
+    "median_time_ms",
     "average_time_ms",
     "peak_rss_bytes",
+    "median_peak_rss_bytes",
     "average_peak_rss_bytes",
     "wall_time_seconds",
+    "median_wall_time_seconds",
     "average_wall_time_seconds",
     "components",
     "stats_per_run",
     "log_files",
+    "log_sha256",
+    "input_sha256",
+    "binary_sha256",
+    "extra_environment",
+    "timeout_seconds",
+    "memory_limit_bytes",
     "command",
+    "stop_after_failure",
+    "row_sha256",
 ]
 
 
@@ -68,7 +82,7 @@ class RunResult:
 
 def parse_arguments() -> argparse.Namespace:
   parser = argparse.ArgumentParser(
-      description="Run unary Interleaved-Dyck experiments from config.py."
+      description="Run unary Interleaved-Dyck experiments from config_rq1.py."
   )
   parser.add_argument(
       "--dry-run",
@@ -96,6 +110,11 @@ def average(values: Iterable[int | float | None]) -> float | None:
   return fmean(present) if present else None
 
 
+def median_value(values: Iterable[int | float | None]) -> float | None:
+  present = [value for value in values if value is not None]
+  return median(present) if present else None
+
+
 def parse_integer(value: str | None) -> int | None:
   if value is None:
     return None
@@ -105,8 +124,8 @@ def parse_integer(value: str | None) -> int | None:
     return None
 
 
-def configured_memory_limit_bytes() -> int | None:
-  limit_gib = config.MEMORY_LIMIT_GIB
+def configured_memory_limit_bytes(settings=config) -> int | None:
+  limit_gib = settings.MEMORY_LIMIT_GIB
   if limit_gib is None:
     return None
   return int(limit_gib * 1024**3)
@@ -163,20 +182,23 @@ def discover_benchmarks() -> list[Benchmark]:
   return benchmarks
 
 
-def validate_experiments() -> list[dict[str, Any]]:
-  if config.MEASURED_REPETITIONS <= 0:
+def validate_execution_settings(settings=config) -> None:
+  if settings.MEASURED_REPETITIONS <= 0:
     raise ValueError("MEASURED_REPETITIONS must be positive")
-  if config.WARMUP_REPETITIONS < 0:
+  if settings.WARMUP_REPETITIONS < 0:
     raise ValueError("WARMUP_REPETITIONS cannot be negative")
-  if config.TIMEOUT_SECONDS is not None and config.TIMEOUT_SECONDS <= 0:
+  if settings.TIMEOUT_SECONDS is not None and settings.TIMEOUT_SECONDS <= 0:
     raise ValueError("TIMEOUT_SECONDS must be positive or None")
-  if config.MEMORY_LIMIT_GIB is not None and (
-      isinstance(config.MEMORY_LIMIT_GIB, bool)
-      or not isinstance(config.MEMORY_LIMIT_GIB, (int, float))
-      or config.MEMORY_LIMIT_GIB <= 0
+  if settings.MEMORY_LIMIT_GIB is not None and (
+      isinstance(settings.MEMORY_LIMIT_GIB, bool)
+      or not isinstance(settings.MEMORY_LIMIT_GIB, (int, float))
+      or settings.MEMORY_LIMIT_GIB <= 0
   ):
     raise ValueError("MEMORY_LIMIT_GIB must be a positive number or None")
 
+
+def validate_experiments() -> list[dict[str, Any]]:
+  validate_execution_settings()
   experiments = list(config.EXPERIMENTS)
   names: set[str] = set()
   for experiment in experiments:
@@ -254,17 +276,17 @@ def write_log(
     os.fsync(stream.fileno())
 
 
-def run_once(command: Sequence[str], log_path: Path) -> RunResult:
+def run_once(command: Sequence[str], log_path: Path, *, settings=config) -> RunResult:
   command_text = shlex.join(command)
   environment = os.environ.copy()
-  environment.update({str(k): str(v) for k, v in config.EXTRA_ENVIRONMENT.items()})
+  environment.update({str(k): str(v) for k, v in settings.EXTRA_ENVIRONMENT.items()})
   started_at = utc_now()
   start = time.perf_counter()
   stdout = ""
   stderr = ""
   exit_code: int | None = None
   status = "spawn-error"
-  memory_limit_bytes = configured_memory_limit_bytes()
+  memory_limit_bytes = configured_memory_limit_bytes(settings)
 
   def apply_memory_limit() -> None:
     if memory_limit_bytes is not None:
@@ -284,7 +306,7 @@ def run_once(command: Sequence[str], log_path: Path) -> RunResult:
         preexec_fn=apply_memory_limit if memory_limit_bytes is not None else None,
     )
     try:
-      stdout, stderr = process.communicate(timeout=config.TIMEOUT_SECONDS)
+      stdout, stderr = process.communicate(timeout=settings.TIMEOUT_SECONDS)
       exit_code = process.returncode
       if exit_code == 0:
         status = "success"
@@ -320,21 +342,12 @@ def run_once(command: Sequence[str], log_path: Path) -> RunResult:
   return result
 
 
-def prepare_csv(path: Path, resume: bool) -> set[tuple[str, str, str]]:
+def prepare_csv(path: Path, resume: bool, expected: dict) -> set[tuple[str, str, str]]:
   path.parent.mkdir(parents=True, exist_ok=True)
-  completed: set[tuple[str, str, str]] = set()
-
+  completed = set()
   if resume and path.exists() and path.stat().st_size:
-    with path.open("r", encoding="utf-8", newline="") as stream:
-      reader = csv.DictReader(stream)
-      if reader.fieldnames != CSV_COLUMNS:
-        raise RuntimeError(
-            f"existing CSV header does not match this runner: {path}; "
-            "use --restart or change OUTPUT_CSV"
-        )
-      for row in reader:
-        completed.add((row["dataset"], row["dot_path"], row["experiment"]))
-    return completed
+    return provenance.resume_rows(path, CSV_COLUMNS,
+                                  ("dataset", "dot_path", "experiment"), expected)
 
   with path.open("w", encoding="utf-8", newline="") as stream:
     writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS)
@@ -346,6 +359,7 @@ def prepare_csv(path: Path, resume: bool) -> set[tuple[str, str, str]]:
 
 def append_csv_row(path: Path, row: dict[str, Any]) -> None:
   """Append, flush and fsync one completed project/configuration immediately."""
+  provenance.validate(row)
   with path.open("a", encoding="utf-8", newline="") as stream:
     writer = csv.DictWriter(stream, fieldnames=CSV_COLUMNS)
     writer.writerow(row)
@@ -358,6 +372,7 @@ def create_csv_row(
     experiment: dict[str, Any],
     command: Sequence[str],
     results: Sequence[RunResult],
+    identity: dict[str, str],
 ) -> dict[str, Any]:
   times = [parse_integer(result.stats.get("Time (ms)")) for result in results]
   rss_values = [
@@ -373,7 +388,7 @@ def create_csv_row(
       str(result.log_path.relative_to(config.REPOSITORY_ROOT)) for result in results
   ]
 
-  return {
+  return provenance.seal({
       "dataset": benchmark.dataset,
       "dot_name": benchmark.dot.name,
       "dot_path": str(relative_dot),
@@ -386,16 +401,20 @@ def create_csv_row(
       "statuses": json_cell([result.status for result in results]),
       "exit_codes": json_cell([result.exit_code for result in results]),
       "time_ms": json_cell(times),
+      "median_time_ms": median_value(times),
       "average_time_ms": average(times),
       "peak_rss_bytes": json_cell(rss_values),
+      "median_peak_rss_bytes": median_value(rss_values),
       "average_peak_rss_bytes": average(rss_values),
       "wall_time_seconds": json_cell(wall_times),
+      "median_wall_time_seconds": median_value(wall_times),
       "average_wall_time_seconds": average(wall_times),
       "components": json_cell(components),
       "stats_per_run": json_cell([result.stats for result in results]),
       "log_files": json_cell(log_files),
       "command": shlex.join(command),
-  }
+      **identity,
+  })
 
 
 def run_experiment(
@@ -459,7 +478,14 @@ def main() -> int:
 
   csv_path = Path(config.OUTPUT_CSV).expanduser().resolve()
   resume = config.RESUME_EXISTING_CSV and not arguments.restart
-  completed = prepare_csv(csv_path, resume)
+  paths = {binary, *(b.dot for b in benchmarks)}
+  fingerprints = {path: provenance.sha256(path) for path in paths}
+  identities = {
+      (b.dataset, str(b.dot.relative_to(config.REPOSITORY_ROOT)), e["name"]):
+      provenance.identity(b.dot, binary, make_command(binary, b, e), config, fingerprints)
+      for b in benchmarks for e in experiments
+  }
+  completed = prepare_csv(csv_path, resume, identities)
   total = len(benchmarks) * len(experiments)
   finished = 0
 
@@ -480,10 +506,12 @@ def main() -> int:
           f"({experiment['name']})",
           flush=True,
       )
+      provenance.check_files(benchmark.dot, binary, identities[key])
       command, results = run_experiment(binary, benchmark, experiment)
+      provenance.check_files(benchmark.dot, binary, identities[key])
       append_csv_row(
           csv_path,
-          create_csv_row(benchmark, experiment, command, results),
+          create_csv_row(benchmark, experiment, command, results, identities[key]),
       )
       print(f"  appended and synced: {csv_path}", flush=True)
 
@@ -495,5 +523,5 @@ if __name__ == "__main__":
   try:
     sys.exit(main())
   except (OSError, RuntimeError, TypeError, ValueError) as error:
-    print(f"run_experiments.py: {error}", file=sys.stderr)
+    print(f"run_rq1.py: {error}", file=sys.stderr)
     sys.exit(1)

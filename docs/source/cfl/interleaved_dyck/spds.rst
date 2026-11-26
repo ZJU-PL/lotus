@@ -119,6 +119,32 @@ Exit codes are 0 for a completed computation (including an unreachable
 answer), 2 for invalid input, and 3 for a resource limit. Failure cases print
 no result relation.
 
+Taint client
+------------
+
+``--analysis taint`` uses the default empty/empty stack projections on the
+original directed graph and removes self-pairs from the final results.
+It supports all query scopes. Prefix flags are rejected. In this client,
+``--query V V`` returns no candidate even if a balanced cycle exists; the
+general ``dyck`` mode retains its original reflexive reachability semantics.
+Epsilon and self reachability are preserved inside the solver.
+
+For nonreflexive pairs the result equals the classic CFL projection
+intersection used by ``staged-bounds --analysis taint --method intersection``.
+The two projections may have different witnesses, so this is a sound upper
+bound, not exact two-stack reachability or a complete source-code taint analyzer.
+No value-flow endpoint restriction or Regularization automaton is imposed.
+The original SPDS saturation algorithm is unchanged.
+
+.. code-block:: console
+
+   build/bin/lotus-cfl-interleaved-dyck spds --analysis taint --all-pairs --pairs input.dot
+
+``Time (ms)`` includes PDS preparation, solving and diagonal removal after DOT
+parsing. ``process peak RSS (bytes)`` includes parsing and is sampled before
+relation export. For all-pairs queries, auto/post use the existing forward
+all-source solver; ``--direction pre`` uses reverse endpoint queries.
+
 Value-flow client
 -----------------
 
@@ -153,6 +179,10 @@ this client. The existing per-saturation resource limits apply; no partial
 relation is printed on failure. ``--timings`` reports the existing solver phase
 instrumentation, not end-to-end client time: DOT parsing, client graph
 transformation and result remapping are not included in these phase counters.
+The value-flow CLI also prints ``Time (ms)`` for the complete analysis after
+DOT parsing, including client transformation and result remapping, and
+``process peak RSS (bytes)`` on supported Unix platforms. RSS is sampled after
+analysis and before relation export; it includes input parsing allocations.
 
 Build and test
 --------------
