@@ -21,16 +21,10 @@ template <> struct Lattice<TaintLattice> {
   }
 
   static TaintLattice merge(TaintLattice lhs, TaintLattice rhs) {
-    auto cmpResult = compare(lhs, rhs);
-    switch (cmpResult) {
-    case LatticeCompareResult::Equal:
-    case LatticeCompareResult::GreaterThan:
-      return lhs;
-    case LatticeCompareResult::LessThan:
-      return rhs;
-    case LatticeCompareResult::Incomparable:
-      return TaintLattice::Either;
-    }
+    // Unknown=0 (00), Untainted=1 (01), Tainted=2 (10), Either=3 (11):
+    // lattice join is exact bitwise OR.
+    return static_cast<TaintLattice>(static_cast<uint8_t>(lhs) |
+                                     static_cast<uint8_t>(rhs));
   }
 
   static bool willMergeSmearTaintness(TaintLattice lhs, TaintLattice rhs) {

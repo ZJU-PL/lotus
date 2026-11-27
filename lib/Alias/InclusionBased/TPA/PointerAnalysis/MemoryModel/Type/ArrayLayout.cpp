@@ -20,6 +20,7 @@
 
 #include <limits>
 #include <mutex>
+#include <numeric>
 
 namespace tpa {
 
@@ -92,6 +93,91 @@ std::pair<size_t, bool> ArrayLayout::offsetInto(size_t offset) const {
     }
   }
   return std::make_pair(offset, hitArray);
+}
+
+std::vector<std::pair<size_t, bool>>
+ArrayLayout::collectPeriodicOffsets(size_t base, size_t limit,
+                                    size_t stride) const {
+  std::vector<std::pair<size_t, bool>> out;
+  if (base >= limit)
+    return out;
+  if (stride == 0) {
+    out.push_back(offsetInto(base));
+    return out;
+  }
+
+  auto collect = [&](auto &&self, size_t raw, size_t lim, size_t step,
+                     size_t tripleIdx, bool hitArray) -> void {
+    while (raw < lim) {
+      while (tripleIdx < arrayLayout.size() &&
+             (arrayLayout[tripleIdx].size == 0 ||
+              arrayLayout[tripleIdx].end <= raw))
+        ++tripleIdx;
+
+      if (tripleIdx >= arrayLayout.size() ||
+          arrayLayout[tripleIdx].start >= lim) {
+        while (raw < lim) {
+          out.emplace_back(raw, hitArray);
+          if (lim - raw <= step)
+            break;
+          raw += step;
+        }
+        return;
+      }
+
+      const auto &triple = arrayLayout[tripleIdx];
+      if (raw < triple.start) {
+        const size_t prefixEnd = std::min(triple.start, lim);
+        while (raw < prefixEnd) {
+          out.emplace_back(raw, hitArray);
+          if (lim - raw <= step)
+            return;
+          raw += step;
+        }
+        if (raw >= triple.end)
+          continue;
+      }
+
+      const size_t effEnd = std::min(triple.end, lim);
+      const size_t count = (effEnd - 1 - raw) / step + 1;
+      const size_t g = std::gcd(step, triple.size);
+      const size_t periodSteps = triple.size / g;
+
+      if (count >= periodSteps) {
+        const size_t firstRes = (raw - triple.start) % g;
+        self(self, triple.start + firstRes, triple.start + triple.size, g,
+             tripleIdx + 1, true);
+      } else {
+        size_t rem = count;
+        size_t cur = triple.start + (raw - triple.start) % triple.size;
+        const size_t elemEnd = triple.start + triple.size;
+        while (rem > 0) {
+          const size_t stepsInSeg =
+              std::min(rem, (elemEnd - 1 - cur) / step + 1);
+          const size_t segLimit = cur + (stepsInSeg - 1) * step + 1;
+          self(self, cur, segLimit, step, tripleIdx + 1, true);
+          rem -= stepsInSeg;
+          if (rem > 0) {
+            const size_t curOff = cur - triple.start;
+            const size_t advance =
+                ((stepsInSeg % triple.size) * (step % triple.size)) %
+                triple.size;
+            cur = triple.start + ((curOff + advance) % triple.size);
+          }
+        }
+      }
+
+      if (effEnd >= lim)
+        break;
+      const size_t skip = (effEnd - raw + step - 1) / step;
+      if ((lim - 1 - raw) / step < skip)
+        break;
+      raw += skip * step;
+    }
+  };
+
+  collect(collect, base, limit, stride, 0, false);
+  return out;
 }
 
 } // namespace tpa

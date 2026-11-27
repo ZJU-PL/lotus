@@ -56,22 +56,17 @@ void TransferFunction::evalStore(const Pointer *dst, const Pointer *src,
     return;
   }
 
-  // Create a new Store for the output of this node
+  // Persistent Store copy is O(1) (root retain) and updates only path-copy the
+  // touched O(log_16 N) path; unchanged writes keep the exact same root pointer
+  // so Memo::update skips them in O(1).
   auto &store = evalResult.getNewStore(*localState);
 
   const auto *dstObj = *dstSet.begin();
-  // Check conditions for Strong Update:
-  // 1. Singleton set: We know exactly which object is being written.
-  // 2. Not a summary object: The object represents a single concrete memory
-  // location
-  //    (not an array summary or heap abstraction that represents multiple
-  //    locs).
   if (dstSet.size() == 1 && !dstObj->isSummaryObject())
     strongUpdateStore(dstObj, srcSet, store);
   else
     weakUpdateStore(dstSet, srcSet, store);
 
-  // Propagate the updated store to successors
   addMemLevelSuccessors(pp, store, evalResult);
 }
 

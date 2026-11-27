@@ -21,6 +21,8 @@ using namespace llvm;
 
 #include <mutex>
 
+#include <llvm/ADT/SmallVector.h>
+
 namespace context {
 namespace {
 std::mutex &contextRegistryMutex() {
@@ -51,6 +53,43 @@ const Context *Context::pushContext(const Context *ctx,
   // If not, it points to the newly inserted one.
   auto itr = ctxSet.insert(newCtx).first;
   return &(*itr);
+}
+
+// Pushes a new call site while keeping at most the k most recent call sites
+// (standard suffix k-CFA call-string truncation).
+const Context *Context::pushContextWithLimit(const Context *ctx,
+                                             const Instruction *inst,
+                                             size_t k) {
+  std::lock_guard<std::mutex> lock(contextRegistryMutex());
+  auto getGlobalUnlocked = []() -> const Context * {
+    return &(*ctxSet.insert(Context()).first);
+  };
+  auto pushUnlocked = [](const Context *base,
+                         const Instruction *cs) -> const Context * {
+    return &(*ctxSet.insert(Context(cs, base)).first);
+  };
+
+  if (k == 0)
+    return getGlobalUnlocked();
+  if (k == 1)
+    return pushUnlocked(getGlobalUnlocked(), inst);
+  if (ctx->sz < k)
+    return pushUnlocked(ctx, inst);
+
+  // Retain the (k - 1) most recent call sites from `ctx`, then append `inst`.
+  llvm::SmallVector<const Instruction *, 8> suffix;
+  suffix.reserve(k - 1);
+  const Context *cur = ctx;
+  for (size_t i = 0; i < k - 1; ++i) {
+    assert(cur != nullptr && cur->sz > 0);
+    suffix.push_back(cur->callSite);
+    cur = cur->predContext;
+  }
+
+  const Context *res = getGlobalUnlocked();
+  for (auto it = suffix.rbegin(), end = suffix.rend(); it != end; ++it)
+    res = pushUnlocked(res, *it);
+  return pushUnlocked(res, inst);
 }
 
 // Pops the most recent context frame.

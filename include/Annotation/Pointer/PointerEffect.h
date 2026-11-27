@@ -15,18 +15,25 @@ enum class PointerEffectType {
 class PointerAllocEffect {
 private:
   APosition sizePos;
+  APosition destPos;
   bool hasSize;
 
 public:
   PointerAllocEffect()
-      : sizePos(APosition::getReturnPosition()), hasSize(false) {}
-  PointerAllocEffect(const APosition &p) : sizePos(p), hasSize(true) {}
+      : sizePos(APosition::getReturnPosition()),
+        destPos(APosition::getReturnPosition()), hasSize(false) {}
+  PointerAllocEffect(const APosition &p)
+      : sizePos(p), destPos(APosition::getReturnPosition()), hasSize(true) {}
+  PointerAllocEffect(const APosition &sizeP, const APosition &destP,
+                     bool withSize)
+      : sizePos(sizeP), destPos(destP), hasSize(withSize) {}
 
   bool hasSizePosition() const { return hasSize; }
   APosition getSizePosition() const {
     assert(hasSize);
     return sizePos;
   }
+  APosition getDestPosition() const { return destPos; }
 };
 
 class CopySource {
@@ -141,6 +148,11 @@ private:
   }
   PointerEffect(const APosition &a) : type(PointerEffectType::Alloc) {
     new (&alloc) PointerAllocEffect(a);
+  }
+  PointerEffect(const APosition &sizePos, const APosition &destPos,
+                bool hasSize)
+      : type(PointerEffectType::Alloc) {
+    new (&alloc) PointerAllocEffect(sizePos, destPos, hasSize);
   }
   PointerEffect(const CopyDest &d, const CopySource &s)
       : type(PointerEffectType::Copy) {
@@ -264,6 +276,15 @@ public:
 
   static PointerEffect getAllocEffect(const APosition &sizePos) {
     return PointerEffect(sizePos);
+  }
+
+  static PointerEffect getAllocEffect(const APosition &sizePos,
+                                      const APosition &destPos) {
+    return PointerEffect(sizePos, destPos, true);
+  }
+
+  static PointerEffect getAllocEffectWithDest(const APosition &destPos) {
+    return PointerEffect(APosition::getReturnPosition(), destPos, false);
   }
 
   static PointerEffect getCopyEffect(const CopyDest &d, const CopySource &s) {

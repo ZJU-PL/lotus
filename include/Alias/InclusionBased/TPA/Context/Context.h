@@ -80,6 +80,11 @@ public:
                                     const llvm::Instruction *inst);
   // Push a new call site using a ProgramPoint (contains both context and node)
   static const Context *pushContext(const ProgramPoint &);
+  // Push a new call site using standard suffix k-CFA: retains the k most recent
+  // call sites (dropping the oldest frame when the depth reaches k).
+  static const Context *pushContextWithLimit(const Context *ctx,
+                                             const llvm::Instruction *inst,
+                                             size_t k);
   // Pop the top call site from the context stack
   // Returns the predecessor context (the context before the top call site)
   static const Context *popContext(const Context *ctx);

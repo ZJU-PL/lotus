@@ -30,22 +30,11 @@ void TransferFunction::addTopLevelSuccessors(const ProgramPoint &pp,
     evalResult.addTopLevelSuccessor(ProgramPoint(ctx, succ));
 }
 
-void TransferFunction::addMemLevelSuccessors(const ProgramPoint &pp,
-                                             const tpa::MemoryObject *obj,
-                                             EvalResult &evalResult) {
-  const auto *ctx = pp.getContext();
-  const auto *duInst = pp.getDefUseInstruction();
-  for (auto *succ : duInst->mem_succs(obj))
-    evalResult.addMemLevelSuccessor(ProgramPoint(ctx, succ), obj);
-}
-
-void TransferFunction::addMemLevelSuccessors(const ProgramPoint &pp,
-                                             EvalResult &evalResult) {
-  const auto *ctx = pp.getContext();
-  const auto *duInst = pp.getDefUseInstruction();
-  for (auto const &mapping : duInst->mem_succs())
-    for (auto *succ : mapping.second)
-      evalResult.addMemLevelSuccessor(ProgramPoint(ctx, succ), mapping.first);
+void TransferFunction::addMemBroadcast(const ProgramPoint &srcPP,
+                                       const ProgramPoint &dstPP,
+                                       EvalResult &evalResult) {
+  const bool full = syncState ? syncState->markBroadcast(srcPP, dstPP) : true;
+  evalResult.addMemBroadcast(dstPP, full);
 }
 
 TaintLattice TransferFunction::getTaintForOperands(const context::Context *ctx,
@@ -60,11 +49,12 @@ TaintLattice TransferFunction::getTaintForOperands(const context::Context *ctx,
   return currVal;
 }
 
-void TransferFunction::evalEntry(const ProgramPoint &pp, EvalResult &evalResult,
-                                 bool envChanged) {
+void TransferFunction::evalEntry(const ProgramPoint &srcPP,
+                                 const ProgramPoint &entryPP,
+                                 EvalResult &evalResult, bool envChanged) {
   if (envChanged)
-    addTopLevelSuccessors(pp, evalResult);
-  addMemLevelSuccessors(pp, evalResult);
+    addTopLevelSuccessors(entryPP, evalResult);
+  addMemBroadcast(srcPP, entryPP, evalResult);
 }
 
 void TransferFunction::evalAlloca(const ProgramPoint &pp,
@@ -122,7 +112,8 @@ void TransferFunction::evalLoad(const ProgramPoint &pp,
 
   const auto *ptrOp = loadInst->getPointerOperand();
   auto ptsSet = globalState.getPointerAnalysis().getPtsSet(ctx, ptrOp);
-  assert(!ptsSet.empty());
+  if (ptsSet.empty())
+    return;
 
   auto loadVal = loadTaintFromPtsSet(ptsSet, *localState);
   if (loadVal != TaintLattice::Unknown) {
@@ -135,24 +126,18 @@ void TransferFunction::evalLoad(const ProgramPoint &pp,
   }
 }
 
-void TransferFunction::strongUpdateStore(const MemoryObject *obj,
-                                         TaintLattice v, TaintStore &store) {
-  store.strongUpdate(obj, v);
-}
-
 void TransferFunction::weakUpdateStore(PtsSet pSet, TaintLattice v,
-                                       TaintStore &store) {
+                                       EvalResult &evalResult) {
   for (const auto *obj : pSet) {
     if (obj->isSpecialObject())
       continue;
-    store.weakUpdate(obj, v);
+    evalResult.weakUpdateOverride(obj, v);
   }
 }
 
 void TransferFunction::evalStore(const ProgramPoint &pp,
                                  EvalResult &evalResult) {
-  if (localState != nullptr)
-    evalResult.setStore(*localState);
+  evalResult.setBaseStore(localState);
 
   const auto *ctx = pp.getContext();
   const auto *storeInst =
@@ -166,16 +151,17 @@ void TransferFunction::evalStore(const ProgramPoint &pp,
     return;
 
   auto ptsSet = globalState.getPointerAnalysis().getPtsSet(ctx, ptrOp);
-  assert(!ptsSet.empty());
+  if (ptsSet.empty())
+    return;
   const auto *obj = *ptsSet.begin();
 
   if (ptsSet.size() == 1 && !obj->isSpecialObject() && !obj->isSummaryObject())
-    strongUpdateStore(obj, val, evalResult.getStore());
+    evalResult.strongUpdateOverride(obj, val);
   else
-    weakUpdateStore(ptsSet, val, evalResult.getStore());
+    weakUpdateStore(ptsSet, val, evalResult);
 
-  for (const auto *obj : ptsSet)
-    addMemLevelSuccessors(pp, obj, evalResult);
+  for (const auto *dstObj : ptsSet)
+    evalResult.addDirectMemProp(pp, dstObj);
 }
 
 std::vector<TaintLattice> TransferFunction::collectArgumentTaintValue(
@@ -217,7 +203,8 @@ void TransferFunction::evalInternalCall(const ProgramPoint &pp,
 
   const auto *callee = fc.getFunction();
   auto numParam = callee->arg_size();
-  assert(cs->arg_size() >= numParam);
+  if (cs->arg_size() < numParam)
+    return;
 
   auto argSets = collectArgumentTaintValue(pp.getContext(), cs, numParam);
   if (argSets.size() < numParam)
@@ -229,7 +216,8 @@ void TransferFunction::evalInternalCall(const ProgramPoint &pp,
                               .getDefUseFunction(fc.getFunction())
                               .getEntryInst();
 
-  evalEntry(ProgramPoint(fc.getContext(), entryInst), evalResult, envChanged);
+  evalEntry(pp, ProgramPoint(fc.getContext(), entryInst), evalResult,
+            envChanged);
 }
 
 void TransferFunction::evalAtomic(const ProgramPoint &pp, EvalResult &result) {
@@ -258,12 +246,12 @@ void TransferFunction::evalAtomic(const ProgramPoint &pp, EvalResult &result) {
       env.weakUpdate(TaintValue(pp.getContext(), inst), returnedValue))
     addTopLevelSuccessors(pp, result);
 
-  result.setStore(*localState);
+  result.setBaseStore(localState);
   if (replacementValue != TaintLattice::Unknown) {
     if (cx) {
       // The exchange may fail. Retain incoming contents as well as the new
       // value.
-      weakUpdateStore(pointsTo, replacementValue, result.getStore());
+      weakUpdateStore(pointsTo, replacementValue, result);
     } else {
       const auto writtenValue =
           rmw->getOperation() == AtomicRMWInst::Xchg
@@ -272,13 +260,13 @@ void TransferFunction::evalAtomic(const ProgramPoint &pp, EvalResult &result) {
       const auto *object = *pointsTo.begin();
       if (pointsTo.size() == 1 && !object->isSummaryObject() &&
           !object->isSpecialObject())
-        strongUpdateStore(object, writtenValue, result.getStore());
+        result.strongUpdateOverride(object, writtenValue);
       else
-        weakUpdateStore(pointsTo, writtenValue, result.getStore());
+        weakUpdateStore(pointsTo, writtenValue, result);
     }
   }
   for (const auto *object : pointsTo)
-    addMemLevelSuccessors(pp, object, result);
+    result.addDirectMemProp(pp, object);
 }
 
 void TransferFunction::evalCall(const ProgramPoint &pp,
@@ -287,8 +275,7 @@ void TransferFunction::evalCall(const ProgramPoint &pp,
   auto *cs = llvm::dyn_cast<llvm::CallBase>(inst);
   assert(cs);
 
-  if (localState != nullptr)
-    evalResult.setStore(*localState);
+  evalResult.setBaseStore(localState);
 
   const auto *ctx = pp.getContext();
   auto callees = resolveCallTargets(globalState.getPointerAnalysis(), *cs,
@@ -318,18 +305,19 @@ void TransferFunction::evalCall(const ProgramPoint &pp,
   }
 }
 
-void TransferFunction::applyReturn(const ProgramPoint &pp, TaintLattice tVal,
-                                   EvalResult &evalResult) {
+void TransferFunction::applyReturn(const ProgramPoint &srcPP,
+                                   const ProgramPoint &retSite,
+                                   TaintLattice tVal, EvalResult &evalResult) {
   auto envChanged = false;
   if (tVal != TaintLattice::Unknown)
     envChanged = globalState.getEnv().weakUpdate(
-        TaintValue(pp.getContext(),
-                   pp.getDefUseInstruction()->getInstruction()),
+        TaintValue(retSite.getContext(),
+                   retSite.getDefUseInstruction()->getInstruction()),
         tVal);
 
   if (envChanged)
-    addTopLevelSuccessors(pp, evalResult);
-  addMemLevelSuccessors(pp, evalResult);
+    addTopLevelSuccessors(retSite, evalResult);
+  addMemBroadcast(srcPP, retSite, evalResult);
 }
 
 void TransferFunction::evalReturn(const ProgramPoint &pp,
@@ -344,8 +332,7 @@ void TransferFunction::evalReturn(const ProgramPoint &pp,
     return;
   }
 
-  if (localState != nullptr)
-    evalResult.setStore(*localState);
+  evalResult.setBaseStore(localState);
 
   auto tVal = TaintLattice::Unknown;
   if (auto *retVal = retInst->getReturnValue())
@@ -354,16 +341,15 @@ void TransferFunction::evalReturn(const ProgramPoint &pp,
   auto returnTgts =
       globalState.getCallGraph().getCallers(FunctionContext(ctx, fromFunc));
   for (auto const &retSite : returnTgts)
-    applyReturn(retSite, tVal, evalResult);
+    applyReturn(pp, retSite, tVal, evalResult);
 }
 
 void TransferFunction::evalResume(const ProgramPoint &pp, EvalResult &result) {
-  if (localState)
-    result.setStore(*localState);
+  result.setBaseStore(localState);
   const auto *function = pp.getDefUseInstruction()->getFunction();
   for (const auto &caller : globalState.getCallGraph().getCallers(
            FunctionContext(pp.getContext(), function)))
-    applyReturn(caller, TaintLattice::Unknown, result);
+    applyReturn(pp, caller, TaintLattice::Unknown, result);
 }
 
 EvalResult TransferFunction::eval(const ProgramPoint &pp) {
@@ -373,8 +359,8 @@ EvalResult TransferFunction::eval(const ProgramPoint &pp) {
 
   const auto *duInst = pp.getDefUseInstruction();
   if (duInst->isEntryInstruction()) {
-    evalResult.setStore(*localState);
-    evalEntry(pp, evalResult, true);
+    evalResult.setBaseStore(localState);
+    evalEntry(pp, pp, evalResult, true);
   } else {
     const auto *inst = duInst->getInstruction();
     assert(inst != nullptr);

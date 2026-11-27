@@ -30,7 +30,8 @@ TaintVector ReturnTracker::getReturnTaintValues(const ReturnVector &retVec) {
   return vectorTransform(retVec, [this](auto const &returnSource) {
     auto retInst = returnSource.getDefUseInstruction()->getInstruction();
     auto retValue = cast<ReturnInst>(retInst)->getReturnValue();
-    assert(retValue != nullptr);
+    if (retValue == nullptr)
+      return TaintLattice::Unknown;
 
     auto tVal = trackerState.getEnv().lookup(
         TaintValue(returnSource.getContext(), retValue));
@@ -80,10 +81,11 @@ void ReturnTracker::trackValue(const ProgramPoint &pp,
 
 void ReturnTracker::trackMemory(const ProgramPoint &pp,
                                 const ReturnVector &retVec) {
-  for (auto const &mapping : pp.getDefUseInstruction()->mem_succs()) {
-    auto retTaints = getReturnTaintValues(mapping.first, retVec);
-    processReturns(pp, retVec, retTaints);
-  }
+  pp.getDefUseInstruction()->forEachMemSucc(
+      [&](const tpa::MemoryObject *obj, const auto &) {
+        auto retTaints = getReturnTaintValues(obj, retVec);
+        processReturns(pp, retVec, retTaints);
+      });
 }
 
 void ReturnTracker::trackReturn(const ProgramPoint &pp,

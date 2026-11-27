@@ -3,8 +3,10 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/PtsSet.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
-#include <unordered_map>
+
+#include <llvm/ADT/DenseMap.h>
 
 namespace tpa {
 
@@ -31,18 +33,18 @@ private:
   static_assert(std::is_pointer<T>::value,
                 "PtsMap only accept pointer as key type");
 
-  // Internal mapping from key to points-to set
-  using MapType = std::unordered_map<T, PtsSet>;
+  // Internal flat hash map from key to points-to set.
+  using MapType = llvm::DenseMap<T, PtsSet>;
   MapType mapping;
 
 public:
   using const_iterator = typename MapType::const_iterator;
 
   struct Binding {
-    bool present;
+    bool present = false;
     PtsSet value;
   };
-  using ReadMap = std::unordered_map<T, Binding>;
+  using ReadMap = llvm::DenseMap<T, Binding>;
 
 private:
   // Used only by parallel transfer views. The base remains immutable while
@@ -56,14 +58,18 @@ private:
       return {true, found->second};
     if (base) {
       const auto observed = base->binding(key);
-      reads.emplace(key, observed);
+      reads.try_emplace(key, observed);
       return observed;
     }
     return {false, PtsSet::getEmptySet()};
   }
 
 public:
+  PtsMap() = default;
+
   bool isOverlay() const { return base != nullptr; }
+
+  void reserve(size_t count) { mapping.reserve(count); }
 
   PtsMap makeOverlay() const {
     PtsMap result;
@@ -114,21 +120,19 @@ public:
     if (base) {
       const auto old = binding(key);
       const auto value = old.value.insert(obj);
-      mapping.insert_or_assign(key, value);
+      mapping[key] = value;
       return value != old.value;
     }
-    auto itr = mapping.find(key);
-    if (itr == mapping.end())
-      itr = mapping.insert(std::make_pair(key, PtsSet::getEmptySet())).first;
+    auto res = mapping.try_emplace(key, PtsSet::getSingletonSet(obj));
+    if (res.second)
+      return true;
 
-    auto &set = itr->second;
+    auto &set = res.first->second;
     auto newSet = set.insert(obj);
     if (set == newSet)
       return false;
-    else {
-      set = newSet;
-      return true;
-    }
+    set = newSet;
+    return true;
   }
 
   // Weak update: union with existing set
@@ -140,23 +144,20 @@ public:
     if (base) {
       const auto old = binding(key);
       const auto value = old.value.merge(pSet);
-      mapping.insert_or_assign(key, value);
+      mapping[key] = value;
       return !old.present || value != old.value;
     }
-    auto itr = mapping.find(key);
-    if (itr == mapping.end()) {
-      mapping.insert(std::make_pair(key, pSet));
+    auto res = mapping.try_emplace(key, pSet);
+    if (res.second)
       return true;
-    } else {
-      auto &set = itr->second;
-      auto newSet = set.merge(pSet);
-      if (newSet == set)
-        return false;
-      else {
-        set = newSet;
-        return true;
-      }
-    }
+    auto &set = res.first->second;
+    if (set == pSet)
+      return false;
+    auto newSet = set.merge(pSet);
+    if (newSet == set)
+      return false;
+    set = newSet;
+    return true;
   }
 
   // Strong update: replace existing set
@@ -167,30 +168,31 @@ public:
 
     if (base) {
       const auto old = binding(key);
-      mapping.insert_or_assign(key, pSet);
+      mapping[key] = pSet;
       return !old.present || old.value != pSet;
     }
-    auto itr = mapping.find(key);
-    if (itr == mapping.end()) {
-      mapping.insert(std::make_pair(key, pSet));
+    auto res = mapping.try_emplace(key, pSet);
+    if (res.second)
       return true;
-    } else {
-      auto &set = itr->second;
-      if (set == pSet)
-        return false;
-      else {
-        set = pSet;
-        return true;
-      }
-    }
+    auto &set = res.first->second;
+    if (set == pSet)
+      return false;
+    set = pSet;
+    return true;
   }
 
   // Merge another map into this one (weak updates)
   // Returns true if anything changed
   bool mergeWith(const PtsMap<T> &rhs) {
+    if (this == &rhs)
+      return false;
+    if (!base && !rhs.base && mapping.empty()) {
+      mapping = rhs.mapping;
+      return !mapping.empty();
+    }
     bool ret = false;
-    for (auto const &mapping : rhs)
-      ret |= weakUpdate(mapping.first, mapping.second);
+    for (auto const &entry : rhs)
+      ret |= weakUpdate(entry.first, entry.second);
     return ret;
   }
 

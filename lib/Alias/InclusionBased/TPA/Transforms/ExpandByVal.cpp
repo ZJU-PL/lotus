@@ -17,6 +17,7 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
@@ -82,26 +83,49 @@ PreservedAnalyses ExpandByValPass::run(Module &M,
         if (argAttrs.hasAttribute(Attribute::ByVal)) {
           Argument *Arg = func.getArg(argIdx);
           Type *byValTy = argAttrs.getByValType();
-          Module *mod = func.getParent();
-          LLVMContext &ctx = func.getContext();
-          Instruction *insertPt =
-              &*func.getEntryBlock().getFirstInsertionPt();
+          if (!byValTy && Arg->getType()->isPointerTy())
+            byValTy = Arg->getType()->getPointerElementType();
+          if (byValTy && byValTy->isSized()) {
+            Module *mod = func.getParent();
+            LLVMContext &ctx = func.getContext();
+            Instruction *insertPt =
+                &*func.getEntryBlock().getFirstInsertionPt();
 
-          auto *slot =
-              new AllocaInst(byValTy, 0, Arg->getName() + ".byval", insertPt);
-          Arg->replaceAllUsesWith(slot);
+            auto *slot =
+                new AllocaInst(byValTy, 0, Arg->getName() + ".byval", insertPt);
+            Arg->replaceAllUsesWith(slot);
 
-          Type *sizeTy = IntegerType::get(ctx, 64);
-          Type *tys[3] = {slot->getType(), Arg->getType(), sizeTy};
-          Function *memcpyFn =
-              Intrinsic::getDeclaration(mod, Intrinsic::memcpy, tys);
-          Value *args[4] = {
-              slot, Arg,
-              ConstantInt::get(
-                  sizeTy, mod->getDataLayout().getTypeAllocSize(byValTy)),
-              ConstantInt::getFalse(ctx)};
-          CallInst::Create(memcpyFn->getFunctionType(), memcpyFn, args, "",
-                           insertPt);
+            Type *i8PtrDst = Type::getInt8PtrTy(
+                ctx, slot->getType()->getPointerAddressSpace());
+            Type *i8PtrSrc = Type::getInt8PtrTy(
+                ctx, Arg->getType()->getPointerAddressSpace());
+            Value *dstPtr = slot->getType() == i8PtrDst
+                                ? static_cast<Value *>(slot)
+                                : CastInst::CreatePointerCast(
+                                      slot, i8PtrDst, "byval.dst", insertPt);
+            Value *srcPtr = Arg->getType() == i8PtrSrc
+                                ? static_cast<Value *>(Arg)
+                                : CastInst::CreatePointerCast(
+                                      Arg, i8PtrSrc, "byval.src", insertPt);
+
+            Type *sizeTy = IntegerType::get(ctx, 64);
+            Type *tys[3] = {i8PtrDst, i8PtrSrc, sizeTy};
+            Function *memcpyFn =
+                Intrinsic::getDeclaration(mod, Intrinsic::memcpy, tys);
+            Value *args[4] = {
+                dstPtr, srcPtr,
+                ConstantInt::get(
+                    sizeTy, mod->getDataLayout().getTypeAllocSize(byValTy)),
+                ConstantInt::getFalse(ctx)};
+            auto *call = CallInst::Create(memcpyFn->getFunctionType(), memcpyFn,
+                                          args, "", insertPt);
+            auto location = insertPt->getDebugLoc();
+            if (!location)
+              if (auto *scope = func.getSubprogram())
+                location =
+                    DILocation::get(ctx, scope->getScopeLine(), 0, scope);
+            call->setDebugLoc(location);
+          }
         }
         argAttrs =
             argAttrs.removeAttribute(func.getContext(), Attribute::ByVal)
@@ -120,13 +144,16 @@ PreservedAnalyses ExpandByValPass::run(Module &M,
 
       // Keep in-module call sites consistent with the rewritten signature.
       for (User *U : func.users())
-        if (auto *CB = dyn_cast<CallBase>(U))
+        if (auto *CB = dyn_cast<CallBase>(U)) {
+          if (CB->getCalledOperand()->stripPointerCasts() != &func)
+            continue;
           for (unsigned argIdx = 0;
                argIdx < CB->arg_size() && argIdx < func.arg_size();
                ++argIdx) {
             CB->removeParamAttr(argIdx, Attribute::ByVal);
             CB->removeParamAttr(argIdx, Attribute::StructRet);
           }
+        }
     }
   }
 

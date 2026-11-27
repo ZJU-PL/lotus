@@ -129,12 +129,15 @@ bool TaintAnalysis::runOnDefUseModule(const DefUseModule &module,
                          unmodeledPolicy);
   auto work = Initializer(state, memo).runOnInitState(TaintStore());
   std::set<const context::Context *> contexts;
+  TaintSyncState syncState;
   while (!work.empty()) {
     auto point = work.dequeue();
     contexts.insert(point.getContext());
-    auto result = TransferFunction(state, memo.lookup(point)).eval(point);
+    auto dirtyObjs = memo.takeDirtyObjects(point);
+    auto result =
+        TransferFunction(state, memo.lookup(point), &syncState).eval(point);
     ++stats.evaluations;
-    TaintPropagator(memo, work).propagate(result);
+    TaintPropagator(memo, work).propagate(result, dirtyObjs);
   }
   ignoredUnresolvedCalls = state.getIgnoredUnresolvedCalls();
   violations = SinkViolationChecker(env, memo, extTable, ptrAnalysis)
@@ -143,7 +146,7 @@ bool TaintAnalysis::runOnDefUseModule(const DefUseModule &module,
     lossSites = PrecisionLossTracker(state).trackImprecision(violations);
   stats.contexts = contexts.size();
   stats.valueFacts = env.size();
-  stats.memoryStates = std::distance(memo.begin(), memo.end());
+  stats.memoryStates = memo.size();
   stats.sinks = state.getSinks().size();
   for (const auto &entry : violations)
     stats.violations += entry.second.size();
@@ -152,8 +155,7 @@ bool TaintAnalysis::runOnDefUseModule(const DefUseModule &module,
       (void)succ;
       ++stats.topEdges;
     }
-    for (const auto &entry : node.mem_succs())
-      stats.memoryEdges += entry.second.size();
+    stats.memoryEdges += node.countMemSuccEdges();
   };
   for (const auto &function : module) {
     countEdges(*function.getEntryInst());

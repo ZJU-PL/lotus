@@ -44,6 +44,10 @@ static void printAllocEffect(raw_ostream &os,
   } else {
     os << "unknown size";
   }
+  if (!allocEffect.getDestPosition().isReturnPosition()) {
+    os << " into *";
+    printPosition(os, allocEffect.getDestPosition());
+  }
 }
 
 /**

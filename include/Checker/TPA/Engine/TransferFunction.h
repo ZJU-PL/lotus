@@ -5,6 +5,9 @@
 #include "Checker/TPA/Engine/EvalResult.h"
 
 #include <cstddef>
+#include <utility>
+
+#include <llvm/ADT/DenseSet.h>
 
 namespace annotation {
 class PipeTaintEntry;
@@ -29,6 +32,19 @@ class TaintGlobalState;
 class TaintLocalState;
 class TaintValue;
 
+// Tracks which (sourcePP, targetPP) whole-store memory broadcasts have already
+// performed their initial full synchronization, allowing subsequent visits to
+// propagate only newly-grown dirty objects in O(|dirty|).
+class TaintSyncState {
+private:
+  llvm::DenseSet<std::pair<ProgramPoint, ProgramPoint>> syncedBroadcasts;
+
+public:
+  bool markBroadcast(const ProgramPoint &srcPP, const ProgramPoint &dstPP) {
+    return syncedBroadcasts.insert(std::make_pair(srcPP, dstPP)).second;
+  }
+};
+
 class TransferFunction {
 private:
   // The global state
@@ -37,15 +53,16 @@ private:
   // The local state
   const TaintStore *localState;
 
+  // Optional fixpoint sync state for exact delta propagation
+  TaintSyncState *syncState;
+
   void addTopLevelSuccessors(const ProgramPoint &, EvalResult &);
-  void addMemLevelSuccessors(const ProgramPoint &, EvalResult &);
-  void addMemLevelSuccessors(const ProgramPoint &, const tpa::MemoryObject *,
-                             EvalResult &);
+  void addMemBroadcast(const ProgramPoint &, const ProgramPoint &,
+                       EvalResult &);
   TaintLattice getTaintForOperands(const context::Context *,
                                    const llvm::Instruction *);
   TaintLattice loadTaintFromPtsSet(tpa::PtsSet, const TaintStore &);
-  void strongUpdateStore(const tpa::MemoryObject *, TaintLattice, TaintStore &);
-  void weakUpdateStore(tpa::PtsSet, TaintLattice, TaintStore &);
+  void weakUpdateStore(tpa::PtsSet, TaintLattice, EvalResult &);
 
   std::vector<TaintLattice> collectArgumentTaintValue(const context::Context *,
                                                       const llvm::CallBase *,
@@ -54,7 +71,8 @@ private:
                              const std::vector<TaintLattice> &);
   void evalInternalCall(const ProgramPoint &, const tpa::FunctionContext &,
                         EvalResult &, bool);
-  void applyReturn(const ProgramPoint &, TaintLattice, EvalResult &);
+  void applyReturn(const ProgramPoint &, const ProgramPoint &, TaintLattice,
+                   EvalResult &);
 
   void updateDirectMemoryTaint(const TaintValue &, TaintLattice,
                                const ProgramPoint &, EvalResult &);
@@ -79,7 +97,8 @@ private:
   void evalExternalCall(const ProgramPoint &, const llvm::Function *,
                         EvalResult &);
 
-  void evalEntry(const ProgramPoint &, EvalResult &, bool);
+  void evalEntry(const ProgramPoint &, const ProgramPoint &, EvalResult &,
+                 bool);
   void evalAlloca(const ProgramPoint &, EvalResult &);
   void evalAllOperands(const ProgramPoint &, EvalResult &);
   void evalLoad(const ProgramPoint &, EvalResult &);
@@ -90,8 +109,9 @@ private:
   void evalResume(const ProgramPoint &, EvalResult &);
 
 public:
-  TransferFunction(TaintGlobalState &g, const TaintStore *l)
-      : globalState(g), localState(l) {}
+  TransferFunction(TaintGlobalState &g, const TaintStore *l,
+                   TaintSyncState *sync = nullptr)
+      : globalState(g), localState(l), syncState(sync) {}
 
   EvalResult eval(const ProgramPoint &);
 };

@@ -64,6 +64,13 @@ public:
     sortAndUnique();
   }
 
+  static SortedVector fromSortedUnique(std::vector<T> &&v,
+                                       const Comparator &c = Comparator()) {
+    SortedVector res(c);
+    res.vec = std::move(v);
+    return res;
+  }
+
   template <typename Iterator> void assign(Iterator first, Iterator last) {
     vec.assign(first, last);
     sortAndUnique();
@@ -213,6 +220,12 @@ public:
     } else
       return 0;
   }
+
+  // Bulk construction helpers: append unsorted elements in O(1) amortized and
+  // call finalize() once after all insertions complete.
+  void push_back_unsorted(const T &elem) { vec.push_back(elem); }
+  void push_back_unsorted(T &&elem) { vec.push_back(std::move(elem)); }
+  void finalize() { sortAndUnique(); }
 
   // Additional utilities
   bool merge(const SortedVector &rhs) {

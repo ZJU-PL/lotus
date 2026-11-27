@@ -25,6 +25,11 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Program/CFG/CFGNode.h"
 #include "Alias/InclusionBased/TPA/Util/IO/PointerAnalysis/Printer.h"
 
+#include <algorithm>
+#include <cstdint>
+
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/raw_ostream.h>
 
 using namespace llvm;
@@ -79,25 +84,28 @@ void StorePruner::findAllReachableObjects(const Store &store,
   // allocation's structural suffix at every field costs O(fields^2) per call.
   // A lower-offset expansion includes every higher-offset structural suffix.
   using Block = const MemoryBlock *;
-  std::unordered_map<Block, size_t> scheduledMin, expandedMin;
+  llvm::DenseMap<Block, size_t> scheduledMin, expandedMin;
   auto note = [&](const MemoryObject *object) {
     if (object->isSpecialObject() ||
         (!store.isOverlay() && isAccessible(object)))
       return;
     auto result =
-        scheduledMin.emplace(object->getMemoryBlock(), object->getOffset());
+        scheduledMin.try_emplace(object->getMemoryBlock(), object->getOffset());
     if (!result.second)
       result.first->second =
           std::min(result.first->second, object->getOffset());
   };
-  std::vector<const MemoryObject *> work(reachableSet.begin(),
-                                         reachableSet.end());
-  for (const auto *object : work)
+  std::vector<const MemoryObject *> work;
+  work.reserve(reachableSet.size() * 2);
+  for (const auto *object : reachableSet) {
+    work.push_back(object);
     note(object);
+  }
   auto enqueue = [&](const MemoryObject *object) {
-    // For an owning store, every globally accessible binding is already a
-    // root. An unbound global/function object adds neither bindings nor edges.
-    if (!store.isOverlay() && isAccessible(object) && !store.hasBinding(object))
+    // For an owning store, getRootSet() has already seeded every globally
+    // accessible object that has a binding in `store`, and any unbound global
+    // or function object contributes neither bindings nor outgoing edges.
+    if (!store.isOverlay() && isAccessible(object))
       return;
     if (reachableSet.insert(object).second) {
       note(object);
@@ -114,7 +122,7 @@ void StorePruner::findAllReachableObjects(const Store &store,
       auto *block = object->getMemoryBlock();
       const auto offset = object->getOffset();
       auto expanded = expandedMin.find(block);
-      if (offset == scheduledMin.at(block) &&
+      if (offset == scheduledMin.find(block)->second &&
           (expanded == expandedMin.end() || offset < expanded->second)) {
         expandedMin[block] = offset;
         for (const auto *field :
@@ -133,6 +141,7 @@ void StorePruner::findAllReachableObjects(const Store &store,
 Store StorePruner::filterStore(const Store &store,
                                const ObjectSet &reachableSet) {
   Store ret;
+  ret.reserve(std::min<size_t>(store.size(), reachableSet.size()));
   for (auto const &mapping : store) {
     if (reachableSet.count(mapping.first))
       ret.strongUpdate(mapping.first, mapping.second);
@@ -141,22 +150,101 @@ Store StorePruner::filterStore(const Store &store,
   return ret;
 }
 
-// Main entry point for store pruning.
-Store StorePruner::pruneStore(const Store &store, const ProgramPoint &pp) {
+bool StorePruner::pruneStoreIfNeeded(const Store &store, const ProgramPoint &pp,
+                                     Store &out) {
   assert(pp.getCFGNode()->isCallNode() &&
          "Pruning can only happen on call node!");
 
-  // Every owning-store binding is already a root in this common case.
-  // There is nothing to remove, independently of argument reachability.
-  if (!store.isOverlay() &&
-      std::all_of(store.begin(), store.end(), [](const auto &binding) {
-        return isAccessible(binding.first);
-      }))
-    return store;
+  // O(1): if there are no stack/heap bindings anywhere in the persistent
+  // radix tree, every binding is globally accessible and nothing can be pruned.
+  const size_t totalNonAccessibleBound = store.nonAccessibleCount();
+  if (totalNonAccessibleBound == 0)
+    return false;
 
-  auto reachableSet = getRootSet(store, pp);
-  findAllReachableObjects(store, reachableSet);
-  return filterStore(store, reachableSet);
+  ObjectSet reachableNonAcc;
+  std::vector<const MemoryObject *> work;
+
+  using Block = const MemoryBlock *;
+  llvm::DenseMap<Block, size_t> scheduledMin, expandedMin;
+  auto note = [&](const MemoryObject *object) {
+    if (object->isSpecialObject())
+      return;
+    auto result =
+        scheduledMin.try_emplace(object->getMemoryBlock(), object->getOffset());
+    if (!result.second)
+      result.first->second =
+          std::min(result.first->second, object->getOffset());
+  };
+  auto enqueueNonAcc = [&](const MemoryObject *object) {
+    if (isAccessible(object))
+      return;
+    if (reachableNonAcc.insert(object).second) {
+      note(object);
+      work.push_back(object);
+    }
+  };
+
+  // Seed non-accessible objects pointed to by accessible (global/function)
+  // bindings, skipping all subtrees with accToNonAccMask == 0 in O(1).
+  store.forEachAccessiblePointingToNonAccessible([&](PtsSet pts) {
+    for (const auto *pointee : pts)
+      enqueueNonAcc(pointee);
+  });
+
+  // Seed non-accessible objects pointed to by call arguments.
+  const auto *ctx = pp.getContext();
+  const auto &callNode = static_cast<const CallCFGNode &>(*pp.getCFGNode());
+  for (const auto *argVal : callNode) {
+    const auto *argPtr = ptrManager.getPointer(ctx, argVal);
+    if (argPtr == nullptr)
+      continue;
+    auto argSet = env.lookup(argPtr);
+    if (!argSet.hasNonAccessible())
+      continue;
+    for (const auto *obj : argSet)
+      enqueueNonAcc(obj);
+  }
+
+  // BFS strictly over reachable non-accessible (stack/heap) objects.
+  llvm::SmallVector<uint32_t, 64> keepBoundNonAccIds;
+  for (size_t next = 0; next < work.size(); ++next) {
+    const auto *object = work[next];
+    if (!object->isSpecialObject()) {
+      auto *block = object->getMemoryBlock();
+      const auto offset = object->getOffset();
+      auto expanded = expandedMin.find(block);
+      if (offset == scheduledMin.find(block)->second &&
+          (expanded == expandedMin.end() || offset < expanded->second)) {
+        expandedMin[block] = offset;
+        for (const auto *field :
+             memManager.getReachablePointerObjects(object, false))
+          enqueueNonAcc(field);
+      }
+    }
+    if (const PtsSet *pts = store.findOwnBinding(object)) {
+      keepBoundNonAccIds.push_back(object->getId());
+      if (pts->hasNonAccessible()) {
+        for (const auto *pointee : *pts)
+          enqueueNonAcc(pointee);
+      }
+    }
+  }
+
+  if (keepBoundNonAccIds.size() == totalNonAccessibleBound)
+    return false;
+
+  std::sort(keepBoundNonAccIds.begin(), keepBoundNonAccIds.end());
+  // Retain pure-global subtrees and drop pure-unreachable subtrees in O(1).
+  out = store.filterNonAccessibleIds(keepBoundNonAccIds);
+  return true;
+}
+
+// Main entry point for store pruning.
+Store StorePruner::pruneStore(const Store &store, const ProgramPoint &pp) {
+  Store out;
+  if (!pruneStoreIfNeeded(store, pp, out))
+    return store;
+  return out;
 }
 
 } // namespace tpa

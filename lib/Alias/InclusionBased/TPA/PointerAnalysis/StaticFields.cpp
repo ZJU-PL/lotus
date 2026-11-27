@@ -38,7 +38,7 @@ const MemoryBlock MemoryManager::uBlock = MemoryBlock(
     AllocSite::getUniversalAllocSite(), TypeLayout::getByteArrayTypeLayout());
 const MemoryBlock MemoryManager::nBlock = MemoryBlock(
     AllocSite::getNullAllocSite(), TypeLayout::getPointerTypeLayoutWithSize(0));
-const MemoryObject MemoryManager::uObj = MemoryObject(&uBlock, 0, true);
-const MemoryObject MemoryManager::nObj = MemoryObject(&nBlock, 0, false);
+const MemoryObject MemoryManager::uObj = MemoryObject(&uBlock, 0, true, 0u);
+const MemoryObject MemoryManager::nObj = MemoryObject(&nBlock, 0, false, 1u);
 
 } // namespace tpa

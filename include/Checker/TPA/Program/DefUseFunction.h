@@ -2,18 +2,25 @@
 
 #include "Checker/TPA/Program/DefUseInstruction.h"
 
+#include <deque>
 #include <vector>
+
+#include <llvm/ADT/DenseMap.h>
 
 namespace tpa::taint {
 
 class DefUseFunction {
 private:
   const llvm::Function &function;
-  std::unordered_map<const llvm::Instruction *, DefUseInstruction> instMap;
+  // Pointer-stable node storage paired with a flat DenseMap lookup index.
+  std::deque<DefUseInstruction> instStorage;
+  llvm::DenseMap<const llvm::Instruction *, DefUseInstruction *> instMap;
 
   DefUseInstruction entryInst;
   std::vector<DefUseInstruction *> exitInsts;
   std::vector<DefUseInstruction *> memoryExitInsts;
+  MemoryGroupTable memGroups;
+  mutable bool memPredsBuilt = false;
 
 public:
   using NodeType = DefUseInstruction;
@@ -33,6 +40,12 @@ public:
   const std::vector<DefUseInstruction *> &getExitInsts() const {
     return exitInsts;
   }
+
+  MemoryGroupTable &getMemoryGroups() { return memGroups; }
+  const MemoryGroupTable &getMemoryGroups() const { return memGroups; }
+
+  void finalizeMemSuccEdges();
+  void ensureMemPreds() const;
 };
 
 } // namespace tpa::taint

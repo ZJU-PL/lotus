@@ -33,13 +33,12 @@ public:
     const auto *duInst = pp.getDefUseInstruction();
     assert(!duInst->isEntryInstruction());
 
-    // Enqueue all affected operands
-    for (auto const &mapping : duInst->mem_preds()) {
-      if (!mSet.count(mapping.first))
-        continue;
-
-      for (auto *predDuInst : mapping.second)
-        workList.enqueue(ProgramPoint(ctx, predDuInst));
+    // Enqueue all affected memory predecessors in O(|mSet|).
+    for (const auto *obj : mSet) {
+      if (const auto *preds = duInst->findMemPreds(obj)) {
+        for (auto *predDuInst : *preds)
+          workList.enqueue(ProgramPoint(ctx, predDuInst));
+      }
     }
   }
 };

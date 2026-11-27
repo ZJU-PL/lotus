@@ -48,13 +48,14 @@ bool writeDotFile(const char *filePath,
     for (auto succ : valueSuccessors)
       os << "  n" << id << " -> n" << succ << " [style=dotted];\n";
     std::map<unsigned, std::set<std::string>> memorySuccessors;
-    for (const auto &entry : node->mem_succs()) {
-      std::string object;
-      llvm::raw_string_ostream objectText(object);
-      objectText << *entry.first;
-      for (auto *succ : entry.second)
-        memorySuccessors[ids.at(succ)].insert(objectText.str());
-    }
+    node->forEachMemSucc(
+        [&](const tpa::MemoryObject *loc, const auto &succs) {
+          std::string object;
+          llvm::raw_string_ostream objectText(object);
+          objectText << *loc;
+          for (auto *succ : succs)
+            memorySuccessors[ids.at(succ)].insert(objectText.str());
+        });
     for (const auto &entry : memorySuccessors) {
       std::string objects;
       for (const auto &object : entry.second)

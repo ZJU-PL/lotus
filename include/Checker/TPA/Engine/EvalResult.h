@@ -10,15 +10,29 @@
 namespace tpa::taint {
 
 class EvalResult {
-private:
-  TaintStore store;
+public:
+  struct DirectMemProp {
+    ProgramPoint targetPP;
+    const tpa::MemoryObject *obj;
+  };
 
-  using SuccessorList = std::vector<EvalSuccessor>;
-  SuccessorList succs;
+  struct MemBroadcast {
+    ProgramPoint targetPP;
+    bool full;
+  };
+
+private:
+  // Non-owning view of the incoming pointer-stable TaintStore in TaintMemo.
+  const TaintStore *baseStore = nullptr;
+  // Sparse per-object writes applied by this transfer (empty for passthrough
+  // nodes like Entry, Return, Resume, InternalCall, IgnoredCall).
+  TaintStore overrides;
+
+  std::vector<ProgramPoint> topSuccs;
+  std::vector<DirectMemProp> directMemProps;
+  std::vector<MemBroadcast> memBroadcasts;
 
 public:
-  using const_iterator = typename SuccessorList::const_iterator;
-
   EvalResult() = default;
 
   EvalResult(const EvalResult &) = delete;
@@ -26,24 +40,57 @@ public:
   EvalResult &operator=(const EvalResult &) = delete;
   EvalResult &operator=(EvalResult &&) = delete;
 
-  TaintStore &getStore() { return store; }
-  const TaintStore &getStore() const { return store; }
-  void setStore(const TaintStore &s) { store = s; }
-  void setStore(TaintStore &&s) { store = std::move(s); }
+  void setBaseStore(const TaintStore *s) { baseStore = s; }
+  const TaintStore *getBaseStore() const { return baseStore; }
+  const TaintStore &getOverrides() const { return overrides; }
 
-  void addTopLevelSuccessor(const ProgramPoint &pp) {
-    succs.push_back(EvalSuccessor(pp, nullptr));
+  bool hasOverride(const tpa::MemoryObject *obj) const {
+    return overrides.findValue(obj) != nullptr;
   }
 
-  void addMemLevelSuccessor(const ProgramPoint &pp,
-                            const tpa::MemoryObject *obj) {
-    succs.push_back(EvalSuccessor(pp, obj));
+  TaintLattice lookup(const tpa::MemoryObject *obj) const {
+    if (!overrides.empty()) {
+      if (const TaintLattice *ov = overrides.findValue(obj))
+        return *ov;
+    }
+    return baseStore ? baseStore->lookup(obj) : TaintLattice::Unknown;
   }
 
-  const_iterator begin() const { return succs.begin(); }
-  const_iterator end() const { return succs.end(); }
-  bool empty() const { return succs.empty(); }
-  size_t size() const { return succs.size(); }
+  void strongUpdateOverride(const tpa::MemoryObject *obj, TaintLattice val) {
+    overrides.strongUpdate(obj, val);
+  }
+
+  void weakUpdateOverride(const tpa::MemoryObject *obj, TaintLattice val) {
+    if (const TaintLattice *existing = overrides.findValue(obj)) {
+      overrides.strongUpdate(obj, Lattice<TaintLattice>::merge(*existing, val));
+    } else {
+      const TaintLattice baseVal =
+          baseStore ? baseStore->lookup(obj) : TaintLattice::Unknown;
+      overrides.strongUpdate(obj, Lattice<TaintLattice>::merge(baseVal, val));
+    }
+  }
+
+  void addTopLevelSuccessor(const ProgramPoint &pp) { topSuccs.push_back(pp); }
+
+  void addDirectMemProp(const ProgramPoint &pp, const tpa::MemoryObject *obj) {
+    directMemProps.push_back(DirectMemProp{pp, obj});
+  }
+
+  void addMemBroadcast(const ProgramPoint &pp, bool full) {
+    memBroadcasts.push_back(MemBroadcast{pp, full});
+  }
+
+  const std::vector<ProgramPoint> &getTopSuccessors() const { return topSuccs; }
+  const std::vector<DirectMemProp> &getDirectMemProps() const {
+    return directMemProps;
+  }
+  const std::vector<MemBroadcast> &getMemBroadcasts() const {
+    return memBroadcasts;
+  }
+
+  bool empty() const {
+    return topSuccs.empty() && directMemProps.empty() && memBroadcasts.empty();
+  }
 };
 
 } // namespace tpa::taint

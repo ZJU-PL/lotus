@@ -28,7 +28,8 @@ TaintLattice SinkViolationChecker::lookupTaint(const TaintValue &tv,
     if (!store)
       return TaintLattice::Unknown;
     auto pSet = ptrAnalysis.getPtsSet(tv.getContext(), tv.getValue());
-    assert(!pSet.empty());
+    if (pSet.empty())
+      return TaintLattice::Unknown;
     auto res = TaintLattice::Unknown;
     for (const auto *loc : pSet) {
       auto val = store->lookup(loc);
@@ -36,8 +37,24 @@ TaintLattice SinkViolationChecker::lookupTaint(const TaintValue &tv,
     }
     return res;
   }
-  case TClass::ReachableMemory:
-    llvm_unreachable("ReachableMemory shouldn't appear in sink entry");
+  case TClass::ReachableMemory: {
+    if (!store)
+      return TaintLattice::Unknown;
+    auto pSet = ptrAnalysis.getPtsSet(tv.getContext(), tv.getValue());
+    if (pSet.empty())
+      return TaintLattice::Unknown;
+    auto res = TaintLattice::Unknown;
+    for (const auto *obj : pSet) {
+      if (obj->isUniversalObject())
+        return TaintLattice::Either;
+      if (obj->isNullObject())
+        continue;
+      for (const auto *field :
+           ptrAnalysis.getMemoryManager().getReachableMemoryObjects(obj))
+        res = Lattice<TaintLattice>::merge(res, store->lookup(field));
+    }
+    return res;
+  }
   }
 }
 
@@ -61,7 +78,11 @@ void SinkViolationChecker::checkCallSiteWithEntry(
 
   auto *cs = llvm::dyn_cast<llvm::CallBase>(
       pp.getDefUseInstruction()->getInstruction());
+  if (!cs)
+    return;
   auto checkArgument = [this, &pp, &entry, &violations, &cs](size_t idx) {
+    if (idx >= cs->arg_size())
+      return;
     const auto *store = memo.lookup(pp);
 
     auto argVal = TaintValue(pp.getContext(), cs->getArgOperand(idx));

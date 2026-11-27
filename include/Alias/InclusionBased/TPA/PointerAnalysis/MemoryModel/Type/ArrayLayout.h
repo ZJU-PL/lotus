@@ -40,6 +40,11 @@ public:
   ArrayLayout &operator=(ArrayLayout &&) = delete;
 
   std::pair<size_t, bool> offsetInto(size_t offset) const;
+  // Exact periodic image of { base + k * stride | base + k * stride < limit }
+  // under offsetInto(), collapsing repeated traversals of array triples via
+  // modular period folding.
+  std::vector<std::pair<size_t, bool>>
+  collectPeriodicOffsets(size_t base, size_t limit, size_t stride) const;
 
   bool operator==(const ArrayLayout &rhs) const {
     return arrayLayout == rhs.arrayLayout;

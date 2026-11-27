@@ -58,25 +58,18 @@ public:
       return true;
     } else {
       auto &current = itr->second;
-      // Stores are allocated mutable; only Memo can mutate them, and only
-      // when no immutable snapshot is retaining this version.
+      if (current->sameRoot(store))
+        return false;
+      // Stores are allocated mutable; only Memo can mutate them in place, and
+      // only when no immutable snapshot is retaining this version.
       if (current.use_count() == 1)
         return const_cast<Store *>(current.get())->mergeWith(store);
-      // Avoid allocating a replacement for an unchanged join. Presence of
-      // an explicitly empty binding still counts as a change.
-      bool changed = false;
-      for (const auto &binding : store)
-        if (!current->hasBinding(binding.first) ||
-            current->lookup(binding.first).merge(binding.second) !=
-                current->lookup(binding.first)) {
-          changed = true;
-          break;
-        }
-      if (!changed)
+      // Persistent Store copy is O(1) (root retain) and mergeWith allocates
+      // zero nodes if unchanged.
+      Store replacement(*current);
+      if (!replacement.mergeWith(store))
         return false;
-      auto replacement = std::make_shared<Store>(*current);
-      replacement->mergeWith(store);
-      current = std::move(replacement);
+      current = std::make_shared<Store>(std::move(replacement));
       return true;
     }
   }
@@ -86,20 +79,18 @@ public:
   bool update(const ProgramPoint &pp, const MemoryObject *obj, PtsSet pSet) {
     auto itr = inState.find(pp);
     if (itr == inState.end()) {
-      auto newStore = Store();
-      newStore.strongUpdate(obj, pSet);
-      inState.emplace(pp, std::make_shared<Store>(std::move(newStore)));
+      auto newStore = std::make_shared<Store>();
+      newStore->strongUpdate(obj, pSet);
+      inState.emplace(pp, std::move(newStore));
       return true;
     } else {
       auto &current = itr->second;
       if (current.use_count() == 1)
         return const_cast<Store *>(current.get())->weakUpdate(obj, pSet);
-      if (current->hasBinding(obj) &&
-          current->lookup(obj).merge(pSet) == current->lookup(obj))
+      Store replacement(*current);
+      if (!replacement.weakUpdate(obj, pSet))
         return false;
-      auto replacement = std::make_shared<Store>(*current);
-      replacement->weakUpdate(obj, pSet);
-      current = std::move(replacement);
+      current = std::make_shared<Store>(std::move(replacement));
       return true;
     }
   }

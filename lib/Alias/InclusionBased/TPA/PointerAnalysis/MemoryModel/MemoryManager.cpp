@@ -48,38 +48,50 @@ MemoryManager::MemoryManager(size_t pSize)
 // Also maintains the blockToObjects index so that
 // getReachableMemoryObjects() can look up objects by block in O(k) time
 // instead of scanning all objects in O(n).
-const MemoryObject *MemoryManager::getMemoryObject(const MemoryBlock *memBlock,
-                                                   size_t offset,
-                                                   bool summary) const {
-  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+const MemoryObject *
+MemoryManager::getMemoryObjectUnlocked(const MemoryBlock *memBlock,
+                                       size_t offset, bool summary) const {
   assert(memBlock != nullptr);
 
   auto obj = MemoryObject(memBlock, offset, summary);
-  // C++14-compatible: use std::pair instead of structured binding.
   auto insertResult = objSet.insert(obj);
   auto itr = insertResult.first;
   bool inserted = insertResult.second;
   assert(itr->isSummaryObject() == summary);
   const MemoryObject *result = &*itr;
 
-  // Populate the block→objects index for newly interned objects.
-  if (inserted)
+  if (inserted) {
+    result->id = nextObjId++;
     blockToObjects[memBlock].push_back(result);
+  }
 
   return result;
 }
 
+const MemoryObject *MemoryManager::getMemoryObject(const MemoryBlock *memBlock,
+                                                   size_t offset,
+                                                   bool summary) const {
+  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+  return getMemoryObjectUnlocked(memBlock, offset, summary);
+}
+
 // Internal factory for MemoryBlocks.
 // Maps an AllocSite (instruction + context) to a MemoryBlock.
-const MemoryBlock *MemoryManager::allocateMemoryBlock(AllocSite allocSite,
-                                                      const TypeLayout *type) {
-  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+const MemoryBlock *
+MemoryManager::allocateMemoryBlockUnlocked(AllocSite allocSite,
+                                           const TypeLayout *type) {
   auto itr = allocMap.find(allocSite);
   if (itr == allocMap.end())
     itr = allocMap.insert(
         itr, std::make_pair(allocSite, MemoryBlock(allocSite, type)));
   assert(type == itr->second.getTypeLayout());
   return &itr->second;
+}
+
+const MemoryBlock *MemoryManager::allocateMemoryBlock(AllocSite allocSite,
+                                                      const TypeLayout *type) {
+  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+  return allocateMemoryBlockUnlocked(allocSite, type);
 }
 
 // Allocates memory for a global variable.
@@ -91,8 +103,8 @@ MemoryManager::allocateGlobalMemory(const llvm::GlobalVariable *value,
   assert(value != nullptr && type != nullptr);
 
   const auto *memBlock =
-      allocateMemoryBlock(AllocSite::getGlobalAllocSite(value), type);
-  return getMemoryObject(memBlock, 0, startWithSummary(type));
+      allocateMemoryBlockUnlocked(AllocSite::getGlobalAllocSite(value), type);
+  return getMemoryObjectUnlocked(memBlock, 0, startWithSummary(type));
 }
 
 // Allocates memory for a function (to support function pointers).
@@ -101,9 +113,9 @@ const MemoryObject *
 MemoryManager::allocateMemoryForFunction(const llvm::Function *f) {
   std::lock_guard<std::recursive_mutex> lock(*registryMutex);
   const auto *memBlock =
-      allocateMemoryBlock(AllocSite::getFunctionAllocSite(f),
-                          TypeLayout::getPointerTypeLayoutWithSize(0));
-  return getMemoryObject(memBlock, 0, false);
+      allocateMemoryBlockUnlocked(AllocSite::getFunctionAllocSite(f),
+                                  TypeLayout::getPointerTypeLayoutWithSize(0));
+  return getMemoryObjectUnlocked(memBlock, 0, false);
 }
 
 // Allocates stack memory (alloca).
@@ -113,8 +125,8 @@ const MemoryObject *MemoryManager::allocateStackMemory(const Context *ctx,
                                                        const TypeLayout *type) {
   std::lock_guard<std::recursive_mutex> lock(*registryMutex);
   const auto *memBlock =
-      allocateMemoryBlock(AllocSite::getStackAllocSite(ctx, ptr), type);
-  return getMemoryObject(memBlock, 0, startWithSummary(type));
+      allocateMemoryBlockUnlocked(AllocSite::getStackAllocSite(ctx, ptr), type);
+  return getMemoryObjectUnlocked(memBlock, 0, startWithSummary(type));
 }
 
 // Allocates heap memory (malloc/new).
@@ -125,28 +137,28 @@ const MemoryObject *MemoryManager::allocateHeapMemory(const Context *ctx,
                                                       const TypeLayout *type) {
   std::lock_guard<std::recursive_mutex> lock(*registryMutex);
   const auto *memBlock =
-      allocateMemoryBlock(AllocSite::getHeapAllocSite(ctx, ptr), type);
+      allocateMemoryBlockUnlocked(AllocSite::getHeapAllocSite(ctx, ptr), type);
   // Note: summary=true passed to getMemoryObject
-  return getMemoryObject(memBlock, 0, true);
+  return getMemoryObjectUnlocked(memBlock, 0, true);
 }
 
 // Special allocation for argv (array of strings).
 const MemoryObject *MemoryManager::allocateArgv(const llvm::Value *ptr) {
   std::lock_guard<std::recursive_mutex> lock(*registryMutex);
-  const auto *memBlock = allocateMemoryBlock(
+  const auto *memBlock = allocateMemoryBlockUnlocked(
       AllocSite::getStackAllocSite(Context::getGlobalContext(), ptr),
       TypeLayout::getByteArrayTypeLayout());
-  argvObj = getMemoryObject(memBlock, 0, true);
+  argvObj = getMemoryObjectUnlocked(memBlock, 0, true);
   return argvObj;
 }
 
 // Special allocation for envp (environment pointer).
 const MemoryObject *MemoryManager::allocateEnvp(const llvm::Value *ptr) {
   std::lock_guard<std::recursive_mutex> lock(*registryMutex);
-  const auto *memBlock = allocateMemoryBlock(
+  const auto *memBlock = allocateMemoryBlockUnlocked(
       AllocSite::getStackAllocSite(Context::getGlobalContext(), ptr),
       TypeLayout::getByteArrayTypeLayout());
-  envpObj = getMemoryObject(memBlock, 0, true);
+  envpObj = getMemoryObjectUnlocked(memBlock, 0, true);
   return envpObj;
 }
 
@@ -154,21 +166,19 @@ const MemoryObject *MemoryManager::allocateEnvp(const llvm::Value *ptr) {
 // This is the core of field sensitivity.
 const MemoryObject *MemoryManager::offsetMemory(const MemoryObject *obj,
                                                 size_t offset) const {
-  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
   assert(obj != nullptr);
 
   if (offset == 0)
     return obj;
-  else
-    return offsetMemory(obj->getMemoryBlock(), obj->getOffset() + offset);
+  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+  return offsetMemoryUnlocked(obj->getMemoryBlock(), obj->getOffset() + offset);
 }
 
 // Low-level offset calculation.
 // Determines the new offset and whether it falls into an array (requiring
 // summary).
-const MemoryObject *MemoryManager::offsetMemory(const MemoryBlock *block,
-                                                size_t offset) const {
-  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+const MemoryObject *MemoryManager::offsetMemoryUnlocked(
+    const MemoryBlock *block, size_t offset) const {
   assert(block != nullptr);
 
   // Universal/Null blocks are invariant to offset.
@@ -190,7 +200,51 @@ const MemoryObject *MemoryManager::offsetMemory(const MemoryBlock *block,
   if (adjustedOffset >= type->getSize())
     return &uObj;
 
-  return getMemoryObject(block, adjustedOffset, summary);
+  return getMemoryObjectUnlocked(block, adjustedOffset, summary);
+}
+
+const MemoryObject *MemoryManager::offsetMemory(const MemoryBlock *block,
+                                                size_t offset) const {
+  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+  return offsetMemoryUnlocked(block, offset);
+}
+
+std::vector<const MemoryObject *>
+MemoryManager::offsetMemoryArray(const MemoryObject *srcObj,
+                                 size_t stride) const {
+  assert(srcObj != nullptr);
+  std::vector<const MemoryObject *> result;
+  if (stride == 0) {
+    result.push_back(srcObj);
+    return result;
+  }
+
+  const auto *block = srcObj->getMemoryBlock();
+  if (block == &uBlock || block == &nBlock) {
+    result.push_back(&uObj);
+    return result;
+  }
+
+  const auto *type = block->getTypeLayout();
+  const size_t objSize = type->getSize();
+  const size_t base = srcObj->getOffset();
+  if (base >= objSize)
+    return result;
+
+  const auto folded =
+      type->getArrayLayout()->collectPeriodicOffsets(base, objSize, stride);
+  const bool isHeap = block->isHeapBlock();
+
+  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+  result.reserve(folded.size());
+  for (const auto &entry : folded) {
+    if (entry.first >= objSize)
+      result.push_back(&uObj);
+    else
+      result.push_back(
+          getMemoryObjectUnlocked(block, entry.first, entry.second || isHeap));
+  }
+  return result;
 }
 
 // Returns all pointer-typed fields reachable from 'obj'.
@@ -217,7 +271,7 @@ MemoryManager::getReachablePointerObjects(const MemoryObject *obj,
     // Transform offsets back into MemoryObjects
     std::transform(itr, ptrLayout->end(), std::back_inserter(ret),
                    [this, memBlock](size_t offset) {
-                     return offsetMemory(memBlock, offset);
+                     return offsetMemoryUnlocked(memBlock, offset);
                    });
   }
 

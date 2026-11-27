@@ -89,18 +89,18 @@ void CallTracker::trackMemory(const ProgramPoint &pp,
   std::unordered_map<size_t, util::VectorSet<const tpa::MemoryObject *>>
       trackedObjects;
 
-  for (auto const &mapping : pp.getDefUseInstruction()->mem_succs()) {
-    const auto *obj = mapping.first;
-    auto callTaints = getMemoryTaintValues(callers, obj);
+  pp.getDefUseInstruction()->forEachMemSucc(
+      [&](const tpa::MemoryObject *obj, const auto &) {
+        auto callTaints = getMemoryTaintValues(callers, obj);
 
-    auto demandingIndices = getDemandingIndices(callTaints);
-    for (auto idx : demandingIndices)
-      trackerState.addImprecisionSource(callers[idx]);
+        auto demandingIndices = getDemandingIndices(callTaints);
+        for (auto idx : demandingIndices)
+          trackerState.addImprecisionSource(callers[idx]);
 
-    auto impreciseIndices = getImpreciseIndices(callTaints);
-    for (auto idx : impreciseIndices)
-      trackedObjects[idx].insert(obj);
-  }
+        auto impreciseIndices = getImpreciseIndices(callTaints);
+        for (auto idx : impreciseIndices)
+          trackedObjects[idx].insert(obj);
+      });
 
   LocalTracker localTracker(workList);
   for (auto const &mapping : trackedObjects)

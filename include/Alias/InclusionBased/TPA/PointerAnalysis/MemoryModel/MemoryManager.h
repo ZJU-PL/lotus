@@ -7,9 +7,11 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+#include <llvm/ADT/DenseMap.h>
 
 namespace tpa {
 
@@ -45,17 +47,18 @@ private:
   // Size of a pointer in bytes (typically 8 on 64-bit systems)
   size_t ptrSize;
 
-  // Ordered set of all memory objects
-  // Ordered for deterministic iteration and comparison
-  mutable std::set<MemoryObject> objSet;
+  // Pointer-stable hash set of all interned memory objects.
+  mutable std::unordered_set<MemoryObject> objSet;
+  // Next dense ID for newly interned MemoryObjects (0=uObj, 1=nObj).
+  mutable uint32_t nextObjId = 2u;
 
   // Index from MemoryBlock* to the list of MemoryObjects that belong
   // to it. This allows getReachableMemoryObjects() to run in O(k) time (where
   // k is the number of fields/elements in the block) instead of O(n) over all
   // objects in the analysis. The index is populated lazily in getMemoryObject()
   // whenever a new MemoryObject is interned into objSet.
-  mutable std::unordered_map<const MemoryBlock *,
-                             std::vector<const MemoryObject *>>
+  mutable llvm::DenseMap<const MemoryBlock *,
+                         std::vector<const MemoryObject *>>
       blockToObjects;
 
   // Universal memory block: represents memory that may contain any value
@@ -70,6 +73,12 @@ private:
   // Special objects for command line arguments
   const MemoryObject *argvObj;
   const MemoryObject *envpObj;
+
+  // Unlocked internals (caller must hold *registryMutex).
+  const MemoryBlock *allocateMemoryBlockUnlocked(AllocSite, const TypeLayout *);
+  const MemoryObject *getMemoryObjectUnlocked(const MemoryBlock *, size_t,
+                                              bool) const;
+  const MemoryObject *offsetMemoryUnlocked(const MemoryBlock *, size_t) const;
 
   // Create a memory block for an allocation site
   const MemoryBlock *allocateMemoryBlock(AllocSite, const TypeLayout *);
@@ -120,6 +129,10 @@ public:
 
   // Get memory object at offset within another object
   const MemoryObject *offsetMemory(const MemoryObject *, size_t) const;
+  // Exact set of memory objects reached by stepping from srcObj by stride
+  // across the remainder of srcObj's MemoryBlock (isArrayRef GEP).
+  std::vector<const MemoryObject *>
+  offsetMemoryArray(const MemoryObject *srcObj, size_t stride) const;
   // Get all memory objects that share the same memory block
   // This includes all fields of a struct or elements of an array
   std::vector<const MemoryObject *>

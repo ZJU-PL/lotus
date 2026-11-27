@@ -19,6 +19,7 @@ class SemiSparsePointerAnalysis;
 
 namespace tpa::taint {
 
+class DefUseFunction;
 class ModRefModuleSummary;
 
 using ReachingDefModuleMap = ReachingDefMap<llvm::Instruction>;
@@ -39,6 +40,12 @@ public:
   }
 
   ReachingDefModuleMap runOnFunction(const llvm::Function &func);
+
+  // Computes exact memory-level reaching definitions at basic-block
+  // granularity (with location equivalence-class coalescing) and streams
+  // memory def-use edges directly into `duFunc` without materializing
+  // per-instruction reaching-definition maps.
+  void buildMemoryDefUseEdges(DefUseFunction &duFunc) const;
 };
 
 } // namespace tpa::taint

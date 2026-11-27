@@ -23,12 +23,13 @@ void TransferFunction::updateDirectMemoryTaint(const TaintValue &tv,
                                                EvalResult &evalResult) {
   auto const &ptrAnalysis = globalState.getPointerAnalysis();
   auto pSet = ptrAnalysis.getPtsSet(tv.getContext(), tv.getValue());
-  auto &store = evalResult.getStore();
   for (const auto *obj : pSet) {
     if (obj->isSpecialObject())
       continue;
-    store.weakUpdate(obj, taintVal);
-    addMemLevelSuccessors(pp, obj, evalResult);
+    const bool first = !evalResult.hasOverride(obj);
+    evalResult.weakUpdateOverride(obj, taintVal);
+    if (first)
+      evalResult.addDirectMemProp(pp, obj);
   }
 }
 
@@ -39,7 +40,6 @@ void TransferFunction::updateReachableMemoryTaint(const TaintValue &tv,
   auto const &ptrAnalysis = globalState.getPointerAnalysis();
   auto const &memManager = ptrAnalysis.getMemoryManager();
   auto pSet = ptrAnalysis.getPtsSet(tv.getContext(), tv.getValue());
-  auto &store = evalResult.getStore();
   for (const auto *obj : pSet) {
     if (obj->isSpecialObject())
       continue;
@@ -48,8 +48,10 @@ void TransferFunction::updateReachableMemoryTaint(const TaintValue &tv,
     for (const auto *dstObj : dstObjs) {
       if (dstObj->isSpecialObject())
         continue;
-      store.weakUpdate(dstObj, taintVal);
-      addMemLevelSuccessors(pp, dstObj, evalResult);
+      const bool first = !evalResult.hasOverride(dstObj);
+      evalResult.weakUpdateOverride(dstObj, taintVal);
+      if (first)
+        evalResult.addDirectMemProp(pp, dstObj);
     }
   }
 }
@@ -95,6 +97,8 @@ void TransferFunction::updateTaintCallByTPosition(const ProgramPoint &pp,
   } else {
     auto const &argPos = taintPos.getAsArgPosition();
     if (!argPos.isAfterArgPosition()) {
+      if (argPos.getArgIndex() >= cs->arg_size())
+        return;
       auto argTVal =
           TaintValue(pp.getContext(), cs->getArgOperand(argPos.getArgIndex()));
       updateTaintValueByTClass(argTVal, taintClass, taintVal, pp, evalResult);
@@ -129,7 +133,8 @@ TaintLattice TransferFunction::getTaintValueByTClass(const TaintValue &tv,
 
     auto const &ptrAnalysis = globalState.getPointerAnalysis();
     auto pSet = ptrAnalysis.getPtsSet(tv.getContext(), tv.getValue());
-    assert(!pSet.empty());
+    if (pSet.empty())
+      return TaintLattice::Unknown;
     TaintLattice retVal = loadTaintFromPtsSet(pSet, *localState);
 
     return retVal;
@@ -167,9 +172,9 @@ void TransferFunction::evalMemcpy(const TaintValue &srcVal,
 
   auto dstSet = ptrAnalysis.getPtsSet(dstVal.getContext(), dstVal.getValue());
   auto srcSet = ptrAnalysis.getPtsSet(srcVal.getContext(), srcVal.getValue());
-  assert(!dstSet.empty() && !srcSet.empty());
+  if (dstSet.empty() || srcSet.empty())
+    return;
 
-  auto &store = evalResult.getStore();
   for (const auto *srcObj : srcSet) {
     if (srcObj->isSpecialObject())
       continue;
@@ -191,8 +196,10 @@ void TransferFunction::evalMemcpy(const TaintValue &srcVal,
         const auto *tgtObj = memManager.offsetMemory(updateObj, offset);
         if (tgtObj->isSpecialObject())
           continue;
-        store.weakUpdate(tgtObj, oVal);
-        addMemLevelSuccessors(pp, tgtObj, evalResult);
+        const bool first = !evalResult.hasOverride(tgtObj);
+        evalResult.weakUpdateOverride(tgtObj, oVal);
+        if (first)
+          evalResult.addDirectMemProp(pp, tgtObj);
       }
     }
   }
@@ -221,19 +228,20 @@ void TransferFunction::evalTaintPipe(const ProgramPoint &pp,
     assert(!dstPos.isReturnPosition());
     assert(!dstPos.getAsArgPosition().isAfterArgPosition());
 
-    auto srcVal =
-        TaintValue(pp.getContext(),
-                   cs->getArgOperand(srcPos.getAsArgPosition().getArgIndex()));
-    auto dstVal =
-        TaintValue(pp.getContext(),
-                   cs->getArgOperand(dstPos.getAsArgPosition().getArgIndex()));
+    auto srcIdx = srcPos.getAsArgPosition().getArgIndex();
+    auto dstIdx = dstPos.getAsArgPosition().getArgIndex();
+    if (srcIdx >= cs->arg_size() || dstIdx >= cs->arg_size())
+      return;
+    auto srcVal = TaintValue(pp.getContext(), cs->getArgOperand(srcIdx));
+    auto dstVal = TaintValue(pp.getContext(), cs->getArgOperand(dstIdx));
     evalMemcpy(srcVal, dstVal, pp, evalResult);
   } else {
     const auto position = srcPos.getAsArgPosition();
     auto srcTaint = TaintLattice::Unknown;
     const auto end = position.isAfterArgPosition()
                          ? cs->arg_size()
-                         : position.getArgIndex() + 1u;
+                         : std::min<unsigned>(position.getArgIndex() + 1u,
+                                              cs->arg_size());
     for (unsigned i = position.getArgIndex(); i < end; ++i) {
       const auto *argument = cs->getArgOperand(i);
       if (position.isAfterArgPosition() && srcClass != TClass::ValueOnly &&
@@ -301,7 +309,7 @@ void TransferFunction::evalIgnoredCall(const ProgramPoint &pp,
       globalState.getEnv().weakUpdate(TaintValue(pp.getContext(), inst),
                                       TaintLattice::Untainted))
     addTopLevelSuccessors(pp, evalResult);
-  addMemLevelSuccessors(pp, evalResult);
+  addMemBroadcast(pp, pp, evalResult);
 }
 
 } // namespace tpa::taint

@@ -174,6 +174,19 @@ ExternalPointerTable::buildTableImpl(const StringRef &fileContent, bool &ok) {
              return false;
            });
 
+  auto allocWithSizeAndOut = rule(
+      seq(str("ALLOC"), token(parg), token(str("OUT")), token(parg)),
+      [](auto const &tuple) {
+        return PointerEffect::getAllocEffect(std::get<1>(tuple),
+                                             std::get<3>(tuple));
+      });
+
+  auto allocWithOut =
+      rule(seq(str("ALLOC"), token(str("OUT")), token(parg)),
+           [](auto const &tuple) {
+             return PointerEffect::getAllocEffectWithDest(std::get<2>(tuple));
+           });
+
   auto allocWithSize =
       rule(seq(str("ALLOC"), token(parg)), [](auto const &pair) {
         return PointerEffect::getAllocEffect(std::get<1>(pair));
@@ -184,7 +197,9 @@ ExternalPointerTable::buildTableImpl(const StringRef &fileContent, bool &ok) {
   });
 
   auto allocEntry =
-      rule(seq(token(id), token(alt(allocWithSize, allocWithoutSize))),
+      rule(seq(token(id),
+               token(alt(allocWithSizeAndOut, allocWithOut, allocWithSize,
+                         allocWithoutSize))),
            [&extTable](auto &&pair) {
              extTable.table[std::get<0>(pair).str()].addEffect(
                  std::move(std::get<1>(pair)));

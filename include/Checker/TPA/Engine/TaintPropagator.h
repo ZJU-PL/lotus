@@ -2,6 +2,8 @@
 
 #include "Checker/TPA/Support/TaintStore.h"
 
+#include <llvm/ADT/ArrayRef.h>
+
 namespace tpa::taint {
 
 class EvalResult;
@@ -14,13 +16,14 @@ private:
   TaintMemo &memo;
   WorkList &workList;
 
-  void enqueueIfMemoChange(const ProgramPoint &, const tpa::MemoryObject *,
-                           const TaintStore &);
+  void propagateObjFrom(const ProgramPoint &, const tpa::MemoryObject *,
+                        TaintLattice);
 
 public:
   TaintPropagator(TaintMemo &m, WorkList &w) : memo(m), workList(w) {}
 
-  void propagate(const EvalResult &);
+  void propagate(const EvalResult &,
+                 llvm::ArrayRef<const tpa::MemoryObject *> dirtyObjs = {});
 };
 
 } // namespace tpa::taint

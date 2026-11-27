@@ -150,7 +150,8 @@ TrackerTransferFunction::evalLoad(const ProgramPoint &pp,
   const auto *ptrOp = loadInst->getPointerOperand();
   auto ptsSet =
       trackerState.getPointerAnalysis().getPtsSet(pp.getContext(), ptrOp);
-  assert(!ptsSet.empty());
+  if (ptsSet.empty())
+    return {};
 
   return evalPtsSet(pp, ptsSet, store);
 }
@@ -259,9 +260,10 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
     break;
   }
   case Instruction::Load: {
-    assert(store != nullptr);
-    auto memSet = evalLoad(pp, *store);
-    LocalTracker(workList).trackMemory(pp, memSet);
+    if (store != nullptr) {
+      auto memSet = evalLoad(pp, *store);
+      LocalTracker(workList).trackMemory(pp, memSet);
+    }
     break;
   }
   case Instruction::CallBr:
@@ -283,9 +285,11 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
   case Instruction::Resume: {
     MemorySet objects;
     if (store)
-      for (const auto &entry : pp.getDefUseInstruction()->mem_preds())
-        if (store->lookup(entry.first) == TaintLattice::Either)
-          objects.insert(entry.first);
+      pp.getDefUseInstruction()->forEachMemPred(
+          [&](const tpa::MemoryObject *loc, const auto &) {
+            if (store->lookup(loc) == TaintLattice::Either)
+              objects.insert(loc);
+          });
     LocalTracker(workList).trackMemory(pp, objects);
     break;
   }

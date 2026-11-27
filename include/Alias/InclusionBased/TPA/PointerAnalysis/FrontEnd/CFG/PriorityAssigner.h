@@ -10,13 +10,11 @@ namespace tpa {
 class CFG;
 class CFGNode;
 
-// PriorityAssigner now assigns Reverse Post-Order (RPO) labels instead
-// of post-order labels. RPO ensures that for a forward data-flow analysis the
-// worklist processes nodes in the correct order (predecessors before successors
-// in the acyclic case), minimising the number of fixpoint iterations needed.
-//
-// The `currLabel` member is kept for ABI compatibility but is no longer used
-// by the implementation (labels are assigned in a second pass after the DFS).
+// PriorityAssigner assigns post-order labels (1 = exit/leaf, N = entry) via
+// DFS rooted at the CFG entry node. Because ForwardWorkList is a max-heap
+// (`lhs < rhs`), popping highest-priority first visits nodes in forward
+// Reverse Post-Order (entry -> exit), and BackwardWorkList (min-heap) visits
+// nodes in reverse-CFG RPO (exit -> entry).
 class PriorityAssigner {
 private:
   CFG &cfg;

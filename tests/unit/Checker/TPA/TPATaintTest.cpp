@@ -7,11 +7,18 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Program/CFG/CFG.h"
 #include "Alias/InclusionBased/TPA/Transforms/LowerGlobalCtor.h"
 #include "Alias/InclusionBased/TPA/Transforms/RunPrepass.h"
+#include "Annotation/ModRef/ExternalModRefTable.h"
 #include "Checker/TPA/Analysis/TaintAnalysis.h"
 #include "Checker/TPA/FrontEnd/DefUseModuleBuilder.h"
+#include "Checker/TPA/FrontEnd/ModRefModuleAnalysis.h"
+#include "Checker/TPA/FrontEnd/ReachingDefModuleAnalysis.h"
+#include "Checker/TPA/Program/DefUseModule.h"
+#include "Checker/TPA/Program/Reachability.h"
 
 #include <cstddef>
 #include <map>
+#include <set>
+#include <tuple>
 
 #include <gtest/gtest.h>
 #include <llvm/ADT/ScopeExit.h>
@@ -1072,6 +1079,389 @@ TEST(TPATaint, InputVerifierRecoversDebugOnlyButRejectsBrokenExecutableIR) {
   EXPECT_FALSE(tpa::taint::verifyInputModule(*broken, errors, recovered));
   EXPECT_FALSE(recovered);
   EXPECT_NE(broken->getFunction("main")->getSubprogram(), nullptr);
+}
+
+TEST(TPATaint, GroupedReachingDefMatchesReferencePerInstructionSolver) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"(
+    @g0 = global i32 0
+    @g1 = global i32 0
+    @g2 = global i32 0
+    @g3 = global i32 0
+    @g4 = global i32 0
+
+    define void @helper(i32 %v) {
+      store i32 %v, i32* @g1
+      store i32 %v, i32* @g2
+      store i32 %v, i32* @g3
+      store i32 %v, i32* @g4
+      ret void
+    }
+
+    define i32 @worker(i1 %cond, i32 %n) {
+    entry:
+      %x = alloca i32
+      %y = alloca i32
+      store i32 1, i32* %x
+      store i32 2, i32* %y
+      store i32 3, i32* @g0
+      br i1 %cond, label %then, label %else
+    then:
+      store i32 10, i32* %x
+      call void @helper(i32 %n)
+      br label %loop
+    else:
+      %p = select i1 %cond, i32* %x, i32* %y
+      store i32 20, i32* %p
+      br label %loop
+    loop:
+      %i = phi i32 [ 0, %then ], [ 0, %else ], [ %next, %loop ]
+      %v0 = load i32, i32* @g0
+      %v1 = load i32, i32* @g1
+      %v2 = load i32, i32* @g2
+      %vx = load i32, i32* %x
+      %old = atomicrmw add i32* @g0, i32 1 seq_cst
+      call void @helper(i32 %old)
+      %next = add i32 %i, 1
+      %again = icmp slt i32 %next, %n
+      br i1 %again, label %loop, label %exit
+    exit:
+      %sum1 = add i32 %v0, %v1
+      %sum2 = add i32 %v2, %vx
+      %res = add i32 %sum1, %sum2
+      ret i32 %res
+    }
+
+    define i32 @main(i32 %argc) {
+      %c = icmp sgt i32 %argc, 1
+      %r = call i32 @worker(i1 %c, i32 %argc)
+      ret i32 %r
+    }
+  )",
+                                          diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  tpa::taint::prepareModule(*module);
+  tpa::SemiSparseProgramBuilder pb;
+  auto program = pb.runOnModule(*module);
+  tpa::SemiSparsePointerAnalysis pointer;
+  pointer.loadExternalPointerTable(TPA_TAINT_TEST_INPUTS "/ptr.spec");
+  pointer.runOnProgram(program);
+
+  auto modRefTable = annotation::ExternalModRefTable::loadFromFile(
+      TPA_TAINT_TEST_INPUTS "/modref.spec");
+  const auto policy = tpa::taint::UnmodeledPolicy::Ignore;
+  auto moduleSummary =
+      tpa::taint::ModRefModuleAnalysis(pointer, modRefTable, policy)
+          .runOnModule(*module);
+
+  tpa::taint::DefUseModule duModule(
+      *module, tpa::taint::reachableFunctions(*module, pointer, policy));
+  tpa::taint::ReachingDefModuleAnalysis rdAnalysis(pointer, moduleSummary,
+                                                   modRefTable, policy);
+
+  using Edge = std::tuple<const tpa::taint::DefUseInstruction *,
+                          const tpa::MemoryObject *,
+                          const tpa::taint::DefUseInstruction *>;
+
+  for (auto &duFunc : duModule) {
+    rdAnalysis.buildMemoryDefUseEdges(duFunc);
+    const auto &func = duFunc.getFunction();
+    auto refMap = rdAnalysis.runOnFunction(func);
+    const auto &funcSummary = moduleSummary.getSummary(&func);
+    auto *entryDu = duFunc.getEntryInst();
+
+    std::set<Edge> expected;
+    auto recordFromStore = [&](const tpa::taint::ReachingDefStore<llvm::Instruction> &st,
+                               const tpa::MemoryObject *obj,
+                               const tpa::taint::DefUseInstruction *dstDu) {
+      const auto *defs = st.getReachingDefs(obj);
+      if (!defs || defs->empty()) {
+        expected.emplace(entryDu, obj, dstDu);
+        return;
+      }
+      for (const auto *defInst : *defs) {
+        const auto *srcDu =
+            defInst ? duFunc.getDefUseInstruction(defInst) : entryDu;
+        ASSERT_NE(srcDu, nullptr);
+        expected.emplace(srcDu, obj, dstDu);
+      }
+    };
+
+    for (const auto &bb : func) {
+      for (const auto &inst : bb) {
+        const auto *dstDu = duFunc.getDefUseInstruction(&inst);
+        if (!dstDu)
+          continue;
+        const auto &st = refMap.getReachingDefStore(&inst);
+        if (auto *li = llvm::dyn_cast<llvm::LoadInst>(&inst)) {
+          for (const auto *obj : pointer.getPtsSet(li->getPointerOperand()))
+            recordFromStore(st, obj, dstDu);
+        } else if (auto *rmw = llvm::dyn_cast<llvm::AtomicRMWInst>(&inst)) {
+          for (const auto *obj : pointer.getPtsSet(rmw->getPointerOperand()))
+            recordFromStore(st, obj, dstDu);
+        } else if (auto *cx = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&inst)) {
+          for (const auto *obj : pointer.getPtsSet(cx->getPointerOperand()))
+            recordFromStore(st, obj, dstDu);
+        } else if (auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+          for (const auto *callee :
+               tpa::taint::resolveCallTargets(pointer, *cb, policy)) {
+            if (!callee->isDeclaration()) {
+              const auto &csum = moduleSummary.getSummary(callee);
+              for (const auto *obj : csum.mem_reads())
+                recordFromStore(st, obj, dstDu);
+              for (const auto *obj : csum.mem_writes())
+                recordFromStore(st, obj, dstDu);
+            }
+          }
+        } else if (llvm::isa<llvm::ReturnInst>(&inst) ||
+                   llvm::isa<llvm::ResumeInst>(&inst)) {
+          for (const auto *obj : funcSummary.mem_writes())
+            recordFromStore(st, obj, dstDu);
+        }
+      }
+    }
+
+    std::set<Edge> actualFwd;
+    auto collectFwd = [&](const tpa::taint::DefUseInstruction &src) {
+      src.forEachMemSucc(
+          [&](const tpa::MemoryObject *obj, const auto &succs) {
+            for (const auto *dst : succs)
+              actualFwd.emplace(&src, obj, dst);
+          });
+    };
+    collectFwd(*entryDu);
+    for (const auto &bb : func)
+      for (const auto &inst : bb)
+        if (const auto *node = duFunc.getDefUseInstruction(&inst))
+          collectFwd(*node);
+    EXPECT_EQ(actualFwd, expected) << "Function: " << func.getName().str();
+
+    // Reverse edges built lazily via ensureMemPreds() must match forward edges.
+    duFunc.ensureMemPreds();
+    std::set<Edge> actualRev;
+    auto collectRev = [&](const tpa::taint::DefUseInstruction &dst) {
+      dst.forEachMemPred(
+          [&](const tpa::MemoryObject *obj, const auto &preds) {
+            for (const auto *src : preds)
+              actualRev.emplace(src, obj, &dst);
+          });
+    };
+    collectRev(*entryDu);
+    for (const auto &bb : func)
+      for (const auto &inst : bb)
+        if (const auto *node = duFunc.getDefUseInstruction(&inst))
+          collectRev(*node);
+    EXPECT_EQ(actualRev, expected) << "Reverse edges in: " << func.getName().str();
+
+    // Confirm equivalent globals (@g3, @g4) collapsed into a shared group in
+    // @worker.
+    if (func.getName() == "worker") {
+      const auto &groups = duFunc.getMemoryGroups();
+      EXPECT_LT(groups.groupLocs.size(), groups.locToGroup.size());
+    }
+  }
+}
+
+TEST(TPATaint, ModRefSCCBitvectorHandlesMutualRecursionAndLocalStackFiltering) {
+  const char *ir = R"(
+    @shared_g = global i32 0
+    declare void @sink(i32)
+
+    define void @f1(i32 %n) {
+      %local_s = alloca i32
+      store i32 %n, i32* %local_s
+      %cmp = icmp sgt i32 %n, 0
+      br i1 %cmp, label %go, label %done
+    go:
+      call void @f2(i32* %local_s, i32 %n)
+      br label %done
+    done:
+      ret void
+    }
+
+    define void @f2(i32* %p, i32 %n) {
+      %v = load i32, i32* %p
+      call void @f3(i32* %p, i32 %v)
+      ret void
+    }
+
+    define void @f3(i32* %p, i32 %v) {
+      store i32 %v, i32* @shared_g
+      %v2 = load i32, i32* %p
+      %n1 = sub i32 %v2, 1
+      %cmp = icmp sgt i32 %n1, 0
+      br i1 %cmp, label %rec, label %done
+    rec:
+      call void @f1(i32 %n1)
+      br label %done
+    done:
+      ret void
+    }
+
+    define i32 @main(i32 %argc) {
+      call void @f1(i32 %argc)
+      %out = load i32, i32* @shared_g
+      call void @sink(i32 %out)
+      ret i32 0
+    }
+  )";
+
+  // 1. Check ModRef summaries directly on the 3-node SCC {f1, f2, f3}.
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(ir, diagnostic, context);
+  ASSERT_NE(module, nullptr);
+  tpa::taint::prepareModule(*module);
+  tpa::SemiSparseProgramBuilder pb;
+  auto program = pb.runOnModule(*module);
+  tpa::SemiSparsePointerAnalysis pointer;
+  pointer.loadExternalPointerTable(TPA_TAINT_TEST_INPUTS "/ptr.spec");
+  pointer.runOnProgram(program);
+  auto modRefTable = annotation::ExternalModRefTable::loadFromFile(
+      TPA_TAINT_TEST_INPUTS "/modref.spec");
+  auto summary = tpa::taint::ModRefModuleAnalysis(
+                     pointer, modRefTable, tpa::taint::UnmodeledPolicy::Ignore)
+                     .runOnModule(*module);
+
+  const auto *f1 = module->getFunction("f1");
+  const auto *f2 = module->getFunction("f2");
+  const auto *f3 = module->getFunction("f3");
+  const auto *mainFn = module->getFunction("main");
+  const auto *localAlloca = &f1->front().front();
+  const auto *gVar = module->getGlobalVariable("shared_g");
+
+  auto localPts = pointer.getPtsSet(localAlloca);
+  auto globalPts = pointer.getPtsSet(gVar);
+  ASSERT_EQ(localPts.size(), 1u);
+  ASSERT_EQ(globalPts.size(), 1u);
+  const auto *localObj = *localPts.begin();
+  const auto *globalObj = *globalPts.begin();
+
+  // f2 and f3 read f1's stack object; f1 filters out its own local stack, so
+  // neither f1 nor main exposes localObj in its ModRef summary.
+  EXPECT_TRUE(summary.getSummary(f2).isMemoryRead(localObj));
+  EXPECT_TRUE(summary.getSummary(f3).isMemoryRead(localObj));
+  EXPECT_FALSE(summary.getSummary(f1).isMemoryRead(localObj));
+  EXPECT_FALSE(summary.getSummary(mainFn).isMemoryRead(localObj));
+
+  // Global write in f3 propagates across the entire SCC and up to main.
+  EXPECT_TRUE(summary.getSummary(f3).isMemoryWritten(globalObj));
+  EXPECT_TRUE(summary.getSummary(f2).isMemoryWritten(globalObj));
+  EXPECT_TRUE(summary.getSummary(f1).isMemoryWritten(globalObj));
+  EXPECT_TRUE(summary.getSummary(mainFn).isMemoryWritten(globalObj));
+
+  // 2. End-to-end taint analysis must detect the tainted flow through the SCC.
+  auto res = run(ir, 0, false);
+  EXPECT_EQ(res.violations, 1u);
+}
+
+TEST(TPATaint, PrecisionLossTrackingWithGroupedDefUseAndVoidReturn) {
+  auto res = run(R"(
+    @g = global i32 0
+    @g2 = global i32 0
+    declare i32 @source()
+    declare void @sink(i32)
+
+    define void @writer(i32 %v) {
+      store i32 %v, i32* @g2
+      ret void
+    }
+
+    define i32 @reader() {
+      %v = load i32, i32* @g
+      ret i32 %v
+    }
+
+    define i32 @main() {
+      %t = call i32 @source()
+      call void @writer(i32 0)
+      call void @writer(i32 %t)
+      %void_smear = load i32, i32* @g2
+      call void @sink(i32 %void_smear)
+      store i32 0, i32* @g
+      %clean = call i32 @reader()
+      store i32 %t, i32* @g
+      %dirty = call i32 @reader()
+      call void @sink(i32 %clean)
+      call void @sink(i32 %dirty)
+      ret i32 0
+    }
+  )",
+                 0, /*track=*/true, /*repeat=*/true);
+  EXPECT_EQ(res.violations, 3u);
+  EXPECT_EQ(res.ambiguous, 3u);
+  EXPECT_GT(res.losses, 0u);
+}
+
+TEST(TPATaint, DeltaPropagationHandlesDynamicCallersAndIndirectCalls) {
+  auto res = run(R"(
+    @g1 = global i32 0
+    @g2 = global i32 0
+    declare i32 @source()
+    declare void @sink(i32)
+
+    define i32 @callee(i32 %x) {
+      %v1 = load i32, i32* @g1
+      store i32 %v1, i32* @g2
+      %sum = add i32 %x, %v1
+      ret i32 %sum
+    }
+
+    define i32 @main(i1 %cond) {
+      %fp_slot = alloca i32 (i32)*
+      store i32 (i32)* @callee, i32 (i32)** %fp_slot
+      store i32 0, i32* @g1
+      ; First call site with clean state (establishes initial broadcast sync)
+      %r1 = call i32 @callee(i32 1)
+      ; Mutate @g1 to tainted after initial sync, then invoke via indirect call
+      %t = call i32 @source()
+      store i32 %t, i32* @g1
+      %fp = load i32 (i32)*, i32 (i32)** %fp_slot
+      %r2 = call i32 %fp(i32 2)
+      %g2_val = load i32, i32* @g2
+      call void @sink(i32 %r2)
+      call void @sink(i32 %g2_val)
+      ret i32 0
+    }
+  )",
+                 0, false, /*repeat=*/true);
+  EXPECT_EQ(res.violations, 2u);
+}
+
+TEST(TPATaint, SuffixKCFASeparatesDeepCallSitesUnderOneCFA) {
+  const char *ir = R"(
+    declare i32 @source()
+    declare void @sink(i32)
+
+    define i32 @identity(i32 %x) {
+      ret i32 %x
+    }
+
+    define void @wrapper(i32 %t) {
+      %dirty = call i32 @identity(i32 %t)
+      %clean = call i32 @identity(i32 0)
+      call void @sink(i32 %dirty)
+      call void @sink(i32 %clean)
+      ret void
+    }
+
+    define i32 @main() {
+      %t = call i32 @source()
+      call void @wrapper(i32 %t)
+      ret i32 0
+    }
+  )";
+  // 0-CFA merges both calls to @identity inside @wrapper.
+  auto k0 = run(ir, 0, false);
+  EXPECT_EQ(k0.violations, 2u);
+  EXPECT_EQ(k0.ambiguous, 2u);
+
+  // Standard suffix 1-CFA distinguishes the two depth-2 call sites to
+  // @identity inside @wrapper, eliminating the false positive on %clean.
+  auto k1 = run(ir, 1, false);
+  EXPECT_EQ(k1.violations, 1u);
+  EXPECT_EQ(k1.ambiguous, 0u);
 }
 
 } // namespace

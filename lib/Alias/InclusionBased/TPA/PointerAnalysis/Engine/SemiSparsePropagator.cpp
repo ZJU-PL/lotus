@@ -16,6 +16,7 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Engine/EvalResult.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Engine/GlobalState.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Engine/WorkList.h"
+#include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/MemoryObject.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Program/CFG/CFG.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/Memo.h"
 #include "Alias/InclusionBased/TPA/Util/IO/PointerAnalysis/Printer.h"
@@ -67,13 +68,7 @@ void SemiSparsePropagator::propagateMemLevel(const EvalSuccessor &evalSucc) {
   assert(!isTopLevelNode(node));
   assert(evalSucc.getStore() != nullptr);
 
-  // Check if the store state has changed for this program point.
-  // If yes, update the memo table and add to worklist.
-  bool enqueued =
-      enqueueIfMemoChange(evalSucc.getProgramPoint(), *evalSucc.getStore());
-
-  // if (enqueued)
-  //	errs() << "\tENQ(M) " << evalSucc.getProgramPoint() << "\n";
+  enqueueIfMemoChange(evalSucc.getProgramPoint(), *evalSucc.getStore());
 }
 
 // Main propagation entry point.

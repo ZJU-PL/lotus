@@ -10,30 +10,17 @@ PtsSet TransferFunction::offsetMemory(const MemoryObject *srcObj, size_t offset,
                                       bool isArrayRef) {
   assert(srcObj != nullptr);
 
-  auto resSet = PtsSet::getEmptySet();
   auto &memManager = globalState.getMemoryManager();
 
   // We have two cases here:
   // - For non-array reference, just access the variable with the given offset
-  // - For array reference, we have to examine the variables with offset * 0,
-  // offset * 1, offset * 2... all the way till the memory region boundary, if
-  // the memory object is not known to be an array previously (this may happen
-  // if the program contains nonarray-to-array bitcast)
-  if (isArrayRef && offset != 0) {
-    auto objSize = srcObj->getMemoryBlock()->getTypeLayout()->getSize();
-    // errs() << "obj = " << *srcObj << ", size = " << objSize -
-    // srcObj->getOffset() << "\n";
+  // - For array reference, examine all offsets base + k * offset < objSize,
+  //   using exact modular period folding over the block's ArrayLayout and
+  //   interning the resulting PtsSet in one batch.
+  if (isArrayRef && offset != 0)
+    return PtsSet::fromObjects(memManager.offsetMemoryArray(srcObj, offset));
 
-    for (unsigned i = 0, e = objSize - srcObj->getOffset(); i < e;
-         i += offset) {
-      const auto *offsetObj = memManager.offsetMemory(srcObj, i);
-      resSet = resSet.insert(offsetObj);
-    }
-  } else {
-    const auto *offsetObj = memManager.offsetMemory(srcObj, offset);
-    resSet = resSet.insert(offsetObj);
-  }
-  return resSet;
+  return PtsSet::getSingletonSet(memManager.offsetMemory(srcObj, offset));
 }
 
 bool TransferFunction::copyWithOffset(const Pointer *dst, const Pointer *src,

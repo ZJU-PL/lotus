@@ -5,6 +5,8 @@
 #include <cassert>
 #include <cstddef>
 
+#include <llvm/ADT/DenseMapInfo.h>
+
 namespace context {
 class Context;
 } // namespace context
@@ -17,6 +19,13 @@ class ProgramPoint {
 private:
   const context::Context *ctx;
   const DefUseInstruction *node;
+
+  struct SentinelTag {};
+  ProgramPoint(SentinelTag, const context::Context *c,
+               const DefUseInstruction *n)
+      : ctx(c), node(n) {}
+
+  friend struct llvm::DenseMapInfo<tpa::taint::ProgramPoint>;
 
 public:
   ProgramPoint(const context::Context *c, const DefUseInstruction *n)
@@ -53,3 +62,29 @@ template <> struct hash<tpa::taint::ProgramPoint> {
   }
 };
 } // namespace std
+
+namespace llvm {
+template <> struct DenseMapInfo<tpa::taint::ProgramPoint> {
+  using CtxInfo = DenseMapInfo<const context::Context *>;
+  using NodeInfo = DenseMapInfo<const tpa::taint::DefUseInstruction *>;
+
+  static tpa::taint::ProgramPoint getEmptyKey() {
+    return tpa::taint::ProgramPoint(tpa::taint::ProgramPoint::SentinelTag{},
+                                    CtxInfo::getEmptyKey(),
+                                    NodeInfo::getEmptyKey());
+  }
+  static tpa::taint::ProgramPoint getTombstoneKey() {
+    return tpa::taint::ProgramPoint(tpa::taint::ProgramPoint::SentinelTag{},
+                                    CtxInfo::getTombstoneKey(),
+                                    NodeInfo::getTombstoneKey());
+  }
+  static unsigned getHashValue(const tpa::taint::ProgramPoint &p) {
+    return static_cast<unsigned>(
+        util::hashPair(p.getContext(), p.getDefUseInstruction()));
+  }
+  static bool isEqual(const tpa::taint::ProgramPoint &lhs,
+                      const tpa::taint::ProgramPoint &rhs) {
+    return lhs == rhs;
+  }
+};
+} // namespace llvm

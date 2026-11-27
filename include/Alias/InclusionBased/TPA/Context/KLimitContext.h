@@ -26,9 +26,9 @@ public:
   // Get the current K-limit value
   static unsigned getLimit() { return defaultLimit; }
 
-  // Push a new call site onto the context stack with K-limiting
-  // If current context size >= K, returns the current context unchanged
-  // This prevents the context from growing beyond the K limit
+  // Push a new call site onto the context stack using standard suffix k-CFA.
+  // Retains the k most recent call sites (dropping the oldest frame when
+  // depth >= k). For k == 0, always returns the global (empty) context.
   // Parameters: ctx - the current context before the call, inst - the call
   // instruction
   static const Context *pushContext(const Context *, const llvm::Instruction *);

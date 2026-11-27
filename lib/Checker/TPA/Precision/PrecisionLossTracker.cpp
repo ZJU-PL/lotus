@@ -6,6 +6,7 @@
 #include "Checker/TPA/Precision/TrackerGlobalState.h"
 #include "Checker/TPA/Precision/TrackerTransferFunction.h"
 #include "Checker/TPA/Precision/TrackerWorkList.h"
+#include "Checker/TPA/Program/DefUseModule.h"
 
 #include <unordered_set>
 
@@ -29,13 +30,16 @@ void PrecisionLossTracker::initializeWorkList(
     for (auto const &violation : mapping.second) {
       if (violation.actualVal != TaintLattice::Either)
         continue;
+      if (violation.argPos >= cs->arg_size())
+        continue;
 
       auto *argVal = cs->getArgOperand(violation.argPos);
       if (violation.what == annotation::TClass::ValueOnly) {
         trackedValues.insert(argVal);
       } else {
         auto pSet = ptrAnalysis.getPtsSet(ctx, argVal);
-        assert(!pSet.empty());
+        if (pSet.empty())
+          continue;
 
         trackedObjects.insert(pSet.begin(), pSet.end());
       }
@@ -49,6 +53,7 @@ void PrecisionLossTracker::initializeWorkList(
 
 ProgramPointSet
 PrecisionLossTracker::trackImprecision(const SinkViolationRecord &record) {
+  globalState.getDefUseModule().ensureMemPreds();
   ProgramPointSet ppSet;
 
   // Prepare the tracker state

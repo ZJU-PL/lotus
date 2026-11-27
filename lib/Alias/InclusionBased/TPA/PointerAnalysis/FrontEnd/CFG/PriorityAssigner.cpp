@@ -10,21 +10,11 @@
 // information flows forward in a single pass rather than requiring many
 // iterations.
 //
-// The previous implementation assigned post-order labels (leaf nodes
-// get low numbers, entry gets a high number). If the worklist is a min-heap
-// (processes lowest priority first), this is backwards for a forward analysis:
-// the entry node would be processed last, requiring O(n) extra iterations to
-// propagate information from entry to leaves.
-//
-// Correct RPO assignment: perform a DFS and assign labels in *reverse*
-// post-order. The entry node gets label 1 (processed first), and leaf nodes
-// get higher labels (processed later). This matches the standard RPO
-// convention used by LLVM's ReversePostOrderTraversal.
-//
-// Algorithm:
-// 1. DFS from the entry node, recording nodes in post-order (push on finish).
-// 2. Reverse the post-order list to get RPO.
-// 3. Assign labels 1, 2, 3, ... in RPO order.
+// Assigns post-order priorities (1 = exit/leaf, N = entry) via DFS rooted at
+// the CFG entry node. Because ForwardWorkList is a max-heap (`lhs < rhs`),
+// popping highest-priority first visits nodes in Reverse Post-Order
+// (entry -> exit), and BackwardWorkList (min-heap, `lhs > rhs`) visits nodes
+// in reverse-CFG RPO (exit -> entry).
 
 #include "Alias/InclusionBased/TPA/PointerAnalysis/FrontEnd/CFG/PriorityAssigner.h"
 
@@ -35,22 +25,27 @@
 namespace tpa {
 
 void PriorityAssigner::traverse() {
-  // Step 1: Collect nodes in post-order via DFS.
+  // Step 1: Collect nodes in post-order via DFS, rooted at the function's
+  // entry node so reachable nodes follow true CFG topology.
   std::vector<tpa::CFGNode *> postOrder;
   postOrder.reserve(64);
+
+  if (auto *entry = cfg.getEntryNode())
+    visitNode(entry, postOrder);
 
   for (auto *node : cfg) {
     if (node->getPriority() == 0u)
       visitNode(node, postOrder);
   }
 
-  // Step 2: Assign RPO labels (reverse of post-order).
-  // postOrder[0] is the last node finished (deepest leaf), so it gets the
-  // highest RPO label. postOrder.back() is the first node finished (entry or
-  // near-entry), so it gets label 1.
+  // Step 2: Assign post-order labels (1 for deepest exit/leaf, highest for
+  // entry). ForwardWorkList uses a std::priority_queue max-heap with
+  // PriorityComparator (lhs < rhs), so popping highest-priority first visits
+  // nodes in Reverse Post-Order (entry -> exit), and BackwardWorkList (min-heap
+  // with lhs > rhs) visits nodes in reverse-CFG RPO (exit -> entry).
   unsigned label = 1;
-  for (auto it = postOrder.rbegin(); it != postOrder.rend(); ++it) {
-    (*it)->setPriority(label);
+  for (auto *node : postOrder) {
+    node->setPriority(label);
     ++label;
   }
 }

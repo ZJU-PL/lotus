@@ -2,7 +2,7 @@
 
 #include "Alias/InclusionBased/TPA/Util/Iterator/IteratorRange.h"
 
-#include <unordered_set>
+#include <llvm/ADT/DenseSet.h>
 
 namespace llvm {
 class Value;
@@ -16,10 +16,10 @@ namespace tpa::taint {
 
 class ModRefFunctionSummary {
 private:
-  using ValueSet = std::unordered_set<const llvm::Value *>;
+  using ValueSet = llvm::DenseSet<const llvm::Value *>;
   ValueSet valueReadSet;
 
-  using MemSet = std::unordered_set<const tpa::MemoryObject *>;
+  using MemSet = llvm::DenseSet<const tpa::MemoryObject *>;
   MemSet memReadSet, memWriteSet;
 
 public:
@@ -79,6 +79,15 @@ public:
   bool empty() const {
     return valueReadSet.empty() && memReadSet.empty() && memWriteSet.empty();
   }
+
+  void clear() {
+    valueReadSet.clear();
+    memReadSet.clear();
+    memWriteSet.clear();
+  }
+  void reserveValueReads(size_t n) { valueReadSet.reserve(n); }
+  void reserveMemoryReads(size_t n) { memReadSet.reserve(n); }
+  void reserveMemoryWrites(size_t n) { memWriteSet.reserve(n); }
 };
 
 } // namespace tpa::taint

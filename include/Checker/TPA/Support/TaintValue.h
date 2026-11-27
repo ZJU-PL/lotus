@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <utility>
 
+#include <llvm/ADT/DenseMapInfo.h>
+
 namespace context {
 class Context;
 } // namespace context
@@ -58,3 +60,27 @@ template <> struct hash<tpa::taint::TaintValue> {
   }
 };
 } // namespace std
+
+namespace llvm {
+template <> struct DenseMapInfo<tpa::taint::TaintValue> {
+  using CtxInfo = DenseMapInfo<const context::Context *>;
+  using ValInfo = DenseMapInfo<const llvm::Value *>;
+
+  static tpa::taint::TaintValue getEmptyKey() {
+    return tpa::taint::TaintValue(CtxInfo::getEmptyKey(),
+                                  ValInfo::getEmptyKey());
+  }
+  static tpa::taint::TaintValue getTombstoneKey() {
+    return tpa::taint::TaintValue(CtxInfo::getTombstoneKey(),
+                                  ValInfo::getTombstoneKey());
+  }
+  static unsigned getHashValue(const tpa::taint::TaintValue &tv) {
+    return static_cast<unsigned>(
+        util::hashPair(tv.getContext(), tv.getValue()));
+  }
+  static bool isEqual(const tpa::taint::TaintValue &lhs,
+                      const tpa::taint::TaintValue &rhs) {
+    return lhs == rhs;
+  }
+};
+} // namespace llvm

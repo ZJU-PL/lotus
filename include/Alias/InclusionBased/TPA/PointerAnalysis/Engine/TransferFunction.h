@@ -93,7 +93,8 @@ private:
   void evalExternalCall(const context::Context *, const CallCFGNode &,
                         const FunctionContext &, EvalResult &);
   void evalInternalCall(const context::Context *, const CallCFGNode &,
-                        const FunctionContext &, EvalResult &, bool);
+                        const FunctionContext &, EvalResult &, bool,
+                        const Store *&prunedStore);
   // Return transfer function helpers
   std::pair<bool, bool> evalReturnValue(const context::Context *,
                                         const ReturnCFGNode &,
@@ -103,8 +104,8 @@ private:
   // External call effect helpers
   bool evalMallocWithSize(const context::Context *, const llvm::Instruction *,
                           llvm::Type *, const llvm::Value *);
-  bool evalExternalAlloc(const context::Context *, const CallCFGNode &,
-                         const annotation::PointerAllocEffect &);
+  void evalExternalAlloc(const context::Context *, const CallCFGNode &,
+                         EvalResult &, const annotation::PointerAllocEffect &);
   void evalMemcpyPtsSet(const MemoryObject *,
                         const std::vector<const MemoryObject *> &, size_t,
                         Store &);

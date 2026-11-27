@@ -180,7 +180,8 @@ void TransferFunction::evalInternalCall(const context::Context *ctx,
                                         const CallCFGNode &callNode,
                                         const FunctionContext &fc,
                                         EvalResult &evalResult,
-                                        bool callGraphUpdated) {
+                                        bool callGraphUpdated,
+                                        const Store *&prunedStore) {
   const auto *tgtCFG =
       globalState.getSemiSparseProgram().getCFGForFunction(*fc.getFunction());
   assert(tgtCFG != nullptr);
@@ -199,15 +200,21 @@ void TransferFunction::evalInternalCall(const context::Context *ctx,
   }
 
   // Pass the store to the callee.
-  // We use StorePruner to reduce the size of the passed store,
-  // keeping only objects reachable from the arguments and globals.
-  auto prunedStore =
-      StorePruner(globalState.getEnv(), globalState.getPointerManager(),
-                  globalState.getMemoryManager())
-          .pruneStore(*localState, ProgramPoint(ctx, &callNode));
-  auto &newStore = evalResult.getNewStore(std::move(prunedStore));
+  // Store pruning depends only on (*localState, ctx, callNode), not on the
+  // resolved callee, so compute it once and reuse across all internal targets.
+  if (prunedStore == nullptr) {
+    Store filtered;
+    if (StorePruner(globalState.getEnv(), globalState.getPointerManager(),
+                    globalState.getMemoryManager())
+            .pruneStoreIfNeeded(*localState, ProgramPoint(ctx, &callNode),
+                                filtered)) {
+      prunedStore = &evalResult.getNewStore(std::move(filtered));
+    } else {
+      prunedStore = localState;
+    }
+  }
   evalResult.addMemLevelProgramPoint(
-      ProgramPoint(fc.getContext(), tgtEntryNode), newStore);
+      ProgramPoint(fc.getContext(), tgtEntryNode), *prunedStore);
 
   // Force enqueuing the direct successors of the call in the caller.
   // This ensures that even if the callee doesn't return immediately,
@@ -252,6 +259,7 @@ void TransferFunction::evalCallNode(const ProgramPoint &pp,
     return;
   }
 
+  const Store *prunedStore = nullptr;
   for (const auto *f : callees) {
     // Update call graph first.
     // Create context for callee (policy: k-CFA everywhere or selective 0-CFA
@@ -266,7 +274,8 @@ void TransferFunction::evalCallNode(const ProgramPoint &pp,
     if (f->isDeclaration())
       evalExternalCall(ctx, callNode, callTgt, evalResult);
     else
-      evalInternalCall(ctx, callNode, callTgt, evalResult, callGraphUpdated);
+      evalInternalCall(ctx, callNode, callTgt, evalResult, callGraphUpdated,
+                       prunedStore);
   }
 }
 

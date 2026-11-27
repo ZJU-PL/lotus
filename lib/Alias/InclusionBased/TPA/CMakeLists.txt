@@ -48,6 +48,7 @@ set(PointerAnalysisSourceCodes
   PointerAnalysis/Program/CFG/CFG.cpp
   PointerAnalysis/Program/SemiSparseProgram.cpp
   PointerAnalysis/Support/PtsSet.cpp
+  PointerAnalysis/Support/Store.cpp
   PointerAnalysis/StaticFields.cpp
 )
 

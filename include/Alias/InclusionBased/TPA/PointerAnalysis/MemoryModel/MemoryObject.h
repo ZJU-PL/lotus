@@ -4,42 +4,27 @@
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace tpa {
 
-// Memory object representation
-//
-// A MemoryObject represents a specific memory location that pointers can point
-// to. Conceptually, it's a pair (MemoryBlock, offset), representing a field or
-// element within a memory allocation.
-//
-// Field Sensitivity:
-// - Each field of a struct is a separate MemoryObject
-// - Each element of an array is a separate MemoryObject
-// - This enables precise analysis of struct/array access
-//
-// Summary Objects:
-// - For recursive types or when precision is lost, summary objects may be used
-// - Summary objects represent "some part of this allocation"
-//
-// Example:
-//   struct Point { int x; int y; };
-//   Point p;
-//   &p.x is MemoryObject(p_block, offset_of(x))
-//   &p.y is MemoryObject(p_block, offset_of(y))
 class MemoryObject {
 private:
   const MemoryBlock *memBlock;
   size_t offset;
   bool summary;
+  mutable uint32_t id;
 
   // Private constructor - created by MemoryManager only
-  MemoryObject(const MemoryBlock *b, size_t o, bool s)
-      : memBlock(b), offset(o), summary(s) {
+  MemoryObject(const MemoryBlock *b, size_t o, bool s, uint32_t objId = 0)
+      : memBlock(b), offset(o), summary(s), id(objId) {
     assert(b != nullptr);
   }
 
 public:
+  // Dense unique ID within a MemoryManager (0 = universal, 1 = null, 2+ =
+  // interned objects). Used as radix key for persistent Store trees.
+  uint32_t getId() const { return id; }
   // Get the memory block this object belongs to
   const MemoryBlock *getMemoryBlock() const { return memBlock; }
   // Get the offset within the memory block

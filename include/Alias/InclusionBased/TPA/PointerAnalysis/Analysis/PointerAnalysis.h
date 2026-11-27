@@ -51,6 +51,10 @@ protected:
   MemoryManager memManager;
   // External pointer table for modeling library function effects
   annotation::ExternalPointerTable extTable;
+  // Cached list of address-taken functions in the module so universal indirect
+  // call queries do not rescan all functions in the module on every call site.
+  mutable const llvm::Module *cachedAddrTakenModule = nullptr;
+  mutable std::vector<const llvm::Function *> cachedAddrTakenFuncs;
 
   // Helper method to extract function targets from a points-to set
   // If the set contains the universal object, all address-taken functions are
@@ -60,9 +64,15 @@ protected:
                   std::vector<const llvm::Function *> &funcs) const {
     if (pSet.has(MemoryManager::getUniversalObject())) {
       const auto *module = inst->getParent()->getParent()->getParent();
-      for (auto const &f : *module)
-        if (f.hasAddressTaken())
-          funcs.push_back(&f);
+      if (cachedAddrTakenModule != module) {
+        cachedAddrTakenFuncs.clear();
+        for (auto const &f : *module)
+          if (f.hasAddressTaken())
+            cachedAddrTakenFuncs.push_back(&f);
+        cachedAddrTakenModule = module;
+      }
+      funcs.insert(funcs.end(), cachedAddrTakenFuncs.begin(),
+                   cachedAddrTakenFuncs.end());
     } else {
       for (const auto *obj : pSet) {
         auto &allocSite = obj->getAllocSite();
@@ -120,7 +130,8 @@ public:
     assert(val != nullptr);
 
     auto ptrs = ptrManager.getPointersWithValue(val->stripPointerCasts());
-    assert(!ptrs.empty());
+    if (ptrs.empty())
+      return PtsSet::getEmptySet();
 
     std::vector<PtsSet> pSets;
     pSets.reserve(ptrs.size());

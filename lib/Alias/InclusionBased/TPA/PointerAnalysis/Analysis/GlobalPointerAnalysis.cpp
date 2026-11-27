@@ -185,7 +185,8 @@ GlobalPointerAnalysis::processConstantGEP(const llvm::ConstantExpr *cexpr,
         // IntToPtr results in unknown base
         return std::make_pair(nullptr, 0);
       case Instruction::BitCast:
-        // Strip bitcast and continue
+      case Instruction::AddrSpaceCast:
+        // Strip pointer cast and continue
         baseVal = ce->getOperand(0);
         // Don't return. Keep looping on baseVal
         break;
@@ -194,9 +195,10 @@ GlobalPointerAnalysis::processConstantGEP(const llvm::ConstantExpr *cexpr,
         raw_string_ostream ceOS(ceStr);
         ceOS << *ce;
         ceOS.flush();
-        LOG_ERROR("Constant expr not yet handled in global initializer: {}",
-                  ceStr);
-        llvm_unreachable("Unknown constantexpr!");
+        LOG_WARN("Unhandled constant expr in global GEP (treating as "
+                 "universal): {}",
+                 ceStr);
+        return std::make_pair(nullptr, 0);
       }
       }
     } else {
@@ -254,12 +256,14 @@ void GlobalPointerAnalysis::processGlobalScalarInitializer(
       envStore.second.insert(gObj, MemoryManager::getUniversalObject());
       break;
     }
-    case Instruction::BitCast: {
-      // Recursively process the operand of the bitcast
+    case Instruction::BitCast:
+    case Instruction::AddrSpaceCast: {
+      // Recursively process the operand of the pointer cast
       processGlobalInitializer(gObj, ce->getOperand(0), envStore, dataLayout);
       break;
     }
     default:
+      envStore.second.insert(gObj, MemoryManager::getUniversalObject());
       break;
     }
   } else {
@@ -267,8 +271,10 @@ void GlobalPointerAnalysis::processGlobalScalarInitializer(
     raw_string_ostream initOS(initStr);
     initOS << *initializer;
     initOS.flush();
-    LOG_ERROR("Unsupported constant pointer: {}", initStr);
-    llvm_unreachable("Unsupported constant pointer!");
+    LOG_WARN("Unhandled constant pointer initializer (treating as universal): "
+             "{}",
+             initStr);
+    envStore.second.insert(gObj, MemoryManager::getUniversalObject());
   }
 }
 

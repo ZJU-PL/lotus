@@ -3,17 +3,32 @@
 #include "Checker/TPA/Support/ProgramPoint.h"
 #include "Checker/TPA/Support/TaintStore.h"
 
-#include <unordered_map>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <utility>
+
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/SmallVector.h>
 
 namespace tpa::taint {
 
 class TaintMemo {
 private:
-  std::unordered_map<ProgramPoint, TaintStore> memo;
+  struct Entry {
+    TaintStore store;
+    // Objects whose taint value in `store` grew since `pp` was last evaluated.
+    llvm::SmallVector<const tpa::MemoryObject *, 8> dirtyObjs;
+  };
+
+  // Pointer-stable storage so const TaintStore* lookups remain valid across
+  // subsequent memo insertions during propagation.
+  std::deque<Entry> entries;
+  llvm::DenseMap<ProgramPoint, uint32_t> memo;
 
 public:
   using const_iterator = decltype(memo)::const_iterator;
+  using DirtyObjectList = llvm::SmallVector<const tpa::MemoryObject *, 8>;
 
   TaintMemo() = default;
 
@@ -23,23 +38,40 @@ public:
     if (itr == memo.end())
       return nullptr;
     else
-      return &itr->second;
+      return &entries[itr->second].store;
   }
 
   bool insert(const ProgramPoint &pp, const tpa::MemoryObject *obj,
               TaintLattice tVal) {
-    auto itr = memo.find(pp);
-    if (itr == memo.end()) {
-      itr = memo.insert(std::make_pair(pp, TaintStore())).first;
+    auto res = memo.try_emplace(pp, static_cast<uint32_t>(entries.size()));
+    if (res.second)
+      entries.emplace_back();
+    Entry &entry = entries[res.first->second];
+    if (entry.store.weakUpdate(obj, tVal)) {
+      entry.dirtyObjs.push_back(obj);
+      return true;
     }
+    return false;
+  }
 
-    return itr->second.weakUpdate(obj, tVal);
+  DirtyObjectList takeDirtyObjects(const ProgramPoint &pp) {
+    DirtyObjectList out;
+    auto itr = memo.find(pp);
+    if (itr != memo.end())
+      out.swap(entries[itr->second].dirtyObjs);
+    return out;
   }
 
   void update(const ProgramPoint &pp, TaintStore &&store) {
-    memo[pp] = std::move(store);
+    auto res = memo.try_emplace(pp, static_cast<uint32_t>(entries.size()));
+    if (res.second)
+      entries.emplace_back();
+    Entry &entry = entries[res.first->second];
+    entry.store = std::move(store);
+    entry.dirtyObjs.clear();
   }
 
+  size_t size() const { return memo.size(); }
   const_iterator begin() const { return memo.begin(); }
   const_iterator end() const { return memo.end(); }
 };

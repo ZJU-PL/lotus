@@ -50,7 +50,8 @@ static const Value *getArgument(const CallCFGNode &callNode,
   assert(callBase);
 
   auto argIdx = pos.getAsArgPosition().getArgIndex();
-  assert(callBase->arg_size() > argIdx);
+  if (argIdx >= callBase->arg_size())
+    return nullptr;
 
   return callBase->getArgOperand(argIdx)->stripPointerCasts();
 }
@@ -174,21 +175,46 @@ bool TransferFunction::evalMallocWithSize(const context::Context *ctx,
 }
 
 // Logic for Alloc effects.
-bool TransferFunction::evalExternalAlloc(
+void TransferFunction::evalExternalAlloc(
     const context::Context *ctx, const CallCFGNode &callNode,
-    const PointerAllocEffect &allocEffect) {
-  // TODO: add type hint to malloc-like calls
-  const auto *dstVal = callNode.getDest();
-  if (dstVal == nullptr)
-    return false;
-
-  auto *mallocType = getMallocType(callNode.getCallSite());
+    EvalResult &evalResult, const PointerAllocEffect &allocEffect) {
   const auto *sizeVal =
       allocEffect.hasSizePosition()
           ? getArgument(callNode, allocEffect.getSizePosition())
           : nullptr;
 
-  return evalMallocWithSize(ctx, dstVal, mallocType, sizeVal);
+  if (!allocEffect.getDestPosition().isReturnPosition()) {
+    const auto *outArg = getArgument(callNode, allocEffect.getDestPosition());
+    if (outArg != nullptr) {
+      const auto *dstPtr =
+          globalState.getPointerManager().getPointer(ctx, outArg);
+      if (dstPtr != nullptr) {
+        auto dstSet = globalState.getEnv().lookup(dstPtr);
+        if (!dstSet.empty()) {
+          const auto *mem = globalState.getMemoryManager().allocateHeapMemory(
+              ctx, callNode.getCallSite(),
+              TypeLayout::getByteArrayTypeLayout());
+          auto &store = evalResult.getNewStore(*localState);
+          weakUpdateStore(dstSet, PtsSet::getSingletonSet(mem), store);
+          addMemLevelSuccessors(ProgramPoint(ctx, &callNode), store,
+                                evalResult);
+          return;
+        }
+      }
+    }
+    addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState,
+                          evalResult);
+    return;
+  }
+
+  // TODO: add type hint to malloc-like calls
+  const auto *dstVal = callNode.getDest();
+  if (dstVal != nullptr) {
+    auto *mallocType = getMallocType(callNode.getCallSite());
+    if (evalMallocWithSize(ctx, dstVal, mallocType, sizeVal))
+      addTopLevelSuccessors(ProgramPoint(ctx, &callNode), evalResult);
+  }
+  addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState, evalResult);
 }
 
 // Helper to simulate memcpy semantics on the store.
@@ -247,12 +273,14 @@ bool TransferFunction::evalMemcpy(const context::Context *ctx,
          "memcpy only operates on arguments");
 
   auto &ptrManager = globalState.getPointerManager();
-  const auto *dstPtr =
-      ptrManager.getPointer(ctx, getArgument(callNode, dstPos));
+  const auto *dstArg = getArgument(callNode, dstPos);
+  const auto *srcArg = getArgument(callNode, srcPos);
+  if (dstArg == nullptr || srcArg == nullptr)
+    return false;
+  const auto *dstPtr = ptrManager.getPointer(ctx, dstArg);
   if (dstPtr == nullptr)
     return false;
-  const auto *srcPtr =
-      ptrManager.getPointer(ctx, getArgument(callNode, srcPos));
+  const auto *srcPtr = ptrManager.getPointer(ctx, srcArg);
   if (srcPtr == nullptr)
     return false;
 
@@ -266,16 +294,20 @@ PtsSet TransferFunction::evalExternalCopySource(const context::Context *ctx,
   switch (src.getType()) {
   case CopySource::SourceType::Value: {
     // Source is the value of the pointer argument itself (e.g., p = q)
-    const auto *ptr = globalState.getPointerManager().getPointer(
-        ctx, getArgument(callNode, src.getPosition()));
+    const auto *srcArg = getArgument(callNode, src.getPosition());
+    if (srcArg == nullptr)
+      return PtsSet::getEmptySet();
+    const auto *ptr = globalState.getPointerManager().getPointer(ctx, srcArg);
     if (ptr == nullptr)
       return PtsSet::getEmptySet();
     return globalState.getEnv().lookup(ptr);
   }
   case CopySource::SourceType::DirectMemory: {
     // Source is the content of memory pointed to by argument (e.g., p = *q)
-    const auto *ptr = globalState.getPointerManager().getPointer(
-        ctx, getArgument(callNode, src.getPosition()));
+    const auto *srcArg = getArgument(callNode, src.getPosition());
+    if (srcArg == nullptr)
+      return PtsSet::getEmptySet();
+    const auto *ptr = globalState.getPointerManager().getPointer(ctx, srcArg);
     if (ptr == nullptr)
       return PtsSet::getEmptySet();
     return loadFromPointer(ptr, *localState);
@@ -323,8 +355,14 @@ void TransferFunction::evalExternalCopyDest(const context::Context *ctx,
   bool envChanged = false;
   if (!(callNode.getDest() == nullptr &&
         dest.getPosition().isReturnPosition())) {
-    const auto *dstPtr = globalState.getPointerManager().getOrCreatePointer(
-        ctx, getArgument(callNode, dest.getPosition()));
+    const auto *dstArg = getArgument(callNode, dest.getPosition());
+    if (dstArg == nullptr) {
+      addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState,
+                            evalResult);
+      return;
+    }
+    const auto *dstPtr =
+        globalState.getPointerManager().getOrCreatePointer(ctx, dstArg);
     switch (dest.getType()) {
     case CopyDest::DestType::Value: {
       envChanged = globalState.getEnv().weakUpdate(dstPtr, srcSet);
@@ -396,10 +434,7 @@ void TransferFunction::evalExternalCallByEffect(const context::Context *ctx,
                                                 EvalResult &evalResult) {
   switch (effect.getType()) {
   case PointerEffectType::Alloc: {
-    if (evalExternalAlloc(ctx, callNode, effect.getAsAllocEffect()))
-      addTopLevelSuccessors(ProgramPoint(ctx, &callNode), evalResult);
-    addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState,
-                          evalResult);
+    evalExternalAlloc(ctx, callNode, evalResult, effect.getAsAllocEffect());
     break;
   }
   case PointerEffectType::Copy: {

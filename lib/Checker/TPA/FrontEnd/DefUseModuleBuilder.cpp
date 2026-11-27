@@ -78,22 +78,6 @@ void addExternalDefs(DefUseFunction &duFunc) {
   }
 }
 
-void addExternalUses(DefUseFunction &duFunc,
-                     const ReachingDefMap<Instruction> &rdMap,
-                     const ModRefFunctionSummary &summary) {
-  for (auto *exitInst : duFunc.getMemoryExitInsts()) {
-    auto &rdStore = rdMap.getReachingDefStore(exitInst->getInstruction());
-    for (auto const &mapping : rdStore) {
-      const auto *loc = mapping.first;
-      if (summary.isMemoryWritten(loc))
-        for (auto *inst : mapping.second)
-          // A null definition denotes memory supplied at function entry.
-          (inst ? duFunc.getDefUseInstruction(inst) : duFunc.getEntryInst())
-              ->insertMemLevelEdge(loc, exitInst);
-    }
-  }
-}
-
 void computeNodePriority(DefUseFunction &duFunc) {
   auto &f = duFunc.getFunction();
 
@@ -112,140 +96,13 @@ void computeNodePriority(DefUseFunction &duFunc) {
   }
 }
 
-class MemReadVisitor : public llvm::InstVisitor<MemReadVisitor> {
-private:
-  const SemiSparsePointerAnalysis &ptrAnalysis;
-  UnmodeledPolicy unmodeledPolicy;
-  const ModRefModuleSummary &summaryMap;
-  const ExternalModRefTable &modRefTable;
-
-  using RDMapType = ReachingDefMap<Instruction>;
-  const RDMapType &rdMap;
-
-  DefUseFunction &duFunc;
-
-  void addMemDefUseEdge(const MemoryObject *obj,
-                        const ReachingDefStore<Instruction> &rdStore,
-                        DefUseInstruction *dstDuInst) {
-    const auto *nodeSet = rdStore.getReachingDefs(obj);
-    if (nodeSet == nullptr) {
-      duFunc.getEntryInst()->insertMemLevelEdge(obj, dstDuInst);
-      return;
-    }
-    for (const auto *srcInst : *nodeSet) {
-      auto *srcDuInst = srcInst == nullptr
-                            ? duFunc.getEntryInst()
-                            : duFunc.getDefUseInstruction(srcInst);
-      srcDuInst->insertMemLevelEdge(obj, dstDuInst);
-    }
-  }
-
-  void processMemRead(Instruction &inst, Value *ptr, bool isReachableMemory) {
-    auto pSet = ptrAnalysis.getPtsSet(ptr);
-    if (!pSet.empty()) {
-      auto &rdStore = rdMap.getReachingDefStore(&inst);
-      auto *dstDuInst = duFunc.getDefUseInstruction(&inst);
-      for (const auto *obj : pSet) {
-        if (isReachableMemory) {
-          for (const auto *oLoc :
-               ptrAnalysis.getMemoryManager().getReachableMemoryObjects(obj))
-            addMemDefUseEdge(oLoc, rdStore, dstDuInst);
-        } else {
-          addMemDefUseEdge(obj, rdStore, dstDuInst);
-        }
-      }
-    }
-  }
-
-  void processExternalCall(CallBase *cs, const Function *f) {
-    const auto &summary = lookupModRefSummary(modRefTable, *f, unmodeledPolicy);
-    auto &inst = *cs;
-
-    for (auto const &effect : summary) {
-      if (effect.isRefEffect()) {
-        auto const &pos = effect.getPosition();
-        assert(!pos.isReturnPosition() &&
-               "It doesn't make any sense to ref a return position!");
-
-        auto const &argPos = pos.getAsArgPosition();
-        unsigned idx = argPos.getArgIndex();
-
-        if (!argPos.isAfterArgPosition())
-          processMemRead(inst, cs->getArgOperand(idx),
-                         effect.onReachableMemory());
-        else {
-          for (auto i = idx, e = cs->arg_size(); i < e; ++i)
-            if (cs->getArgOperand(i)->getType()->isPointerTy())
-              processMemRead(inst, cs->getArgOperand(i),
-                             effect.onReachableMemory());
-        }
-      }
-    }
-  }
-
-public:
-  MemReadVisitor(const RDMapType &m, DefUseFunction &f,
-                 const SemiSparsePointerAnalysis &p,
-                 const ModRefModuleSummary &sm, const ExternalModRefTable &e,
-                 UnmodeledPolicy policy)
-      : ptrAnalysis(p), unmodeledPolicy(policy), summaryMap(sm), modRefTable(e),
-        rdMap(m), duFunc(f) {}
-
-  // Default case
-  void visitInstruction(Instruction &) {}
-
-  void visitLoadInst(LoadInst &loadInst) {
-    processMemRead(loadInst, loadInst.getPointerOperand(), false);
-  }
-
-  void visitAtomicRMWInst(AtomicRMWInst &inst) {
-    processMemRead(inst, inst.getPointerOperand(), false);
-  }
-  void visitAtomicCmpXchgInst(AtomicCmpXchgInst &inst) {
-    processMemRead(inst, inst.getPointerOperand(), false);
-  }
-
-  void visitCallBase(CallBase &call) { visitTaintCall(&call); }
-
-  void visitTaintCall(CallBase *cs) {
-    if (isDebugIntrinsic(*cs))
-      return;
-    auto *inst = cs;
-    auto callTgts = resolveCallTargets(ptrAnalysis, *cs, unmodeledPolicy);
-    auto &rdStore = rdMap.getReachingDefStore(inst);
-    auto *dstDuInst = duFunc.getDefUseInstruction(inst);
-    for (const auto *callee : callTgts) {
-      if (callee->isDeclaration()) {
-        processExternalCall(cs, callee);
-      } else {
-        auto &summary = summaryMap.getSummary(callee);
-        for (const auto *obj : summary.mem_reads())
-          addMemDefUseEdge(obj, rdStore, dstDuInst);
-        for (const auto *obj : summary.mem_writes())
-          addMemDefUseEdge(obj, rdStore, dstDuInst);
-      }
-    }
-  }
-};
-
 } // namespace
 
 void DefUseModuleBuilder::buildMemLevelEdges(
     DefUseFunction &duFunc, const ModRefModuleSummary &summaryMap) {
-  // Run the reaching def analysis
   ReachingDefModuleAnalysis rdAnalysis(ptrAnalysis, summaryMap, modRefTable,
                                        unmodeledPolicy);
-  auto rdMap = rdAnalysis.runOnFunction(duFunc.getFunction());
-
-  MemReadVisitor memVisitor(rdMap, duFunc, ptrAnalysis, summaryMap, modRefTable,
-                            unmodeledPolicy);
-  for (const auto *bb :
-       llvm::depth_first(&duFunc.getFunction().getEntryBlock()))
-    memVisitor.visit(*const_cast<BasicBlock *>(bb));
-
-  // Add mem-level external uses
-  auto const &summary = summaryMap.getSummary(&duFunc.getFunction());
-  addExternalUses(duFunc, rdMap, summary);
+  rdAnalysis.buildMemoryDefUseEdges(duFunc);
 }
 
 void DefUseModuleBuilder::buildDefUseFunction(

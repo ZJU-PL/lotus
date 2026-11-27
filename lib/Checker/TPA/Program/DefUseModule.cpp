@@ -47,7 +47,7 @@ DefUseInstruction *
 DefUseFunction::getDefUseInstruction(const Instruction *inst) {
   auto itr = instMap.find(inst);
   if (itr != instMap.end())
-    return &itr->second;
+    return itr->second;
   else
     return nullptr;
 }
@@ -55,12 +55,40 @@ const DefUseInstruction *
 DefUseFunction::getDefUseInstruction(const Instruction *inst) const {
   auto itr = instMap.find(inst);
   if (itr != instMap.end())
-    return &itr->second;
+    return itr->second;
   else
     return nullptr;
 }
 
+void DefUseFunction::finalizeMemSuccEdges() {
+  entryInst.finalizeMemSuccEdges();
+  for (auto &node : instStorage)
+    node.finalizeMemSuccEdges();
+}
+
+void DefUseFunction::ensureMemPreds() const {
+  if (memPredsBuilt)
+    return;
+  auto addFrom = [](const DefUseInstruction &src) {
+    auto *mutableSrc = const_cast<DefUseInstruction *>(&src);
+    for (const auto &entry : src.mem_succs())
+      for (auto *dst : entry.second)
+        dst->appendMemPredEdge(entry.first, mutableSrc);
+    for (const auto &entry : src.group_mem_succs())
+      for (auto *dst : entry.second)
+        dst->appendGroupMemPredEdge(entry.first, mutableSrc);
+  };
+  addFrom(entryInst);
+  for (const auto &node : instStorage)
+    addFrom(node);
+  entryInst.finalizeMemPredEdges();
+  for (const auto &node : instStorage)
+    node.finalizeMemPredEdges();
+  memPredsBuilt = true;
+}
+
 DefUseFunction::DefUseFunction(const Function &f) : function(f), entryInst(&f) {
+  entryInst.setMemoryGroups(&memGroups);
   for (const auto *bb : llvm::depth_first(&f.getEntryBlock())) {
     for (auto const &inst : *bb) {
       if (isDebugIntrinsic(inst))
@@ -69,17 +97,16 @@ DefUseFunction::DefUseFunction(const Function &f) : function(f), entryInst(&f) {
         if (brInst->isUnconditional())
           continue;
 
-      auto itr =
-          instMap
-              .emplace(std::piecewise_construct, std::forward_as_tuple(&inst),
-                       std::forward_as_tuple(inst))
-              .first;
+      instStorage.emplace_back(inst);
+      DefUseInstruction *duInst = &instStorage.back();
+      duInst->setMemoryGroups(&memGroups);
+      instMap.try_emplace(&inst, duInst);
 
       if (isa<ReturnInst>(&inst)) {
-        exitInsts.push_back(&itr->second);
+        exitInsts.push_back(duInst);
       }
       if (isa<ReturnInst>(inst) || isa<ResumeInst>(inst))
-        memoryExitInsts.push_back(&itr->second);
+        memoryExitInsts.push_back(duInst);
     }
   }
 }

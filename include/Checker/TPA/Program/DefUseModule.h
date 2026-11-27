@@ -35,6 +35,11 @@ public:
   };
   const DefUseFunction &getDefUseFunction(const llvm::Function *f) const;
 
+  void ensureMemPreds() const {
+    for (const auto &entry : funMap)
+      entry.second.ensureMemPreds();
+  }
+
   iterator begin() { return iterator(funMap.begin()); }
   iterator end() { return iterator(funMap.end()); }
   const_iterator begin() const { return const_iterator(funMap.begin()); }

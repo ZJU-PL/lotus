@@ -76,11 +76,15 @@ PreservedAnalyses GlobalCleanup::run(Module &M,
     modified = true;
   }
 
-  for (auto &gv : M.globals())
+  for (auto it = M.global_begin(), end = M.global_end(); it != end;) {
+    auto &gv = *it++;
     modified |= cleanUpLinkage(&gv);
+  }
 
-  for (auto &f : M)
+  for (auto it = M.begin(), end = M.end(); it != end;) {
+    auto &f = *it++;
     modified |= cleanUpLinkage(&f);
+  }
 
   return modified ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
