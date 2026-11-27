@@ -195,11 +195,11 @@ protected:
   }
 
   void releaseSCCMemory() {
-    dfsNum.clear();
-    entryTime.clear();
-    inComponent.clear();
-    visitedNodes.clear();
-    sccStack.clear();
+    std::vector<unsigned>().swap(dfsNum);
+    std::vector<unsigned>().swap(entryTime);
+    std::vector<uint8_t>().swap(inComponent);
+    std::vector<NodeIndex>().swap(visitedNodes);
+    std::vector<const NodeType *>().swap(sccStack);
   }
 
 public:

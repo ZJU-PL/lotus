@@ -134,6 +134,12 @@ protected:
   }
 
   void buildPredecessorGraph() {
+    auto packEdge = [](NodeIndex src, NodeIndex dst) -> uint64_t {
+      return (static_cast<uint64_t>(src) << 32) | static_cast<uint64_t>(dst);
+    };
+    std::vector<uint64_t> edges;
+    edges.reserve(constraints.size() * 2);
+
     for (auto const &c : constraints) {
       NodeIndex srcTgt = nodeFactory.getMergeTarget(c.getSrc());
       NodeIndex dstTgt = nodeFactory.getMergeTarget(c.getDest());
@@ -143,29 +149,39 @@ protected:
         // Dest = &src edge: keep the exact original object node c.getSrc() so
         // merging src's points-to equivalence class never conflates &src with
         // &srcTgt across HVN -> HU passes.
-        predGraph.insertEdge(dstTgt, getAdrNodeIndex(c.getSrc()));
+        edges.push_back(packEdge(dstTgt, getAdrNodeIndex(c.getSrc())));
         // *Dest = src edge
-        predGraph.insertEdge(getRefNodeIndex(dstTgt), srcTgt);
+        edges.push_back(packEdge(getRefNodeIndex(dstTgt), srcTgt));
         break;
       }
       case AndersConstraint::LOAD: {
         // dest = *src edge
-        predGraph.insertEdge(dstTgt, getRefNodeIndex(srcTgt));
+        edges.push_back(packEdge(dstTgt, getRefNodeIndex(srcTgt)));
         break;
       }
       case AndersConstraint::STORE: {
         // *dest = src edge
-        predGraph.insertEdge(getRefNodeIndex(dstTgt), srcTgt);
+        edges.push_back(packEdge(getRefNodeIndex(dstTgt), srcTgt));
         break;
       }
       case AndersConstraint::COPY: {
         // Dest = Src edge
-        predGraph.insertEdge(dstTgt, srcTgt);
+        edges.push_back(packEdge(dstTgt, srcTgt));
         // *Dest = *Src edge
-        predGraph.insertEdge(getRefNodeIndex(dstTgt), getRefNodeIndex(srcTgt));
+        edges.push_back(
+            packEdge(getRefNodeIndex(dstTgt), getRefNodeIndex(srcTgt)));
         break;
       }
       }
+    }
+
+    // Sort and deduplicate edges so SparseBitVector insertions are strictly
+    // ascending per source node (O(1) amortized instead of O(deg) scans).
+    std::sort(edges.begin(), edges.end());
+    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+    for (uint64_t packed : edges) {
+      predGraph.insertEdge(static_cast<NodeIndex>(packed >> 32),
+                           static_cast<NodeIndex>(packed & 0xFFFFFFFFu));
     }
   }
 
@@ -415,9 +431,9 @@ protected:
 
   virtual void releaseMemory() {
     indirectNodes.clear();
-    peLabel.clear();
-    mergeTarget.clear();
-    mergedNodesList.clear();
+    std::vector<unsigned>().swap(peLabel);
+    std::vector<NodeIndex>().swap(mergeTarget);
+    std::vector<NodeIndex>().swap(mergedNodesList);
     predGraph.releaseMemory();
     releaseSCCMemory();
   }

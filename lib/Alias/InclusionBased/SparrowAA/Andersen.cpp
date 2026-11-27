@@ -459,21 +459,45 @@ void Andersen::getAllAllocationSites(
 
 bool Andersen::getPointsToSet(const llvm::Value *v,
                               std::vector<const llvm::Value *> &ptsSet) const {
-  AndersPtsSet aggregated;
-  if (!getPointsToSet(v, aggregated))
+  std::vector<NodeIndex> nodes;
+  nodeFactory.getValueNodesFor(v, nodes);
+  if (nodes.empty())
     return false;
 
   ptsSet.clear();
   DenseSet<const llvm::Value *> uniq;
-  for (auto idx : aggregated) {
-    if (idx == nodeFactory.getNullObjectNode())
-      continue;
-    const llvm::Value *val = nodeFactory.getValueForNode(idx);
-    if (val && uniq.insert(val).second) {
+  bool sawUnknown = false;
+  bool sawKnown = false;
+  auto emitCompactId = [&](unsigned objId) {
+    if (objId == NullObjCompactId || objId >= objIdToNode.size())
+      return;
+    const llvm::Value *val = nodeFactory.getValueForNode(objIdToNode[objId]);
+    if (val && uniq.insert(val).second)
       ptsSet.push_back(val);
+  };
+
+  for (auto n : nodes) {
+    if (n == AndersNodeFactory::InvalidIndex ||
+        n == nodeFactory.getUniversalPtrNode()) {
+      sawUnknown = true;
+      continue;
+    }
+    NodeIndex rep = nodeFactory.getMergeTarget(n);
+    if (ptsSetImpl == PtsSetImpl::SPARSE_BITVECTOR) {
+      if (rep >= sparsePtsGraph.size() || sparsePtsGraph[rep].isEmpty())
+        continue;
+      sawKnown = true;
+      for (auto objId : sparsePtsGraph[rep])
+        emitCompactId(objId);
+    } else {
+      if (rep >= bddPtsGraph.size() || bddPtsGraph[rep].isEmpty())
+        continue;
+      sawKnown = true;
+      for (auto objId : bddPtsGraph[rep])
+        emitCompactId(static_cast<unsigned>(objId));
     }
   }
-  return true;
+  return sawKnown || sawUnknown;
 }
 
 bool Andersen::getPointsToSet(const llvm::Value *v,
@@ -497,13 +521,18 @@ bool Andersen::getPointsToSet(const llvm::Value *v,
       if (rep >= sparsePtsGraph.size() || sparsePtsGraph[rep].isEmpty())
         continue;
       sawKnown = true;
-      ptsSet.unionWith(sparsePtsGraph[rep]);
+      for (auto objId : sparsePtsGraph[rep]) {
+        if (objId < objIdToNode.size())
+          ptsSet.insert(objIdToNode[objId]);
+      }
     } else {
       if (rep >= bddPtsGraph.size() || bddPtsGraph[rep].isEmpty())
         continue;
       sawKnown = true;
-      for (auto idx : bddPtsGraph[rep])
-        ptsSet.insert(static_cast<unsigned>(idx));
+      for (auto objId : bddPtsGraph[rep]) {
+        if (objId < objIdToNode.size())
+          ptsSet.insert(objIdToNode[static_cast<unsigned>(objId)]);
+      }
     }
   }
 
@@ -531,35 +560,57 @@ bool Andersen::getPointsToSetInContext(const llvm::Value *v,
   if (ptsSetImpl == PtsSetImpl::SPARSE_BITVECTOR) {
     if (rep >= sparsePtsGraph.size() || sparsePtsGraph[rep].isEmpty())
       return false;
-    ptsSet = sparsePtsGraph[rep];
+    ptsSet.clear();
+    for (auto objId : sparsePtsGraph[rep]) {
+      if (objId < objIdToNode.size())
+        ptsSet.insert(objIdToNode[objId]);
+    }
     return true;
   }
 
   if (rep >= bddPtsGraph.size() || bddPtsGraph[rep].isEmpty())
     return false;
   ptsSet.clear();
-  for (auto idx : bddPtsGraph[rep])
-    ptsSet.insert(static_cast<unsigned>(idx));
+  for (auto objId : bddPtsGraph[rep]) {
+    if (objId < objIdToNode.size())
+      ptsSet.insert(objIdToNode[static_cast<unsigned>(objId)]);
+  }
   return true;
 }
 
 bool Andersen::getPointsToSetInContext(
     const llvm::Value *v, AndersNodeFactory::CtxKey ctx,
     std::vector<const llvm::Value *> &ptsSet) const {
-  AndersPtsSet aggregated;
-  if (!getPointsToSetInContext(v, ctx, aggregated))
+  NodeIndex n = nodeFactory.getValueNodeFor(v, ctx);
+  if (n == AndersNodeFactory::InvalidIndex)
     return false;
 
   ptsSet.clear();
+  if (n == nodeFactory.getUniversalPtrNode())
+    return true;
+
+  NodeIndex rep = nodeFactory.getMergeTarget(n);
   llvm::DenseSet<const llvm::Value *> uniq;
-  for (auto idx : aggregated) {
-    if (idx == nodeFactory.getNullObjectNode())
-      continue;
-    const llvm::Value *val = nodeFactory.getValueForNode(idx);
-    if (val && uniq.insert(val).second) {
+  auto emitCompactId = [&](unsigned objId) {
+    if (objId == NullObjCompactId || objId >= objIdToNode.size())
+      return;
+    const llvm::Value *val = nodeFactory.getValueForNode(objIdToNode[objId]);
+    if (val && uniq.insert(val).second)
       ptsSet.push_back(val);
-    }
+  };
+
+  if (ptsSetImpl == PtsSetImpl::SPARSE_BITVECTOR) {
+    if (rep >= sparsePtsGraph.size() || sparsePtsGraph[rep].isEmpty())
+      return false;
+    for (auto objId : sparsePtsGraph[rep])
+      emitCompactId(objId);
+    return true;
   }
+
+  if (rep >= bddPtsGraph.size() || bddPtsGraph[rep].isEmpty())
+    return false;
+  for (auto objId : bddPtsGraph[rep])
+    emitCompactId(static_cast<unsigned>(objId));
   return true;
 }
 
@@ -605,6 +656,7 @@ bool Andersen::runOnModule(const Module &M) {
     // Phase 1: reset state and re-collect using the adaptive CS policy
     constraints.clear();
     nodeFactory = AndersNodeFactory();
+    objIdToNode.clear();
     sparsePtsGraph.clear();
     bddPtsGraph.clear();
     ctxPolicy = savedPolicy;
@@ -738,7 +790,7 @@ void Andersen::dumpPtsGraphPlainVanilla() const {
         std::stringstream ss;
         ss << i;
         for (auto v : sparsePtsGraph[rep])
-          ss << " " << v;
+          ss << " " << (v < objIdToNode.size() ? objIdToNode[v] : v);
         LOG_DEBUG("{}", ss.str());
       }
     } else {
@@ -746,7 +798,7 @@ void Andersen::dumpPtsGraphPlainVanilla() const {
         std::stringstream ss;
         ss << i;
         for (auto v : bddPtsGraph[rep])
-          ss << " " << v;
+          ss << " " << (v < objIdToNode.size() ? objIdToNode[v] : v);
         LOG_DEBUG("{}", ss.str());
       }
     }

@@ -25,7 +25,7 @@ using namespace llvm;
  * @return true if the set contains exactly one element and it equals i
  */
 static inline bool isSetContainingOnly(const AndersPtsSet &set, NodeIndex i) {
-  return (set.getSize() == 1) && (*set.begin() == i);
+  return set.containsOnly(i);
 }
 
 /**
@@ -47,6 +47,43 @@ AliasResult AndersenAAResult::andersenAlias(const Value *v1, const Value *v2) {
   // set (pointer equivalence), not because they refer to the same memory
   // location.  Returning MustAlias for merged nodes is unsound and can cause
   // incorrect optimizations.
+
+  // Zero-copy fast path for sparse bitset backend when each value has a single
+  // context node (always true for k=0 and common for k>0).
+  if (anders.ptsSetImpl == PtsSetImpl::SPARSE_BITVECTOR) {
+    std::vector<NodeIndex> n1s, n2s;
+    anders.nodeFactory.getValueNodesFor(v1, n1s);
+    if (n1s.empty())
+      return AliasResult::MayAlias;
+    anders.nodeFactory.getValueNodesFor(v2, n2s);
+    if (n2s.empty())
+      return AliasResult::MayAlias;
+
+    if (n1s.size() == 1 && n2s.size() == 1) {
+      NodeIndex n1 = n1s[0], n2 = n2s[0];
+      NodeIndex univPtr = anders.nodeFactory.getUniversalPtrNode();
+      if (n1 == AndersNodeFactory::InvalidIndex || n1 == univPtr ||
+          n2 == AndersNodeFactory::InvalidIndex || n2 == univPtr)
+        return AliasResult::MayAlias;
+      NodeIndex r1 = anders.nodeFactory.getMergeTarget(n1);
+      NodeIndex r2 = anders.nodeFactory.getMergeTarget(n2);
+      if (r1 >= anders.sparsePtsGraph.size() ||
+          r2 >= anders.sparsePtsGraph.size())
+        return AliasResult::MayAlias;
+      const AndersPtsSet &s1 = anders.sparsePtsGraph[r1];
+      const AndersPtsSet &s2 = anders.sparsePtsGraph[r2];
+      if (s1.isEmpty() || s2.isEmpty())
+        return AliasResult::MayAlias;
+      if (s1.containsOnly(Andersen::NullObjCompactId) ||
+          s2.containsOnly(Andersen::NullObjCompactId))
+        return AliasResult::NoAlias;
+      if (s1.has(Andersen::UniversalObjCompactId) ||
+          s2.has(Andersen::UniversalObjCompactId))
+        return AliasResult::MayAlias;
+      return s1.intersectWith(s2) ? AliasResult::MayAlias
+                                  : AliasResult::NoAlias;
+    }
+  }
 
   AndersPtsSet s1, s2;
   if (!anders.getPointsToSet(v1, s1) || !anders.getPointsToSet(v2, s2))

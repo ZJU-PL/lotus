@@ -60,6 +60,7 @@ public:
   bool complement();
 
   void clear();
+  void clearAndRelease() { clear(); }
   unsigned getSize() const;
   bool isEmpty() const;
   bool operator==(const BDDAndersPtsSet &other) const;

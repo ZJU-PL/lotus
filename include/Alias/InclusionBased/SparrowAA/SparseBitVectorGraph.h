@@ -112,9 +112,9 @@ public:
   unsigned getSize() const { return static_cast<unsigned>(activeNodes.size()); }
 
   void releaseMemory() {
-    nodes.clear();
-    present.clear();
-    activeNodes.clear();
+    std::vector<SparseBitVectorGraphNode>().swap(nodes);
+    std::vector<uint8_t>().swap(present);
+    std::vector<NodeIndex>().swap(activeNodes);
   }
 
   iterator begin() { return nodes.begin(); }

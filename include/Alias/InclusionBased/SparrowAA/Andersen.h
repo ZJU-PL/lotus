@@ -172,8 +172,13 @@ private:
   PtsSetImpl ptsSetImpl = PtsSetImpl::SPARSE_BITVECTOR;
 
   /// Dense points-to graph indexed by representative NodeIndex.
+  /// Elements in each points-to set are compact object IDs in [0, objIdToNode.size()),
+  /// where ID 0 is UniversalObj and ID 1 is NullObject.
   /// Exactly one of `sparsePtsGraph` / `bddPtsGraph` is populated depending on
   /// `ptsSetImpl`, avoiding std::map overhead and RuntimePtsSet type erasure.
+  static constexpr unsigned UniversalObjCompactId = 0;
+  static constexpr unsigned NullObjCompactId = 1;
+  std::vector<NodeIndex> objIdToNode;
   std::vector<AndersPtsSet> sparsePtsGraph;
   std::vector<BDDAndersPtsSet> bddPtsGraph;
 
