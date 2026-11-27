@@ -397,7 +397,8 @@ Location createLocationFromInstruction(const llvm::Instruction *instruction) {
   if (instruction && instruction->getDebugLoc()) {
     location = createLocationFromDebugLoc(instruction->getDebugLoc());
 
-    if (auto *func = instruction->getFunction()) {
+    if (const auto *func =
+            instruction->getParent() ? instruction->getFunction() : nullptr) {
       std::string funcName;
 
       // Try to get name from debug info first

@@ -1505,9 +1505,7 @@ void GSAFReportDecorator::buildFromTrace(
                errs() << "[" << std::get<INDEX>(NodeIndexPair) << "] "
                       << *NextObj << "\n";);
 
-    bool HitConstantExpr = false;
-
-    Instruction *Operation = nullptr;
+    Value *Operation = nullptr;
     if (CurrObjIsSite && !NextObjIsSite) {
       // build tips for <site, operand>
       Operation = ((const GuardedValueFlowSite *)CurrObj)->getInstruction();
@@ -1535,8 +1533,7 @@ void GSAFReportDecorator::buildFromTrace(
         Operation = dyn_cast_or_null<Instruction>(N->getLLVMValue());
         if (!Operation) {
           if (auto *CE = dyn_cast_or_null<ConstantExpr>(N->getLLVMValue())) {
-            Operation = CE->getAsInstruction();
-            HitConstantExpr = true;
+            Operation = CE;
           }
         }
       } else if (auto *N = nodeOfKind<GuardedValueFlowNode::Kind::StoreMemory,
@@ -1564,12 +1561,6 @@ void GSAFReportDecorator::buildFromTrace(
 
     I = std::get<INDEX>(NodeIndexPair);
     SrcIndexPair = std::move(NodeIndexPair);
-
-    // we must del the operation manually
-    // if the operation is created via
-    // a constant expr
-    if (HitConstantExpr)
-      Operation->deleteValue();
   }
 
   if (IsFinalize) {

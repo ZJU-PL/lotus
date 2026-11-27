@@ -235,18 +235,25 @@ GSAFChecker::traces(const std::shared_ptr<Vulnerability> &vulnerability) const {
 }
 
 bool SMTAdvisor4Inlining::prune(const SMTExpr &expression) {
+  auto countCallSites = [](llvm::StringRef symbol) {
+    unsigned depth = 0;
+    size_t position = 0;
+    while ((position = symbol.find("_CS", position)) != llvm::StringRef::npos) {
+      ++position;
+      if (++depth >= GSAFOptions::InlineDepth)
+        return true;
+    }
+    return false;
+  };
+  if (const char *sym = expression.getSymbolCStr())
+    return countCallSites(sym);
   std::string symbol = expression.getSymbol();
-  unsigned depth = 0;
-  size_t position = 0;
-  while ((position = symbol.find("_CS", position)) != std::string::npos) {
-    ++position;
-    if (++depth >= GSAFOptions::InlineDepth)
-      return true;
-  }
-  return false;
+  return countCallSites(symbol);
 }
 
 bool SMTAdvisor4Inlining::rename(const SMTExpr &expression) {
+  if (const char *sym = expression.getSymbolCStr())
+    return !llvm::StringRef(sym).startswith("global_");
   return !StringRef(expression.getSymbol()).startswith("global_");
 }
 

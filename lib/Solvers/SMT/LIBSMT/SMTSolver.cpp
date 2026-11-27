@@ -23,8 +23,10 @@
 #include "Solvers/SMT/LIBSMT/SMTFactory.h"
 #include "Solvers/SMT/LIBSMT/SMTModel.h"
 
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 
 #include <llvm/Support/CommandLine.h>
@@ -67,8 +69,9 @@ bool SMTSolvingTimeOut = false;
 SMTSolver::SMTSolver(SMTFactory *F, z3::solver &Z3Solver, z3::model &Z3Model)
     : SMTObject(F), Solver(Z3Solver), checkCount(0) {
   if (SMTSolver::GlobalTimeout > 0) {
+    CurrentTimeout = static_cast<unsigned>(SMTSolver::GlobalTimeout);
     z3::params Z3Params(Z3Solver.ctx());
-    Z3Params.set("timeout", (unsigned)SMTSolver::GlobalTimeout);
+    Z3Params.set("timeout", CurrentTimeout);
     Z3Solver.set(Z3Params);
   }
 }
@@ -77,9 +80,11 @@ SMTSolver::SMTSolver(const SMTSolver &Other)
     : SMTObject(Other), Solver(Other.Solver), checkCount(Other.checkCount),
       PendingAssertions(Other.PendingAssertions),
       ScopeAssertionMarks(Other.ScopeAssertionMarks),
-      SyncedCounts(Other.SyncedCounts), ActiveAsts(Other.ActiveAsts),
-      FalseCount(Other.FalseCount), HasCachedResult(Other.HasCachedResult),
-      CachedResult(Other.CachedResult), Z3ModelValid(Other.Z3ModelValid) {}
+      Z3ScopeMarks(Other.Z3ScopeMarks), Z3ScopeSatVars(Other.Z3ScopeSatVars),
+      SyncedAsserts(Other.SyncedAsserts), ActiveAsts(Other.ActiveAsts),
+      FalseCount(Other.FalseCount), CurrentTimeout(Other.CurrentTimeout),
+      HasCachedResult(Other.HasCachedResult), CachedResult(Other.CachedResult),
+      Z3ModelValid(Other.Z3ModelValid) {}
 
 SMTSolver &SMTSolver::operator=(const SMTSolver &Other) {
   SMTObject::operator=(Other);
@@ -88,9 +93,12 @@ SMTSolver &SMTSolver::operator=(const SMTSolver &Other) {
     this->checkCount = Other.checkCount;
     this->PendingAssertions = Other.PendingAssertions;
     this->ScopeAssertionMarks = Other.ScopeAssertionMarks;
-    this->SyncedCounts = Other.SyncedCounts;
+    this->Z3ScopeMarks = Other.Z3ScopeMarks;
+    this->Z3ScopeSatVars = Other.Z3ScopeSatVars;
+    this->SyncedAsserts = Other.SyncedAsserts;
     this->ActiveAsts = Other.ActiveAsts;
     this->FalseCount = Other.FalseCount;
+    this->CurrentTimeout = Other.CurrentTimeout;
     this->HasCachedResult = Other.HasCachedResult;
     this->CachedResult = Other.CachedResult;
     this->Z3ModelValid = Other.Z3ModelValid;
@@ -100,29 +108,49 @@ SMTSolver &SMTSolver::operator=(const SMTSolver &Other) {
 
 SMTSolver::~SMTSolver() {}
 
-void SMTSolver::flushToZ3() {
-  size_t synced_scopes = SyncedCounts.size() - 1;
-  size_t synced_asserts = SyncedCounts.back();
-  const size_t target_scopes = ScopeAssertionMarks.size();
-
-  size_t next_boundary = (synced_scopes < target_scopes)
-                             ? ScopeAssertionMarks[synced_scopes]
-                             : PendingAssertions.size();
-  for (; synced_asserts < next_boundary; ++synced_asserts) {
-    Solver.add(PendingAssertions[synced_asserts].Expr);
-  }
-  SyncedCounts.back() = synced_asserts;
-
-  while (synced_scopes < target_scopes) {
-    Solver.push();
-    ++synced_scopes;
-    size_t end = (synced_scopes < target_scopes)
-                     ? ScopeAssertionMarks[synced_scopes]
-                     : PendingAssertions.size();
-    for (; synced_asserts < end; ++synced_asserts) {
-      Solver.add(PendingAssertions[synced_asserts].Expr);
+uint64_t SMTSolver::currentSatVars() const {
+  z3::stats St = Solver.statistics();
+  const unsigned Sz = St.size();
+  for (unsigned I = 0; I < Sz; ++I) {
+    const char *Key = Z3_stats_get_key(Solver.ctx(), St, I);
+    if (!Key)
+      continue;
+    if (std::strcmp(Key, "sat mk var") == 0 ||
+        std::strcmp(Key, "sat-mk-var") == 0) {
+      return St.is_uint(I) ? static_cast<uint64_t>(St.uint_value(I))
+                           : static_cast<uint64_t>(St.double_value(I));
     }
-    SyncedCounts.push_back(synced_asserts);
+  }
+  return 0;
+}
+
+void SMTSolver::flushToZ3() {
+  const size_t total = PendingAssertions.size();
+  if (SyncedAsserts >= total)
+    return;
+
+  // Only materialize non-empty Z3 scopes so nested push() calls without new
+  // assertions do not trigger redundant incremental solver internalization.
+  for (size_t mark : ScopeAssertionMarks) {
+    if (mark < SyncedAsserts)
+      continue;
+    if (mark >= total)
+      break;
+    while (SyncedAsserts < mark) {
+      Solver.add(PendingAssertions[SyncedAsserts].Expr);
+      ++SyncedAsserts;
+    }
+    if (Z3ScopeMarks.empty() || Z3ScopeMarks.back() < mark) {
+      uint64_t vars_before_push = (SyncedAsserts > 0) ? currentSatVars() : 0;
+      Solver.push();
+      Z3ScopeMarks.push_back(mark);
+      Z3ScopeSatVars.push_back(vars_before_push);
+    }
+  }
+
+  while (SyncedAsserts < total) {
+    Solver.add(PendingAssertions[SyncedAsserts].Expr);
+    ++SyncedAsserts;
   }
 }
 
@@ -366,6 +394,7 @@ bool SMTSolver::checkN2NQueryWithOverAppro(
 // SMTSolver
 void SMTSolver::setTimeout(unsigned Timeout) {
   if (Timeout > 0) {
+    CurrentTimeout = Timeout;
     z3::params Z3Params(Solver.ctx());
     Z3Params.set("timeout", Timeout);
     Solver.set(Z3Params);
@@ -401,15 +430,45 @@ void SMTSolver::pop(unsigned N) {
     Z3ModelValid = false;
   }
 
-  const size_t synced_scopes = SyncedCounts.size() - 1;
-  if (synced_scopes > target_depth) {
+  unsigned z3_pops = 0;
+  uint64_t popped_base_vars = std::numeric_limits<uint64_t>::max();
+  const size_t old_synced = SyncedAsserts;
+  while (!Z3ScopeMarks.empty() && Z3ScopeMarks.back() >= new_size) {
+    SyncedAsserts = Z3ScopeMarks.back();
+    popped_base_vars = Z3ScopeSatVars.back();
+    Z3ScopeMarks.pop_back();
+    Z3ScopeSatVars.pop_back();
+    ++z3_pops;
+  }
+  if (z3_pops > 0) {
+    const size_t popped_asserts = old_synced - SyncedAsserts;
+    bool should_reset = (new_size == 0);
+    if (!should_reset && popped_asserts > 0) {
+      uint64_t cur_vars = currentSatVars();
+      uint64_t delta_vars =
+          (cur_vars > popped_base_vars) ? (cur_vars - popped_base_vars) : 0;
+      // Avoid quadratic sat::solver::gc_vars() / erase_clause_watch() in Z3's
+      // incremental QF_BV solver when popping a massive scope; reset() clears
+      // clauses in O(N) while PendingAssertions preserves the exact outer
+      // assertions for lazy re-flush on the next check().
+      if (delta_vars >= 65536)
+        should_reset = true;
+    }
     try {
-      Solver.pop(static_cast<unsigned>(synced_scopes - target_depth));
+      if (should_reset) {
+        Solver.reset();
+        if (CurrentTimeout > 0)
+          setTimeout(CurrentTimeout);
+        Z3ScopeMarks.clear();
+        Z3ScopeSatVars.clear();
+        SyncedAsserts = 0;
+      } else {
+        Solver.pop(z3_pops);
+      }
     } catch (z3::exception &Ex) {
       std::cerr << __FILE__ << " : " << __LINE__ << " : " << Ex << "\n";
       exit(1);
     }
-    SyncedCounts.resize(target_depth + 1);
     Z3ModelValid = false;
   }
 }
@@ -483,11 +542,16 @@ SMTExprVec SMTSolver::assertions() {
 }
 
 void SMTSolver::reset() {
-  if (SyncedCounts.size() > 1 || SyncedCounts[0] > 0)
+  if (!Z3ScopeMarks.empty() || SyncedAsserts > 0) {
     Solver.reset();
+    if (CurrentTimeout > 0)
+      setTimeout(CurrentTimeout);
+  }
   PendingAssertions.clear();
   ScopeAssertionMarks.clear();
-  SyncedCounts.assign(1, 0);
+  Z3ScopeMarks.clear();
+  Z3ScopeSatVars.clear();
+  SyncedAsserts = 0;
   ActiveAsts.clear();
   FalseCount = 0;
   HasCachedResult = false;
@@ -502,9 +566,7 @@ bool SMTSolver::operator<(const SMTSolver &Solver) const {
 
 SMTModel SMTSolver::getSMTModel() {
   try {
-    if (!Z3ModelValid ||
-        SyncedCounts.size() - 1 < ScopeAssertionMarks.size() ||
-        SyncedCounts.back() < PendingAssertions.size()) {
+    if (!Z3ModelValid || SyncedAsserts < PendingAssertions.size()) {
       flushToZ3();
       if (Solver.check() == z3::sat)
         Z3ModelValid = true;

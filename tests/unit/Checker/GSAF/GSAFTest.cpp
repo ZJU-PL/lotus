@@ -470,4 +470,124 @@ TEST_F(GSAFTest, DeadOutputSummaryChainTerminatesQuicklyWithoutExplosion) {
   }
 }
 
+TEST_F(GSAFTest, MergeDisjunctiveConstraintsFactorsSharedDeferredItems) {
+  auto module = parseModule("define void @test() { ret void }");
+  ASSERT_NE(module, nullptr);
+  Function *F = module->getFunction("test");
+
+  SymbolicSummary s1(F, 1);
+  SymbolicSummary s2(F, 2);
+  SymbolicSummary merged(F, 1);
+  {
+    SMTFactory factory;
+    SMTExpr x = factory.createBitVecConst("x", 32);
+    SMTExpr y = factory.createBitVecConst("y", 32);
+    SMTExpr shared = (y == 7);
+    SMTExpr c1 = (x == 1);
+    SMTExpr c2 = (x == 2);
+    s1.addNonSymDeps(SummaryCacheItem(&c1, "", 0));
+    s1.addNonSymDeps(SummaryCacheItem(&shared, "_CS_shared", 1));
+    s2.addNonSymDeps(SummaryCacheItem(&c2, "", 0));
+    s2.addNonSymDeps(SummaryCacheItem(&shared, "_CS_shared", 1));
+  }
+
+  std::vector<const SummaryBase *> group{&s1, &s2};
+  merged.mergeDisjunctiveConstraints(group, nullptr);
+
+  // Shared deferred item stays factored out instead of duplicated/renamed eagerly.
+  bool foundSharedDeferred = false;
+  for (const auto &item : merged.getNonSymDepsCache()) {
+    if (item.suffix == "_CS_shared")
+      foundSharedDeferred = true;
+  }
+  EXPECT_TRUE(foundSharedDeferred);
+
+  SMTFactory checkFactory;
+  SMTSolver solver = checkFactory.createSMTSolverForLogic("QF_BV");
+  for (const auto &item : merged.getNonSymDepsCache())
+    solver.add(item.getSMTExprFromCache(&checkFactory).first);
+
+  SMTExpr x = checkFactory.createBitVecConst("x", 32);
+  SMTExpr ycs = checkFactory.createBitVecConst("y_CS_shared", 32);
+
+  solver.push();
+  solver.add(x == 2);
+  solver.add(ycs == 7);
+  EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Sat);
+  solver.pop();
+
+  solver.push();
+  solver.add(x == 3);
+  EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Unsat);
+  solver.pop();
+
+  solver.push();
+  solver.add(x == 1);
+  solver.add(ycs != 7);
+  EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Unsat);
+  solver.pop();
+}
+
+TEST_F(GSAFTest, CyclicArgumentSummaryWithDirectUseAndDominatedDeadBranch) {
+  // Exercises:
+  // 1) summarizeArgumentDAG on a cyclic argument graph that also has a direct
+  //    use-site on the argument node itself (LocalTarget == LocalArg), ensuring
+  //    TraceSummary::getTailNode() never sees nullptr.
+  // 2) Dead dominated branch does not falsely suppress a feasible sibling use
+  //    site (properDominators -> properlyDominatedBlocks regression).
+  auto module = parseModule(R"(
+    declare void @free(i8*)
+    declare i8* @malloc(i64)
+
+    define i8* @cyclic_with_direct_use(i8* %p, i1 %c1, i1 %c2) {
+    entry:
+      %direct = load i8, i8* %p
+      br i1 %c1, label %loop, label %early
+    early:
+      ret i8* %p
+    loop:
+      %cur = phi i8* [ %p, %entry ], [ %next, %loop ]
+      %step = getelementptr i8, i8* %cur, i64 1
+      %next = select i1 %c2, i8* %step, i8* %p
+      br i1 %c2, label %loop, label %exit
+    exit:
+      %after = load i8, i8* %next
+      ret i8* %next
+    }
+
+    define i8 @uaf_with_dead_dominated_branch(i1 %flag) {
+    entry:
+      %buf = call i8* @malloc(i64 16)
+      call void @free(i8* %buf)
+      br i1 %flag, label %dead_check, label %live_use
+    dead_check:
+      %not_flag = xor i1 %flag, true
+      br i1 %not_flag, label %unreachable_use, label %live_use
+    unreachable_use:
+      %dead_v = load i8, i8* %buf
+      ret i8 %dead_v
+    live_use:
+      %live_v = load i8, i8* %buf
+      %passed = call i8* @cyclic_with_direct_use(i8* %buf, i1 %flag, i1 false)
+      %ret_v = load i8, i8* %passed
+      ret i8 %ret_v
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  initializeBuiltinVulnerabilities();
+  std::shared_ptr<Vulnerability> uaf;
+  for (auto *info : registeredVulnerabilities())
+    if (info->id() == "gsaf.use-after-free")
+      uaf = info->getVulnerability();
+  ASSERT_NE(uaf, nullptr);
+
+  auto wrapper = std::make_shared<VulnerabilityWrapper>();
+  wrapper->addVulnerability(uaf);
+  legacy::PassManager pm;
+  auto *checker = new GSAFChecker(wrapper);
+  pm.add(checker);
+  pm.run(*module);
+  EXPECT_FALSE(checker->traces(uaf).empty());
+}
+
 } // namespace

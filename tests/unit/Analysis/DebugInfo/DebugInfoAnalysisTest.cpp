@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include <llvm/ADT/StringRef.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -92,6 +93,73 @@ TEST(DebugInfoAnalysisTest, IRExpressionRendererTerminatesOnCyclicPhiAndGep) {
   std::unordered_map<llvm::Value *, llvm::Value *> phiChoice{{phi, next}};
   std::string expr = renderer.restore_access_path_expr(next, true, &phiChoice);
   EXPECT_FALSE(expr.empty());
+}
+
+TEST(DebugInfoAnalysisTest, HandlesDetachedConstantExprInstructionSafely) {
+  llvm::LLVMContext context;
+  auto module = parseModule(context, R"(
+    @buf = global [4 x i8] zeroinitializer
+
+    define i8* @example() {
+    entry:
+      ret i8* getelementptr inbounds ([4 x i8], [4 x i8]* @buf, i64 0, i64 1)
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  auto *function = module->getFunction("example");
+  ASSERT_NE(function, nullptr);
+  auto *ret = llvm::dyn_cast<llvm::ReturnInst>(
+      function->getEntryBlock().getTerminator());
+  ASSERT_NE(ret, nullptr);
+  auto *ce = llvm::dyn_cast<llvm::ConstantExpr>(ret->getReturnValue());
+  ASSERT_NE(ce, nullptr);
+
+  DebugInfoAnalysis analysis;
+  EXPECT_FALSE(analysis.getIRString(ce).empty());
+  EXPECT_EQ(analysis.getSourceFile(ce), "");
+  EXPECT_FALSE(analysis.getVariableName(ce).empty());
+
+  llvm::Instruction *detached = ce->getAsInstruction();
+  ASSERT_NE(detached, nullptr);
+  EXPECT_EQ(detached->getParent(), nullptr);
+  EXPECT_FALSE(analysis.getIRString(detached).empty());
+  EXPECT_EQ(analysis.getFunctionName(detached), "unknown_function");
+  EXPECT_EQ(analysis.getSourceFile(detached), "");
+  EXPECT_FALSE(analysis.getVariableName(detached).empty());
+  detached->deleteValue();
+}
+
+TEST(DebugInfoAnalysisTest, CachesIRStringsAcrossFunctionsSafely) {
+  llvm::LLVMContext context;
+  auto module = parseModule(context, R"(
+    define i32 @first(i32 %a) {
+    entry:
+      %x = add i32 %a, 1
+      ret i32 %x
+    }
+
+    define i32 @second(i32 %b) {
+    entry:
+      %y = mul i32 %b, 3
+      ret i32 %y
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  const auto *x = findInstructionByName(module->getFunction("first"), "x");
+  const auto *y = findInstructionByName(module->getFunction("second"), "y");
+  ASSERT_NE(x, nullptr);
+  ASSERT_NE(y, nullptr);
+
+  DebugInfoAnalysis analysis;
+  std::string xFirst = analysis.getIRString(x);
+  std::string yFirst = analysis.getIRString(y);
+  EXPECT_FALSE(xFirst.empty());
+  EXPECT_FALSE(yFirst.empty());
+  EXPECT_NE(xFirst, yFirst);
+  EXPECT_EQ(analysis.getIRString(x), xFirst);
+  EXPECT_EQ(analysis.getIRString(y), yFirst);
 }
 
 } // namespace

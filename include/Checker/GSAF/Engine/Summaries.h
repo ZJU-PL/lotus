@@ -96,6 +96,12 @@ public:
   void addNonSymDeps(SummaryCacheItem Item);
   void addSymbDeps(SummaryCacheItem Item);
 
+  // Replace this summary's deferred constraints with the exact disjunction of
+  // constraints across Group, factoring out deferred callee items shared by
+  // every summary in Group without eager renaming.
+  void mergeDisjunctiveConstraints(const std::vector<const SummaryBase *> &Group,
+                                   SMTRenamingAdvisor *Advisor);
+
   // Get the control/data/symbolic cache vector
   const std::vector<SummaryCacheItem> &getNonSymDepsCache();
   const std::vector<SummaryCacheItem> &getSymbDepsCache();

@@ -32,13 +32,17 @@ private:
   // Z3_solver_push() internalization unless check()/getSMTModel() actually runs.
   std::vector<SMTExpr> PendingAssertions;
   std::vector<size_t> ScopeAssertionMarks;
-  std::vector<size_t> SyncedCounts{0};
+  std::vector<size_t> Z3ScopeMarks;
+  std::vector<uint64_t> Z3ScopeSatVars;
+  size_t SyncedAsserts = 0;
   std::unordered_set<Z3_ast> ActiveAsts;
   unsigned FalseCount = 0;
+  unsigned CurrentTimeout = 0;
   bool HasCachedResult = false;
   SMTResultType CachedResult = SMTRT_Uncheck;
   bool Z3ModelValid = false;
 
+  uint64_t currentSatVars() const;
   void flushToZ3();
 
   SMTSolver(SMTFactory *F, z3::solver &Z3Solver, z3::model &Z3Model);
@@ -100,6 +104,18 @@ public:
   SMTModel getSMTModel();
 
   SMTExprVec assertions();
+
+  const std::vector<SMTExpr> &pendingAssertions() const {
+    return PendingAssertions;
+  }
+
+  const std::vector<size_t> &scopeAssertionMarks() const {
+    return ScopeAssertionMarks;
+  }
+
+  bool containsAssertion(Z3_ast Ast) const {
+    return ActiveAsts.count(Ast) != 0;
+  }
 
   virtual void reset();
 

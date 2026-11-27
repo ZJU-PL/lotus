@@ -131,7 +131,85 @@ static void finalizeSummaryItem(
   }
 }
 
+template <class T, class KeyFn>
+static void mergeEquivalentSummaries(
+    Function *F, SMTRenamingAdvisor *Advisor,
+    std::map<const GuardedValueFlowNode *, std::set<T *, trace_summary_cmp>,
+             ObjectLess> &SI,
+    KeyFn MakeKey) {
+  for (auto &Entry : SI) {
+    auto &SmrySet = Entry.second;
+    if (SmrySet.size() <= 1)
+      continue;
+
+    using KeyTy = decltype(MakeKey(*SmrySet.begin()));
+    std::map<KeyTy, std::vector<T *>> Groups;
+    bool AnyMulti = false;
+    for (T *S : SmrySet) {
+      if (!S)
+        continue;
+      auto &Vec = Groups[MakeKey(S)];
+      Vec.push_back(S);
+      if (Vec.size() > 1)
+        AnyMulti = true;
+    }
+    if (!AnyMulti)
+      continue;
+
+    std::set<T *, trace_summary_cmp> NewSet;
+    for (auto &GEntry : Groups) {
+      auto &Group = GEntry.second;
+      if (Group.size() == 1) {
+        NewSet.insert(Group.front());
+        continue;
+      }
+
+      T *Rep = Group.front(); // shortest trace under trace_summary_cmp
+      unsigned MinInlineDepth = Rep->getInlineDepth();
+      int MergedMask = 0;
+      std::unordered_set<const GuardedValueFlowNode *> MergedInputs;
+      std::vector<const SummaryBase *> BaseGroup;
+      BaseGroup.reserve(Group.size());
+
+      for (T *S : Group) {
+        MinInlineDepth = std::min(MinInlineDepth, S->getInlineDepth());
+        MergedMask |= S->getVulnerabilityMask();
+        const auto &Ins = S->getInputs();
+        MergedInputs.insert(Ins.begin(), Ins.end());
+        BaseGroup.push_back(S);
+      }
+
+      T *Merged = new T(F, Rep->getTrace(), MinInlineDepth);
+      Merged->setVulnerabilityMask(MergedMask);
+      Merged->setInputs(MergedInputs);
+      Merged->mergeDisjunctiveConstraints(BaseGroup, Advisor);
+
+      for (T *S : Group)
+        delete S;
+
+      if (!NewSet.insert(Merged).second)
+        delete Merged;
+    }
+    SmrySet = std::move(NewSet);
+  }
+}
+
 void FunctionAnalyzer::finalizeSummary() {
+  mergeEquivalentSummaries(
+      F, &Parent->SMTAdvisor, Smry->OutSmrys, [](OutputSummary *S) {
+        return std::make_pair(S->getSourceNode(), S->getSourceSite());
+      });
+  mergeEquivalentSummaries(
+      F, &Parent->SMTAdvisor, Smry->InSmrys, [](InputSummary *S) {
+        return std::make_tuple(S->getSourceNode(), S->getSourceSite(),
+                               S->getTailNode(), S->getTailSite());
+      });
+  mergeEquivalentSummaries(
+      F, &Parent->SMTAdvisor, Smry->TaintSourceWrapperSmrys,
+      [](InputSummary *S) {
+        return std::make_tuple(S->getSourceNode(), S->getSourceSite(),
+                               S->getTailNode(), S->getTailSite());
+      });
   finalizeSummaryItem(Smry->InSmrys);
   finalizeSummaryItem(Smry->OutSmrys);
   finalizeSummaryItem(Smry->TaintSourceWrapperSmrys);
@@ -732,6 +810,15 @@ void FunctionAnalyzer::inlineCalleeInSummary(
     const std::vector<Z3_ast> *VerifiedPrereqAsts) {
   TimeChecker->check();
 
+  if (allGoalsReportedForCurrentSrc()) {
+    return;
+  }
+
+  if (ActiveSrcGoalTracking && Case == 0 && canReport(Src) &&
+      ReportedCallSinks.count(std::make_tuple(ActualNode, CS, CalleeInSmry))) {
+    return;
+  }
+
   if (Case != 1 && CalleeInSmry->getInlineDepth() >= GSAFOptions::InlineDepth) {
     return;
   }
@@ -801,7 +888,8 @@ void FunctionAnalyzer::inlineCalleeInSummary(
     auto Trace = TraceBuilder.snapshot();
     TraceBuilder.pop();
 
-    tryReport(Trace);
+    if (tryReport(Trace))
+      markCallSinkReported(ActualNode, CS, CalleeInSmry);
 
     Solver->pop();
   } else {
@@ -817,7 +905,7 @@ void FunctionAnalyzer::inlineCalleeInSummary(
         pushState();
         Solver->push();
 
-        search(Src.first, nullptr, std::make_pair(Src.first, CS), Depth);
+        runForwardSearch(Src.first, std::make_pair(Src.first, CS), Depth);
 
         Solver->pop();
         popState();
@@ -869,6 +957,10 @@ void FunctionAnalyzer::inlineCalleeOutSummary(
     Vulnerability::ValueSitePairType Src, unsigned Depth, int Case) {
   auto *RetNode = OutSmry->getReturnNode();
   assert(RetNode);
+
+  if (allGoalsReportedForCurrentSrc()) {
+    return;
+  }
 
   if (OutSmry->getInlineDepth() >= GSAFOptions::InlineDepth) {
     assert(isa<GuardedValueFlowArgumentNode>(OutSmry->getSourceNode()) &&

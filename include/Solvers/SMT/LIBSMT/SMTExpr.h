@@ -153,7 +153,26 @@ public:
 
   bool equals(const SMTExpr &e) const { return z3::eq(Expr, e.Expr); }
 
-  std::string getSymbol() const { return Z3_ast_to_string(Expr.ctx(), Expr); }
+  const char *getSymbolCStr() const {
+    Z3_context C = Expr.ctx();
+    Z3_ast Ast = Expr;
+    if (Z3_get_ast_kind(C, Ast) == Z3_APP_AST) {
+      Z3_app App = Z3_to_app(C, Ast);
+      if (Z3_get_app_num_args(C, App) == 0) {
+        Z3_func_decl Decl = Z3_get_app_decl(C, App);
+        Z3_symbol Sym = Z3_get_decl_name(C, Decl);
+        if (Z3_get_symbol_kind(C, Sym) == Z3_STRING_SYMBOL)
+          return Z3_get_symbol_string(C, Sym);
+      }
+    }
+    return nullptr;
+  }
+
+  std::string getSymbol() const {
+    if (const char *Str = getSymbolCStr())
+      return std::string(Str);
+    return Z3_ast_to_string(Expr.ctx(), Expr);
+  }
 
   Z3_symbol getZ3Symbol() const { return Expr.decl().name(); }
 

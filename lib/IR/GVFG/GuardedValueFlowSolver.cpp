@@ -200,7 +200,7 @@ static SMTExpr getMatchingRegionExpr(GuardedValueFlowSolver &solver,
 
 GuardedValueFlowSolver::GuardedValueFlowSolver(SMTFactory &factory,
                                                const DataLayout &dl)
-    : SMTSolver(factory.createSimpleSMTSolver()), DL(dl) {}
+    : SMTSolver(factory.createSMTSolverForLogic("QF_BV")), DL(dl) {}
 
 GuardedValueFlowSolver::~GuardedValueFlowSolver() {}
 
@@ -476,6 +476,103 @@ SMTExpr GuardedValueFlowSolver::encodeBinaryOpcodeNode(
     elem_num = 1;
   }
 
+  auto tryGetBvUint64 = [](SMTExpr &E, uint64_t &Out) -> bool {
+    if (!E.isBitVector() || !E.isNumeral())
+      return false;
+    z3::expr &ZE = E.getZ3Expr();
+    return Z3_get_numeral_uint64(ZE.ctx(), ZE, &Out);
+  };
+
+  auto makeConstShl = [&](SMTExpr &Val, uint64_t Shift) -> SMTExpr {
+    uint64_t W = Val.getBitVecSize();
+    if (Shift == 0)
+      return Val;
+    if (Shift >= W)
+      return Factory->createBitVecVal(0, W);
+    SMTExpr LowZeros = Factory->createBitVecVal(0, Shift);
+    return Val.basic_extract(static_cast<unsigned>(W - 1 - Shift), 0)
+        .basic_concat(LowZeros);
+  };
+
+  auto makeConstLShr = [&](SMTExpr &Val, uint64_t Shift) -> SMTExpr {
+    uint64_t W = Val.getBitVecSize();
+    if (Shift == 0)
+      return Val;
+    if (Shift >= W)
+      return Factory->createBitVecVal(0, W);
+    SMTExpr HighZeros = Factory->createBitVecVal(0, Shift);
+    SMTExpr HighBits =
+        Val.basic_extract(static_cast<unsigned>(W - 1), static_cast<unsigned>(Shift));
+    return HighZeros.basic_concat(HighBits);
+  };
+
+  auto makeConstAShr = [&](SMTExpr &Val, uint64_t Shift) -> SMTExpr {
+    uint64_t W = Val.getBitVecSize();
+    if (Shift == 0 || W <= 1)
+      return Val;
+    if (Shift >= W)
+      return Val.basic_extract(static_cast<unsigned>(W - 1),
+                               static_cast<unsigned>(W - 1))
+          .basic_sext(W - 1);
+    return Val.basic_extract(static_cast<unsigned>(W - 1),
+                             static_cast<unsigned>(Shift))
+        .basic_sext(Shift);
+  };
+
+  auto makeConstMul = [&](SMTExpr &Val,
+                          uint64_t C) -> std::pair<bool, SMTExpr> {
+    uint64_t W = Val.getBitVecSize();
+    if (C == 0)
+      return {true, Factory->createBitVecVal(0, W)};
+    uint64_t TZ = llvm::countTrailingZeros(C);
+    if (TZ >= W)
+      return {true, Factory->createBitVecVal(0, W)};
+    uint64_t Odd = C >> TZ;
+    if (Odd == 1)
+      return {true, makeConstShl(Val, TZ)};
+
+    // Express Odd in Non-Adjacent Form (NAF) so sparse/struct-stride constant
+    // multipliers (e.g., 24, 48, 0x680) lower to a few add/sub + bit-wire
+    // shifts instead of a full WxW bit-blasted multiplier.
+    SmallVector<std::pair<unsigned, int>, 10> Terms;
+    __uint128_t V = Odd;
+    unsigned Bit = 0;
+    while (V != 0) {
+      if (V & 1) {
+        int Digit = 2 - static_cast<int>(V & 3);
+        if (Bit + TZ < W) {
+          if (Terms.size() >= 8)
+            return {false, Factory->createEmptySMTExpr()};
+          Terms.push_back({Bit, Digit});
+        }
+        if (Digit > 0)
+          V -= 1;
+        else
+          V += 1;
+      }
+      V >>= 1;
+      ++Bit;
+    }
+
+    if (Terms.empty())
+      return {true, Factory->createBitVecVal(0, W)};
+
+    SMTExpr Acc = Factory->createEmptySMTExpr();
+    bool HasAcc = false;
+    for (auto It = Terms.rbegin(), E = Terms.rend(); It != E; ++It) {
+      SMTExpr Term = makeConstShl(Val, It->first);
+      if (!HasAcc) {
+        Acc = (It->second > 0)
+                  ? Term
+                  : Factory->createBitVecVal(0, W).basic_sub(Term);
+        HasAcc = true;
+      } else {
+        Acc = (It->second > 0) ? Acc.basic_add(Term) : Acc.basic_sub(Term);
+      }
+    }
+    return {true, makeConstShl(Acc, TZ)};
+  };
+
   switch (node->getOpcodeKind()) {
   case GuardedValueFlowOpcodeNode::OpcodeKind::FAdd:
   case GuardedValueFlowOpcodeNode::OpcodeKind::Add:
@@ -485,43 +582,131 @@ SMTExpr GuardedValueFlowSolver::encodeBinaryOpcodeNode(
     return makeEqualExpr(*Factory, self, lhs.array_sub(rhs, elem_num));
   case GuardedValueFlowOpcodeNode::OpcodeKind::FMul:
   case GuardedValueFlowOpcodeNode::OpcodeKind::Mul: {
-    SMTExpr ret = makeEqualExpr(*Factory, self, lhs.array_mul(rhs, elem_num));
+    SMTExpr prod = Factory->createEmptySMTExpr();
+    bool HandledConst = false;
+    if (elem_num == 1 && lhs.isBitVector() && rhs.isBitVector()) {
+      uint64_t C = 0;
+      SMTExpr *VarSide = nullptr;
+      if (tryGetBvUint64(rhs, C))
+        VarSide = &lhs;
+      else if (tryGetBvUint64(lhs, C))
+        VarSide = &rhs;
+      if (VarSide) {
+        auto Reduced = makeConstMul(*VarSide, C);
+        if (Reduced.first) {
+          prod = Reduced.second;
+          HandledConst = true;
+        }
+      }
+    }
+    if (!HandledConst)
+      prod = lhs.array_mul(rhs, elem_num);
+    SMTExpr ret = makeEqualExpr(*Factory, self, prod);
     if (GVFGIgnoreBitVecOverflow.getValue())
       ret = ret && (lhs == 0 || rhs == 0 || self != 0);
     return ret;
   }
   case GuardedValueFlowOpcodeNode::OpcodeKind::UDiv: {
-    SMTExpr ret = makeEqualExpr(*Factory, self, lhs.array_udiv(rhs, elem_num));
+    SMTExpr quot = Factory->createEmptySMTExpr();
+    bool HandledConst = false;
+    uint64_t C = 0;
+    if (elem_num == 1 && lhs.isBitVector() && tryGetBvUint64(rhs, C) &&
+        C != 0 && (C & (C - 1)) == 0) {
+      quot = makeConstLShr(lhs, llvm::countTrailingZeros(C));
+      HandledConst = true;
+    }
+    if (!HandledConst)
+      quot = lhs.array_udiv(rhs, elem_num);
+    SMTExpr ret = makeEqualExpr(*Factory, self, quot);
     if (GVFGIgnoreBitVecOverflow.getValue())
       ret = ret && (lhs == 0 || rhs == 0 || self != 0);
     return ret;
   }
   case GuardedValueFlowOpcodeNode::OpcodeKind::FDiv:
   case GuardedValueFlowOpcodeNode::OpcodeKind::SDiv: {
-    SMTExpr ret = makeEqualExpr(*Factory, self, lhs.array_sdiv(rhs, elem_num));
+    SMTExpr quot = Factory->createEmptySMTExpr();
+    bool HandledConst = false;
+    uint64_t C = 0;
+    if (elem_num == 1 && lhs.isBitVector() && tryGetBvUint64(rhs, C) &&
+        C != 0 && (C & (C - 1)) == 0) {
+      uint64_t W = lhs.getBitVecSize();
+      uint64_t K = llvm::countTrailingZeros(C);
+      if (K == 0) {
+        quot = lhs;
+        HandledConst = true;
+      } else if (K + 1 < W && K < 63) {
+        // Bit-exact signed division by positive power of two 2^K:
+        //   ((lhs <s 0) ? (lhs + (2^K - 1)) : lhs) >>a K
+        SMTExpr SignBit = lhs.basic_extract(static_cast<unsigned>(W - 1),
+                                            static_cast<unsigned>(W - 1));
+        SMTExpr IsNeg = (SignBit == Factory->createBitVecVal(1, 1));
+        SMTExpr Bias = Factory->createBitVecVal((1ULL << K) - 1, W);
+        SMTExpr BiasedNeg = lhs.basic_add(Bias);
+        SMTExpr Biased = IsNeg.basic_ite(BiasedNeg, lhs);
+        quot = makeConstAShr(Biased, K);
+        HandledConst = true;
+      }
+    }
+    if (!HandledConst)
+      quot = lhs.array_sdiv(rhs, elem_num);
+    SMTExpr ret = makeEqualExpr(*Factory, self, quot);
     if (GVFGIgnoreBitVecOverflow.getValue())
       ret = ret && (lhs == 0 || rhs == 0 || self != 0);
     return ret;
   }
-  case GuardedValueFlowOpcodeNode::OpcodeKind::URem:
+  case GuardedValueFlowOpcodeNode::OpcodeKind::URem: {
+    uint64_t C = 0;
+    if (elem_num == 1 && lhs.isBitVector() && tryGetBvUint64(rhs, C) &&
+        C != 0 && (C & (C - 1)) == 0) {
+      uint64_t W = lhs.getBitVecSize();
+      uint64_t K = llvm::countTrailingZeros(C);
+      SMTExpr rem = (K == 0)
+                        ? Factory->createBitVecVal(0, W)
+                        : ((K >= W)
+                               ? lhs
+                               : [&]() {
+                                   SMTExpr HighZeros =
+                                       Factory->createBitVecVal(0, W - K);
+                                   SMTExpr LowBits = lhs.basic_extract(
+                                       static_cast<unsigned>(K - 1), 0);
+                                   return HighZeros.basic_concat(LowBits);
+                                 }());
+      return makeEqualExpr(*Factory, self, rem);
+    }
     return makeEqualExpr(*Factory, self, lhs.array_urem(rhs, elem_num));
+  }
   case GuardedValueFlowOpcodeNode::OpcodeKind::SRem:
   case GuardedValueFlowOpcodeNode::OpcodeKind::FRem:
     return makeEqualExpr(*Factory, self, lhs.array_srem(rhs, elem_num));
   case GuardedValueFlowOpcodeNode::OpcodeKind::Shl: {
-    SMTExpr ret = makeEqualExpr(*Factory, self, lhs.array_shl(rhs, elem_num));
+    uint64_t Shift = 0;
+    SMTExpr shifted =
+        (elem_num == 1 && lhs.isBitVector() && tryGetBvUint64(rhs, Shift))
+            ? makeConstShl(lhs, Shift)
+            : lhs.array_shl(rhs, elem_num);
+    SMTExpr ret = makeEqualExpr(*Factory, self, shifted);
     if (GVFGIgnoreBitVecOverflow.getValue())
       ret = ret && (lhs == 0 || rhs >= 10 || self != 0);
     return ret;
   }
   case GuardedValueFlowOpcodeNode::OpcodeKind::LShr: {
-    SMTExpr ret = makeEqualExpr(*Factory, self, lhs.array_lshr(rhs, elem_num));
+    uint64_t Shift = 0;
+    SMTExpr shifted =
+        (elem_num == 1 && lhs.isBitVector() && tryGetBvUint64(rhs, Shift))
+            ? makeConstLShr(lhs, Shift)
+            : lhs.array_lshr(rhs, elem_num);
+    SMTExpr ret = makeEqualExpr(*Factory, self, shifted);
     if (GVFGIgnoreBitVecOverflow.getValue())
       ret = ret && (lhs == 0 || rhs >= 10 || self != 0);
     return ret;
   }
   case GuardedValueFlowOpcodeNode::OpcodeKind::AShr: {
-    SMTExpr ret = makeEqualExpr(*Factory, self, lhs.array_ashr(rhs, elem_num));
+    uint64_t Shift = 0;
+    SMTExpr shifted =
+        (elem_num == 1 && lhs.isBitVector() && tryGetBvUint64(rhs, Shift))
+            ? makeConstAShr(lhs, Shift)
+            : lhs.array_ashr(rhs, elem_num);
+    SMTExpr ret = makeEqualExpr(*Factory, self, shifted);
     if (GVFGIgnoreBitVecOverflow.getValue())
       ret = ret && (lhs == 0 || rhs >= 10 || self != 0);
     return ret;
@@ -949,6 +1134,7 @@ void GuardedValueFlowSolver::collectDataDeps(const GuardedValueFlowNode *node,
   if (isResultLikeNode(node)) {
     SMTExpr self = getOrInsertExpr(node);
 
+    bool has_unconditional_child = false;
     if (auto *phi_node = dyn_cast<GuardedValueFlowPhiNode>(node)) {
       for (const auto &incoming : phi_node->incoming()) {
         auto gated = _getPhiGated(phi_node, incoming);
@@ -975,27 +1161,37 @@ void GuardedValueFlowSolver::collectDataDeps(const GuardedValueFlowNode *node,
         if (!child || shouldExcludeSummaryBackedChild(node, child))
           continue;
         auto *region = node->getMatchingRegion(child);
-        SMTExpr cond_expr =
-            region ? toBoolExpr(*Factory, getOrInsertExpr(region))
-                   : Factory->createBoolVal(true);
-        if (region)
-          collectDataDeps(region, 0, out);
+        if (!region || region->isAlwaysTrue()) {
+          has_unconditional_child = true;
+          out.push_back(makeEqualExpr(*Factory, self, getOrInsertExpr(child)));
+          continue;
+        }
+        SMTExpr cond_expr = toBoolExpr(*Factory, getOrInsertExpr(region));
+        collectDataDeps(region, 0, out);
         out.push_back((!cond_expr) ||
                       makeEqualExpr(*Factory, self, getOrInsertExpr(child)));
       }
     }
 
     if (!isTerminalNode(node)) {
-      SMTExprVec cases = Factory->createEmptySMTExprVec();
-      for (const auto &edge : node->children()) {
-        if (!edge.target || shouldExcludeSummaryBackedChild(node, edge.target))
-          continue;
-        cases.push_back(
-            makeEqualExpr(*Factory, self, getOrInsertExpr(edge.target)));
-      }
+      if (!has_unconditional_child) {
+        SMTExprVec cases = Factory->createEmptySMTExprVec();
+        bool has_self_edge = false;
+        for (const auto &edge : node->children()) {
+          if (!edge.target ||
+              shouldExcludeSummaryBackedChild(node, edge.target))
+            continue;
+          if (edge.target == node) {
+            has_self_edge = true;
+            break;
+          }
+          cases.push_back(
+              makeEqualExpr(*Factory, self, getOrInsertExpr(edge.target)));
+        }
 
-      if (!cases.empty())
-        out.push_back(cases.toOrExpr());
+        if (!has_self_edge && !cases.empty())
+          out.push_back(cases.toOrExpr());
+      }
 
       for (const auto &edge : node->children()) {
         if (edge.target && !shouldExcludeSummaryBackedChild(node, edge.target))
@@ -1215,13 +1411,18 @@ void DTGuardedValueFlowSolver::collectDataDeps(const GuardedValueFlowNode *node,
     }
     if (!isTerminalNode(node)) {
       SMTExprVec cases = Factory->createEmptySMTExprVec();
+      bool has_self_edge = false;
       for (const auto &edge : node->children()) {
         if (!edge.target || shouldExcludeSummaryBackedChild(node, edge.target))
           continue;
+        if (edge.target == node) {
+          has_self_edge = true;
+          break;
+        }
         cases.push_back(
             makeEqualExpr(*Factory, self, getOrInsertExpr(edge.target)));
       }
-      if (!cases.empty())
+      if (!has_self_edge && !cases.empty())
         out.push_back(cases.toOrExpr());
       for (const auto &edge : node->children()) {
         if (edge.target &&

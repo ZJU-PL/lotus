@@ -81,4 +81,52 @@ TEST(SMTSolverTest, AddAllAssertsVectorExactlyOnceWithoutSwitchFallthrough) {
   EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Unsat);
 }
 
+TEST(SMTSolverTest, QFBVLogicCollapsedScopesAndRenamingWorkCleanly) {
+  SMTFactory factory;
+  SMTSolver solver = factory.createSMTSolverForLogic("QF_BV");
+
+  SMTExpr x = factory.createBitVecConst("node.x", 32);
+  SMTExpr y = factory.createBitVecConst("y", 32);
+  ASSERT_NE(x.getSymbolCStr(), nullptr);
+  EXPECT_STREQ(x.getSymbolCStr(), "node.x");
+  EXPECT_EQ(x.getSymbol(), "node.x");
+
+  // Nested empty pushes collapse cleanly without corrupting scope marks.
+  solver.push();
+  solver.push();
+  SMTExpr eq1 = (x == 42);
+  solver.add(eq1);
+  EXPECT_TRUE(solver.containsAssertion(static_cast<Z3_ast>(eq1.getZ3Expr())));
+  EXPECT_EQ(solver.pendingAssertions().size(), 1u);
+  EXPECT_EQ(solver.scopeAssertionMarks().size(), 2u);
+  EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Sat);
+
+  solver.push();
+  solver.add(y == x + 1);
+  EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Sat);
+  EXPECT_EQ(solver.getSMTModel().getIntValue(y, true).first, 43);
+  solver.pop();
+
+  // Outer assertion survives inner pop; popping to empty resets cleanly.
+  EXPECT_EQ(solver.pendingAssertions().size(), 1u);
+  EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Sat);
+  solver.pop(2);
+  EXPECT_TRUE(solver.pendingAssertions().empty());
+  EXPECT_FALSE(solver.containsAssertion(static_cast<Z3_ast>(eq1.getZ3Expr())));
+  EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Sat);
+
+  // Fast hash-table renaming cache + explicit cache clear.
+  SMTExprVec vec = factory.createEmptySMTExprVec();
+  vec.push_back(x == y);
+  std::unordered_map<std::string, SMTExpr> mapping;
+  auto renamed1 = factory.rename(vec, "_CS1", mapping);
+  EXPECT_FALSE(renamed1.second);
+  EXPECT_EQ(renamed1.first.size(), 1u);
+  factory.clearRenamingCache();
+  mapping.clear();
+  auto renamed2 = factory.rename(vec, "_CS2", mapping);
+  EXPECT_FALSE(renamed2.second);
+  EXPECT_EQ(renamed2.first.size(), 1u);
+}
+
 } // namespace

@@ -39,6 +39,12 @@ public:
   // return true if time out exists
   bool isTimeOut();
 
+  // Remaining wall-clock seconds before timeout (0.0 if already expired).
+  double remainingSeconds() const;
+
   // Check timeout and perform the corresponding actions
   void check();
+
+  // Immediately check timeout bypassing step throttling.
+  void checkNow();
 };

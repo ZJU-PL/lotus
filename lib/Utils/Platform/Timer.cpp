@@ -44,9 +44,28 @@ bool Timer::isTimeOut() {
   return false;
 }
 
+double Timer::remainingSeconds() const {
+  double TimeElapsed;
+  if (Suspended) {
+    TimeElapsed = difftime(SuspendStartTime, StartTime);
+  } else {
+    time_t CurrTime;
+    time(&CurrTime);
+    TimeElapsed = difftime(CurrTime, StartTime);
+  }
+  double Remaining = (Duration + SuspendTime) - TimeElapsed;
+  return Remaining > 0.0 ? Remaining : 0.0;
+}
+
 // Checks for timeout and executes callback if needed.
 void Timer::check() {
   if (isTimeOut()) {
+    TaskAfterTimeout();
+  }
+}
+
+void Timer::checkNow() {
+  if (remainingSeconds() <= 0.0) {
     TaskAfterTimeout();
   }
 }

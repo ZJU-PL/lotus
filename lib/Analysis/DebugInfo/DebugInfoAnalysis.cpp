@@ -176,8 +176,12 @@ static const DIFile *getDIFileFromIR(const Value *V) {
         return DL->getFile();
       }
     }
-    if (const auto *DIFun = I->getFunction()->getSubprogram()) {
-      return DIFun->getFile();
+    if (I->getParent()) {
+      if (const auto *F = I->getFunction()) {
+        if (const auto *DIFun = F->getSubprogram()) {
+          return DIFun->getFile();
+        }
+      }
     }
   }
   return nullptr;
@@ -375,7 +379,7 @@ std::string DebugInfoAnalysis::getSourceFile(const Value *V) {
     return getSourceFile(Arg->getParent());
   }
   if (const auto *I = dyn_cast<Instruction>(V)) {
-    return getSourceFile(I->getFunction());
+    return I->getParent() ? getSourceFile(I->getFunction()) : "";
   }
 
   return "";
@@ -452,7 +456,7 @@ std::string DebugInfoAnalysis::getSourceLocation(const Instruction *I) {
 }
 
 std::string DebugInfoAnalysis::getFunctionName(const Instruction *I) {
-  if (!I)
+  if (!I || !I->getParent())
     return "unknown_function";
 
   const Function *F = I->getFunction();
@@ -503,7 +507,7 @@ std::string DebugInfoAnalysis::getVariableName(const Value *V,
   // getDILocalVariable fails)
   if (varName.empty()) {
     if (auto *I = dyn_cast<Instruction>(V)) {
-      const Function *F = I->getFunction();
+      const Function *F = I->getParent() ? I->getFunction() : nullptr;
       if (F) {
         for (const auto &BB : *F) {
           for (const auto &Inst : BB) {
@@ -575,8 +579,11 @@ std::string DebugInfoAnalysis::getVariableName(const Value *V,
     varName = "temp_var";
   }
 
-  // Cache the result
-  varNameCache[V] = varName;
+  // Cache the result (skip detached/temporary instructions whose addresses may
+  // be reused after deletion).
+  auto *Inst = dyn_cast<Instruction>(V);
+  if (!Inst || Inst->getParent())
+    varNameCache[V] = varName;
   return varName;
 }
 
@@ -652,7 +659,7 @@ MDNode *DebugInfoAnalysis::findVarInfoMDNode(const Value *V,
   const Function *SearchFn = F;
   if (!SearchFn) {
     if (auto *I = dyn_cast<Instruction>(V)) {
-      SearchFn = I->getFunction();
+      SearchFn = I->getParent() ? I->getFunction() : nullptr;
     }
   }
   if (!SearchFn)

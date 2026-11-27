@@ -10,8 +10,10 @@
 ///
 /// **Value-flow parent classification** (`isValueFlowParent`):
 /// Region nodes are never value-flow parents.  Cast-opcode nodes are always
-/// value-flow parents.  For simple-opcode nodes, GEP, Add, and Sub are
-/// transparent (they represent address arithmetic); the true/false branches
+/// value-flow parents.  For simple-opcode nodes, Add and Sub are transparent
+/// (they represent address arithmetic); GetElementPtr is transparent only for
+/// its base-pointer operand (operand 0), avoiding duplicate traversal through
+/// its lowered offset-computation helper (operand 1); the true/false branches
 /// of Select are transparent, but the condition operand is not.
 /// Arithmetic-opcode nodes (Mul, Div, Rem, And, Or, Xor, etc.) are only
 /// transparent when `enable_arithmetic_flow` is true.
@@ -103,6 +105,8 @@ static bool isValueFlowParent(const GuardedValueFlowNode *node,
 
   switch (opcode_parent->getOpcodeKind()) {
   case GuardedValueFlowOpcodeNode::OpcodeKind::GetElementPtr:
+    return opcode_parent->getNumOperands() != 0 &&
+           opcode_parent->getOperand(0) == node;
   case GuardedValueFlowOpcodeNode::OpcodeKind::Add:
   case GuardedValueFlowOpcodeNode::OpcodeKind::Sub:
     return true;

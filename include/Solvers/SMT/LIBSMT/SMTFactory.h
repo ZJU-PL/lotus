@@ -50,6 +50,8 @@ public:
 
   SMTSolver createSimpleSMTSolver();
 
+  SMTSolver createSMTSolverForLogic(const std::string &Logic);
+
   SMTSolver createSMTSolverWithTactic(const std::string &Tactic = "smt");
 
   SMTExpr createEmptySMTExpr();
@@ -113,6 +115,8 @@ public:
                                      std::unordered_map<std::string, SMTExpr> &,
                                      SMTRenamingAdvisor * = nullptr);
 
+  void clearRenamingCache() { ExprRenamingCache.clear(); }
+
   std::mutex &getFactoryLock() { return FactoryLock; }
 
   z3::context &getZ3Ctx() { return Ctx; }
@@ -125,17 +129,36 @@ public:
 
 private:
   struct RenamingUtility {
+    SMTExpr KeyExpr;
     bool WillBePruned;
     SMTExpr AfterBeingPruned;
     SMTExprVec ToPrune;
     std::unordered_map<std::string, SMTExpr> SymbolMapping;
   };
 
-  std::map<SMTExpr, RenamingUtility, SMTExprComparator> ExprRenamingCache;
+  struct RenamingCacheKey {
+    Z3_ast Ast;
+    const SMTRenamingAdvisor *Advisor;
+
+    bool operator==(const RenamingCacheKey &Other) const {
+      return Ast == Other.Ast && Advisor == Other.Advisor;
+    }
+  };
+
+  struct RenamingCacheKeyHash {
+    size_t operator()(const RenamingCacheKey &Key) const {
+      size_t H1 = std::hash<Z3_ast>{}(Key.Ast);
+      size_t H2 = std::hash<const SMTRenamingAdvisor *>{}(Key.Advisor);
+      return H1 ^ (H2 + 0x9e3779b97f4a7c15ULL + (H1 << 6) + (H1 >> 2));
+    }
+  };
+
+  std::unordered_map<RenamingCacheKey, RenamingUtility, RenamingCacheKeyHash>
+      ExprRenamingCache;
 
   /// Utility for public function translate
   /// It visits all exprs in a ``big" expr.
   bool visit(SMTExpr &, std::unordered_map<std::string, SMTExpr> &,
-             SMTExprVec &, std::map<SMTExpr, bool, SMTExprComparator> &,
+             SMTExprVec &, std::unordered_map<Z3_ast, bool> &,
              SMTRenamingAdvisor *);
 };

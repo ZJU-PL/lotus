@@ -72,6 +72,7 @@ private:
   /// return value is not necessary to be inlined.
   PushPopCache<const GuardedValueFlowCallOutputNode *> CallSiteOutputCache;
   PushPopCache<const GuardedValueFlowCallSite *> UsedRenamingCallSites;
+  PushPopCache<const BasicBlock *> UnsatBlocks;
 
   struct BlockCheckEntry {
     SMTSolver::SMTResultType Result = SMTSolver::SMTRT_Uncheck;
@@ -140,6 +141,106 @@ private:
   std::unordered_set<const GuardedValueFlowNode *> CanReachCommonArgSite;
   std::unordered_set<const GuardedValueFlowNode *> CanReachAnyRelevantSite;
 
+  /// Per-analyzer caches in Fctry for deferred summary translation/renaming
+  /// and canonical tryReport() satisfiability results.
+  struct RenamedSummaryKey {
+    Z3_ast SummaryAst;
+    std::string Suffix;
+
+    bool operator==(const RenamedSummaryKey &Other) const {
+      return SummaryAst == Other.SummaryAst && Suffix == Other.Suffix;
+    }
+  };
+  struct RenamedSummaryKeyHash {
+    size_t operator()(const RenamedSummaryKey &Key) const {
+      size_t H1 = std::hash<Z3_ast>{}(Key.SummaryAst);
+      size_t H2 = std::hash<std::string>{}(Key.Suffix);
+      return H1 ^ (H2 + 0x9e3779b97f4a7c15ULL + (H1 << 6) + (H1 >> 2));
+    }
+  };
+  struct AstVecHash {
+    size_t operator()(const std::vector<Z3_ast> &Asts) const {
+      size_t H = Asts.size();
+      for (Z3_ast Ast : Asts) {
+        size_t V = std::hash<Z3_ast>{}(Ast);
+        H ^= V + 0x9e3779b97f4a7c15ULL + (H << 6) + (H >> 2);
+      }
+      return H;
+    }
+  };
+  std::unordered_map<RenamedSummaryKey, SMTExpr, RenamedSummaryKeyHash>
+      RenamedSummaryCache;
+  std::unordered_map<Z3_ast, SMTExpr> TryReportPinnedExprs;
+  std::unordered_map<std::vector<Z3_ast>, bool, AstVecHash> TryReportSatCache;
+  std::unique_ptr<z3::solver> ReportSolver;
+  std::vector<Z3_ast> ReportSolverStack;
+  std::vector<size_t> ReportSolverScopeMarks;
+
+  /// Exact per-source reported-goal tracking for top-level bug reporting
+  /// (synchronous mode only). Prevents N! re-reporting of already-verified
+  /// (Src, Sink) pairs while preserving 100% of feasible bug reports.
+  using DirectSinkGoalKey =
+      std::pair<const GuardedValueFlowNode *, const GuardedValueFlowSite *>;
+  using CallSinkGoalKey =
+      std::tuple<const GuardedValueFlowNode *, const GuardedValueFlowCallSite *,
+                 InputSummary *>;
+  bool ActiveSrcGoalTracking = false;
+  bool SrcCanReachReturn = false;
+  std::set<DirectSinkGoalKey> ExpectedDirectSinks;
+  std::set<CallSinkGoalKey> ExpectedCallSinks;
+  std::set<DirectSinkGoalKey> ReportedDirectSinks;
+  std::set<CallSinkGoalKey> ReportedCallSinks;
+
+  void initSrcGoalTracking(const GuardedValueFlowNode *SrcNode,
+                           const GuardedValueFlowSite *SrcSite,
+                           bool IncludeBackwardSearch);
+  void clearSrcGoalTracking();
+  bool allGoalsReportedForCurrentSrc() const;
+  void markDirectSinkReported(const GuardedValueFlowNode *Node,
+                              const GuardedValueFlowSite *Site);
+  void markCallSinkReported(const GuardedValueFlowNode *Node,
+                            const GuardedValueFlowCallSite *CS,
+                            InputSummary *Smry);
+
+  /// Exact two-pass forward-search subsumption for search() -> inlineCalleeOutSummary(Case=1).
+  /// Pass 1 explores the intraprocedural downward DAG (recording minimal states for
+  /// bottomUpDepthFirstSearch and planned CallSiteOutput expansions); Pass 2 expands
+  /// CallSiteOutput summaries while skipping any revisit whose (Base, Deferred, Depth)
+  /// state is subsumed by a strictly weaker or already-explored state.
+  using ForwardDeferredKey = std::tuple<bool, Z3_ast, std::string>;
+  struct ForwardVisitState {
+    unsigned InlineDepth = 0;
+    std::vector<Z3_ast> ExtraBaseAsts;
+    std::vector<ForwardDeferredKey> ExtraDeferred;
+    bool Expanded = false;
+  };
+  bool ForwardSearchSubsumptionActive = false;
+  size_t ForwardRootBaseCount = 0;
+  size_t ForwardRootNonSymCount = 0;
+  size_t ForwardRootSymbCount = 0;
+  std::unordered_map<const GuardedValueFlowNode *,
+                     std::vector<ForwardVisitState>>
+      ForwardBottomUpVisited;
+  std::unordered_map<const GuardedValueFlowCallOutputNode *,
+                     std::vector<ForwardVisitState>>
+      ForwardCSOPlanned;
+
+  ForwardVisitState captureForwardState(unsigned InlineDepth) const;
+  bool forwardStateSubsumes(const ForwardVisitState &Earlier,
+                            const ForwardVisitState &Current,
+                            bool StrictOnly) const;
+  bool forwardStateEquals(const ForwardVisitState &A,
+                          const ForwardVisitState &B) const;
+  void runForwardSearch(const GuardedValueFlowNode *StartNode,
+                        Vulnerability::ValueSitePairType Src,
+                        unsigned InlineDepth);
+
+  SMTExpr getTranslatedRenamedSummary(const SummaryCacheItem &Item);
+  Z3_ast pinTryReportExpr(const SMTExpr &Expr);
+
+  bool summarizeArgumentDAG(const GuardedValueFlowNode *ArgNode);
+  unsigned DagEncodeCounter = 0;
+
   void ensureSolver();
   void buildRelevantNodes();
 
@@ -205,7 +306,8 @@ private:
   // This is a bi-direction search
   void search(const GuardedValueFlowNode *CurrentNode,
               const GuardedValueFlowNode *PreviousNode,
-              Vulnerability::ValueSitePairType Src, unsigned InlineDepth);
+              Vulnerability::ValueSitePairType Src, unsigned InlineDepth,
+              bool AllowCSOInline = true);
 
   void finalizeSummary();
 
@@ -259,7 +361,8 @@ private:
       const GuardedValueFlowNode *Node, const GuardedValueFlowSite *UseSite,
       std::unordered_map<const BasicBlock *, BlockCheckEntry> &,
       bool UpdateCache,
-      const std::vector<Z3_ast> **VerifiedPrereqAsts = nullptr);
+      const std::vector<Z3_ast> **VerifiedPrereqAsts = nullptr,
+      bool *OutBlockUnreachable = nullptr);
 
   /// It processes use sites according to the type of use sites
   void processUseSite(Vulnerability::ValueSitePairType Src,
@@ -283,7 +386,7 @@ private:
   /// Add the cached constraints to build summary
   void addCachedConstraintsToSummary(SummaryBase *S);
 
-  void tryReport(std::shared_ptr<VulnerabilityTrace> Trace);
+  bool tryReport(std::shared_ptr<VulnerabilityTrace> Trace);
 };
 
 } // namespace lotus::gsaf

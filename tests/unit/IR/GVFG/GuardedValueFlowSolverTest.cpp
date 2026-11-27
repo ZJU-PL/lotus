@@ -745,4 +745,115 @@ TEST_F(GuardedValueFlowSolverTest,
   EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Sat);
 }
 
+TEST_F(GuardedValueFlowSolverTest,
+       ConstantStrengthReductionIsBitExactAndGepHasSingleBaseParent) {
+  const char *source = R"(
+    %struct.node = type { [208 x i64] }
+
+    define i64 @ops(i64 %x, %struct.node* %base, i64 %idx) {
+    entry:
+      %m24 = mul i64 %x, 24
+      %m1664 = mul i64 %x, 1664
+      %mneg1 = mul i64 %x, -1
+      %ud8 = udiv i64 %x, 8
+      %ur8 = urem i64 %x, 8
+      %sd8 = sdiv i64 %x, 8
+      %sh3 = shl i64 %x, 3
+      %lr4 = lshr i64 %x, 4
+      %ar5 = ashr i64 %x, 5
+      %gep = getelementptr inbounds %struct.node, %struct.node* %base, i64 %idx
+      %p2i = ptrtoint %struct.node* %gep to i64
+      %sum = add i64 %m24, %p2i
+      ret i64 %sum
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+  Function *F = module->getFunction("ops");
+  ASSERT_NE(F, nullptr);
+  auto pipeline = runBuilder(*module);
+  GuardedValueFlowGraph &graph = pipeline.builder->getGraph(*F);
+
+  auto findNode = [&](StringRef name) -> GuardedValueFlowNode * {
+    for (Instruction &I : instructions(*F)) {
+      if (I.getName() == name)
+        return graph.findNode(&I);
+    }
+    return nullptr;
+  };
+
+  // Non-zero-offset GEP must only propagate value flow from its base pointer
+  // (operand 0), not from its offset chain (eliminating 2^K GEP diamonds).
+  auto *base_node = graph.findNode(F->getArg(1));
+  auto *idx_node = graph.findNode(F->getArg(2));
+  auto *gep_node = findNode("gep");
+  ASSERT_NE(base_node, nullptr);
+  ASSERT_NE(idx_node, nullptr);
+  ASSERT_NE(gep_node, nullptr);
+  auto *gep_op = dyn_cast<GuardedValueFlowOpcodeNode>(gep_node->getChild(0));
+  ASSERT_NE(gep_op, nullptr);
+  auto base_parents = base_node->getValueFlowParents(false);
+  EXPECT_NE(std::find(base_parents.begin(), base_parents.end(), gep_op),
+            base_parents.end());
+  auto idx_parents = idx_node->getValueFlowParents(false);
+  EXPECT_EQ(std::find(idx_parents.begin(), idx_parents.end(), gep_op),
+            idx_parents.end());
+
+  auto *x_node = graph.findNode(F->getArg(0));
+  ASSERT_NE(x_node, nullptr);
+
+  auto checkExact = [&](StringRef name,
+                        std::function<SMTExpr(SMTFactory &, SMTExpr &)> ref) {
+    auto *node = findNode(name);
+    ASSERT_NE(node, nullptr) << name.str();
+    SMTFactory factory;
+    GuardedValueFlowSolver solver(factory, module->getDataLayout());
+    solver.addAll(solver.getDataDeps(node));
+    SMTExpr x = solver.getOrInsertExpr(x_node);
+    SMTExpr res = solver.getOrInsertExpr(node);
+    // For negative/positive/boundary inputs, the lowered formula implies exact
+    // equality with the reference bitvector operation.
+    solver.add(res != ref(factory, x));
+    EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Unsat) << name.str();
+  };
+
+  checkExact("m24", [](SMTFactory &f, SMTExpr &x) {
+    SMTExpr c = f.createBitVecVal(24, 64);
+    return x.basic_mul(c);
+  });
+  checkExact("m1664", [](SMTFactory &f, SMTExpr &x) {
+    SMTExpr c = f.createBitVecVal(1664, 64);
+    return x.basic_mul(c);
+  });
+  checkExact("mneg1", [](SMTFactory &f, SMTExpr &x) {
+    SMTExpr c = f.createBitVecVal(static_cast<uint64_t>(-1), 64);
+    return x.basic_mul(c);
+  });
+  checkExact("ud8", [](SMTFactory &f, SMTExpr &x) {
+    SMTExpr c = f.createBitVecVal(8, 64);
+    return x.basic_udiv(c);
+  });
+  checkExact("ur8", [](SMTFactory &f, SMTExpr &x) {
+    SMTExpr c = f.createBitVecVal(8, 64);
+    return x.basic_urem(c);
+  });
+  checkExact("sd8", [](SMTFactory &f, SMTExpr &x) {
+    SMTExpr c = f.createBitVecVal(8, 64);
+    return x.basic_sdiv(c);
+  });
+  checkExact("sh3", [](SMTFactory &f, SMTExpr &x) {
+    SMTExpr c = f.createBitVecVal(3, 64);
+    return x.basic_shl(c);
+  });
+  checkExact("lr4", [](SMTFactory &f, SMTExpr &x) {
+    SMTExpr c = f.createBitVecVal(4, 64);
+    return x.basic_lshr(c);
+  });
+  checkExact("ar5", [](SMTFactory &f, SMTExpr &x) {
+    SMTExpr c = f.createBitVecVal(5, 64);
+    return x.basic_ashr(c);
+  });
+}
+
 } // namespace

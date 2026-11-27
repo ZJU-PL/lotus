@@ -58,8 +58,12 @@ int DebugInfoAnalysis::getPhiOperandSourceLine(const llvm::PHINode *Phi,
     };
     if (int line = findLocation(*Phi->getIncomingBlock(index)))
       return line;
-    if (int line = findLocation(Phi->getFunction()->getEntryBlock()))
-      return line;
+    if (Phi->getParent()) {
+      if (const auto *F = Phi->getFunction(); F && !F->empty()) {
+        if (int line = findLocation(F->getEntryBlock()))
+          return line;
+      }
+    }
   }
   return 0;
 }
@@ -67,10 +71,18 @@ int DebugInfoAnalysis::getPhiOperandSourceLine(const llvm::PHINode *Phi,
 std::string DebugInfoAnalysis::getIRString(const llvm::Value *V) {
   if (!V)
     return {};
+  const bool cacheable =
+      !llvm::isa<llvm::Instruction>(V) ||
+      llvm::cast<llvm::Instruction>(V)->getParent() != nullptr;
+  if (cacheable) {
+    auto it = irStringCache.find(V);
+    if (it != irStringCache.end())
+      return it->second;
+  }
   const llvm::Module *M = nullptr;
   const llvm::Function *F = nullptr;
   if (const auto *I = llvm::dyn_cast<llvm::Instruction>(V)) {
-    F = I->getFunction();
+    F = I->getParent() ? I->getFunction() : nullptr;
     M = F ? F->getParent() : nullptr;
   } else if (const auto *Arg = llvm::dyn_cast<llvm::Argument>(V)) {
     F = Arg->getParent();
@@ -94,7 +106,10 @@ std::string DebugInfoAnalysis::getIRString(const llvm::Value *V) {
   } else {
     V->print(output);
   }
-  return output.str();
+  std::string rendered = output.str();
+  if (cacheable)
+    irStringCache.emplace(V, rendered);
+  return rendered;
 }
 
 bool DebugInfoAnalysis::hasVariableDebugName(const llvm::Value *V) {

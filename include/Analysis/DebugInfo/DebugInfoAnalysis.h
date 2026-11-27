@@ -4,9 +4,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
-#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -81,8 +81,9 @@ private:
     // Helper: Find the actual path to a source file
     static std::string findSourceFile(const std::string& filename);
 
-    // Cache for variable names (per-instance, keyed by Value*)
+    // Cache for variable names and rendered IR strings (per-instance, keyed by Value*)
     std::unordered_map<const llvm::Value*, std::string> varNameCache;
+    std::unordered_map<const llvm::Value*, std::string> irStringCache;
     std::map<std::pair<llvm::Type *, int64_t>, std::string> fieldNameCache;
     std::map<std::string, std::vector<std::string>> compositeFieldNames;
     std::unordered_map<const llvm::Module *,
