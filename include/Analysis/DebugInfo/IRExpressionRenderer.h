@@ -25,11 +25,11 @@ using namespace llvm;
 using namespace std;
 inline constexpr int64_t UnknownOffset = std::numeric_limits<int64_t>::max();
 inline Function *getEnclosingFunction(Value *value) {
-  if (auto *instruction = dyn_cast<Instruction>(value))
-    return instruction->getFunction();
-  if (auto *argument = dyn_cast<Argument>(value))
+  if (auto *instruction = dyn_cast_or_null<Instruction>(value))
+    return instruction->getParent() ? instruction->getFunction() : nullptr;
+  if (auto *argument = dyn_cast_or_null<Argument>(value))
     return argument->getParent();
-  return dyn_cast<Function>(value);
+  return dyn_cast_or_null<Function>(value);
 }
 inline Value *getRWPtr(Instruction *instruction) {
   if (auto *load = dyn_cast<LoadInst>(instruction))

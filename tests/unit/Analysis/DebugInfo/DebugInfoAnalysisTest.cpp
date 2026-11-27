@@ -162,4 +162,35 @@ TEST(DebugInfoAnalysisTest, CachesIRStringsAcrossFunctionsSafely) {
   EXPECT_EQ(analysis.getIRString(y), yFirst);
 }
 
+TEST(DebugInfoAnalysisTest,
+     IRExpressionRendererHandlesVariableStructArrayGepOffset) {
+  llvm::LLVMContext context;
+  auto module = parseModule(context, R"(
+    %struct.S = type { i32, [8 x i64] }
+
+    define i64* @index_field(%struct.S* %s, i64 %i) {
+    entry:
+      %elem = getelementptr inbounds %struct.S, %struct.S* %s, i64 0, i32 1, i64 %i
+      ret i64* %elem
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  auto *function = module->getFunction("index_field");
+  ASSERT_NE(function, nullptr);
+  auto *elem =
+      const_cast<llvm::Instruction *>(findInstructionByName(function, "elem"));
+  ASSERT_NE(elem, nullptr);
+
+  lotus::PackedTypeLayout layout(module->getDataLayout());
+  DebugInfoAnalysis analysis;
+  lotus::ir_expression::IRExpressionRenderer renderer(layout, analysis);
+
+  auto *gep = llvm::cast<llvm::GEPOperator>(elem);
+  auto offs = renderer.get_gep_offset(gep, nullptr);
+  EXPECT_EQ(offs.first, 0);
+  EXPECT_GE(offs.second, 0);
+  EXPECT_FALSE(renderer.restore_access_path_expr(elem, true, nullptr).empty());
+}
+
 } // namespace

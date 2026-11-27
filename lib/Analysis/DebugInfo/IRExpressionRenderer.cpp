@@ -51,7 +51,7 @@ int64_t IRExpressionRenderer::get_inbound_offset(UserTy *inst, int start_id,
     Constant *const_vidx =
         CVA && f ? CVA->getConstant(vidx, f) : dyn_cast<Constant>(vidx);
 
-    if (auto *CI = dyn_cast<ConstantInt>(const_vidx)) {
+    if (auto *CI = dyn_cast_or_null<ConstantInt>(const_vidx)) {
       int64_t fieldIdx = CI->getSExtValue();
       if (Type *sequential_type = sequentialType(type)) {
         // TODO: currently, we collapse all the array fields, can be improved
@@ -59,6 +59,11 @@ int64_t IRExpressionRenderer::get_inbound_offset(UserTy *inst, int start_id,
         type = sequentialElement(sequential_type);
         offset += fieldIdx * static_cast<int64_t>(TSDL->getTypeSizeInBits(type));
       } else if (StructType *struct_type = dyn_cast<StructType>(type)) {
+        if (fieldIdx < 0 ||
+            static_cast<unsigned>(fieldIdx) >= struct_type->getNumElements()) {
+          offset = UnknownOffset;
+          break;
+        }
         // getElementOffset works in O(1), it is fast enough and we do not need
         // to cache the result
         int64_t curr_offset =
@@ -380,6 +385,10 @@ string IRExpressionRenderer::construct_gep_expr(GEPOperator *gep_inst) {
         type = sequentialElement(sequential_type);
         gep_expr += "[" + format_str("%" PRId64, fieldIdx) + "]";
       } else if (StructType *struct_type = dyn_cast<StructType>(type)) {
+        if (fieldIdx < 0 ||
+            static_cast<unsigned>(fieldIdx) >= struct_type->getNumElements()) {
+          break;
+        }
         // getElementOffset works in O(1), it is fast enough and we do not need
         // to cache the result
         int64_t curr_offset = static_cast<int64_t>(
