@@ -37,7 +37,9 @@ void AnalysisState::taintInit(Function *Func) {
               ->getPointerElementType()
               ->getPointerElementType()
               ->isIntegerTy(8)) {
-        taintVal(getNode(Arg), {}, Condition());
+        if (auto *ArgNode = getNode(Arg)) {
+          taintVal(ArgNode, {}, Condition());
+        }
       }
     }
   }
@@ -72,7 +74,9 @@ void AnalysisState::processCallTaintSources(Instruction *Inst) {
   Condition BBCond = getLocalCond(Inst->getParent());
   for (const auto &V : TaintedDsts) {
     auto *SrcVal = V.getValue().getLLVMVal();
-    assert(SrcVal);
+    if (!SrcVal) {
+      continue;
+    }
     TaintStep SrcStep(TaintStep::TAINT_STEP_SOURCE, Inst, SrcVal);
     taintVal(V.getValue(), {SrcStep}, BBCond);
   }
@@ -81,9 +85,17 @@ void AnalysisState::processCallTaintSources(Instruction *Inst) {
 void AnalysisState::taintVal(const ProgramValuePtr &V,
                              const std::vector<TaintStep> &Steps,
                              const Condition &PreCond, bool Peel) {
+  if (V.isVacuous()) {
+    return;
+  }
   markTaint(V, Steps, PreCond);
 
   if (!Peel || !hasSymbolicVals(V)) {
+    return;
+  }
+
+  Type *VTy = V.getType();
+  if (!VTy) {
     return;
   }
 
@@ -95,9 +107,9 @@ void AnalysisState::taintVal(const ProgramValuePtr &V,
       const auto *SymVal = CastProperty<PropertySymExpr>(Val);
 
       bool ShouldPropagate = false;
-      if (V.getType()->isIntegerTy()) {
+      if (VTy->isIntegerTy()) {
         ShouldPropagate = (SymVal->getUsedVars().size() == 1);
-      } else if (V.getType()->isPointerTy()) {
+      } else if (VTy->isPointerTy()) {
         ShouldPropagate = (SymVal->getUsedVars().size() > 1) || SymVal->isVar();
       }
 
@@ -106,8 +118,8 @@ void AnalysisState::taintVal(const ProgramValuePtr &V,
       }
 
       for (const auto &DstV : SymVal->getUsedVars()) {
-        if (V.getType()->isIntegerTy() ||
-            DstV.getValue().getType()->isPointerTy()) {
+        Type *DstTy = DstV.getValue().getType();
+        if (VTy->isIntegerTy() || (DstTy && DstTy->isPointerTy())) {
           markTaint(DstV.getValue(), Steps, Cond && PreCond);
         }
       }
@@ -159,11 +171,18 @@ void AnalysisState::processTaintPropagation(Instruction *Inst) {
   }
 
   ProgramValuePtr DstV(getNode(Inst));
+  if (DstV.isVacuous() || !DstV.getType()) {
+    return;
+  }
   bool IsDstPointer = DstV.getType()->isPointerTy();
 
   if (isInstUnmodelled(Inst)) {
     for (unsigned Idx = 0; Idx < Inst->getNumOperands(); ++Idx) {
-      auto OpndVals = getSymbolicVals(getNode(Inst->getOperand(Idx)));
+      auto *OpNode = getNode(Inst->getOperand(Idx));
+      if (!OpNode) {
+        continue;
+      }
+      const auto &OpndVals = getSymbolicVals(OpNode);
       for (const auto &P : OpndVals) {
         const auto &OpndVal = P.first;
         if (IsaProperty<PropertySymExpr>(OpndVal)) {
@@ -185,7 +204,8 @@ void AnalysisState::processTaintPropagation(Instruction *Inst) {
     for (const auto &Sym :
          CastProperty<PropertySymExpr>(SymVal)->getUsedVars()) {
       auto SrcV = Sym.getValue();
-      bool ValuePassing = !IsDstPointer || SrcV.getType()->isPointerTy();
+      Type *SrcTy = SrcV.getType();
+      bool ValuePassing = !IsDstPointer || (SrcTy && SrcTy->isPointerTy());
       if (ValuePassing) {
         propagateTaint(SrcV, DstV, Inst, PreCond);
       }
@@ -258,13 +278,18 @@ AnalysisState::getTaintTransferTargets(Instruction *Inst) const {
   }
 
   Function *Callee = getCallee(Inst);
-  if (Callee && Callee->isIntrinsic()) {
+  if (Callee && Callee->isIntrinsic() && CS->arg_size() >= 2) {
     switch (Callee->getIntrinsicID()) {
     case Intrinsic::memset:
     case Intrinsic::memmove:
-    case Intrinsic::memcpy:
-      Res[getNode(CS->getArgOperand(1))].insert(getNode(CS->getArgOperand(0)));
+    case Intrinsic::memcpy: {
+      auto *SrcNode = getNode(CS->getArgOperand(1));
+      auto *DstNode = getNode(CS->getArgOperand(0));
+      if (SrcNode && DstNode) {
+        Res[SrcNode].insert(DstNode);
+      }
       break;
+    }
     default:
       break;
     }
@@ -326,37 +351,58 @@ void AnalysisState::buildTaintSummary() {
 
 void AnalysisState::taintProcessCall(CallInst *Inst, Function *Callee,
                                      const TaintSummary &Smry) {
-  const auto &FormalToReal = FormalToRealMap.at(Inst);
+  auto F2RIt = FormalToRealMap.find(Inst);
+  if (F2RIt == FormalToRealMap.end()) {
+    return;
+  }
+  const auto &FormalToReal = F2RIt->second;
   const auto &CalleeTaintedSteps = Smry.TaintedSteps;
   auto *GraphCS = Graph->findSite<GuardedValueFlowCallSite>(Inst);
 
   Condition BBCond = getLocalCond(Inst->getParent());
   for (const auto &P : Smry.TaintedFormals) {
-    if (!FormalToReal.count(P.first)) {
+    auto RealIt = FormalToReal.find(P.first);
+    if (RealIt == FormalToReal.end()) {
       continue;
     }
 
     Condition Cond = transCond(Inst, Callee, P.second);
     Cond.andCond(BBCond);
 
-    auto Steps = CalleeTaintedSteps.at(P.first);
+    std::vector<TaintStep> Steps;
+    auto StepIt = CalleeTaintedSteps.find(P.first);
+    if (StepIt != CalleeTaintedSteps.end()) {
+      Steps = StepIt->second;
+    }
     Steps.emplace_back(TaintStep::TAINT_STEP_CALL, Inst);
-    taintVal(FormalToReal.at(P.first), Steps, Cond);
+    taintVal(RealIt->second, Steps, Cond);
   }
 
   for (const auto &P : Smry.TaintedRets) {
+    if (!P.first.isa<GuardedValueFlowNodeValue>()) {
+      continue;
+    }
     auto *RetNode = P.first.getAs<GuardedValueFlowNodeValue>()->getNode();
+    if (!RetNode) {
+      continue;
+    }
     const GuardedValueFlowNode *OutNode = nullptr;
 
     Condition Cond = transCond(Inst, Callee, P.second);
     Cond.andCond(BBCond);
 
-    auto Steps = CalleeTaintedSteps.at(P.first);
+    std::vector<TaintStep> Steps;
+    auto StepIt = CalleeTaintedSteps.find(P.first);
+    if (StepIt != CalleeTaintedSteps.end()) {
+      Steps = StepIt->second;
+    }
     Steps.emplace_back(TaintStep::TAINT_STEP_CALL, Inst);
 
     if (RetNode->getKind() == GuardedValueFlowNode::Kind::CommonReturn) {
-      OutNode = getNode(Inst);
-    } else {
+      if (!Inst->getType()->isVoidTy()) {
+        OutNode = getNode(Inst);
+      }
+    } else if (GraphCS) {
       OutNode = GraphCS->getPseudoOutput(
           Callee, cast<GuardedValueFlowReturnNode>(RetNode)->getIndex());
     }

@@ -28,6 +28,9 @@ namespace {
 
 StringRef simplifyIntrinsicName(StringRef IntrinsicName) {
   size_t StartIdx = IntrinsicName.find('.', 0);
+  if (StartIdx == StringRef::npos) {
+    return IntrinsicName;
+  }
   size_t EndIdx = IntrinsicName.find('.', StartIdx + 1);
   return IntrinsicName.substr(0, EndIdx);
 }
@@ -42,7 +45,7 @@ bool QueryEngine::needsMemoryCheck(const PTItem &Pt) {
   const auto &AllocSite = Pt.getAllocSite();
   if (Pt.isConcrete()) {
     if (AllocSite.isa<GuardedValueFlowNodeValue>() &&
-        isa<AllocaInst>(AllocSite.getLLVMVal())) {
+        isa_and_nonnull<AllocaInst>(AllocSite.getLLVMVal())) {
       auto *AllocI = cast<AllocaInst>(AllocSite.getLLVMVal());
       auto *AllocedTy = AllocI->getAllocatedType();
       if (AllocedTy->isArrayTy() || AllocI->isArrayAllocation()) {
@@ -53,9 +56,11 @@ bool QueryEngine::needsMemoryCheck(const PTItem &Pt) {
     return true;
   }
 
-  assert(Pt.isSymbolic());
+  if (!Pt.isSymbolic()) {
+    return false;
+  }
   if (AllocSite.isa<GuardedValueFlowNodeValue>() &&
-      isa<GlobalValue>(AllocSite.getLLVMVal())) {
+      isa_and_nonnull<GlobalValue>(AllocSite.getLLVMVal())) {
     return false;
   }
 
@@ -193,89 +198,135 @@ void QueryEngine::buildBofQueryLibCall(CallInst *Inst,
     return isMatchLib(Inst, FuncName.str(), Target);
   };
 
+  auto SafeNode = [&State](Value *V) -> GuardedValueFlowNode * {
+    return State.getNode(V);
+  };
+
   if (MatchLib("memset") || MatchLib("llvm.memset")) {
-    GenQueryForPtrBytes(State.getNode(Inst->getArgOperand(0)),
-                        State.getSymbolicVals(State.getNode(Inst->getArgOperand(2))));
+    if (Inst->arg_size() >= 3) {
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(0)),
+                          State.getSymbolicVals(SafeNode(Inst->getArgOperand(2))));
+    }
   } else if (MatchLib("snprintf")) {
-    Value *Ptr = Inst->getArgOperand(0);
-    Value *NumBytes = Inst->getArgOperand(1);
-    GenQueryForPtrBytes(State.getNode(Ptr),
-                        State.getSymbolicVals(State.getNode(NumBytes)));
-    GenQueryAccSizeDep(State.getNode(Ptr), State.getNode(Inst->getArgOperand(2)));
+    if (Inst->arg_size() >= 3) {
+      Value *Ptr = Inst->getArgOperand(0);
+      Value *NumBytes = Inst->getArgOperand(1);
+      GenQueryForPtrBytes(SafeNode(Ptr),
+                          State.getSymbolicVals(SafeNode(NumBytes)));
+      GenQueryAccSizeDep(SafeNode(Ptr), SafeNode(Inst->getArgOperand(2)));
+    }
   } else if (MatchLib("memcpy") || MatchLib("memmove") ||
              MatchLib("llvm.memcpy") || MatchLib("llvm.memmove")) {
-    const auto &Sizes =
-        State.getSymbolicVals(State.getNode(Inst->getArgOperand(2)));
-    GenQueryForPtrBytes(State.getNode(Inst->getArgOperand(0)), Sizes);
-    GenQueryForPtrBytes(State.getNode(Inst->getArgOperand(1)), Sizes);
+    if (Inst->arg_size() >= 3) {
+      const auto &Sizes =
+          State.getSymbolicVals(SafeNode(Inst->getArgOperand(2)));
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(0)), Sizes);
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(1)), Sizes);
+    }
   } else if (MatchLib("fread") || MatchLib("fwrite")) {
-    auto SzVals = State.getSymbolicVals(State.getNode(Inst->getArgOperand(1)));
-    auto CountVals =
-        State.getSymbolicVals(State.getNode(Inst->getArgOperand(2)));
-    GenQueryForPtrBytes(State.getNode(Inst->getArgOperand(0)),
-                        SzVals * CountVals);
+    if (Inst->arg_size() >= 3) {
+      const auto &SzVals =
+          State.getSymbolicVals(SafeNode(Inst->getArgOperand(1)));
+      const auto &CountVals =
+          State.getSymbolicVals(SafeNode(Inst->getArgOperand(2)));
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(0)),
+                          SzVals * CountVals);
+    }
   } else if (MatchLib("memchr")) {
-    GenQueryForPtrBytes(State.getNode(Inst->getArgOperand(0)),
-                        State.getSymbolicVals(State.getNode(Inst->getArgOperand(2))));
+    if (Inst->arg_size() >= 3) {
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(0)),
+                          State.getSymbolicVals(SafeNode(Inst->getArgOperand(2))));
+    }
   } else if (MatchLib("strchr")) {
-    GenQueryForPtrBytes(State.getNode(Inst->getOperand(0)), {});
+    if (Inst->arg_size() >= 1) {
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(0)), {});
+    }
   } else if (MatchLib("strcpy")) {
-    Value *DstPtr = Inst->getOperand(0);
-    Value *SrcPtr = Inst->getOperand(1);
-    const auto &SrcLenVals = State.getStrlen(State.getNode(SrcPtr), Inst);
-    GenQueryForPtrBytes(State.getNode(DstPtr), SrcLenVals + PropertyInteger(1));
-    GenQueryForPtrBytes(State.getNode(SrcPtr), {});
-    GenQueryAccSizeDep(State.getNode(DstPtr), State.getNode(SrcPtr));
-  } else if (MatchLib("puts")) {
-    Value *DstPtr = Inst->getOperand(0);
-    const auto &LenVals = State.getStrlen(State.getNode(DstPtr), Inst);
-    GenQueryForPtrBytes(State.getNode(DstPtr), LenVals + PropertyInteger(1));
-  } else if (MatchLib("strncpy") || MatchLib("strncmp")) {
-    const auto &Sizes =
-        State.getSymbolicVals(State.getNode(Inst->getOperand(2)));
-    GenQueryForPtrBytes(State.getNode(Inst->getOperand(0)), Sizes);
-    GenQueryForPtrBytes(State.getNode(Inst->getOperand(1)), Sizes);
-  } else if (MatchLib("strstr") || MatchLib("strcasestr") ||
-             MatchLib("strcmp")) {
-    GenQueryForPtrBytes(State.getNode(Inst->getOperand(0)), {});
-    GenQueryForPtrBytes(State.getNode(Inst->getOperand(1)), {});
-  } else if (MatchLib("strtok") || MatchLib("strlen")) {
-    GenQueryForPtrBytes(State.getNode(Inst->getOperand(0)), {});
-  } else if (MatchLib("strncat")) {
-    Value *DstPtr = Inst->getOperand(0);
-    Value *SrcPtr = Inst->getOperand(1);
-    Value *NumBytes = Inst->getOperand(2);
-
-    const auto &SrcLenVals = State.getStrlen(State.getNode(SrcPtr), Inst);
-    const auto &DstLenVals = State.getStrlen(State.getNode(DstPtr), Inst);
-    const auto &NLenVals = State.getSymbolicVals(State.getNode(NumBytes));
-
-    GuardedSymbolicValSet AccSizes;
-    for (const auto &SrcP : SrcLenVals) {
-      for (const auto &DstP : DstLenVals) {
-        for (const auto &NP : NLenVals) {
-          PropertyValuePtr CopyLen = NP.first;
-          auto Diff = NP.first - SrcP.first;
-          if (Diff > int64_t(0)) {
-            CopyLen = SrcP.first;
-          }
-          PropertyValuePtr AccSize = CopyLen + PropertyInteger(1) + DstP.first;
-          AccSizes.addValue(AccSize, SrcP.second && DstP.second && NP.second);
-        }
+    if (Inst->arg_size() >= 2) {
+      Value *DstPtr = Inst->getArgOperand(0);
+      Value *SrcPtr = Inst->getArgOperand(1);
+      auto *DstNode = SafeNode(DstPtr);
+      auto *SrcNode = SafeNode(SrcPtr);
+      if (DstNode && SrcNode) {
+        const auto &SrcLenVals = State.getStrlen(SrcNode, Inst);
+        GenQueryForPtrBytes(DstNode, SrcLenVals + PropertyInteger(1));
+        GenQueryForPtrBytes(SrcNode, {});
+        GenQueryAccSizeDep(DstNode, SrcNode);
       }
     }
+  } else if (MatchLib("puts")) {
+    if (Inst->arg_size() >= 1) {
+      Value *DstPtr = Inst->getArgOperand(0);
+      if (auto *DstNode = SafeNode(DstPtr)) {
+        const auto &LenVals = State.getStrlen(DstNode, Inst);
+        GenQueryForPtrBytes(DstNode, LenVals + PropertyInteger(1));
+      }
+    }
+  } else if (MatchLib("strncpy") || MatchLib("strncmp")) {
+    if (Inst->arg_size() >= 3) {
+      const auto &Sizes =
+          State.getSymbolicVals(SafeNode(Inst->getArgOperand(2)));
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(0)), Sizes);
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(1)), Sizes);
+    }
+  } else if (MatchLib("strstr") || MatchLib("strcasestr") ||
+             MatchLib("strcmp")) {
+    if (Inst->arg_size() >= 2) {
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(0)), {});
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(1)), {});
+    }
+  } else if (MatchLib("strtok") || MatchLib("strlen")) {
+    if (Inst->arg_size() >= 1) {
+      GenQueryForPtrBytes(SafeNode(Inst->getArgOperand(0)), {});
+    }
+  } else if (MatchLib("strncat")) {
+    if (Inst->arg_size() >= 3) {
+      Value *DstPtr = Inst->getArgOperand(0);
+      Value *SrcPtr = Inst->getArgOperand(1);
+      Value *NumBytes = Inst->getArgOperand(2);
+      auto *DstNode = SafeNode(DstPtr);
+      auto *SrcNode = SafeNode(SrcPtr);
+      auto *NumNode = SafeNode(NumBytes);
+      if (DstNode && SrcNode && NumNode) {
+        const auto &SrcLenVals = State.getStrlen(SrcNode, Inst);
+        const auto &DstLenVals = State.getStrlen(DstNode, Inst);
+        const auto &NLenVals = State.getSymbolicVals(NumNode);
 
-    GenQueryForPtrBytes(State.getNode(DstPtr), AccSizes);
-    GenQueryForPtrBytes(State.getNode(SrcPtr), {});
+        GuardedSymbolicValSet AccSizes;
+        for (const auto &SrcP : SrcLenVals) {
+          for (const auto &DstP : DstLenVals) {
+            for (const auto &NP : NLenVals) {
+              PropertyValuePtr CopyLen = NP.first;
+              auto Diff = NP.first - SrcP.first;
+              if (Diff > int64_t(0)) {
+                CopyLen = SrcP.first;
+              }
+              PropertyValuePtr AccSize =
+                  CopyLen + PropertyInteger(1) + DstP.first;
+              AccSizes.addValue(AccSize, SrcP.second && DstP.second && NP.second);
+            }
+          }
+        }
+
+        GenQueryForPtrBytes(DstNode, AccSizes);
+        GenQueryForPtrBytes(SrcNode, {});
+      }
+    }
   } else if (MatchLib("strcat")) {
-    Value *DstPtr = Inst->getOperand(0);
-    Value *SrcPtr = Inst->getOperand(1);
-    const auto &SrcLenVals = State.getStrlen(State.getNode(SrcPtr), Inst);
-    const auto &DstLenVals = State.getStrlen(State.getNode(DstPtr), Inst);
-    GenQueryForPtrBytes(State.getNode(DstPtr),
-                        SrcLenVals + DstLenVals + PropertyInteger(1));
-    GenQueryForPtrBytes(State.getNode(SrcPtr), {});
-    GenQueryAccSizeDep(State.getNode(DstPtr), State.getNode(SrcPtr));
+    if (Inst->arg_size() >= 2) {
+      Value *DstPtr = Inst->getArgOperand(0);
+      Value *SrcPtr = Inst->getArgOperand(1);
+      auto *DstNode = SafeNode(DstPtr);
+      auto *SrcNode = SafeNode(SrcPtr);
+      if (DstNode && SrcNode) {
+        const auto &SrcLenVals = State.getStrlen(SrcNode, Inst);
+        const auto &DstLenVals = State.getStrlen(DstNode, Inst);
+        GenQueryForPtrBytes(DstNode,
+                            SrcLenVals + DstLenVals + PropertyInteger(1));
+        GenQueryForPtrBytes(SrcNode, {});
+        GenQueryAccSizeDep(DstNode, SrcNode);
+      }
+    }
   }
 }
 
@@ -291,7 +342,11 @@ void QueryEngine::buildNullDerefQuery(Instruction *Inst,
     return;
   }
 
-  auto PtrVals = State.getSymbolicVals(State.getNode(Ptr));
+  auto *PtrNode = State.getNode(Ptr);
+  if (!PtrNode) {
+    return;
+  }
+  const auto &PtrVals = State.getSymbolicVals(PtrNode);
   PtrVals.forEach([&](const PropertyValuePtr &Val, const Condition &Cond) {
     if (Val == int64_t(0)) {
       addQueryTrace(DirectNumericalQuery::createMustErr(BUG_TY_NULL_DEREF),
@@ -315,7 +370,7 @@ void QueryEngine::buildArrayIndexOOBQuery(Instruction *Inst,
 
   Value *BasePtr = GEP->getPointerOperand();
   auto *BaseNode = State.getNode(BasePtr);
-  if (!State.hasPts(BaseNode)) {
+  if (!BaseNode || !State.hasPts(BaseNode)) {
     return;
   }
 
@@ -382,7 +437,11 @@ void QueryEngine::buildNegativeArrayIndexQuery(Instruction *Inst,
 
   for (unsigned I = 1; I < GEP->getNumOperands(); ++I) {
     Value *Idx = GEP->getOperand(I);
-    auto IdxVals = State.getSymbolicVals(State.getNode(Idx));
+    auto *IdxNode = State.getNode(Idx);
+    if (!IdxNode) {
+      continue;
+    }
+    const auto &IdxVals = State.getSymbolicVals(IdxNode);
 
     IdxVals.forEach([&](const PropertyValuePtr &Val, const Condition &Cond) {
       if (Val < int64_t(0)) {
@@ -413,7 +472,7 @@ void QueryEngine::buildUninitializedReadQuery(Instruction *Inst,
 
   Value *Ptr = getPointerOperand(LoadI);
   auto *PtrNode = State.getNode(Ptr);
-  if (!State.hasPts(PtrNode)) {
+  if (!PtrNode || !State.hasPts(PtrNode)) {
     return;
   }
 
@@ -436,6 +495,9 @@ void QueryEngine::buildUafQuery(Instruction *Inst, const AnalysisState &State) {
   }
 
   auto *PtrNode = State.getNode(Ptr);
+  if (!PtrNode) {
+    return;
+  }
   const auto &FreedPtrs = State.getFreedPtrs();
 
   if (FreedPtrs.hasValue(PtrNode)) {
@@ -476,6 +538,9 @@ void QueryEngine::buildDoubleFreeQuery(Instruction *Inst,
 
   Value *Ptr = CallI->getArgOperand(0);
   auto *PtrNode = State.getNode(Ptr);
+  if (!PtrNode) {
+    return;
+  }
   const auto &FreedPtrs = State.getFreedPtrs();
 
   bool HasDoubleFree = false;

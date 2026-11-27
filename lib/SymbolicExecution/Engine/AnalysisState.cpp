@@ -30,7 +30,7 @@ namespace {
 
 bool isGlobalLLVMVal(const ProgramValuePtr &V) {
   return V.isa<GuardedValueFlowNodeValue>() &&
-         isa<GlobalVariable>(V.getLLVMVal());
+         isa_and_nonnull<GlobalVariable>(V.getLLVMVal());
 }
 
 } // namespace
@@ -38,9 +38,9 @@ bool isGlobalLLVMVal(const ProgramValuePtr &V) {
 AnalysisState::AnalysisState(const AnalysisContext &Ctx,
                              const TaintModel &TaintSpec,
                              GuardedValueFlowGraph *Graph, Function *Func,
-                             StateExtension *Ext)
+                             StateExtension *Ext, bool NeedsSummary)
     : Ctx(Ctx), TaintSpec(TaintSpec), Graph(Graph), F(Func), Ext(Ext),
-      Solver(std::make_unique<PathCondSolver>(*Ctx.getDataLayout())) {
+      NeedsSummary(NeedsSummary) {
   for (auto Iter = Graph->arg_begin(), EIter = Graph->arg_end(); Iter != EIter;
        ++Iter) {
     auto *ArgNode = *Iter;
@@ -54,40 +54,56 @@ AnalysisState::AnalysisState(const AnalysisContext &Ctx,
 }
 
 GuardedValueFlowNode *AnalysisState::getNode(Value *V) const {
-  assert(V && "getNode() expects non-null Value");
-  V = V->stripPointerCasts();
-
-  auto *N = Graph->findNode(V);
-  if (!N) {
-    llvm_unreachable("Unable to find GVFG node for LLVM Value");
+  if (!V || !Graph) {
+    return nullptr;
   }
-  return N;
+  Value *Stripped = V->stripPointerCasts();
+  if (auto *N = Graph->findNode(Stripped)) {
+    return N;
+  }
+  if (Stripped != V) {
+    return Graph->findNode(V);
+  }
+  return nullptr;
 }
 
 void AnalysisState::createMemoryObject(const ProgramValuePtr &Ptr,
                                        PTItem::MemObjKind Kind,
                                        const PropertyValuePtr &Sz,
                                        const Condition &Cond) {
+  if (Ptr.isVacuous()) {
+    return;
+  }
   const PTItem Pt(Ptr, Kind, 0, Sz);
   PointsTo[Ptr].addValue(Pt, Cond);
 }
 
 PropertyValuePtr AnalysisState::computeOffsets(GEPOperator *GEP) {
-  assert(!GEP->getType()->isVectorTy());
+  if (!GEP || GEP->getType()->isVectorTy()) {
+    return PropertyValuePtr();
+  }
   PropertySymExpr OffsetExpr;
-  int64_t ConstantOffset = 0;
+  BigInteger ConstantOffset(0);
 
   Type *CurrentType = GEP->getSourceElementType();
+  if (!CurrentType) {
+    return PropertyValuePtr();
+  }
   bool IsFirstIndex = true;
   for (Value *IndexOperand : GEP->indices()) {
     if (!IsFirstIndex) {
       if (auto *St = dyn_cast<StructType>(CurrentType)) {
-        const auto *CI = cast<ConstantInt>(IndexOperand);
-        uint64_t Addend =
-            Ctx.getElementOffset(St, static_cast<unsigned>(CI->getZExtValue()));
-        ConstantOffset += static_cast<int64_t>(Addend);
-        CurrentType =
-            St->getElementType(static_cast<unsigned>(CI->getZExtValue()));
+        const auto *CI = dyn_cast<ConstantInt>(IndexOperand);
+        if (!CI || CI->getBitWidth() > 64) {
+          return PropertyValuePtr();
+        }
+        unsigned FieldIdx = static_cast<unsigned>(CI->getZExtValue());
+        if (FieldIdx >= St->getNumElements()) {
+          return PropertyValuePtr();
+        }
+        uint64_t Addend = Ctx.getElementOffset(St, FieldIdx);
+        ConstantOffset += BigInteger(APInt(65, Addend, false));
+        CurrentType = St->getElementType(FieldIdx);
         continue;
       }
     }
@@ -101,22 +117,27 @@ PropertyValuePtr AnalysisState::computeOffsets(GEPOperator *GEP) {
       else if (auto *PtrTy = dyn_cast<PointerType>(CurrentType))
         ElementType = PtrTy->getPointerElementType();
       else
-        assert(false && "invalid GEP type");
+        return PropertyValuePtr();
     }
 
     uint64_t ElementSize = Ctx.getTypeStoreSize(ElementType);
     auto *IndexVal = getNode(IndexOperand);
-    if (auto *CI = dyn_cast<ConstantInt>(IndexVal->getLLVMValue())) {
-      ConstantOffset += CI->getSExtValue() * static_cast<int64_t>(ElementSize);
+    if (!IndexVal) {
+      return PropertyValuePtr();
+    }
+    if (auto *CI = dyn_cast_or_null<ConstantInt>(IndexVal->getLLVMValue())) {
+      ConstantOffset +=
+          BigInteger(CI->getValue()) * BigInteger(APInt(65, ElementSize, false));
     } else {
-      OffsetExpr.addTerm(Var(IndexVal), ElementSize);
+      OffsetExpr.addTerm(Var(IndexVal),
+                         BigInteger(APInt(65, ElementSize, false)));
     }
     CurrentType = ElementType;
     IsFirstIndex = false;
   }
 
   if (OffsetExpr.isConstant()) {
-    ConstantOffset += OffsetExpr.getAsConstant().getAsBoundInt();
+    ConstantOffset += OffsetExpr.getAsConstant();
     return GetProperty<PropertyInteger>(ConstantOffset);
   }
   OffsetExpr.addConstTerm(ConstantOffset);
@@ -128,7 +149,8 @@ void AnalysisState::initSymbol(const ProgramValuePtr &V) {
     return;
   }
 
-  if (Regs.count(V) && !Regs.at(V).empty()) {
+  auto It = Regs.find(V);
+  if (It != Regs.end() && !It->second.empty()) {
     return;
   }
 
@@ -140,6 +162,20 @@ void AnalysisState::initSymbol(const ProgramValuePtr &V) {
   }
 
   Regs[V].addValue(PVP);
+}
+
+const GuardedSymbolicValSet &
+AnalysisState::ensureSymbolicVals(const ProgramValuePtr &V) {
+  static const GuardedSymbolicValSet Empty;
+  if (V.isVacuous()) {
+    return Empty;
+  }
+  auto It = Regs.find(V);
+  if (It == Regs.end() || It->second.empty()) {
+    initSymbol(V);
+    It = Regs.find(V);
+  }
+  return It != Regs.end() ? It->second : Empty;
 }
 
 void AnalysisState::transfer(Instruction *Inst, AnalysisDriver &Driver) {
@@ -206,12 +242,18 @@ void AnalysisState::transfer(Instruction *Inst, AnalysisDriver &Driver) {
     break;
   }
   case llvm::Instruction::Shl: {
-    if (auto *CI = dyn_cast<ConstantInt>(Inst->getOperand(1))) {
-      if (CI->getZExtValue() < 64) {
-        auto Cst = PropertyInteger(1ull << CI->getZExtValue());
-        auto Res = Regs.at(getNode(Inst->getOperand(0))) * Cst;
-        if (!Res.empty()) {
-          Regs[getNode(Inst)] = std::move(Res);
+    if (Inst->getType()->isIntegerTy()) {
+      if (auto *CI = dyn_cast<ConstantInt>(Inst->getOperand(1))) {
+        if (CI->getBitWidth() <= 64 && CI->getZExtValue() < 63) {
+          auto *Op0 = getNode(Inst->getOperand(0));
+          auto *Dst = getNode(Inst);
+          if (Op0 && Dst) {
+            auto Cst = PropertyInteger(static_cast<int64_t>(1ull << CI->getZExtValue()));
+            auto Res = ensureSymbolicVals(Op0) * Cst;
+            if (!Res.empty()) {
+              Regs[Dst] = std::move(Res);
+            }
+          }
         }
       }
     }
@@ -238,7 +280,11 @@ void AnalysisState::transfer(Instruction *Inst, AnalysisDriver &Driver) {
   case llvm::Instruction::FPToSI:
   case llvm::Instruction::UIToFP:
   case llvm::Instruction::FPToUI: {
-    assignVal(getNode(Inst), getNode(Inst->getOperand(0)->stripPointerCasts()));
+    auto *Dst = getNode(Inst);
+    auto *Src = getNode(Inst->getOperand(0)->stripPointerCasts());
+    if (Dst && Src) {
+      assignVal(Dst, Src);
+    }
     break;
   }
   case Instruction::GetElementPtr: {
@@ -292,7 +338,9 @@ void AnalysisState::transfer(Instruction *Inst, AnalysisDriver &Driver) {
   }
 
   if (!Inst->getType()->isVoidTy()) {
-    initSymbol(getNode(Inst));
+    if (auto *InstNode = getNode(Inst)) {
+      initSymbol(InstNode);
+    }
   }
 
   taintTransfer(Inst);
@@ -303,21 +351,36 @@ void AnalysisState::transfer(Instruction *Inst, AnalysisDriver &Driver) {
 }
 
 void AnalysisState::processBinaryInst(Instruction *Inst) {
+  if (!Inst->getType()->isIntegerTy()) {
+    return;
+  }
+  auto *Op0 = getNode(Inst->getOperand(0));
+  auto *Op1 = getNode(Inst->getOperand(1));
+  auto *Dst = getNode(Inst);
+  if (!Op0 || !Op1 || !Dst) {
+    return;
+  }
   auto OpC = PropertyValue::fromLLVMOp(Inst->getOpcode());
-  auto Res = Regs.at(getNode(Inst->getOperand(0)))
-                 .binOp(Regs.at(getNode(Inst->getOperand(1))), OpC);
+  auto Res = ensureSymbolicVals(Op0).binOp(ensureSymbolicVals(Op1), OpC);
   if (!Res.empty()) {
-    Regs[getNode(Inst)] = std::move(Res);
+    Regs[Dst] = std::move(Res);
   }
 }
 
 void AnalysisState::processICmpInst(Instruction *Inst) {
+  if (Inst->getType()->isVectorTy()) {
+    return;
+  }
+  auto *Op0 = getNode(Inst->getOperand(0));
+  auto *Op1 = getNode(Inst->getOperand(1));
+  auto *Dst = getNode(Inst);
+  if (!Op0 || !Op1 || !Dst) {
+    return;
+  }
   auto *CmpI = cast<CmpInst>(Inst);
   unsigned Pred = CmpI->getPredicate();
-  auto Res = Regs.at(getNode(Inst->getOperand(0)))
-                 .cmp(Regs.at(getNode(Inst->getOperand(1))), Pred);
+  auto Res = ensureSymbolicVals(Op0).cmp(ensureSymbolicVals(Op1), Pred);
 
-  auto *Dst = getNode(Inst);
   Regs[Dst].addValue(GetProperty<PropertyInteger>(0), Res[0]);
   Regs[Dst].addValue(GetProperty<PropertyInteger>(1), Res[1]);
 }
@@ -327,6 +390,9 @@ void AnalysisState::processAlloca(Instruction *Inst) {
   Type *AllocatedTy = AllocI->getAllocatedType();
   auto *NumElements = getNode(AllocI->getArraySize());
   auto *Dst = getNode(Inst);
+  if (!Dst) {
+    return;
+  }
 
   uint64_t TySize = Ctx.getTypeStoreSizeInBits(AllocatedTy);
   if (TySize == 0) {
@@ -339,60 +405,76 @@ void AnalysisState::processAlloca(Instruction *Inst) {
     return;
   }
 
-  if (!NumV.isConstant() && !Regs.count(NumElements)) {
-    initSymbol(NumElements);
-    if (!Regs.count(NumElements)) {
-      createMemoryObject(Dst, PTItem::MK_PLACEHOLDER);
-      return;
-    }
-  }
   if (NumV.isConstant()) {
-    BigInteger Sz = NumV.getAsConstant() * TySize;
+    BigInteger Sz = NumV.getAsConstant() * BigInteger(APInt(65, TySize, false));
     PropertyValuePtr AllocSize = GetProperty<PropertyInteger>(std::move(Sz));
     createMemoryObject(Dst, PTItem::MK_CONCRETE, AllocSize);
   } else {
-    auto SizeVals = Regs.at(NumElements) * PropertyInteger(TySize);
+    const auto &NumVals = ensureSymbolicVals(NumElements);
+    if (NumVals.empty()) {
+      createMemoryObject(Dst, PTItem::MK_PLACEHOLDER);
+      return;
+    }
+    auto SizeVals = NumVals * PropertyInteger(BigInteger(APInt(65, TySize, false)));
     for (const auto &SizeCond : SizeVals) {
       createMemoryObject(Dst, PTItem::MK_CONCRETE, SizeCond.first,
                          SizeCond.second);
     }
   }
-  assert(!PointsTo.at(Dst).empty());
+  if (!PointsTo.count(Dst) || PointsTo.at(Dst).empty()) {
+    createMemoryObject(Dst, PTItem::MK_PLACEHOLDER);
+  }
 }
 
 void AnalysisState::setPts(const ProgramValuePtr &Dst, const PtsSet &Pts) {
+  if (Dst.isVacuous()) {
+    return;
+  }
   PointsTo[Dst] = Pts;
 }
 
 void AnalysisState::assignVal(const ProgramValuePtr &Dst,
                               const ProgramValuePtr &Src,
                               const Condition &Cond) {
+  if (Dst.isVacuous() || Src.isVacuous()) {
+    return;
+  }
   if (!Regs.count(Src)) {
     initSymbol(Src);
   }
   initSymbol(Dst);
 
-  if (Regs.count(Src)) {
-    Regs[Dst].addValues(Regs.at(Src), Cond);
+  auto RegIt = Regs.find(Src);
+  if (RegIt != Regs.end()) {
+    Regs[Dst].addValues(RegIt->second, Cond);
   }
 
-  if (PointsTo.count(Src)) {
-    PointsTo[Dst].addValues(PointsTo.at(Src), Cond);
+  auto PtsIt = PointsTo.find(Src);
+  if (PtsIt != PointsTo.end()) {
+    PointsTo[Dst].addValues(PtsIt->second, Cond);
   }
 }
 
 void AnalysisState::assignVals(const ProgramValuePtr &Dst,
                                const GuardedProgramValSet &SrcVals) {
-  assert(!Regs.count(Dst));
-  assert(!PointsTo.count(Dst));
+  if (Dst.isVacuous()) {
+    return;
+  }
   for (const auto &P : SrcVals) {
     const auto &V = P.first;
     const auto &Cond = P.second;
+    if (V.isVacuous()) {
+      continue;
+    }
     initSymbol(V);
 
-    Regs[Dst].addValues(Regs.at(V), Cond);
-    if (PointsTo.count(V)) {
-      PointsTo[Dst].addValues(PointsTo.at(V), Cond);
+    auto RegIt = Regs.find(V);
+    if (RegIt != Regs.end()) {
+      Regs[Dst].addValues(RegIt->second, Cond);
+    }
+    auto PtsIt = PointsTo.find(V);
+    if (PtsIt != PointsTo.end()) {
+      PointsTo[Dst].addValues(PtsIt->second, Cond);
     }
   }
 }
@@ -430,6 +512,9 @@ void AnalysisState::processGEP(Instruction *Inst) {
   }
   auto *GEP = cast<GEPOperator>(Inst);
   PropertyValuePtr Off = computeOffsets(GEP);
+  if (!Off) {
+    return;
+  }
   auto OffsetVals = evalExpr(Off, Regs);
   Condition IndexDataDeps;
   if (IsaProperty<PropertySymExpr>(Off)) {
@@ -445,10 +530,13 @@ void AnalysisState::processGEP(Instruction *Inst) {
   OffsetVals = OffsetVals && IndexDataDeps;
 
   auto *SrcPtr = getNode(getPointerOperand(GEP));
+  auto *Dst = getNode(Inst);
+  if (!SrcPtr || !Dst) {
+    return;
+  }
   initPointsToTarget(SrcPtr, Inst);
 
   auto OffsetInBits = OffsetVals * PropertyInteger(8);
-  auto *Dst = getNode(Inst);
 
   if (Dst != SrcPtr) {
     assignPtr(Dst, SrcPtr, OffsetInBits, true);
@@ -457,12 +545,18 @@ void AnalysisState::processGEP(Instruction *Inst) {
     }
   }
 
-  Regs[Dst] = Regs.at(SrcPtr) + OffsetVals;
+  auto Res = ensureSymbolicVals(SrcPtr) + OffsetVals;
+  if (!Res.empty()) {
+    Regs[Dst] = std::move(Res);
+  }
 }
 
 void AnalysisState::initPointsToTarget(const ProgramValuePtr &Ptr,
                                        Instruction *Pos) {
   (void)Pos;
+  if (Ptr.isVacuous()) {
+    return;
+  }
   if (PointsTo.count(Ptr) && !PointsTo.at(Ptr).empty()) {
     return;
   }
@@ -474,18 +568,22 @@ void AnalysisState::initPointsToTarget(const ProgramValuePtr &Ptr,
   }
 
   initSymbol(Ptr);
-  assert(!PointsTo.at(Ptr).empty());
 }
 
 void AnalysisState::processLoad(Instruction *Inst) {
   auto *LoadI = cast<LoadInst>(Inst);
   auto *LdPtr = getNode(getPointerOperand(LoadI));
-  initPointsToTarget(LdPtr, Inst);
+  if (LdPtr) {
+    initPointsToTarget(LdPtr, Inst);
+  }
 
   auto *LdInstNode = getNode(Inst);
+  if (!LdInstNode) {
+    return;
+  }
   if (LdInstNode->getNumChildren() >= 1) {
     if (auto *LdMemNode =
-            dyn_cast<GuardedValueFlowNode>(LdInstNode->getChild(0))) {
+            dyn_cast_or_null<GuardedValueFlowNode>(LdInstNode->getChild(0))) {
       processLoadPtr(LdPtr, LdMemNode, LdInstNode, Inst);
     }
   }
@@ -495,6 +593,9 @@ void AnalysisState::processLoadPtr(const ProgramValuePtr &Ptr,
                                    const GuardedValueFlowNode *LdMemNode,
                                    const ProgramValuePtr &Dst,
                                    Instruction *Pos) {
+  if (!LdMemNode || Dst.isVacuous()) {
+    return;
+  }
   if (!Ptr.isNull()) {
     initSymbol(Ptr);
   }
@@ -523,7 +624,7 @@ void AnalysisState::collectEscapeObjs() {
 void AnalysisState::processReturn() {
   auto *RetNode = Graph->getCommonReturn();
   if (RetNode) {
-    if (RetNode->getNumChildren() >= 1) {
+    if (RetNode->getNumChildren() >= 1 && RetNode->getChild(0)) {
       auto *RetValNode = cast<GuardedValueFlowNode>(RetNode->getChild(0));
       initSymbol(RetValNode);
       assignVal(RetNode, RetValNode);
@@ -531,7 +632,7 @@ void AnalysisState::processReturn() {
     } else {
       initSymbol(RetNode);
     }
-    OutSymbolicValMap[RetNode].addValues(Regs.at(RetNode));
+    OutSymbolicValMap[RetNode].addValues(ensureSymbolicVals(RetNode));
   }
 
   for (auto Iter = Graph->pseudo_return_begin(),
@@ -539,24 +640,26 @@ void AnalysisState::processReturn() {
        Iter != EIter; ++Iter) {
     auto *PseudoRet = cast<GuardedValueFlowReturnNode>(*Iter);
     Value *BasePtr = PseudoRet->getAccessPath().getBase();
-    ProgramValuePtr LdPtr = BasePtr ? getNode(BasePtr) : ProgramValuePtr();
+    ProgramValuePtr LdPtr = BasePtr ? ProgramValuePtr(getNode(BasePtr))
+                                    : ProgramValuePtr();
 
     for (size_t I = 0; I < PseudoRet->getNumChildren(); ++I) {
       auto *Ch = PseudoRet->getChild(I);
-      if (auto *LdMemNode = dyn_cast<GuardedValueFlowNode>(Ch)) {
+      if (auto *LdMemNode = dyn_cast_or_null<GuardedValueFlowNode>(Ch)) {
         processLoadPtr(LdPtr, LdMemNode, PseudoRet, RetI);
       }
     }
 
     initSymbol(PseudoRet);
-    OutSymbolicValMap[PseudoRet].addValues(Regs.at(PseudoRet));
+    OutSymbolicValMap[PseudoRet].addValues(ensureSymbolicVals(PseudoRet));
   }
 
   for (auto Iter = Graph->return_begin(), EIter = Graph->return_end();
        Iter != EIter; ++Iter) {
     auto *RNode = *Iter;
-    if (PointsTo.count(RNode)) {
-      OutputPts[RNode] = PointsTo.at(RNode);
+    auto PtsIt = PointsTo.find(RNode);
+    if (PtsIt != PointsTo.end()) {
+      OutputPts[RNode] = PtsIt->second;
     }
   }
 
@@ -565,13 +668,20 @@ void AnalysisState::processReturn() {
 
 void AnalysisState::processStore(Instruction *Inst) {
   auto *StoreI = cast<StoreInst>(Inst);
-  ProgramValuePtr StPtr = getNode(getPointerOperand(StoreI));
-  initPointsToTarget(StPtr, Inst);
+  if (auto *StPtr = getNode(getPointerOperand(StoreI))) {
+    initPointsToTarget(StPtr, Inst);
+  }
 }
 
 void AnalysisState::processPhiInst(Instruction *Inst) {
-  auto *Dst = cast<GuardedValueFlowPhiNode>(getNode(Inst));
+  auto *Dst = dyn_cast_or_null<GuardedValueFlowPhiNode>(getNode(Inst));
+  if (!Dst) {
+    return;
+  }
   for (const auto &InNode : *Dst) {
+    if (!InNode.value_node) {
+      continue;
+    }
     auto PhiCond = getPhiCond(Dst, InNode);
     assignVal(Dst, cast<GuardedValueFlowNode>(InNode.value_node), PhiCond);
   }
@@ -579,7 +689,10 @@ void AnalysisState::processPhiInst(Instruction *Inst) {
 
 void AnalysisState::processMemAlloc(
     CallInst *Inst, const std::vector<unsigned> &AllocSizeArgs) {
-  if (AllocSizeArgs.size() <= 1) {
+  if (AllocSizeArgs.empty()) {
+    return;
+  }
+  if (AllocSizeArgs.size() == 1) {
     handleMalloc(Inst, AllocSizeArgs[0]);
   } else {
     handleCalloc(Inst, AllocSizeArgs[0], AllocSizeArgs[1]);
@@ -587,16 +700,21 @@ void AnalysisState::processMemAlloc(
 }
 
 void AnalysisState::handleMalloc(CallInst *Inst, unsigned SzIdx) {
-  auto *SzNode = getNode(Inst->getArgOperand(SzIdx));
-  if (!Regs.count(SzNode)) {
-    initSymbol(SzNode);
-    if (!Regs.count(SzNode)) {
-      createMemoryObject(getNode(Inst), PTItem::MK_PLACEHOLDER);
-      return;
-    }
-  }
-  auto SzVals = Regs.at(SzNode) * PropertyInteger(8);
   auto *Dst = getNode(Inst);
+  if (!Dst) {
+    return;
+  }
+  if (SzIdx >= Inst->arg_size()) {
+    createMemoryObject(Dst, PTItem::MK_PLACEHOLDER);
+    return;
+  }
+  auto *SzNode = getNode(Inst->getArgOperand(SzIdx));
+  const auto &SzNodeVals = ensureSymbolicVals(SzNode);
+  if (SzNodeVals.empty()) {
+    createMemoryObject(Dst, PTItem::MK_PLACEHOLDER);
+    return;
+  }
+  auto SzVals = SzNodeVals * PropertyInteger(8);
   for (const auto &P : SzVals) {
     if (P.first < int64_t(0)) {
       continue;
@@ -609,21 +727,24 @@ void AnalysisState::handleMalloc(CallInst *Inst, unsigned SzIdx) {
 
 void AnalysisState::handleCalloc(CallInst *Inst, unsigned NumIdx,
                                  unsigned SzIdx) {
+  auto *Dst = getNode(Inst);
+  if (!Dst) {
+    return;
+  }
+  if (NumIdx >= Inst->arg_size() || SzIdx >= Inst->arg_size()) {
+    createMemoryObject(Dst, PTItem::MK_PLACEHOLDER);
+    return;
+  }
   auto *NumNode = getNode(Inst->getArgOperand(NumIdx));
   auto *SzNode = getNode(Inst->getArgOperand(SzIdx));
-  if (!Regs.count(NumNode)) {
-    initSymbol(NumNode);
-  }
-  if (!Regs.count(SzNode)) {
-    initSymbol(SzNode);
-  }
-  if (!Regs.count(NumNode) || !Regs.count(SzNode)) {
-    createMemoryObject(getNode(Inst), PTItem::MK_PLACEHOLDER);
+  const auto &NumVals = ensureSymbolicVals(NumNode);
+  const auto &SzNodeVals = ensureSymbolicVals(SzNode);
+  if (NumVals.empty() || SzNodeVals.empty()) {
+    createMemoryObject(Dst, PTItem::MK_PLACEHOLDER);
     return;
   }
 
-  auto SzVals = Regs.at(NumNode) * PropertyInteger(8) * Regs.at(SzNode);
-  auto *Dst = getNode(Inst);
+  auto SzVals = NumVals * PropertyInteger(8) * SzNodeVals;
   for (const auto &P : SzVals) {
     createMemoryObject(Dst, PTItem::MK_CONCRETE, P.first, P.second);
   }
@@ -637,6 +758,9 @@ void AnalysisState::processFreeCall(CallInst *Inst) {
 
   Value *Ptr = Inst->getArgOperand(0);
   auto *PtrNode = getNode(Ptr);
+  if (!PtrNode) {
+    return;
+  }
   Condition BBCond = getLocalCond(Inst->getParent());
 
   FreedPtrSet.addValue(PtrNode, BBCond);
@@ -665,45 +789,29 @@ void AnalysisState::processLibraryCall(CallInst *Inst) {
     Dst = getNode(Inst);
   }
 
-  auto GetRegsSafe = [&](GuardedValueFlowNode *Node) -> GuardedSymbolicValSet & {
-    if (!Node) {
-      return Regs[ProgramValuePtr()];
-    }
-    if (!Regs.count(Node)) {
-      initSymbol(Node);
-    }
-    if (!Regs.count(Node)) {
-      return Regs[ProgramValuePtr(Node)];
-    }
-    return Regs.at(Node);
-  };
-
   if (Callee->isIntrinsic()) {
     auto IntrinsicID = Callee->getIntrinsicID();
     if (IntrinsicID == Intrinsic::expect) {
-      if (Inst->arg_size() >= 1) {
+      if (Dst && Inst->arg_size() >= 1) {
         auto *Arg0 = getNode(Inst->getArgOperand(0));
-        if (!Regs.count(Arg0)) {
-          initSymbol(Arg0);
+        if (Arg0) {
+          Regs[Dst].setValues(ensureSymbolicVals(Arg0));
         }
-        Regs[Dst].setValues(GetRegsSafe(Arg0));
       }
     } else if (IntrinsicID == Intrinsic::umul_with_overflow) {
-      auto *Arg0 = getNode(Inst->getArgOperand(0));
-      auto *Arg1 = getNode(Inst->getArgOperand(1));
-      if (!Regs.count(Arg0)) {
-        initSymbol(Arg0);
-      }
-      if (!Regs.count(Arg1)) {
-        initSymbol(Arg1);
-      }
-      if (!Regs.count(Arg0) || !Regs.count(Arg1)) {
-        createMemoryObject(Dst, PTItem::MK_PLACEHOLDER);
-        return;
-      }
-      auto Res = GetRegsSafe(Arg0) * GetRegsSafe(Arg1);
-      if (!Res.empty()) {
-        Regs[Dst] = std::move(Res);
+      if (Dst && Inst->arg_size() >= 2) {
+        auto *Arg0 = getNode(Inst->getArgOperand(0));
+        auto *Arg1 = getNode(Inst->getArgOperand(1));
+        const auto &Vals0 = ensureSymbolicVals(Arg0);
+        const auto &Vals1 = ensureSymbolicVals(Arg1);
+        if (Vals0.empty() || Vals1.empty()) {
+          createMemoryObject(Dst, PTItem::MK_PLACEHOLDER);
+          return;
+        }
+        auto Res = Vals0 * Vals1;
+        if (!Res.empty()) {
+          Regs[Dst] = std::move(Res);
+        }
       }
     }
     return;
@@ -711,25 +819,33 @@ void AnalysisState::processLibraryCall(CallInst *Inst) {
 
   Condition BBCond = getLocalCond(Inst->getParent());
   auto HandleStringLen = [&](const ProgramValuePtr &Ptr, bool IsDirect) {
-    StrState.handleCStrLen(Ptr, Inst, BBCond, *this, IsDirect);
+    if (!Ptr.isVacuous()) {
+      StrState.handleCStrLen(Ptr, Inst, BBCond, *this, IsDirect);
+    }
   };
 
   const std::string CalleeName = Callee->getName().str();
   if (isMatchLib(Inst, CalleeName, "strlen")) {
-    HandleStringLen(getNode(Inst->getArgOperand(0)), true);
+    if (Inst->arg_size() >= 1) {
+      HandleStringLen(getNode(Inst->getArgOperand(0)), true);
+    }
     return;
   }
 
   if (isMatchLib(Inst, CalleeName, "puts")) {
-    HandleStringLen(getNode(Inst->getArgOperand(0)), false);
+    if (Inst->arg_size() >= 1) {
+      HandleStringLen(getNode(Inst->getArgOperand(0)), false);
+    }
     return;
   }
 
   if (isMatchLib(Inst, CalleeName, "strcpy") ||
       isMatchLib(Inst, CalleeName, "strcat") ||
       isMatchLib(Inst, CalleeName, "strncat")) {
-    HandleStringLen(getNode(Inst->getArgOperand(0)), false);
-    HandleStringLen(getNode(Inst->getArgOperand(1)), false);
+    if (Inst->arg_size() >= 2) {
+      HandleStringLen(getNode(Inst->getArgOperand(0)), false);
+      HandleStringLen(getNode(Inst->getArgOperand(1)), false);
+    }
     return;
   }
 
@@ -747,40 +863,60 @@ void AnalysisState::processAsUnknownLib(CallInst *Inst) {
       if (ArgTy->getPointerElementType()->isAggregateType()) {
         continue;
       }
-      initPointsToTarget(getNode(Arg), Inst);
+      if (auto *ArgNode = getNode(Arg)) {
+        initPointsToTarget(ArgNode, Inst);
+      }
     }
   }
 
   if (Inst->getType()->isPointerTy()) {
-    initPointsToTarget(getNode(Inst), Inst);
+    if (auto *InstNode = getNode(Inst)) {
+      initPointsToTarget(InstNode, Inst);
+    }
   }
 }
 
 Condition AnalysisState::getLocalCond(BasicBlock *BB) const {
+  if (!BB) {
+    return Condition::getTrueCond();
+  }
   auto It = LocalCondMap.find(BB);
   if (It != LocalCondMap.end()) {
     return It->second;
   }
 
-  Condition BBCond(Solver->getCtrlDeps(BB, Graph), Solver.get());
+  if (Graph && Graph->getBlockConditions(BB).empty()) {
+    LocalCondMap.emplace(BB, Condition::getTrueCond());
+    return Condition::getTrueCond();
+  }
+
+  PathCondSolver *S = getSolver();
+  Condition BBCond(S->getCtrlDeps(BB, Graph), S);
   BBCond = BBCond && getCallSiteOutDeps();
   LocalCondMap.emplace(BB, BBCond);
   return BBCond;
 }
 
 Condition AnalysisState::getDataDepsCond(GuardedValueFlowNode *N) const {
+  if (!N) {
+    return Condition::getTrueCond();
+  }
   auto It = DataDepsCondMap.find(N);
   if (It != DataDepsCondMap.end()) {
     return It->second;
   }
 
-  Condition CurDeps(Solver->getDataDeps(N), Solver.get());
+  PathCondSolver *S = getSolver();
+  Condition CurDeps(S->getDataDeps(N), S);
   CurDeps = CurDeps && getCallSiteOutDeps();
   DataDepsCondMap.emplace(N, CurDeps);
   return CurDeps;
 }
 
 Condition AnalysisState::getCallSiteOutDeps() const {
+  if (!Solver) {
+    return Condition::getTrueCond();
+  }
   auto UsedCSOuts = Solver->getUsedCallSiteOutput();
   Condition ResCond = Condition::getTrueCond();
   for (auto *CSO : UsedCSOuts) {
@@ -790,9 +926,10 @@ Condition AnalysisState::getCallSiteOutDeps() const {
       continue;
     }
 
-    if (Regs.count(CSO)) {
+    auto RegIt = Regs.find(CSO);
+    if (RegIt != Regs.end()) {
       Condition CurCond(
-          buildVarEqValues(CSO, Solver->getExpr(Var(CSO)), Regs.at(CSO)),
+          buildVarEqValues(CSO, Solver->getExpr(Var(CSO)), RegIt->second),
           Solver.get());
       CSOutputCondMap.emplace(CSO, CurCond);
       ResCond = ResCond && CurCond;
@@ -802,6 +939,9 @@ Condition AnalysisState::getCallSiteOutDeps() const {
 }
 
 Condition AnalysisState::getRegionCond(GuardedValueFlowRegionNode *R) const {
+  if (!R || R->isAlwaysTrue()) {
+    return Condition::getTrueCond();
+  }
   auto It = RegionCondMap.find(R);
   if (It != RegionCondMap.end()) {
     return It->second;
@@ -816,22 +956,38 @@ Condition AnalysisState::getRegionCond(GuardedValueFlowRegionNode *R) const {
 Condition AnalysisState::getPhiCond(
     const GuardedValueFlowPhiNode *PhiNode,
     const GuardedValueFlowPhiNode::Incoming InNode) const {
-  auto PhiCond = Solver->getPhiGated(PhiNode, InNode);
-  Condition ResCond(PhiCond, Solver.get());
+  if (!PhiNode || !InNode.incoming_block || !InNode.value_node) {
+    return Condition::getTrueCond();
+  }
+  PathCondSolver *S = getSolver();
+  auto PhiCond = S->getPhiGated(PhiNode, InNode);
+  Condition ResCond(PhiCond, S);
   return ResCond && getCallSiteOutDeps();
 }
 
 GuardedSymbolicValSet AnalysisState::inlineExpr(const PropertyValuePtr &E,
                                                 Instruction *CS) const {
-  if (IsaProperty<PropertyInteger>(E)) {
-    return E;
+  if (!E || IsaProperty<PropertyInteger>(E)) {
+    return E ? GuardedSymbolicValSet(E) : GuardedSymbolicValSet();
   }
 
-  if (InlineExprCache.count(E) && InlineExprCache.at(E).count(CS)) {
-    return InlineExprCache.at(E).at(CS);
+  auto CacheIt = InlineExprCache.find(E);
+  if (CacheIt != InlineExprCache.end()) {
+    auto CSIt = CacheIt->second.find(CS);
+    if (CSIt != CacheIt->second.end()) {
+      return CSIt->second;
+    }
   }
 
-  auto Res = evalExpr(E, FormalToRealSymValsMap.at(CS), CS);
+  auto MapIt = FormalToRealSymValsMap.find(CS);
+  if (MapIt == FormalToRealSymValsMap.end()) {
+    static const std::unordered_map<ProgramValuePtr, GuardedSymbolicValSet> EmptyM;
+    auto Res = evalExpr(E, EmptyM, CS);
+    InlineExprCache[E][CS] = Res;
+    return Res;
+  }
+
+  auto Res = evalExpr(E, MapIt->second, CS);
   InlineExprCache[E][CS] = Res;
   return Res;
 }
@@ -879,7 +1035,7 @@ GuardedSymbolicValSet AnalysisState::evalExpr(
   } else {
     std::string Suffix = CS ? getCallsiteSuffix(CS) : std::string();
     Result.addValues(
-        GuardedSymbolicValSet::seqAdd(Seq, Solver.get(), true, Suffix) +
+        GuardedSymbolicValSet::seqAdd(Seq, getSolver(), true, Suffix) +
         Residual);
   }
 
@@ -893,11 +1049,15 @@ std::string AnalysisState::getCallsiteSuffix(Instruction *CS) const {
 SMTExpr
 AnalysisState::buildVarEqValues(const ProgramValuePtr &V, SMTExpr VExpr,
                                 const GuardedSymbolicValSet &SymVals) const {
+  PathCondSolver *S = getSolver();
+  if (!VExpr.isBitVector() || VExpr.getBitVecSize() == 0) {
+    return S->buildBoolVal(true);
+  }
   auto LSz = VExpr.getBitVecSize();
-  SMTExprVec ValVec = Solver->createEmptySMTExprVec();
+  SMTExprVec ValVec = S->createEmptySMTExprVec();
 
   SymVals.forEach([&](const PropertyValuePtr &Val, const Condition &ValCond) {
-    if (ValCond.isFalse()) {
+    if (ValCond.isFalse() || !Val) {
       return;
     }
 
@@ -908,24 +1068,27 @@ AnalysisState::buildVarEqValues(const ProgramValuePtr &V, SMTExpr VExpr,
     }
 
     SMTExpr ValCondExpr =
-        ValCond.isTrue() ? Solver->buildBoolVal(true) : ValCond.getSMTConstr();
-    SMTExpr ValExpr = Solver->buildExprForVal(Val.get());
-    assert(ValExpr.isBitVector());
+        ValCond.isTrue() ? S->buildBoolVal(true) : ValCond.getSMTConstr();
+    SMTExpr ValExpr = S->buildExprForVal(Val.get());
+    if (!ValExpr.isBitVector() || ValExpr.getBitVecSize() == 0) {
+      return;
+    }
 
     unsigned RSz = ValExpr.getBitVecSize();
     if (LSz == RSz) {
       ValVec.push_back((VExpr == ValExpr) && ValCondExpr);
     } else if (LSz > RSz) {
       auto Temp = ValExpr.basic_sext(LSz - RSz);
-      assert(Temp.getBitVecSize() == LSz);
       ValVec.push_back((VExpr == Temp) && ValCondExpr);
     } else {
       auto Temp = ValExpr.basic_extract(LSz - 1, 0);
-      assert(Temp.getBitVecSize() == LSz);
       ValVec.push_back((VExpr == Temp) && ValCondExpr);
     }
   });
 
+  if (ValVec.empty()) {
+    return S->buildBoolVal(true);
+  }
   return ValVec.toOrExpr();
 }
 
@@ -936,12 +1099,19 @@ Condition AnalysisState::getMappingCond(Instruction *CS,
     return It->second;
   }
 
+  auto RenameIt = SMTRenameCtxMap.find(Callee);
+  if (RenameIt == SMTRenameCtxMap.end()) {
+    return Condition::getTrueCond();
+  }
+
+  PathCondSolver *S = getSolver();
   std::string CSSuffix = getCallsiteSuffix(CS);
-  SMTExprVec Vec = Solver->createEmptySMTExprVec();
+  SMTExprVec Vec = S->createEmptySMTExprVec();
   std::vector<Condition> RealDataDeps;
 
   bool IsComplete = true;
-  for (const auto &Iter : SMTRenameCtxMap.at(Callee)) {
+  auto SymValsCSIt = FormalToRealSymValsMap.find(CS);
+  for (const auto &Iter : RenameIt->second) {
     if (!Iter.second.hasRealExpr(CS)) {
       IsComplete = false;
       continue;
@@ -949,8 +1119,12 @@ Condition AnalysisState::getMappingCond(Instruction *CS,
 
     ProgramValuePtr Formal(Iter.first);
     SMTExpr FormalExpr =
-        Solver->renameExpr(Iter.second.getFormalExpr(), CSSuffix);
+        S->renameExpr(Iter.second.getFormalExpr(), CSSuffix);
 
+    if (!hasFormal(CS, Formal)) {
+      IsComplete = false;
+      continue;
+    }
     ProgramValuePtr Real = getRealForFormal(CS, Formal);
     SMTExpr RealExpr = Iter.second.getRealExpr(CS);
 
@@ -961,14 +1135,18 @@ Condition AnalysisState::getMappingCond(Instruction *CS,
           Real.getAs<GuardedValueFlowNodeValue>()->getNode()) {
         RealDataDeps.emplace_back(getDataDepsCond(
             Real.getAs<GuardedValueFlowNodeValue>()->getNode()));
-      } else {
-        const auto &RealSymVals = FormalToRealSymValsMap.at(CS).at(Formal);
-        Vec.push_back(buildVarEqValues(Real, RealExpr, RealSymVals));
+      } else if (SymValsCSIt != FormalToRealSymValsMap.end()) {
+        auto FormalSymIt = SymValsCSIt->second.find(Formal);
+        if (FormalSymIt != SymValsCSIt->second.end()) {
+          Vec.push_back(buildVarEqValues(Real, RealExpr, FormalSymIt->second));
+        }
       }
     }
   }
 
-  Condition ResCond(Vec.toAndExpr(), Solver.get());
+  Condition ResCond = Vec.empty()
+                          ? Condition::getTrueCond()
+                          : Condition(Vec.toAndExpr(), S);
   for (const auto &DepsCond : RealDataDeps) {
     ResCond = ResCond && DepsCond;
   }
@@ -1006,13 +1184,20 @@ bool AnalysisState::isInstUnmodelled(Instruction *Inst) const {
 }
 
 bool AnalysisState::mustBeConstantInt(const ProgramValuePtr &V) const {
+  if (V.isVacuous()) {
+    return false;
+  }
   if (V.isa<GuardedValueFlowNodeValue>() &&
-      isa<ConstantPointerNull>(V.getLLVMVal())) {
+      isa_and_nonnull<ConstantPointerNull>(V.getLLVMVal())) {
     return false;
   }
 
   if (!hasPts(V)) {
-    for (const auto &Pair : getSymbolicVals(V)) {
+    const auto &Vals = getSymbolicVals(V);
+    if (Vals.empty()) {
+      return false;
+    }
+    for (const auto &Pair : Vals) {
       if (!IsaProperty<PropertyInteger>(Pair.first)) {
         return false;
       }
@@ -1025,7 +1210,8 @@ bool AnalysisState::mustBeConstantInt(const ProgramValuePtr &V) const {
 bool SymbolicExecution::isPseudoArgVal(const ProgramValuePtr &V) {
   if (V.isa<GuardedValueFlowNodeValue>()) {
     auto *NV = V.getAs<GuardedValueFlowNodeValue>();
-    return isa<lotus::gvfg::GuardedValueFlowArgumentNode>(NV->getNode());
+    return isa_and_nonnull<lotus::gvfg::GuardedValueFlowArgumentNode>(
+        NV->getNode());
   }
   return false;
 }

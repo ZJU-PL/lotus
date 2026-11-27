@@ -253,11 +253,14 @@ PropertySymExpr::mapWithDefault(const std::unordered_map<Var, Var> &M,
 }
 
 size_t PropertySymExpr::hash() const {
-  std::vector<size_t> Hashes;
+  size_t Seed = 0;
+  auto Mix = [&Seed](size_t Val) {
+    Seed ^= Val + 0x9e3779b97f4a7c15ULL + (Seed << 6) + (Seed >> 2);
+  };
   for (const auto &Entry : coeffs) {
-    Hashes.push_back(std::hash<Var>()(Entry.first));
-    Hashes.push_back(llvm::hash_value(Entry.second.getVal()));
+    Mix(std::hash<Var>()(Entry.first));
+    Mix(llvm::hash_value(Entry.second.getVal()));
   }
-  Hashes.push_back(llvm::hash_value(offsets.getVal()));
-  return hashCombine(Hashes);
+  Mix(llvm::hash_value(offsets.getVal()));
+  return Seed;
 }

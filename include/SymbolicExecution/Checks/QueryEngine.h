@@ -81,7 +81,8 @@ private:
   bool tryReportQuery(const NumericalQueryPtr &QPtr, const Condition &QDepCond,
                       llvm::Function *SinkFun,
                       const std::vector<TraceStep> &Trace,
-                      const AnalysisState &State);
+                      const AnalysisState &State,
+                      bool KnownContextAndQuerySat = false);
   void dischargeQueries(const AnalysisState &State);
 
   // Memory safety check builders (MemoryChecks.cpp)

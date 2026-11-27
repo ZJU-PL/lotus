@@ -20,22 +20,62 @@ SMTCondition::SMTCondition(bool V) {
 }
 
 SMTCondition::SMTCondition(GuardedValueFlowRegionNode *Cond,
-                           PathCondSolver *Solver)
-    : Lit(-1), Constr(new SMTExpr(Solver->buildRegionCondition(Cond))),
-      Solver(Solver) {
+                           PathCondSolver *Solver) {
+  if (Cond && Cond->isAlwaysTrue()) {
+    Lit = 1;
+    Index = -1;
+    return;
+  }
+  SMTExpr Built = Solver->buildRegionCondition(Cond);
+  if (Built.isApp() && Built.isTrue()) {
+    Lit = 1;
+    Index = -1;
+    return;
+  }
+  if (Built.isApp() && Built.isFalse()) {
+    Lit = 0;
+    Index = -2;
+    return;
+  }
+  Lit = -1;
+  Constr = std::make_unique<SMTExpr>(std::move(Built));
+  this->Solver = Solver;
   Index = ((uint64_t)(Solver->getID()) << 32) | this->Constr->getAstId();
 }
 
-SMTCondition::SMTCondition(const SMTExpr &Constr, PathCondSolver *Solver)
-    : Lit(-1), Constr(new SMTExpr(Constr)), Solver(Solver) {
+SMTCondition::SMTCondition(const SMTExpr &Constr, PathCondSolver *Solver) {
+  if (Constr.isApp() && Constr.isTrue()) {
+    Lit = 1;
+    Index = -1;
+    return;
+  }
+  if (Constr.isApp() && Constr.isFalse()) {
+    Lit = 0;
+    Index = -2;
+    return;
+  }
+  Lit = -1;
+  this->Constr = std::make_unique<SMTExpr>(Constr);
+  this->Solver = Solver;
   Index = ((uint64_t)(Solver->getID()) << 32) | this->Constr->getAstId();
 }
 
 SMTCondition::SMTCondition(PropertyValuePtr L, PropertyValuePtr R,
-                           CmpInst::Predicate Pred, PathCondSolver *Solver)
-    : Lit(-1),
-      Constr(new SMTExpr(Solver->buildPredicate(L.get(), R.get(), Pred))),
-      Solver(Solver) {
+                           CmpInst::Predicate Pred, PathCondSolver *Solver) {
+  SMTExpr Built = Solver->buildPredicate(L.get(), R.get(), Pred);
+  if (Built.isApp() && Built.isTrue()) {
+    Lit = 1;
+    Index = -1;
+    return;
+  }
+  if (Built.isApp() && Built.isFalse()) {
+    Lit = 0;
+    Index = -2;
+    return;
+  }
+  Lit = -1;
+  Constr = std::make_unique<SMTExpr>(std::move(Built));
+  this->Solver = Solver;
   Index = ((uint64_t)(Solver->getID()) << 32) | this->Constr->getAstId();
 }
 

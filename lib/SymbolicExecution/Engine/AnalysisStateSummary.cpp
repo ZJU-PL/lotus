@@ -17,8 +17,10 @@ using namespace llvm;
 using namespace SymbolicExecution;
 
 void AnalysisState::finalizeSummary() {
-  processReturn();
-  buildTaintSummary();
+  if (NeedsSummary) {
+    processReturn();
+    buildTaintSummary();
+  }
   if (Ext) {
     FinalizedExt = Ext->finalizeSummary(*this);
   }
@@ -26,10 +28,13 @@ void AnalysisState::finalizeSummary() {
 
 void AnalysisState::processCall(CallInst *Inst, Function *Callee,
                                 const AnalysisSummary &Smry) {
-  initializeFormalToRealMap(Inst, Smry);
-
   auto *GraphCS = Graph->findSite<GuardedValueFlowCallSite>(Inst);
   auto *CalleeGraph = Smry.getGraph();
+  if (!GraphCS || !CalleeGraph) {
+    return;
+  }
+
+  initializeFormalToRealMap(Inst, Smry);
 
   addFormalToRealArgMap(GraphCS, Callee, Smry);
   addFormalToRealLenMap(GraphCS, Callee, Smry);
@@ -39,26 +44,33 @@ void AnalysisState::processCall(CallInst *Inst, Function *Callee,
             EIter = GraphCS->input_end(Callee);
        Iter != EIter; ++Iter) {
     auto *InputNode = (*Iter).InputNode;
+    if (!InputNode) {
+      continue;
+    }
     if ((*Iter).IsCommonInput) {
       initSymbol(InputNode);
       continue;
     }
 
-    assert(isa<GuardedValueFlowCallOutputNode>(InputNode));
-    assert(InputNode->getNumChildren() == 1);
+    auto *CallOutInput = dyn_cast<GuardedValueFlowCallOutputNode>(InputNode);
+    if (!CallOutInput || InputNode->getNumChildren() < 1) {
+      initSymbol(InputNode);
+      continue;
+    }
 
-    auto *LdMemNode = cast<GuardedValueFlowNode>(InputNode->getChild(0));
+    auto *LdMemNode =
+        dyn_cast_or_null<GuardedValueFlowNode>(InputNode->getChild(0));
     ProgramValuePtr BasePtr;
-    auto *LdPtr = cast<GuardedValueFlowCallOutputNode>(InputNode)
-                      ->getAccessPath()
-                      .get_base_ptr();
+    auto *LdPtr = CallOutInput->getAccessPath().get_base_ptr();
 
-    auto *LdPtrNode = CalleeGraph->findNode(LdPtr);
+    auto *LdPtrNode = LdPtr ? CalleeGraph->findNode(LdPtr) : nullptr;
     if (LdPtrNode && hasFormal(Inst, LdPtrNode)) {
       BasePtr = getRealForFormal(Inst, LdPtrNode);
     }
 
-    processLoadPtr(BasePtr, LdMemNode, InputNode, Inst);
+    if (LdMemNode) {
+      processLoadPtr(BasePtr, LdMemNode, InputNode, Inst);
+    }
     initSymbol(InputNode);
   }
 
@@ -75,8 +87,11 @@ void AnalysisState::processCall(CallInst *Inst, Function *Callee,
     initSymbol(Real);
     addFormalToRealValues(GraphCS, Callee, Formal, Real);
 
-    assert(EscapeInfo.count(Formal));
-    auto AccSizes = inlineVals(EscapeInfo.at(Formal), Inst, Callee, CSCond);
+    auto EscIt = EscapeInfo.find(Formal);
+    if (EscIt == EscapeInfo.end()) {
+      continue;
+    }
+    auto AccSizes = inlineVals(EscIt->second, Inst, Callee, CSCond);
     AccSizes.forEach([&](const PropertyValuePtr &Sz, const Condition &C) {
       createMemoryObject(Real, PTItem::MK_CONCRETE, Sz, C);
     });
@@ -91,15 +106,20 @@ void AnalysisState::processCall(CallInst *Inst, Function *Callee,
     auto *RetNode = *Iter;
     const GuardedValueFlowNode *OutNode = nullptr;
     if (RetNode->getKind() == GuardedValueFlowNode::Kind::CommonReturn) {
-      OutNode = getNode(Inst);
+      if (!Inst->getType()->isVoidTy()) {
+        OutNode = getNode(Inst);
+      }
     } else {
       OutNode = GraphCS->getPseudoOutput(
           Callee, cast<GuardedValueFlowReturnNode>(RetNode)->getIndex());
     }
+    if (!OutNode) {
+      continue;
+    }
 
-    if (SmryOutputPts.count(RetNode)) {
-      const auto &RetPts = SmryOutputPts.at(RetNode);
-      auto InlinedPts = inlineVals(RetPts, Inst, Callee, CSCond).first;
+    auto PtsIt = SmryOutputPts.find(RetNode);
+    if (PtsIt != SmryOutputPts.end()) {
+      auto InlinedPts = inlineVals(PtsIt->second, Inst, Callee, CSCond).first;
       setPts(OutNode, InlinedPts);
     }
   }
@@ -115,15 +135,25 @@ void AnalysisState::processCall(CallInst *Inst, Function *Callee,
     auto *RetNode = *Iter;
     const GuardedValueFlowNode *OutNode = nullptr;
     if (RetNode->getKind() == GuardedValueFlowNode::Kind::CommonReturn) {
-      OutNode = getNode(Inst);
+      if (!Inst->getType()->isVoidTy()) {
+        OutNode = getNode(Inst);
+      }
     } else {
       OutNode = GraphCS->getPseudoOutput(
           Callee, cast<GuardedValueFlowReturnNode>(RetNode)->getIndex());
     }
+    if (!OutNode) {
+      continue;
+    }
 
-    const auto &RetVals = RetSymbolicValMap.at(RetNode);
+    auto RetIt = RetSymbolicValMap.find(RetNode);
+    if (RetIt == RetSymbolicValMap.end()) {
+      initSymbol(OutNode);
+      continue;
+    }
+
     GuardedSymbolicValSet InlinedVals =
-        inlineVals(RetVals, Inst, Callee, CSCond);
+        inlineVals(RetIt->second, Inst, Callee, CSCond);
 
     if (InlinedVals.empty()) {
       auto ReceiverVal = GetProperty<PropertySymExpr>(Var(OutNode));
@@ -196,7 +226,9 @@ void AnalysisState::addFormalToRealArgMap(GuardedValueFlowCallSite *GraphCS,
       }
     } else {
       auto Index = (*Iter).InputIndex;
-      assert(Index < CalleeGraph->getNumPseudoArgument());
+      if (Index >= CalleeGraph->getNumPseudoArgument()) {
+        continue;
+      }
       ProgramValuePtr Formal(CalleeGraph->getPseudoArgument(Index));
       FormalToRealArgMap[CS].insert(std::make_pair(Formal, InputNode));
       FormalToRealMap[CS].insert(std::make_pair(Formal, InputNode));
@@ -208,6 +240,9 @@ void AnalysisState::addFormalToRealValues(GuardedValueFlowCallSite *GraphCS,
                                           Function *Callee,
                                           const ProgramValuePtr &Formal,
                                           const ProgramValuePtr &Real) {
+  if (!GraphCS || Formal.isVacuous() || Real.isVacuous()) {
+    return;
+  }
   auto *CS = GraphCS->getInstruction();
   auto &FormalToRealSymM = FormalToRealSymValsMap[CS];
   auto &SMTMap = SMTRenameCtxMap[Callee];
@@ -216,33 +251,35 @@ void AnalysisState::addFormalToRealValues(GuardedValueFlowCallSite *GraphCS,
   if (Real.isConstant()) {
     RealSyms.addValue(GetProperty<PropertyInteger>(Real.getAsConstant()));
   } else {
-    assert(Regs.count(Real));
-    RealSyms.addValues(Regs.at(Real));
+    RealSyms.addValues(ensureSymbolicVals(Real));
   }
   FormalToRealSymM[Formal].addValues(RealSyms);
 
-  if (!SMTMap.count(Formal)) {
-    auto LE = Solver->getExpr(Var(Formal));
-    assert(LE.isBitVector());
-    assert(LE.getBitVecSize());
-    SMTMap.insert(std::make_pair(Formal, RenameCtx(LE)));
+  PathCondSolver *S = getSolver();
+  auto RenameIt = SMTMap.find(Formal);
+  if (RenameIt == SMTMap.end()) {
+    auto LE = S->getExpr(Var(Formal));
+    if (!LE.isBitVector() || LE.getBitVecSize() == 0) {
+      return;
+    }
+    RenameIt = SMTMap.insert(std::make_pair(Formal, RenameCtx(LE))).first;
   }
 
-  auto &Rename = SMTMap.at(Formal);
+  auto &Rename = RenameIt->second;
   unsigned LSz = Rename.getFormalExpr().getBitVecSize();
-  SMTExpr RE = Solver->getExpr(Var(Real));
-  assert(RE.isBitVector());
+  SMTExpr RE = S->getExpr(Var(Real));
+  if (!RE.isBitVector() || RE.getBitVecSize() == 0) {
+    return;
+  }
 
   unsigned RSz = RE.getBitVecSize();
   if (LSz == RSz) {
     Rename.add(CS, RE);
   } else if (LSz > RSz) {
     auto Temp = RE.basic_sext(LSz - RSz);
-    assert(Temp.getBitVecSize() == LSz);
     Rename.add(CS, Temp);
   } else {
     auto Temp = RE.basic_extract(LSz - 1, 0);
-    assert(Temp.getBitVecSize() == LSz);
     Rename.add(CS, Temp);
   }
 }

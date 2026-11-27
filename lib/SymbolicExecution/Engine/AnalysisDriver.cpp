@@ -10,15 +10,16 @@
 #include "SymbolicExecution/Support/AnalysisLimit.h"
 #include "Utils/Parallel/ThreadPool.h"
 
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cassert>
-#include <deque>
 #include <numeric>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace llvm;
@@ -27,43 +28,13 @@ using namespace SymbolicExecution;
 namespace {
 
 void topsortCFG(std::vector<BasicBlock *> &Sorted, Function *F) {
-  if (!F)
+  if (!F || F->empty())
     return;
 
-  std::unordered_map<BasicBlock *, unsigned> Indegree;
-  std::deque<BasicBlock *> Worklist;
-
-  for (BasicBlock &BB : *F) {
-    unsigned Count = 0;
-    for (auto PI = pred_begin(&BB), PE = pred_end(&BB); PI != PE; ++PI)
-      ++Count;
-    Indegree[&BB] = Count;
-  }
-
-  for (BasicBlock &BB : *F) {
-    if (Indegree[&BB] == 0)
-      Worklist.push_back(&BB);
-  }
-
-  while (!Worklist.empty()) {
-    BasicBlock *BB = Worklist.front();
-    Worklist.pop_front();
+  ReversePostOrderTraversal<Function *> RPOT(F);
+  Sorted.reserve(F->size());
+  for (BasicBlock *BB : RPOT) {
     Sorted.push_back(BB);
-
-    for (BasicBlock *Succ : successors(BB)) {
-      auto It = Indegree.find(Succ);
-      if (It == Indegree.end())
-        continue;
-      if (It->second > 0)
-        --It->second;
-      if (It->second == 0)
-        Worklist.push_back(Succ);
-    }
-  }
-
-  for (BasicBlock &BB : *F) {
-    if (std::find(Sorted.begin(), Sorted.end(), &BB) == Sorted.end())
-      Sorted.push_back(&BB);
   }
 }
 
@@ -150,6 +121,45 @@ void AnalysisDriver::runOnModule(Module *M) {
         return Fun->isDeclaration() ? Sum : Sum + 1;
       });
 
+  // Track exact downstream summary consumers so completed callee summaries and
+  // their Z3 solver contexts can be reclaimed as soon as all later callers
+  // finish, preserving identical interprocedural behavior with bounded memory.
+  std::vector<Function *> OrderedFuncs;
+  OrderedFuncs.reserve(FuncSeq.size());
+  std::unordered_map<Function *, size_t> FuncOrderIdx;
+  for (auto Iter = FuncSeq.rbegin(), EIter = FuncSeq.rend(); Iter != EIter;
+       ++Iter) {
+    Function *CurFunc = *Iter;
+    auto *Graph = Ctx.getGraph(CurFunc);
+    if (!Graph)
+      continue;
+    if (Ctx.getFunctionDepth(CurFunc) <= AnalysisLimit::FUNC_INLINE_LIMIT_V) {
+      FuncOrderIdx.emplace(CurFunc, OrderedFuncs.size());
+      OrderedFuncs.push_back(CurFunc);
+    }
+  }
+
+  std::unordered_map<Function *, std::vector<Function *>> LaterCallees;
+  std::unordered_map<Function *, unsigned> RemainingConsumers;
+  for (size_t CallerIdx = 0; CallerIdx < OrderedFuncs.size(); ++CallerIdx) {
+    Function *Caller = OrderedFuncs[CallerIdx];
+    std::unordered_set<Function *> SeenCallees;
+    for (BasicBlock &BB : *Caller) {
+      for (Instruction &I : BB) {
+        if (!isa<CallInst>(&I))
+          continue;
+        Function *Callee = getCallee(&I);
+        if (!Callee || Callee == Caller || !SeenCallees.insert(Callee).second)
+          continue;
+        auto It = FuncOrderIdx.find(Callee);
+        if (It != FuncOrderIdx.end() && It->second < CallerIdx) {
+          LaterCallees[Caller].push_back(Callee);
+          ++RemainingConsumers[Callee];
+        }
+      }
+    }
+  }
+
   llvm::errs() << "[Progress] Start ... " << NumRemain << "functions to run!\n";
   for (auto Iter = FuncSeq.rbegin(), EIter = FuncSeq.rend(); Iter != EIter;
        ++Iter) {
@@ -166,7 +176,22 @@ void AnalysisDriver::runOnModule(Module *M) {
     } else {
       llvm::errs() << "Running on " << CurFunc->getName()
                    << "(depth=" << FunDepth << ")\n";
-      runOnFunction(Graph);
+      auto ConsIt = RemainingConsumers.find(CurFunc);
+      const bool NeedsSummary =
+          (ConsIt != RemainingConsumers.end() && ConsIt->second > 0);
+      runOnFunction(Graph, NeedsSummary);
+
+      auto CalleeIt = LaterCallees.find(CurFunc);
+      if (CalleeIt != LaterCallees.end()) {
+        for (Function *Callee : CalleeIt->second) {
+          auto RemIt = RemainingConsumers.find(Callee);
+          if (RemIt != RemainingConsumers.end() && RemIt->second > 0) {
+            if (--RemIt->second == 0) {
+              releaseMemForFunction(Callee);
+            }
+          }
+        }
+      }
     }
 
     llvm::errs() << "[Progress] " << --NumRemain << "functions remains!\n";
@@ -199,15 +224,20 @@ void AnalysisDriver::releaseMemForFunction(Function *F) {
 
   if (Smry->isSolverShared()) {
     auto *Solver = Smry->getSmrySolver();
-    std::lock_guard<std::mutex> Lock2(Solver->getSolverLock());
-    AnalysisRes.erase(F);
+    if (Solver) {
+      std::lock_guard<std::mutex> Lock2(Solver->getSolverLock());
+      AnalysisRes.erase(F);
+    } else {
+      AnalysisRes.erase(F);
+    }
   } else {
     AnalysisRes.erase(F);
     SolverMgr.releaseFuncSolver(F);
   }
 }
 
-void AnalysisDriver::runOnFunction(GuardedValueFlowGraph *Graph) {
+void AnalysisDriver::runOnFunction(GuardedValueFlowGraph *Graph,
+                                   bool NeedsSummary) {
   Function *F = Graph->getBaseFunction();
 
   if (AllocatorAPI::get(F)) {
@@ -221,7 +251,7 @@ void AnalysisDriver::runOnFunction(GuardedValueFlowGraph *Graph) {
   }
 
   std::unique_ptr<StateExtension> Ext = ExtFactory ? ExtFactory(F) : nullptr;
-  AnalysisState State(Ctx, TaintSpec, Graph, F, Ext.get());
+  AnalysisState State(Ctx, TaintSpec, Graph, F, Ext.get(), NeedsSummary);
   for (auto *BB : TopBBs) {
     for (Instruction &I : *BB) {
       State.transfer(&I, *this);
@@ -229,5 +259,8 @@ void AnalysisDriver::runOnFunction(GuardedValueFlowGraph *Graph) {
   }
 
   State.finalizeSummary();
-  addSummary(F, AnalysisSummary(std::move(State), SolverMgr));
+  Ext.reset();
+  if (NeedsSummary) {
+    addSummary(F, AnalysisSummary(std::move(State), SolverMgr));
+  }
 }

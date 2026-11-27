@@ -52,7 +52,7 @@ class AnalysisState {
 public:
   AnalysisState(const AnalysisContext &Ctx, const TaintModel &TaintSpec,
                 GuardedValueFlowGraph *Graph, llvm::Function *Func,
-                StateExtension *Ext = nullptr);
+                StateExtension *Ext = nullptr, bool NeedsSummary = true);
 
   void transfer(llvm::Instruction *Inst, AnalysisDriver &Driver);
   void finalizeSummary();
@@ -61,22 +61,37 @@ public:
   const AnalysisContext &getContext() const { return Ctx; }
   llvm::Function *getFunc() const { return F; }
   GuardedValueFlowGraph *getGraph() const { return Graph; }
-  PathCondSolver *getSolver() const { return Solver.get(); }
+  bool hasSolver() const { return Solver != nullptr; }
+  PathCondSolver *getSolver() const {
+    if (!Solver) {
+      Solver = std::make_unique<PathCondSolver>(*Ctx.getDataLayout());
+    }
+    return Solver.get();
+  }
+  bool needsSummary() const { return NeedsSummary; }
 
   GuardedValueFlowNode *getNode(llvm::Value *V) const;
 
   bool hasSymbolicVals(const ProgramValuePtr &V) const {
-    return Regs.count(V) != 0;
+    return !V.isVacuous() && Regs.count(V) != 0;
   }
   const GuardedSymbolicValSet &getSymbolicVals(const ProgramValuePtr &V) const {
-    return Regs.at(V);
+    static const GuardedSymbolicValSet Empty;
+    if (V.isVacuous())
+      return Empty;
+    auto It = Regs.find(V);
+    return It != Regs.end() ? It->second : Empty;
   }
 
   bool hasPts(const ProgramValuePtr &Ptr) const {
-    return PointsTo.count(Ptr) != 0;
+    return !Ptr.isVacuous() && PointsTo.count(Ptr) != 0;
   }
   const PtsSet &getPts(const ProgramValuePtr &Ptr) const {
-    return PointsTo.at(Ptr);
+    static const PtsSet Empty;
+    if (Ptr.isVacuous())
+      return Empty;
+    auto It = PointsTo.find(Ptr);
+    return It != PointsTo.end() ? It->second : Empty;
   }
 
   const TaintValSet &getTaintedVals() const { return TaintedVals; }
@@ -142,7 +157,8 @@ private:
   GuardedValueFlowGraph *Graph = nullptr;
   llvm::Function *F = nullptr;
   StateExtension *Ext = nullptr;
-  std::unique_ptr<PathCondSolver> Solver;
+  bool NeedsSummary = true;
+  mutable std::unique_ptr<PathCondSolver> Solver;
   llvm::ReturnInst *RetI = nullptr;
   mutable size_t FreeVarID = 0;
 
@@ -297,6 +313,7 @@ private:
   }
   void addUnknownSym(const ProgramValuePtr &V) { UnknownSyms.insert(V); }
   void initSymbol(const ProgramValuePtr &V);
+  const GuardedSymbolicValSet &ensureSymbolicVals(const ProgramValuePtr &V);
 
   Condition getCallSiteOutDeps() const;
   Condition getRegionCond(GuardedValueFlowRegionNode *R) const;

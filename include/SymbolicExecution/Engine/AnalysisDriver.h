@@ -31,7 +31,7 @@ public:
   AnalysisDriver(AnalysisContext &Ctx, const TaintModel &TaintSpec,
                  ExtensionFactory ExtFactory = nullptr);
 
-  void runOnFunction(GuardedValueFlowGraph *Graph);
+  void runOnFunction(GuardedValueFlowGraph *Graph, bool NeedsSummary = true);
   void runOnModuleParallel(llvm::Module *M);
   void runOnModule(llvm::Module *M);
 

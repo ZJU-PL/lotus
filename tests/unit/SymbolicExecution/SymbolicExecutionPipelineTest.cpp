@@ -159,4 +159,75 @@ TEST_F(SymbolicExecutionPipelineTest, DetectsDoubleFreeAndUseAfterFree) {
   EXPECT_GE(countReportsFor("Symbolic Execution Double Free"), 1u);
 }
 
+TEST_F(SymbolicExecutionPipelineTest,
+       HandlesLoopLatchPlacedBeforeHeaderWithoutOutOfRange) {
+  // Regression test: when a loop latch precedes its dominating header in IR
+  // block order, RPO traversal must still visit the header before the latch.
+  ASSERT_TRUE(loadModule(R"(
+    define i32 @loop_latch_first(i32 %n) {
+    entry:
+      %ok = icmp sgt i32 %n, 0
+      br i1 %ok, label %header, label %exit
+
+    latch:
+      %next = add nsw i32 %i, 1
+      %cond = icmp slt i32 %next, %n
+      br i1 %cond, label %header, label %exit
+
+    header:
+      %i = phi i32 [ 0, %entry ], [ %next, %latch ]
+      %sum = add nsw i32 %i, 2
+      %done = icmp eq i32 %sum, 100
+      br i1 %done, label %exit, label %latch
+
+    exit:
+      ret i32 0
+    }
+  )"));
+
+  runSymex(SymbolicExecution::BUG_TY_BOF | SymbolicExecution::BUG_TY_DBZ |
+           SymbolicExecution::BUG_TY_INT_OVERFLOW |
+           SymbolicExecution::BUG_TY_INT_UNDERFLOW);
+  EXPECT_EQ(countReportsFor("Symbolic Execution Divide by Zero"), 0u);
+}
+
+TEST_F(SymbolicExecutionPipelineTest,
+       SignedIntOverflowUsesActualBitWidthBounds) {
+  ASSERT_TRUE(loadModule(R"(
+    define i32 @safe_small_add() {
+    entry:
+      %r = add i32 1, 2
+      ret i32 %r
+    }
+
+    define i32 @overflow_i32_add() {
+    entry:
+      %r = add i32 2147483647, 1
+      ret i32 %r
+    }
+  )"));
+
+  runSymex(SymbolicExecution::BUG_TY_INT_OVERFLOW);
+  EXPECT_EQ(countReportsFor("Symbolic Execution Integer Overflow"), 1u);
+}
+
+TEST_F(SymbolicExecutionPipelineTest,
+       HandlesMalformedLibCallAndVectorBinarySafely) {
+  ASSERT_TRUE(loadModule(R"(
+    declare void @my_custom_strlen()
+
+    define <2 x i32> @vec_and_custom_lib(<2 x i32> %a, <2 x i32> %b) {
+    entry:
+      call void @my_custom_strlen()
+      %s = add <2 x i32> %a, %b
+      ret <2 x i32> %s
+    }
+  )"));
+
+  runSymex(SymbolicExecution::BUG_TY_BOF | SymbolicExecution::BUG_TY_DBZ |
+           SymbolicExecution::BUG_TY_INT_OVERFLOW |
+           SymbolicExecution::BUG_TY_INT_TRUNCATION);
+  EXPECT_EQ(countReportsFor("Symbolic Execution Buffer Overflow"), 0u);
+}
+
 } // namespace

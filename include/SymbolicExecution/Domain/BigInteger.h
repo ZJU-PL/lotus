@@ -16,7 +16,11 @@ public:
 
   BigInteger(int64_t V) {
     llvm::APInt Tmp(sizeof(int64_t) * 8, V, true);
-    Val = llvm::APInt(Tmp.getMinSignedBits(), V, true);
+    unsigned Width = Tmp.getMinSignedBits();
+    if (Width < 2) {
+      Width = 2;
+    }
+    Val = llvm::APInt(Width, V, true);
   }
 
   BigInteger(llvm::APInt V) {

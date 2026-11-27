@@ -56,7 +56,10 @@ ProgramValuePtr CStringState::getLenVariable(const ProgramValuePtr &Ptr,
                                              const AnalysisState &CurState,
                                              bool IsDirect) const {
   if (IsDirect) {
-    return CurState.getNode(Loc);
+    return Loc ? ProgramValuePtr(CurState.getNode(Loc)) : ProgramValuePtr();
+  }
+  if (Ptr.isVacuous()) {
+    return ProgramValuePtr();
   }
   std::string Name = Ptr.getID() + "_len_" + ptrToString(Loc);
   return ProgramValuePtr(CurState.getContext().getNonPtrType(),

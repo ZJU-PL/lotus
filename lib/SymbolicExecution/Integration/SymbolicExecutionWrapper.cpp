@@ -120,7 +120,8 @@ std::string renderValueLabel(const Value *Val) {
 
 std::vector<NodeTag> getNodeTags(const Instruction *Inst, bool IsCallStep) {
   std::vector<NodeTag> Tags;
-  if (IsCallStep || isa<CallInst>(Inst) || isa<InvokeInst>(Inst)) {
+  if (IsCallStep ||
+      (Inst && (isa<CallInst>(Inst) || isa<InvokeInst>(Inst)))) {
     Tags.push_back(NodeTag::CALL_SITE);
   }
   return Tags;

@@ -184,7 +184,7 @@ private:
 namespace std {
 template <> struct hash<SymbolicExecution::Var> {
   size_t operator()(const SymbolicExecution::Var &V) const {
-    return V.getValue().getData()->hash();
+    return V.getValue().hash();
   }
 };
 

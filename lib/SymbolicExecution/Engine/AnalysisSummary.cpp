@@ -64,7 +64,10 @@ AnalysisSummary::AnalysisSummary(AnalysisState &&State,
       StrState(std::move(State.StrState)),
       TaintSmry(std::move(State.TaintSmry)),
       ExtSummary(std::move(State.FinalizedExt)) {
-  if (SolverMgr.isFuncSolverFull()) {
+  if (!State.hasSolver()) {
+    SmrySolver = nullptr;
+    SolverShared = false;
+  } else if (SolverMgr.isFuncSolverFull()) {
     SmrySolver = SolverMgr.getSharedSmrySolver();
     SolverShared = true;
     translate();

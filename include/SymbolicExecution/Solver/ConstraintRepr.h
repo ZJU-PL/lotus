@@ -84,8 +84,8 @@ public:
   void dump() const;
 
 private:
-  int64_t Index = -3;
-  // 1 => true; 0 => false; -1 => not a literal
+  // Lit: 1 => true (Index = -1); 0 => false (Index = -2); -1 => non-literal
+  int64_t Index = -1;
   int Lit = 1;
   std::unique_ptr<SMTExpr> Constr = nullptr;
   PathCondSolver *Solver = nullptr;

@@ -88,9 +88,14 @@ private:
   SMTFactory Fctry;
   std::unordered_set<const GuardedValueFlowCallOutputNode *> UsedCSOuts;
   std::unique_ptr<GuardedValueFlowSolver> GraphSolver;
+  std::unique_ptr<SMTSolver> QuerySolver;
 
   std::unordered_map<unsigned, unsigned> ConstrToSize;
+  std::unordered_map<unsigned, std::vector<SMTExpr>> ExprFreeConstsCache;
 
+  GuardedValueFlowSolver &getGraphSolver();
+  SMTSolver &getQuerySolver();
+  const std::vector<SMTExpr> &getFreeConsts(const SMTExpr &E);
   void resetSolverState();
   void updateUsedCSOuts();
   void normalizeExprWidth(SMTExpr &L, SMTExpr &R, bool SignExtend = true);
@@ -98,6 +103,7 @@ private:
                           bool SignExtend = true);
   SMTExpr buildSymExpr(const PropertySymExpr *V);
   SMTExpr buildIntExpr(const BigInteger &I);
+  SMTExpr makeConstMul(SMTExpr Val, uint64_t C);
 };
 
 } // namespace SymbolicExecution

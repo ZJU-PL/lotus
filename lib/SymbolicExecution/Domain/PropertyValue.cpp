@@ -82,7 +82,8 @@ unsigned PropertyValue::cmp(const PropertyValue *Rhs, unsigned Pred) const {
       CmpRes = (LeftVal.slt(RightVal));
       break;
     default:
-      assert(false);
+      CmpRes = 2;
+      break;
     }
   } else {
     CmpRes = 2;
@@ -104,6 +105,9 @@ PropertyValuePtr PropertyValue::binOp(const PropertyValuePtr &Rhs,
 
 PropertyValuePtr PropertyValue::binOp(const PropertyValue *Rhs,
                                       BinOp Op) const {
+  if (!Rhs) {
+    return PropertyValuePtr();
+  }
   auto LValKind = getKind();
   auto RValKind = Rhs->getKind();
 
@@ -214,8 +218,10 @@ std::string PropertyValue::getName() const {
   if (Val->isVar()) {
     ProgramValuePtr V = Val->getAsVar().getValue();
     if (V.isa<GuardedValueFlowNodeValue>()) {
-      Name = V.getLLVMVal()->getName().str();
-    } else {
+      if (Value *LV = V.getLLVMVal()) {
+        Name = LV->getName().str();
+      }
+    } else if (!V.isVacuous()) {
       Name = cast<AuxValue>(V.getData().get())->getName();
     }
   }

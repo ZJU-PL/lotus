@@ -129,13 +129,17 @@ void SMTSolver::flushToZ3() {
   if (SyncedAsserts >= total)
     return;
 
-  // Only materialize non-empty Z3 scopes so nested push() calls without new
-  // assertions do not trigger redundant incremental solver internalization.
+  // Only materialize non-empty Z3 scopes with >0 outer assertions so
+  // outermost push() at mark==0 stays at Z3 scope level 0 (preserving Z3's
+  // fast non-incremental QF_BV preprocessing tactics instead of switching
+  // immediately to inc_sat_solver).
   for (size_t mark : ScopeAssertionMarks) {
     if (mark < SyncedAsserts)
       continue;
     if (mark >= total)
       break;
+    if (mark == 0)
+      continue;
     while (SyncedAsserts < mark) {
       Solver.add(PendingAssertions[SyncedAsserts].Expr);
       ++SyncedAsserts;
@@ -440,9 +444,10 @@ void SMTSolver::pop(unsigned N) {
     Z3ScopeSatVars.pop_back();
     ++z3_pops;
   }
-  if (z3_pops > 0) {
+  const bool need_reset_to_empty = (new_size == 0 && old_synced > 0);
+  if (z3_pops > 0 || need_reset_to_empty) {
     const size_t popped_asserts = old_synced - SyncedAsserts;
-    bool should_reset = (new_size == 0);
+    bool should_reset = need_reset_to_empty;
     if (!should_reset && popped_asserts > 0) {
       uint64_t cur_vars = currentSatVars();
       uint64_t delta_vars =

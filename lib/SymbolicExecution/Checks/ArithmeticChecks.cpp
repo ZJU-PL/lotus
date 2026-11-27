@@ -20,18 +20,26 @@ namespace {
 
 std::pair<BigInteger, BigInteger> getSignedMinMaxValues(Type *Ty) {
   unsigned BitWidth = Ty->getIntegerBitWidth();
-  BigInteger One(1);
-  APInt Shifted = One.getVal().shl(BitWidth - 1);
+  if (BitWidth == 0) {
+    return {BigInteger(0), BigInteger(0)};
+  }
+  APInt Shifted = APInt(BitWidth + 1, 1).shl(BitWidth - 1);
   BigInteger Min = -BigInteger(Shifted);
-  BigInteger Max = BigInteger(Shifted) - One;
+  BigInteger Max = BigInteger(Shifted) - BigInteger(1);
   return {Min, Max};
 }
 
 } // namespace
 
 void QueryEngine::buildDbzQuery(Instruction *Inst, const AnalysisState &State) {
-  const auto &DivisorVals =
-      State.getSymbolicVals(State.getNode(Inst->getOperand(1)));
+  if (!Inst->getType()->isIntegerTy()) {
+    return;
+  }
+  auto *DivNode = State.getNode(Inst->getOperand(1));
+  if (!DivNode) {
+    return;
+  }
+  const auto &DivisorVals = State.getSymbolicVals(DivNode);
   DivisorVals.forEach([&](const PropertyValuePtr &Val, const Condition &Cond) {
     if (Val == int64_t(0)) {
       addQueryTrace(
@@ -56,8 +64,13 @@ void QueryEngine::buildIntBoundQuery(Instruction *Inst, SymexBugType BugTy,
     return;
   }
 
-  auto Op1Vals = State.getSymbolicVals(State.getNode(Inst->getOperand(0)));
-  auto Op2Vals = State.getSymbolicVals(State.getNode(Inst->getOperand(1)));
+  auto *Op0Node = State.getNode(Inst->getOperand(0));
+  auto *Op1Node = State.getNode(Inst->getOperand(1));
+  if (!Op0Node || !Op1Node) {
+    return;
+  }
+  const auto &Op1Vals = State.getSymbolicVals(Op0Node);
+  const auto &Op2Vals = State.getSymbolicVals(Op1Node);
 
   GuardedSymbolicValSet ResVals;
   if (Inst->getOpcode() == Instruction::Add) {
@@ -100,8 +113,11 @@ void QueryEngine::buildShiftOverflowQuery(Instruction *Inst,
     return;
   }
 
-  auto ShiftAmountVals =
-      State.getSymbolicVals(State.getNode(Inst->getOperand(1)));
+  auto *ShiftNode = State.getNode(Inst->getOperand(1));
+  if (!ShiftNode) {
+    return;
+  }
+  const auto &ShiftAmountVals = State.getSymbolicVals(ShiftNode);
   unsigned BitWidth = Inst->getType()->getIntegerBitWidth();
   PropertyValuePtr MaxShift = GetProperty<PropertyInteger>(BitWidth);
   PropertyValuePtr Zero = GetProperty<PropertyInteger>(0);
@@ -150,45 +166,53 @@ void QueryEngine::buildIntTruncationQuery(Instruction *Inst,
     return;
   }
 
-  auto SrcVals = State.getSymbolicVals(State.getNode(Src));
+  auto *SrcNode = State.getNode(Src);
+  if (!SrcNode) {
+    return;
+  }
+  const auto &SrcVals = State.getSymbolicVals(SrcNode);
   auto DstMinMax = getSignedMinMaxValues(DstTy);
   BigInteger DstMin = DstMinMax.first;
   BigInteger DstMax = DstMinMax.second;
 
   SrcVals.forEach([&](const PropertyValuePtr &Val, const Condition &Cond) {
     if (IsaProperty<PropertyInteger>(Val)) {
-      BigInteger ValInt = CastProperty<PropertyInteger>(Val)->getAsBoundInt();
+      BigInteger ValInt = CastProperty<PropertyInteger>(Val)->getVal();
       if (ValInt < DstMin || ValInt > DstMax) {
         addQueryTrace(
             DirectNumericalQuery::createMustErr(BUG_TY_INT_TRUNCATION), Cond,
             TraceStep(TraceStep::TRACE_STEP_ARITH, Inst, Src), State);
       }
     } else if (IsaProperty<PropertySymExpr>(Val)) {
-      PropertyValuePtr MaxVal(
-          GetProperty<PropertyInteger>(DstMax.getAsBoundInt()));
-      PropertyValuePtr MinVal(
-          GetProperty<PropertyInteger>(DstMin.getAsBoundInt()));
+      PropertyValuePtr MaxVal(GetProperty<PropertyInteger>(DstMax));
+      PropertyValuePtr MinVal(GetProperty<PropertyInteger>(DstMin));
 
       auto UpperBound = Val - MaxVal;
-      if (IsaProperty<PropertySymExpr>(UpperBound) ||
-          (IsaProperty<PropertyInteger>(UpperBound) &&
-           UpperBound > int64_t(0))) {
+      if (IsaProperty<PropertySymExpr>(UpperBound)) {
         addQueryTrace(DirectNumericalQuery::createSymbolic(
                           BUG_TY_INT_TRUNCATION, UpperBound, false,
                           getDepsVals(Val)),
                       Cond, TraceStep(TraceStep::TRACE_STEP_ARITH, Inst, Src),
                       State);
+      } else if (IsaProperty<PropertyInteger>(UpperBound) &&
+                 UpperBound > int64_t(0)) {
+        addQueryTrace(
+            DirectNumericalQuery::createMustErr(BUG_TY_INT_TRUNCATION), Cond,
+            TraceStep(TraceStep::TRACE_STEP_ARITH, Inst, Src), State);
       }
 
       auto LowerBound = MinVal - Val;
-      if (IsaProperty<PropertySymExpr>(LowerBound) ||
-          (IsaProperty<PropertyInteger>(LowerBound) &&
-           LowerBound > int64_t(0))) {
+      if (IsaProperty<PropertySymExpr>(LowerBound)) {
         addQueryTrace(DirectNumericalQuery::createSymbolic(
                           BUG_TY_INT_TRUNCATION, LowerBound, false,
                           getDepsVals(Val)),
                       Cond, TraceStep(TraceStep::TRACE_STEP_ARITH, Inst, Src),
                       State);
+      } else if (IsaProperty<PropertyInteger>(LowerBound) &&
+                 LowerBound > int64_t(0)) {
+        addQueryTrace(
+            DirectNumericalQuery::createMustErr(BUG_TY_INT_TRUNCATION), Cond,
+            TraceStep(TraceStep::TRACE_STEP_ARITH, Inst, Src), State);
       }
     }
   });

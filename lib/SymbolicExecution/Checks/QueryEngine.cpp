@@ -19,28 +19,12 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cassert>
-#include <regex>
-#include <sstream>
+#include <cstdint>
 
 #define DEBUG_TYPE "Symex"
 
 using namespace llvm;
 using namespace SymbolicExecution;
-
-namespace {
-
-std::string normalizeConditionForGrouping(const Condition &Cond) {
-  if (Cond.isLit()) {
-    return Cond.isTrue() ? "true" : "false";
-  }
-
-  std::ostringstream OSS;
-  OSS << Cond.getSMTConstr();
-  static const std::regex SuffixPattern(R"(_0x[0-9a-fA-F]+)");
-  return std::regex_replace(OSS.str(), SuffixPattern, "");
-}
-
-} // namespace
 
 void QuerySummary::translate(PathCondSolver *NewSolver) {
   for (auto &P : QueryToTraces) {
@@ -70,21 +54,30 @@ void QueryEngine::onPostInstruction(Instruction *Inst,
   auto OpC = Inst->getOpcode();
   if (OpC == Instruction::Load && (EnabledBugs & BUG_TY_BOF)) {
     auto *LoadI = cast<LoadInst>(Inst);
-    buildBofQueryLoadStore(Inst, State.getNode(getPointerOperand(LoadI)),
-                           LoadI->getType(), State);
+    if (auto *PtrNode = State.getNode(getPointerOperand(LoadI))) {
+      buildBofQueryLoadStore(Inst, PtrNode, LoadI->getType(), State);
+    }
   } else if (OpC == Instruction::Store && (EnabledBugs & BUG_TY_BOF)) {
     auto *StoreI = cast<StoreInst>(Inst);
-    buildBofQueryLoadStore(Inst, State.getNode(getPointerOperand(StoreI)),
-                           StoreI->getValueOperand()->getType(), State);
+    if (auto *PtrNode = State.getNode(getPointerOperand(StoreI))) {
+      buildBofQueryLoadStore(Inst, PtrNode,
+                             StoreI->getValueOperand()->getType(), State);
+    }
   } else if (State.isInstUnmodelled(Inst)) {
     auto *Dst = State.getNode(Inst);
-    for (unsigned Idx = 0; Idx < Inst->getNumOperands(); ++Idx) {
-      auto OpndVals = State.getSymbolicVals(State.getNode(Inst->getOperand(Idx)));
-      for (const auto &P : OpndVals) {
-        if (IsaProperty<PropertySymExpr>(P.first)) {
-          for (const auto &DepV :
-               CastProperty<PropertySymExpr>(P.first)->getUsedVars()) {
-            addExtraDeps(Dst, DepV.getValue(), P.second);
+    if (Dst) {
+      for (unsigned Idx = 0; Idx < Inst->getNumOperands(); ++Idx) {
+        auto *OpNode = State.getNode(Inst->getOperand(Idx));
+        if (!OpNode) {
+          continue;
+        }
+        const auto &OpndVals = State.getSymbolicVals(OpNode);
+        for (const auto &P : OpndVals) {
+          if (IsaProperty<PropertySymExpr>(P.first)) {
+            for (const auto &DepV :
+                 CastProperty<PropertySymExpr>(P.first)->getUsedVars()) {
+              addExtraDeps(Dst, DepV.getValue(), P.second);
+            }
           }
         }
       }
@@ -177,6 +170,12 @@ void QueryEngine::onCallSummary(CallInst *Inst, Function *Callee,
 std::unique_ptr<SummaryExtension>
 QueryEngine::finalizeSummary(const AnalysisState &State) {
   dischargeQueries(State);
+  ExtraDepsMap.clear();
+  InlineQueryCache.clear();
+  if (!State.needsSummary()) {
+    QueryToTraces.clear();
+    return nullptr;
+  }
   return std::make_unique<QuerySummary>(std::move(QueryToTraces));
 }
 
@@ -422,7 +421,8 @@ QuerySet QueryEngine::inlineIndirectBofQuery(const IndirectNumericalQuery *IDQ,
 bool QueryEngine::tryReportQuery(const NumericalQueryPtr &QPtr,
                                  const Condition &QDepCond, Function *SinkFun,
                                  const std::vector<TraceStep> &Trace,
-                                 const AnalysisState &State) {
+                                 const AnalysisState &State,
+                                 bool KnownContextAndQuerySat) {
   auto *Solver = State.getSolver();
   auto *Q = QPtr.get();
   const auto *DQ = dyn_cast<DirectNumericalQuery>(Q);
@@ -430,8 +430,12 @@ bool QueryEngine::tryReportQuery(const NumericalQueryPtr &QPtr,
   bool Filtered = false;
 
   if (DQ && DQ->mustSat()) {
-    SMTExprVec DepConstr = QDepCond.toSMT(*Solver);
-    if (Solver->isConstraintSat(DepConstr)) {
+    bool IsSat = KnownContextAndQuerySat;
+    if (!IsSat) {
+      SMTExprVec DepConstr = QDepCond.toSMT(*Solver);
+      IsSat = Solver->isConstraintSat(DepConstr);
+    }
+    if (IsSat) {
       if (AnalysisLimit::getDebugFunctionName() == SinkFun->getName()) {
         LLVM_DEBUG(dbgs() << "Query must err, adding bug report in func "
                           << State.getFunc()->getName() << "\n");
@@ -457,6 +461,9 @@ bool QueryEngine::tryReportQuery(const NumericalQueryPtr &QPtr,
   }
 
   const auto &TaintedVals = State.getTaintedVals();
+  if (TaintedVals.empty()) {
+    return false;
+  }
   const auto &TaintedSteps = State.getTaintedSteps();
   std::vector<TaintStep> TaintSteps;
   bool QueryConsBuilt = false;
@@ -474,6 +481,17 @@ bool QueryEngine::tryReportQuery(const NumericalQueryPtr &QPtr,
     }
 
     auto TaintCond = TaintedVals.getGuardForValue(V) && VCond.second;
+    if (TaintCond.isFalse()) {
+      Filtered = true;
+      continue;
+    }
+
+    if (KnownContextAndQuerySat && TaintCond.isTrue()) {
+      Collector.addReport({Q->getBugTy(), TaintSteps, Trace});
+      Reported = true;
+      break;
+    }
+
     SMTExprVec TaintCons = TaintCond.toSMT(*Solver);
 
     if (!QueryConsBuilt) {
@@ -501,8 +519,12 @@ bool QueryEngine::tryReportQuery(const NumericalQueryPtr &QPtr,
 }
 
 void QueryEngine::dischargeQueries(const AnalysisState &State) {
-  auto *Solver = State.getSolver();
+  if (QueryToTraces.empty()) {
+    return;
+  }
   QueryTraceList RemainingQueries;
+  const bool NeedsSummary = State.needsSummary();
+  const auto &TaintedVals = State.getTaintedVals();
 
   struct QueryInfo {
     NumericalQueryPtr Query;
@@ -512,29 +534,67 @@ void QueryEngine::dischargeQueries(const AnalysisState &State) {
     SymexBugType BugTy;
   };
 
+  auto HasAnyTaintedUsedVal = [&](const NumericalQuery *Q) -> bool {
+    if (TaintedVals.empty()) {
+      return false;
+    }
+    for (const auto &VCond : Q->getUsedVals()) {
+      if (TaintedVals.hasValue(VCond.first)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   std::vector<QueryInfo> AllQueries;
-  std::map<std::string, std::vector<size_t>> ContextGroups;
+  AllQueries.reserve(QueryToTraces.size());
+  // Group strictly by exact Condition::getIndex() (preserving insertion order)
+  // so queries sharing the exact same solver condition AST are batched together
+  // without expensive AST-to-string/regex overhead or cross-callsite conflation.
+  std::vector<std::vector<size_t>> ContextGroups;
+  std::unordered_map<int64_t, size_t> CondIndexToGroup;
+  CondIndexToGroup.reserve(QueryToTraces.size());
 
   for (const auto &P : QueryToTraces) {
     const auto &Trace = P.second;
+    if (Trace.empty() || !Trace.front().Inst) {
+      continue;
+    }
     auto *SinkFun = Trace.front().Inst->getParent()->getParent();
 
-    assert(P.first.size() == 1);
     for (const auto &QCond : P.first) {
+      const NumericalQuery *QPtr = QCond.first.get();
+      const auto *DQ = dyn_cast<DirectNumericalQuery>(QPtr);
+      const bool IsMustSat = (DQ && DQ->mustSat());
+      // When no downstream caller will consume this function's summary, an
+      // untainted non-mustSat query can neither be reported here nor inlined
+      // into a caller; skipping it is bit-for-bit equivalent.
+      if (!NeedsSummary && !IsMustSat && !HasAnyTaintedUsedVal(QPtr)) {
+        continue;
+      }
+
       QueryInfo Info{QCond.first, QCond.second, Trace, SinkFun,
                      QCond.first->getBugTy()};
       size_t Idx = AllQueries.size();
       AllQueries.push_back(std::move(Info));
 
-      std::string NormalizedKey = normalizeConditionForGrouping(QCond.second);
-      ContextGroups[NormalizedKey].push_back(Idx);
+      int64_t CondKey = QCond.second.getIndex();
+      auto Ins = CondIndexToGroup.emplace(CondKey, ContextGroups.size());
+      if (Ins.second) {
+        ContextGroups.emplace_back();
+      }
+      ContextGroups[Ins.first->second].push_back(Idx);
     }
+  }
+
+  if (AllQueries.empty()) {
+    QueryToTraces.clear();
+    return;
   }
 
   std::vector<bool> Resolved(AllQueries.size(), false);
 
-  for (const auto &Group : ContextGroups) {
-    const auto &Indices = Group.second;
+  for (const auto &Indices : ContextGroups) {
     if (Indices.size() == 1) {
       size_t Idx = Indices[0];
       const auto &Info = AllQueries[Idx];
@@ -544,7 +604,12 @@ void QueryEngine::dischargeQueries(const AnalysisState &State) {
     }
 
     const Condition &SharedContext = AllQueries[Indices[0]].QDepCond;
-    SMTExprVec Context = SharedContext.toSMT(*Solver);
+    if (SharedContext.isFalse()) {
+      for (size_t Idx : Indices) {
+        Resolved[Idx] = true;
+      }
+      continue;
+    }
 
     std::vector<size_t> MustSatIndices;
     std::vector<size_t> RegularIndices;
@@ -558,8 +623,47 @@ void QueryEngine::dischargeQueries(const AnalysisState &State) {
       }
     }
 
+    if (RegularIndices.empty()) {
+      bool ContextSat = SharedContext.isTrue();
+      if (!ContextSat) {
+        auto *Solver = State.getSolver();
+        ContextSat = Solver->isConstraintSat(SharedContext.toSMT(*Solver));
+      }
+      for (size_t Idx : MustSatIndices) {
+        const auto &Info = AllQueries[Idx];
+        if (ContextSat) {
+          Collector.addReport({Info.BugTy, {}, Info.Trace});
+        }
+        Resolved[Idx] = true;
+      }
+      continue;
+    }
+
+    auto *Solver = State.getSolver();
+    SMTExprVec Context = SharedContext.toSMT(*Solver);
+
+    std::vector<SMTExprVec> Predicates;
+    Predicates.reserve(RegularIndices.size() + (MustSatIndices.empty() ? 0 : 1));
     if (!MustSatIndices.empty()) {
-      bool ContextSat = Solver->isConstraintSat(Context);
+      Predicates.push_back(Solver->createEmptySMTExprVec());
+    }
+    for (size_t Idx : RegularIndices) {
+      const auto &Info = AllQueries[Idx];
+      auto *DQ = dyn_cast<DirectNumericalQuery>(Info.Query.get());
+      if (DQ && !DQ->mustSat()) {
+        Predicates.push_back(DQ->toSMT(*Solver));
+      } else {
+        Predicates.push_back(Solver->createEmptySMTExprVec());
+      }
+    }
+
+    std::vector<bool> BatchResults =
+        Solver->batchCheckPredicates(Context, Predicates);
+
+    size_t ResultOffset = 0;
+    if (!MustSatIndices.empty()) {
+      bool ContextSat = BatchResults[0];
+      ResultOffset = 1;
       for (size_t Idx : MustSatIndices) {
         const auto &Info = AllQueries[Idx];
         if (ContextSat) {
@@ -569,42 +673,27 @@ void QueryEngine::dischargeQueries(const AnalysisState &State) {
       }
     }
 
-    if (!RegularIndices.empty()) {
-      std::vector<SMTExprVec> Predicates;
-      Predicates.reserve(RegularIndices.size());
-
-      for (size_t Idx : RegularIndices) {
-        const auto &Info = AllQueries[Idx];
-        auto *DQ = dyn_cast<DirectNumericalQuery>(Info.Query.get());
-        if (DQ && !DQ->mustSat()) {
-          Predicates.push_back(DQ->toSMT(*Solver));
-        } else {
-          Predicates.push_back(Solver->createEmptySMTExprVec());
-        }
+    for (size_t I = 0; I < RegularIndices.size(); ++I) {
+      size_t Idx = RegularIndices[I];
+      if (!BatchResults[I + ResultOffset]) {
+        Resolved[Idx] = true;
+        continue;
       }
-
-      std::vector<bool> BatchResults =
-          Solver->batchCheckPredicates(Context, Predicates);
-
-      for (size_t I = 0; I < RegularIndices.size(); ++I) {
-        size_t Idx = RegularIndices[I];
-        if (!BatchResults[I]) {
-          Resolved[Idx] = true;
-          continue;
-        }
-        const auto &Info = AllQueries[Idx];
-        Resolved[Idx] = tryReportQuery(Info.Query, Info.QDepCond, Info.SinkFun,
-                                       Info.Trace, State);
-      }
+      const auto &Info = AllQueries[Idx];
+      Resolved[Idx] = tryReportQuery(Info.Query, Info.QDepCond, Info.SinkFun,
+                                     Info.Trace, State,
+                                     /*KnownContextAndQuerySat=*/true);
     }
   }
 
-  for (size_t I = 0; I < AllQueries.size(); ++I) {
-    if (!Resolved[I]) {
-      const auto &Info = AllQueries[I];
-      QuerySet Qs;
-      Qs.addValue(Info.Query, Info.QDepCond);
-      RemainingQueries.emplace_back(std::move(Qs), Info.Trace);
+  if (NeedsSummary) {
+    for (size_t I = 0; I < AllQueries.size(); ++I) {
+      if (!Resolved[I]) {
+        const auto &Info = AllQueries[I];
+        QuerySet Qs;
+        Qs.addValue(Info.Query, Info.QDepCond);
+        RemainingQueries.emplace_back(std::move(Qs), Info.Trace);
+      }
     }
   }
 

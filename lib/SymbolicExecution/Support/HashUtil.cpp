@@ -1,6 +1,7 @@
 #include "SymbolicExecution/Support/HashUtil.h"
 
-#include <sstream>
+#include <cstdint>
+#include <cstdio>
 
 namespace SymbolicExecution {
 
@@ -13,9 +14,10 @@ size_t hashCombine(const std::vector<size_t> &HashVals) {
 }
 
 std::string ptrToString(const void *Ptr) {
-  std::ostringstream OS;
-  OS << Ptr;
-  return OS.str();
+  char Buf[32];
+  int Len =
+      std::snprintf(Buf, sizeof(Buf), "0x%zx", reinterpret_cast<uintptr_t>(Ptr));
+  return Len > 0 ? std::string(Buf, static_cast<size_t>(Len)) : std::string("0x0");
 }
 
 } // namespace SymbolicExecution

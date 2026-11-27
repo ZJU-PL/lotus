@@ -39,7 +39,7 @@ bool NumericalQueryPtr::operator==(const NumericalQueryPtr &R) const {
          *cast<IndirectNumericalQuery>(Op2);
 }
 
-size_t NumericalQueryPtr::hash() const { return Data->hash(); }
+size_t NumericalQueryPtr::hash() const { return Data ? Data->hash() : 0; }
 
 void NumericalQueryPtr::translate(PathCondSolver *Solver) const {
   if (Data) {
@@ -100,6 +100,9 @@ SMTExprVec DirectNumericalQuery::toSMT(PathCondSolver &Solver) const {
   }
 
   SMTExpr ResExpr = Solver.buildExprForVal(Q.get());
+  if (!ResExpr.isBitVector() || ResExpr.getBitVecSize() == 0) {
+    return RetVec;
+  }
   SMTExpr CstZero = Solver.buildBitVecVal(0, ResExpr.getBitVecSize());
   if (Eq) {
     RetVec.push_back(ResExpr == CstZero);
