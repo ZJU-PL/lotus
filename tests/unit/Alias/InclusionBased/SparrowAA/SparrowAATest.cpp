@@ -876,6 +876,426 @@ TEST_F(SparrowAATest, CompareContextSensitiveVsInsensitive) {
   EXPECT_TRUE(ptsCS.size() >= 0);
 }
 
+TEST_F(SparrowAATest, FreezeAndAddrSpaceCastInstructions) {
+  const char *source = R"(
+    define void @test() {
+      %x = alloca i32
+      %y = alloca i32
+      %fx = freeze i32* %x
+      %as = addrspacecast i32* %fx to i32 addrspace(1)*
+      %back = addrspacecast i32 addrspace(1)* %as to i32*
+      %fu = freeze i32* undef
+      ret void
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  AndersenAAResult AA(*module);
+  Function *F = module->getFunction("test");
+  ASSERT_NE(F, nullptr);
+
+  Value *x = nullptr, *y = nullptr, *fx = nullptr, *back = nullptr,
+        *fu = nullptr;
+  for (auto &BB : *F) {
+    for (auto &I : BB) {
+      if (I.getName() == "x")
+        x = &I;
+      else if (I.getName() == "y")
+        y = &I;
+      else if (I.getName() == "fx")
+        fx = &I;
+      else if (I.getName() == "back")
+        back = &I;
+      else if (I.getName() == "fu")
+        fu = &I;
+    }
+  }
+  ASSERT_NE(x, nullptr);
+  ASSERT_NE(y, nullptr);
+  ASSERT_NE(fx, nullptr);
+  ASSERT_NE(back, nullptr);
+  ASSERT_NE(fu, nullptr);
+
+  std::vector<const Value *> ptsFx, ptsBack;
+  ASSERT_TRUE(AA.getPointsToSet(fx, ptsFx));
+  EXPECT_TRUE(pointsToSetContains(ptsFx, x));
+  EXPECT_FALSE(pointsToSetContains(ptsFx, y));
+
+  ASSERT_TRUE(AA.getPointsToSet(back, ptsBack));
+  EXPECT_TRUE(pointsToSetContains(ptsBack, x));
+  EXPECT_FALSE(pointsToSetContains(ptsBack, y));
+
+  // Frozen undef may alias any concrete object conservatively.
+  auto locX = MemoryLocation(x, LocationSize::beforeOrAfterPointer());
+  auto locFu = MemoryLocation(fu, LocationSize::beforeOrAfterPointer());
+  EXPECT_EQ(AA.alias(locX, locFu), AliasResult::MayAlias);
+}
+
+TEST_F(SparrowAATest, VectorPointerAndConstantVectorHandling) {
+  const char *source = R"(
+    @g1 = global i32 1
+    @g2 = global i32 2
+    @gvec = global <2 x i32*> <i32* @g1, i32* @g2>
+
+    define void @test(<2 x i32*> %base, <2 x i64> %ints) {
+      %x = alloca i32
+      %vgep = getelementptr i32, <2 x i32*> %base, <2 x i64> <i64 0, i64 1>
+      %vi2p = inttoptr <2 x i64> %ints to <2 x i8*>
+      %v1 = insertelement <2 x i32*> undef, i32* %x, i32 0
+      %e0 = extractelement <2 x i32*> %v1, i32 0
+      %gv_ptr = bitcast <2 x i32*>* @gvec to i32**
+      %loaded = load i32*, i32** %gv_ptr
+      ret void
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  AndersenAAResult AA(*module);
+  Function *F = module->getFunction("test");
+  ASSERT_NE(F, nullptr);
+  GlobalVariable *g1 = module->getNamedGlobal("g1");
+  GlobalVariable *g2 = module->getNamedGlobal("g2");
+  ASSERT_NE(g1, nullptr);
+  ASSERT_NE(g2, nullptr);
+
+  Value *x = nullptr, *e0 = nullptr, *loaded = nullptr;
+  for (auto &BB : *F) {
+    for (auto &I : BB) {
+      if (I.getName() == "x")
+        x = &I;
+      else if (I.getName() == "e0")
+        e0 = &I;
+      else if (I.getName() == "loaded")
+        loaded = &I;
+    }
+  }
+  ASSERT_NE(x, nullptr);
+  ASSERT_NE(e0, nullptr);
+  ASSERT_NE(loaded, nullptr);
+
+  std::vector<const Value *> ptsE0, ptsLoaded;
+  ASSERT_TRUE(AA.getPointsToSet(e0, ptsE0));
+  EXPECT_TRUE(pointsToSetContains(ptsE0, x));
+
+  ASSERT_TRUE(AA.getPointsToSet(loaded, ptsLoaded));
+  EXPECT_TRUE(pointsToSetContains(ptsLoaded, g1));
+  EXPECT_TRUE(pointsToSetContains(ptsLoaded, g2));
+}
+
+TEST_F(SparrowAATest, GlobalAliasBlockAddressAndUndefGlobalInit) {
+  const char *source = R"(
+    %S = type { i8*, i32* }
+    @target = global i32 42
+    @alias_target = alias i32, i32* @target
+    @global_struct = global %S { i8* undef, i32* @alias_target }
+    @ba_global = global i8* blockaddress(@test, %lbl)
+
+    define void @test() {
+      %p = alloca i32*
+      store i32* @alias_target, i32** %p
+      %q = load i32*, i32** %p
+      %gs_field = getelementptr inbounds %S, %S* @global_struct, i32 0, i32 1
+      %r = load i32*, i32** %gs_field
+      %ba = load i8*, i8** @ba_global
+      br label %lbl
+    lbl:
+      ret void
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  AndersenAAResult AA(*module);
+  Function *F = module->getFunction("test");
+  GlobalVariable *target = module->getNamedGlobal("target");
+  ASSERT_NE(F, nullptr);
+  ASSERT_NE(target, nullptr);
+
+  Value *q = nullptr, *r = nullptr;
+  for (auto &BB : *F) {
+    for (auto &I : BB) {
+      if (I.getName() == "q")
+        q = &I;
+      else if (I.getName() == "r")
+        r = &I;
+    }
+  }
+  ASSERT_NE(q, nullptr);
+  ASSERT_NE(r, nullptr);
+
+  std::vector<const Value *> ptsQ, ptsR;
+  ASSERT_TRUE(AA.getPointsToSet(q, ptsQ));
+  EXPECT_TRUE(pointsToSetContains(ptsQ, target));
+  ASSERT_TRUE(AA.getPointsToSet(r, ptsR));
+  EXPECT_TRUE(pointsToSetContains(ptsR, target));
+}
+
+TEST_F(SparrowAATest, UniversalObjAndFieldInsensitiveAliasSoundness) {
+  const char *source = R"(
+    %Pair = type { i32, i32 }
+    @g = global i32 0
+    declare i32* @unknown_ext_a()
+    declare i32* @unknown_ext_b()
+
+    define void @test() {
+      %s = alloca %Pair
+      %f0 = getelementptr inbounds %Pair, %Pair* %s, i32 0, i32 0
+      %f1 = getelementptr inbounds %Pair, %Pair* %s, i32 0, i32 1
+      %u1 = call i32* @unknown_ext_a()
+      %u2 = call i32* @unknown_ext_b()
+      ret void
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  AndersenAAResult AA(*module);
+  Function *F = module->getFunction("test");
+  GlobalVariable *g = module->getNamedGlobal("g");
+  ASSERT_NE(F, nullptr);
+  ASSERT_NE(g, nullptr);
+
+  Value *f0 = nullptr, *f1 = nullptr, *u1 = nullptr, *u2 = nullptr;
+  for (auto &BB : *F) {
+    for (auto &I : BB) {
+      if (I.getName() == "f0")
+        f0 = &I;
+      else if (I.getName() == "f1")
+        f1 = &I;
+      else if (I.getName() == "u1")
+        u1 = &I;
+      else if (I.getName() == "u2")
+        u2 = &I;
+    }
+  }
+  ASSERT_NE(f0, nullptr);
+  ASSERT_NE(f1, nullptr);
+  ASSERT_NE(u1, nullptr);
+  ASSERT_NE(u2, nullptr);
+
+  auto loc = [](const Value *V) {
+    return MemoryLocation(V, LocationSize::beforeOrAfterPointer());
+  };
+
+  // Unknown external returns point to UniversalObj: must MayAlias (never
+  // NoAlias) with @g and MayAlias (never MustAlias) with each other.
+  EXPECT_EQ(AA.alias(loc(u1), loc(g)), AliasResult::MayAlias);
+  EXPECT_EQ(AA.alias(loc(u1), loc(u2)), AliasResult::MayAlias);
+
+  // Distinct struct fields share a single field-insensitive object: must not
+  // unsoundly return MustAlias.
+  EXPECT_EQ(AA.alias(loc(f0), loc(f1)), AliasResult::MayAlias);
+  // Same pointer value still returns MustAlias.
+  EXPECT_EQ(AA.alias(loc(f0), loc(f0)), AliasResult::MustAlias);
+}
+
+TEST_F(SparrowAATest, HvnHuHcdLcdExactEquivalenceOnLinkedListCycle) {
+  const char *source = R"(
+    %Node = type { i32, %Node* }
+
+    define void @traverse(%Node* %head) {
+      %slot = alloca %Node*
+      %cur = alloca %Node*
+      store %Node* %head, %Node** %slot
+      %init = load %Node*, %Node** %slot
+      store %Node* %init, %Node** %cur
+      br label %loop
+    loop:
+      %p = load %Node*, %Node** %cur
+      %nextp = getelementptr inbounds %Node, %Node* %p, i32 0, i32 1
+      %next = load %Node*, %Node** %nextp
+      store %Node* %next, %Node** %cur
+      br label %exit
+    exit:
+      ret void
+    }
+
+    define void @driver() {
+      %n1 = alloca %Node
+      %n2 = alloca %Node
+      %f1 = getelementptr inbounds %Node, %Node* %n1, i32 0, i32 1
+      store %Node* %n2, %Node** %f1
+      call void @traverse(%Node* %n1)
+      ret void
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  extern llvm::cl::opt<bool> EnableHVN;
+  extern llvm::cl::opt<bool> EnableHU;
+  extern llvm::cl::opt<bool> EnableHCD;
+  extern llvm::cl::opt<bool> EnableLCD;
+
+  const bool oldHVN = EnableHVN;
+  const bool oldHU = EnableHU;
+  const bool oldHCD = EnableHCD;
+  const bool oldLCD = EnableLCD;
+
+  auto snapshotAllPts = [&](bool hvn, bool hu, bool hcd, bool lcd) {
+    EnableHVN = hvn;
+    EnableHU = hu;
+    EnableHCD = hcd;
+    EnableLCD = lcd;
+    Andersen A(*module, makeContextPolicy(0));
+    std::map<const Value *, std::set<const Value *>> out;
+    for (const Function &F : *module) {
+      for (const Argument &Arg : F.args()) {
+        if (!Arg.getType()->isPointerTy())
+          continue;
+        std::vector<const Value *> pts;
+        if (A.getPointsToSet(&Arg, pts))
+          out[&Arg] = std::set<const Value *>(pts.begin(), pts.end());
+      }
+      for (const BasicBlock &BB : F) {
+        for (const Instruction &I : BB) {
+          if (!I.getType()->isPointerTy())
+            continue;
+          std::vector<const Value *> pts;
+          if (A.getPointsToSet(&I, pts))
+            out[&I] = std::set<const Value *>(pts.begin(), pts.end());
+        }
+      }
+    }
+    return out;
+  };
+
+  auto base = snapshotAllPts(false, false, false, false);
+  EXPECT_FALSE(base.empty());
+  EXPECT_EQ(snapshotAllPts(true, false, false, false), base);
+  EXPECT_EQ(snapshotAllPts(false, true, false, false), base);
+  EXPECT_EQ(snapshotAllPts(true, true, false, false), base);
+  EXPECT_EQ(snapshotAllPts(false, false, true, true), base);
+  EXPECT_EQ(snapshotAllPts(true, true, true, true), base);
+
+  EnableHVN = oldHVN;
+  EnableHU = oldHU;
+  EnableHCD = oldHCD;
+  EnableLCD = oldLCD;
+}
+
+TEST_F(SparrowAATest, AdaptiveCSScoresDirectAddrOfCallersAndSeparatesDiverse) {
+  const char *source = R"(
+    define i32* @diverse_id(i32* %p) {
+      ret i32* %p
+    }
+
+    define i32* @uniform_id(i32* %p) {
+      ret i32* %p
+    }
+
+    define void @main_fn() {
+      %x = alloca i32
+      %y = alloca i32
+      %r1 = call i32* @diverse_id(i32* %x)
+      %r2 = call i32* @diverse_id(i32* %y)
+      %u1 = call i32* @uniform_id(i32* %x)
+      %u2 = call i32* @uniform_id(i32* %x)
+      ret void
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  extern llvm::cl::opt<bool> EnableAdaptiveCS;
+  const bool oldACS = EnableAdaptiveCS;
+  EnableAdaptiveCS = true;
+
+  Andersen A(*module, makeContextPolicy(1));
+
+  EnableAdaptiveCS = oldACS;
+
+  Function *diverseFn = module->getFunction("diverse_id");
+  Function *uniformFn = module->getFunction("uniform_id");
+  Function *mainFn = module->getFunction("main_fn");
+  ASSERT_NE(diverseFn, nullptr);
+  ASSERT_NE(uniformFn, nullptr);
+  ASSERT_NE(mainFn, nullptr);
+
+  EXPECT_FLOAT_EQ(A.getContextNeed(diverseFn), 1.0f);
+  EXPECT_FLOAT_EQ(A.getContextNeed(uniformFn), 0.0f);
+
+  Value *x = nullptr, *y = nullptr, *r1 = nullptr, *r2 = nullptr;
+  for (auto &BB : *mainFn) {
+    for (auto &I : BB) {
+      if (I.getName() == "x")
+        x = &I;
+      else if (I.getName() == "y")
+        y = &I;
+      else if (I.getName() == "r1")
+        r1 = &I;
+      else if (I.getName() == "r2")
+        r2 = &I;
+    }
+  }
+  ASSERT_NE(x, nullptr);
+  ASSERT_NE(y, nullptr);
+  ASSERT_NE(r1, nullptr);
+  ASSERT_NE(r2, nullptr);
+
+  std::vector<const Value *> ptsR1, ptsR2;
+  ASSERT_TRUE(A.getPointsToSet(r1, ptsR1));
+  ASSERT_TRUE(A.getPointsToSet(r2, ptsR2));
+  EXPECT_TRUE(pointsToSetContains(ptsR1, x));
+  EXPECT_FALSE(pointsToSetContains(ptsR1, y));
+  EXPECT_TRUE(pointsToSetContains(ptsR2, y));
+  EXPECT_FALSE(pointsToSetContains(ptsR2, x));
+}
+
+TEST_F(SparrowAATest, BDDBackendMatchesSparseBitVector) {
+  const char *source = R"(
+    define void @test() {
+      %a = alloca i32
+      %b = alloca i32
+      %p = alloca i32*
+      %q = alloca i32*
+      store i32* %a, i32** %p
+      store i32* %b, i32** %q
+      %l1 = load i32*, i32** %p
+      store i32* %l1, i32** %q
+      %l2 = load i32*, i32** %q
+      ret void
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  const PtsSetImpl oldImpl = getGlobalPtsSetImpl();
+
+  selectGlobalPtsSetImpl(PtsSetImpl::SPARSE_BITVECTOR);
+  Andersen sparseA(*module, makeContextPolicy(0));
+
+  selectGlobalPtsSetImpl(PtsSetImpl::BDD);
+  Andersen bddA(*module, makeContextPolicy(0));
+
+  selectGlobalPtsSetImpl(oldImpl);
+
+  Function *F = module->getFunction("test");
+  ASSERT_NE(F, nullptr);
+  for (auto &BB : *F) {
+    for (auto &I : BB) {
+      if (!I.getType()->isPointerTy())
+        continue;
+      std::vector<const Value *> sPts, bPts;
+      bool sOk = sparseA.getPointsToSet(&I, sPts);
+      bool bOk = bddA.getPointsToSet(&I, bPts);
+      EXPECT_EQ(sOk, bOk);
+      std::set<const Value *> sSet(sPts.begin(), sPts.end());
+      std::set<const Value *> bSet(bPts.begin(), bPts.end());
+      EXPECT_EQ(sSet, bSet);
+    }
+  }
+}
+
 #ifndef LOTUS_GTEST_NO_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);

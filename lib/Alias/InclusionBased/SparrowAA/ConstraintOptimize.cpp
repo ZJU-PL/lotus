@@ -15,8 +15,8 @@
 #include "Alias/InclusionBased/SparrowAA/Log.h"
 #include "Alias/InclusionBased/SparrowAA/SparseBitVectorGraph.h"
 
+#include <algorithm>
 #include <deque>
-#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -68,8 +68,10 @@ cl::opt<float> AdaptiveCSThreshold(
 
 namespace {
 
+using OptBitVector = SparseBitVector<512>;
+
 struct SparseBitVectorHash {
-  std::size_t operator()(const SparseBitVector<> &vec) const {
+  std::size_t operator()(const OptBitVector &vec) const {
     // Use a polynomial rolling hash to avoid the high collision rate of
     // plain XOR (which is commutative and maps e.g. {1,2} and {3} to the
     // same value when 1^2==3).  The multiplier 2654435761u is the Knuth
@@ -82,8 +84,7 @@ struct SparseBitVectorHash {
 };
 
 struct SparseBitVectorKeyEqual {
-  bool operator()(const SparseBitVector<> &lhs,
-                  const SparseBitVector<> &rhs) const {
+  bool operator()(const OptBitVector &lhs, const OptBitVector &rhs) const {
     return lhs == rhs;
   }
 };
@@ -102,15 +103,16 @@ protected:
   // This set only keep track of indirect nodes that are not REF or ADR
   DenseSet<NodeIndex> indirectNodes;
 
-  // Map from NodeIndex to Pointer Equivalence Class
-  DenseMap<NodeIndex, unsigned> peLabel;
+  // Dense table mapping NodeIndex (in [0, 3*numNodes)) -> Pointer Equivalence
+  // Class (0 = non-pointer / unassigned).
+  std::vector<unsigned> peLabel;
   // Current pointer equivalence class number
   unsigned pointerEqClass;
 
-  // Store the "representative" (or "leader") when there is a merge in the
-  // cycle. Note that this is different from AndersNode::mergeTarget, which will
-  // be set AFTER the optimization
-  DenseMap<NodeIndex, NodeIndex> mergeTarget;
+  // Dense union-find representative table for cycles within this pass.
+  // InvalidIndex means the node is its own representative.
+  std::vector<NodeIndex> mergeTarget;
+  std::vector<NodeIndex> mergedNodesList;
 
   // During variable substitution, we create unknowns to represent the unknown
   // value that is a dereference of a variable.  These nodes are known as "ref"
@@ -138,8 +140,10 @@ protected:
       switch (c.getType()) {
       case AndersConstraint::ADDR_OF: {
         indirectNodes.insert(srcTgt);
-        // Dest = &src edge
-        predGraph.insertEdge(dstTgt, getAdrNodeIndex(srcTgt));
+        // Dest = &src edge: keep the exact original object node c.getSrc() so
+        // merging src's points-to equivalence class never conflates &src with
+        // &srcTgt across HVN -> HU passes.
+        predGraph.insertEdge(dstTgt, getAdrNodeIndex(c.getSrc()));
         // *Dest = src edge
         predGraph.insertEdge(getRefNodeIndex(dstTgt), srcTgt);
         break;
@@ -175,14 +179,17 @@ protected:
 
   void dumpPredecessorGraph() const {
     LOG_DEBUG("\n----- Predecessor Graph -----");
-    for (auto const &mapping : predGraph) {
+    for (NodeIndex nodeIdx : predGraph.getActiveNodes()) {
+      const SparseBitVectorGraphNode *sNode =
+          predGraph.getNodeWithIndex(nodeIdx);
+      if (!sNode)
+        continue;
       std::string nodeStr;
       raw_string_ostream rso(nodeStr);
-      printPredecessorGraphNode(rso, mapping.first);
+      printPredecessorGraphNode(rso, nodeIdx);
       std::string prefix = nodeStr + "  -->  ";
-      const SparseBitVectorGraphNode &sNode = mapping.second;
       std::vector<std::string> idxStrs;
-      for (auto const &idx : sNode) {
+      for (auto const &idx : *sNode) {
         std::string idxStr;
         raw_string_ostream idxRso(idxStr);
         printPredecessorGraphNode(idxRso, idx);
@@ -211,15 +218,18 @@ protected:
     raw_fd_ostream &os = outFile.os();
     os << "digraph G {\n";
     std::deque<bool> hasLabel(nodeFactory.getNumNodes() * 3, false);
-    for (auto const &mapping : predGraph) {
-      if (!hasLabel[mapping.first]) {
-        os << "\tnode" << mapping.first << " [label = \"";
-        printPredecessorGraphNode(os, mapping.first);
+    for (NodeIndex nodeIdx : predGraph.getActiveNodes()) {
+      const SparseBitVectorGraphNode *sNode =
+          predGraph.getNodeWithIndex(nodeIdx);
+      if (!sNode)
+        continue;
+      if (!hasLabel[nodeIdx]) {
+        os << "\tnode" << nodeIdx << " [label = \"";
+        printPredecessorGraphNode(os, nodeIdx);
         os << "\"]\n";
-        hasLabel[mapping.first] = true;
+        hasLabel[nodeIdx] = true;
       }
-      const SparseBitVectorGraphNode &sNode = mapping.second;
-      for (auto const &idx : sNode) {
+      for (auto const &idx : *sNode) {
         if (!hasLabel[idx]) {
           os << "\tnode" << idx << " [label = \"";
           printPredecessorGraphNode(os, idx);
@@ -227,7 +237,7 @@ protected:
           hasLabel[idx] = true;
         }
         os << "\tnode" << idx << " -> "
-           << "node" << mapping.first << '\n';
+           << "node" << nodeIdx << '\n';
       }
     }
     os << "}\n";
@@ -236,15 +246,15 @@ protected:
   }
 
   NodeIndex getMergeTargetRep(NodeIndex idx) {
-    while (true) {
-      auto itr = mergeTarget.find(idx);
-      if (itr == mergeTarget.end())
-        break;
-      else
-        idx = itr->second;
+    NodeIndex root = idx;
+    while (mergeTarget[root] != AndersNodeFactory::InvalidIndex)
+      root = mergeTarget[root];
+    while (idx != root) {
+      NodeIndex next = mergeTarget[idx];
+      mergeTarget[idx] = root;
+      idx = next;
     }
-
-    return idx;
+    return root;
   }
 
   NodeType *getRep(NodeIndex idx) override {
@@ -255,7 +265,10 @@ protected:
                           const NodeType *repNode) override {
     NodeIndex nodeIdx = node->getNodeIndex();
     NodeIndex repIdx = repNode->getNodeIndex();
-    mergeTarget[nodeIdx] = getMergeTargetRep(repIdx);
+    NodeIndex repRoot = getMergeTargetRep(repIdx);
+    if (mergeTarget[nodeIdx] == AndersNodeFactory::InvalidIndex)
+      mergedNodesList.push_back(nodeIdx);
+    mergeTarget[nodeIdx] = repRoot;
     if (indirectNodes.count(nodeIdx) || nodeIdx >= nodeFactory.getNumNodes())
       indirectNodes.insert(repIdx);
 
@@ -268,115 +281,93 @@ protected:
   }
 
   void rewriteConstraint() {
-    // Since only direct VAR nodes can be assigned non-unique labels, there are
-    // only three cases to consider: VAR+VAR, VAR+REF, and VAR+ADR
-    // - For VAR+VAR, just merge one node into the other
-    // - For VAR+REF, certainly we want to replace the REF node with the VAR
-    // node. This will definitely cut down the analysis time because we have one
-    // less indirect node to worry about
-    // - For VAR+ADR, we want to replace the VAR node with the ADR node because
-    // the latter is more straightforward
-
+    const NodeIndex numNodes = nodeFactory.getNumNodes();
     std::vector<NodeIndex> revLabelMap(pointerEqClass,
                                        AndersNodeFactory::InvalidIndex);
     // Scan all the VAR nodes to see if any of them have the same label as other
-    // VAR nodes. We have to perform the merge before constraint rewriting
-
-    for (auto const &mapping : peLabel) {
-      NodeIndex node = mapping.first;
-      if (node >= nodeFactory.getNumNodes())
+    // VAR nodes. We have to perform the merge before constraint rewriting.
+    for (NodeIndex node = 0; node < numNodes; ++node) {
+      unsigned iLabel = peLabel[node];
+      if (iLabel == 0)
         continue;
-
       if (nodeFactory.getMergeTarget(node) != node)
         continue;
 
-      unsigned iLabel = mapping.second;
       if (revLabelMap[iLabel] == AndersNodeFactory::InvalidIndex)
         revLabelMap[iLabel] = node;
-      else if (iLabel != 0) // We have already found a VAR or ADR node with the
-                            // same label. Note we must exclude label 0 since
-                            // it's special and cannot be merged
-      {
-        // errs() << "MERGE " << i << "with" << revLabelMap[iLabel] << "\n";
+      else {
         nodeFactory.mergeNode(revLabelMap[iLabel], node);
         ++NumNodesMergedInOpt;
       }
     }
 
-    // Collect all peLabels that are assigned to ADR nodes
-    for (auto const &mapping : peLabel) {
-      NodeIndex node = mapping.first;
-      if (node < nodeFactory.getNumNodes() * 2)
-        continue;
-
-      NodeIndex varNode = node - nodeFactory.getNumNodes() * 2;
-      if (nodeFactory.getMergeTarget(varNode) != varNode)
-        continue;
-      revLabelMap[mapping.second] = node;
+    // Collect all peLabels that are assigned to ADR nodes.
+    // Keep every ADR node even if its underlying varNode was merged into
+    // another equivalence class: &varNode is still the distinct address of
+    // varNode, while *(&varNode) resolves via getMergeTarget(varNode).
+    for (NodeIndex node = numNodes * 2, e = numNodes * 3; node < e; ++node) {
+      unsigned iLabel = peLabel[node];
+      if (iLabel != 0)
+        revLabelMap[iLabel] = node;
     }
 
-    // Now scan all constraints and see if we can simplify them
-    std::vector<AndersConstraint> newConstraints;
+    // Bucket rewritten constraints by type as packed (dest << 32 | src) 64-bit
+    // keys for fast cache-friendly sort + deduplication.
+    std::vector<uint64_t> byType[4];
+    auto emitConstraint = [&](AndersConstraint::ConstraintType ty,
+                              NodeIndex dst, NodeIndex src) {
+      byType[static_cast<unsigned>(ty)].push_back(
+          (static_cast<uint64_t>(dst) << 32) | static_cast<uint64_t>(src));
+    };
+
     for (auto const &c : constraints) {
+      // Change the lhs and rhs to their merge targets
+      NodeIndex destTgt = nodeFactory.getMergeTarget(c.getDest());
       // First, if the lhs has label 0 (non-ptr), ignore this constraint
-      if (peLabel[c.getDest()] == 0)
+      if (peLabel[destTgt] == 0)
         continue;
 
-      // Change the lhs to its mergeTarget
-      NodeIndex destTgt = nodeFactory.getMergeTarget(c.getDest());
-      // Change the rhs to its merge target
       NodeIndex srcTgt = nodeFactory.getMergeTarget(c.getSrc());
       switch (c.getType()) {
       case AndersConstraint::ADDR_OF: {
         // We don't want to replace src with srcTgt because, after all, the
         // address of a variable is NOT the same as the address of another
         // variable
-        newConstraints.emplace_back(AndersConstraint::ADDR_OF, destTgt,
-                                    c.getSrc());
-
+        emitConstraint(AndersConstraint::ADDR_OF, destTgt, c.getSrc());
         break;
       }
       case AndersConstraint::LOAD: {
         // If the src is a non-ptr, ignore this constraint
         if (peLabel[srcTgt] == 0)
           break;
-        // If the rhs is equivalent to some ADR node, then we are able to
-        // replace the load with a copy.
-        // ADR nodes start at exactly getNumNodes()*2, but revLabelMap entries
-        // for ADR nodes are stored as (varNode + getNumNodes()*2).  The check
-        // must use >= (not >) so that the first ADR node (index ==
-        // getNumNodes()) is correctly identified.
+        // If the rhs is equivalent to some ADR node (&X), replace load with
+        // copy from getMergeTarget(X).
         NodeIndex srcTgtTgt = revLabelMap[peLabel[srcTgt]];
         if (srcTgtTgt != AndersNodeFactory::InvalidIndex &&
-            srcTgtTgt >= nodeFactory.getNumNodes()) {
-          srcTgtTgt %= nodeFactory.getNumNodes();
-          // errs() << "REPLACE " << srcTgt << " with &" << srcTgtTgt << "\n";
+            srcTgtTgt >= numNodes * 2) {
+          NodeIndex valRep = nodeFactory.getMergeTarget(srcTgtTgt - numNodes * 2);
           ++NumLoadToStoreOptimized;
-          if (srcTgtTgt != destTgt)
-            newConstraints.emplace_back(AndersConstraint::COPY, destTgt,
-                                        srcTgtTgt);
+          if (valRep != destTgt)
+            emitConstraint(AndersConstraint::COPY, destTgt, valRep);
         } else {
-          newConstraints.emplace_back(AndersConstraint::LOAD, destTgt, srcTgt);
+          emitConstraint(AndersConstraint::LOAD, destTgt, srcTgt);
         }
-
         break;
       }
       case AndersConstraint::STORE: {
-        // If the lhs is equivalent to some ADR node, then we are able to
-        // replace the store with a copy.
+        // If the lhs is equivalent to some ADR node (&X), replace store with
+        // copy into getMergeTarget(X).
         NodeIndex destTgtTgt = revLabelMap[peLabel[destTgt]];
         if (destTgtTgt != AndersNodeFactory::InvalidIndex &&
-            destTgtTgt >= nodeFactory.getNumNodes()) {
-          destTgtTgt %= nodeFactory.getNumNodes();
-          // errs() << "REPLACE " << destTgt << " with &" << destTgtTgt << "\n";
+            destTgtTgt >= numNodes * 2) {
+          NodeIndex valRep =
+              nodeFactory.getMergeTarget(destTgtTgt - numNodes * 2);
           ++NumStoreToStoreOptimized;
-          if (destTgtTgt != srcTgt)
-            newConstraints.emplace_back(AndersConstraint::COPY, destTgtTgt,
-                                        srcTgt);
+          if (valRep != srcTgt)
+            emitConstraint(AndersConstraint::COPY, valRep, srcTgt);
         } else {
-          newConstraints.emplace_back(AndersConstraint::STORE, destTgt, srcTgt);
+          emitConstraint(AndersConstraint::STORE, destTgt, srcTgt);
         }
-
         break;
       }
       case AndersConstraint::COPY: {
@@ -388,34 +379,45 @@ protected:
         if (peLabel[srcTgt] == 0)
           break;
 
-        // If the rhs is equivalent to some ADR node, then we are able to
-        // replace the copy with an addr_of.
+        // If the rhs is equivalent to some ADR node (&X), replace copy with
+        // ADDR_OF(destTgt, X) using the original object node X.
         NodeIndex srcTgtTgt = revLabelMap[peLabel[srcTgt]];
         if (srcTgtTgt != AndersNodeFactory::InvalidIndex &&
-            srcTgtTgt >= nodeFactory.getNumNodes()) {
-          srcTgtTgt %= nodeFactory.getNumNodes();
-          // errs() << "REPLACE " << srcTgt << " with &" << srcTgtTgt << "\n";
-          newConstraints.emplace_back(AndersConstraint::ADDR_OF, destTgt,
-                                      srcTgtTgt);
+            srcTgtTgt >= numNodes * 2) {
+          NodeIndex origObj = srcTgtTgt - numNodes * 2;
+          emitConstraint(AndersConstraint::ADDR_OF, destTgt, origObj);
         } else {
-          newConstraints.emplace_back(AndersConstraint::COPY, destTgt, srcTgt);
+          emitConstraint(AndersConstraint::COPY, destTgt, srcTgt);
         }
-
         break;
       }
       }
     }
 
-    // There may be repetitive constraints. Uniquify them
-    std::set<AndersConstraint> constraintSet(newConstraints.begin(),
-                                             newConstraints.end());
-    constraints.assign(constraintSet.begin(), constraintSet.end());
+    size_t totalUnique = 0;
+    for (unsigned t = 0; t < 4; ++t) {
+      auto &vec = byType[t];
+      std::sort(vec.begin(), vec.end());
+      vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+      totalUnique += vec.size();
+    }
+
+    constraints.clear();
+    constraints.reserve(totalUnique);
+    for (unsigned t = 0; t < 4; ++t) {
+      auto ty = static_cast<AndersConstraint::ConstraintType>(t);
+      for (uint64_t packed : byType[t]) {
+        constraints.emplace_back(ty, static_cast<NodeIndex>(packed >> 32),
+                                 static_cast<NodeIndex>(packed & 0xFFFFFFFFu));
+      }
+    }
   }
 
   virtual void releaseMemory() {
     indirectNodes.clear();
     peLabel.clear();
     mergeTarget.clear();
+    mergedNodesList.clear();
     predGraph.releaseMemory();
     releaseSCCMemory();
   }
@@ -424,31 +426,21 @@ protected:
 
 public:
   ConstraintOptimizer(std::vector<AndersConstraint> &c, AndersNodeFactory &n)
-      : constraints(c), nodeFactory(n), pointerEqClass(1) {
-    // Build a predecessor graph.  This is like our constraint graph with the
-    // edges going in the opposite direction, and there are edges for all the
-    // constraints, instead of just copy constraints.  We also build implicit
-    // edges for constraints are implied but not explicit.  I.E for the
-    // constraint a = &b, we add implicit edges *a = b.  This helps us capture
-    // more cycles
+      : constraints(c), nodeFactory(n), predGraph(n.getNumNodes() * 3),
+        peLabel(n.getNumNodes() * 3, 0), pointerEqClass(1),
+        mergeTarget(n.getNumNodes() * 3, AndersNodeFactory::InvalidIndex) {
+    reserveSCCState(n.getNumNodes() * 3);
     buildPredecessorGraph();
   }
 
   void run() override {
-    // Now run Tarjan's SCC algorithm to find cycles, condense predGraph, and
-    // explore possible equivalence relations
-    runOnGraph(&predGraph);
+    // Run Tarjan's SCC algorithm only over active nodes in predGraph.
+    runOnNodeList(predGraph.getActiveNodes());
 
     // For all nodes on the same cycle: assign their representative's pe label
     // to them
-    for (auto const &mapping : mergeTarget)
-      peLabel[mapping.first] = peLabel[getMergeTargetRep(mapping.second)];
-
-    /*for (unsigned i = 0; i < peLabel.size(); ++i)
-    {
-            printPredecessorGraphNode(errs(), i);
-            errs() << ", peLabel = " << peLabel[i] << "\n";
-    }*/
+    for (NodeIndex nodeIdx : mergedNodesList)
+      peLabel[nodeIdx] = peLabel[getMergeTargetRep(nodeIdx)];
 
     // Track pointer equivalence classes
     NumPointerEquivClasses = pointerEqClass;
@@ -457,8 +449,15 @@ public:
     rewriteConstraint();
   }
 
-  // Return a snapshot of the peLabel map after run() completes.
-  const DenseMap<NodeIndex, unsigned> &getPELabels() const { return peLabel; }
+  // Copy non-zero VAR peLabels into `out`.
+  void copyPELabelsTo(DenseMap<NodeIndex, unsigned> &out) const {
+    out.clear();
+    const NodeIndex numNodes = nodeFactory.getNumNodes();
+    for (NodeIndex i = 0; i < numNodes; ++i) {
+      if (peLabel[i] != 0)
+        out[i] = peLabel[i];
+    }
+  }
 };
 
 // The technique used here is described in "Exploiting Pointer and Location
@@ -473,7 +472,7 @@ public:
 class HVNOptimizer : public ConstraintOptimizer {
 private:
   // Map from a set of NodeIndex to Pointer Equivalence Class
-  std::unordered_map<SparseBitVector<>, unsigned, SparseBitVectorHash,
+  std::unordered_map<OptBitVector, unsigned, SparseBitVectorHash,
                      SparseBitVectorKeyEqual>
       setLabel;
 
@@ -487,7 +486,7 @@ private:
     // Scan through the predecessor edges and examine what labels they have
     bool allSame = true;
     unsigned lastSeenLabel = 0;
-    SparseBitVector<> predLabels;
+    OptBitVector predLabels;
     const SparseBitVectorGraphNode *sNode = predGraph.getNodeWithIndex(node);
     if (sNode != nullptr) {
       for (auto const &pred : *sNode) {
@@ -542,11 +541,11 @@ public:
 class HUOptimizer : public ConstraintOptimizer {
 private:
   // Map from a set of NodeIndex to Pointer Equivalence Class
-  std::unordered_map<SparseBitVector<>, unsigned, SparseBitVectorHash,
+  std::unordered_map<OptBitVector, unsigned, SparseBitVectorHash,
                      SparseBitVectorKeyEqual>
       setLabel;
-  // Map from NodeIndex to its offline pts-set
-  DenseMap<unsigned, SparseBitVector<>> ptsSet;
+  // Dense table mapping NodeIndex -> offline pts-set
+  std::vector<OptBitVector> ptsSet;
 
   // Try to assign a single label to node. Return true if the assignment
   // succeeds
@@ -583,22 +582,15 @@ private:
       return;
 
     // Direct VAR nodes need more careful examination
-    SparseBitVector<> &myPtsSet = ptsSet[node];
+    OptBitVector &myPtsSet = ptsSet[node];
     SparseBitVectorGraphNode *sNode = predGraph.getNodeWithIndex(node);
     if (sNode != nullptr) {
       for (auto const &pred : *sNode) {
-        // Be careful! Any insertion to ptsSet here will invalidate myPtsSet
         NodeIndex predRep = getMergeTargetRep(pred);
-        auto itr = ptsSet.find(predRep);
-        if (itr != ptsSet.end())
-          myPtsSet |= (itr->second);
+        if (predRep != node && !ptsSet[predRep].empty())
+          myPtsSet |= ptsSet[predRep];
       }
     }
-
-    // errs() << "ptsSet [" << node << "] = ";
-    // for (auto v: myPtsSet)
-    //	errs() << v << ", ";
-    // errs() << "\n";
 
     // If the ptsSet is empty, assign a label of zero
     if (myPtsSet.empty())
@@ -618,7 +610,7 @@ private:
 
 public:
   HUOptimizer(std::vector<AndersConstraint> &c, AndersNodeFactory &n)
-      : ConstraintOptimizer(c, n) {}
+      : ConstraintOptimizer(c, n), ptsSet(n.getNumNodes() * 3) {}
 
   void releaseMemory() override {
     ConstraintOptimizer::releaseMemory();
@@ -636,7 +628,7 @@ void runHVNAndCapturePELabels(std::vector<AndersConstraint> &constraints,
                               llvm::DenseMap<NodeIndex, unsigned> &out) {
   HVNOptimizer hvn(constraints, nodeFactory);
   hvn.run();
-  out = hvn.getPELabels();
+  hvn.copyPELabelsTo(out);
 }
 
 // Optimize the constraints by performing offline variable substitution

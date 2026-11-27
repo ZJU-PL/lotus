@@ -1,8 +1,12 @@
 #pragma once
 
+#include <string>
+
+#include <llvm/ADT/DenseMap.h>
 #include <llvm/Support/raw_ostream.h>
 
 namespace llvm {
+class ModuleSlotTracker;
 class Value;
 class Module;
 } // namespace llvm
@@ -12,18 +16,25 @@ class AndersenAAResult;
 
 namespace sparrow_aa {
 
+/// Precomputed display names for unnamed LLVM values in a module.
+/// Avoids repeated ModuleSlotTracker::incorporateFunction() rescans when
+/// printing points-to targets belonging to many different functions.
+using ValueNameCache = llvm::DenseMap<const llvm::Value *, std::string>;
+
+/// Build a ValueNameCache by scanning each function in @p M once.
+ValueNameCache buildValueNameCache(const llvm::Module &M);
+
 /// Print the points-to set for a given pointer value.
-///
-/// This function queries the Andersen analysis for the points-to set of the
-/// given value and prints it in a human-readable format. The output includes
-/// the number of locations the pointer points to and labels for each location
-/// (global, stack, heap, or function).
-///
-/// \param V The pointer value to query
-/// \param Anders The Andersen analysis instance
-/// \param OS The output stream to write to
 void printPointsToSet(const llvm::Value *V, Andersen &Anders,
                       llvm::raw_ostream &OS);
+
+/// Print the points-to set using a shared ModuleSlotTracker.
+void printPointsToSet(const llvm::Value *V, Andersen &Anders,
+                      llvm::raw_ostream &OS, llvm::ModuleSlotTracker &MST);
+
+/// Print the points-to set using a precomputed ValueNameCache (O(1) per value).
+void printPointsToSet(const llvm::Value *V, Andersen &Anders,
+                      llvm::raw_ostream &OS, const ValueNameCache &NameCache);
 
 /// Perform and print alias queries between pointers in a module.
 ///

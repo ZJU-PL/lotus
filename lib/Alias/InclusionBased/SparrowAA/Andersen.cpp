@@ -34,6 +34,7 @@
 #include <llvm/ADT/Statistic.h>
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/ModuleSlotTracker.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Path.h>
@@ -367,8 +368,8 @@ ContextPolicy getSelectedAndersenContextPolicy() {
 }
 
 Andersen::Andersen(const Module &module, ContextPolicy policy)
-    : ctxPolicy(policy), initialCtx(ctxPolicy.initialCtx()),
-      globalCtx(ctxPolicy.globalCtx()) {
+    : ptsSetImpl(getGlobalPtsSetImpl()), ctxPolicy(policy),
+      initialCtx(ctxPolicy.initialCtx()), globalCtx(ctxPolicy.globalCtx()) {
   static std::atomic<int> objectCounter{0};
   int myId = ++objectCounter;
   LOG_INFO("=== Andersen object #{} created ===", myId);
@@ -379,57 +380,56 @@ Andersen::Andersen(const Module &module, ContextPolicy policy)
 Andersen::~Andersen() { ctxPolicy.release(); }
 
 AndersNodeFactory::CtxKey
-Andersen::evolveContext(AndersNodeFactory::CtxKey prev,
-                        const llvm::Instruction *I) const {
+Andersen::evolveContextForCallee(AndersNodeFactory::CtxKey prev,
+                                 const llvm::Instruction *I,
+                                 const llvm::Function *callee) const {
   if (!EnableAdaptiveCS || contextNeed.empty())
     return ctxPolicy.evolve(prev, I);
 
-  // If we know the callee and its context-need score is below the threshold,
-  // don't deepen — return the caller's context unchanged.
-  if (I) {
-    if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(I)) {
-      if (const auto *callee = cb->getCalledFunction()) {
-        auto it = contextNeed.find(callee);
-        float score = (it != contextNeed.end()) ? it->second : 0.0f;
-        if (score < AdaptiveCSThreshold)
-          return prev;
-      }
-    }
+  // If the callee's context-need score is below the threshold, keep it
+  // context-insensitive (reuse initialCtx) instead of cloning it per caller
+  // context.
+  if (callee) {
+    auto it = contextNeed.find(callee);
+    float score = (it != contextNeed.end()) ? it->second : 0.0f;
+    if (score < AdaptiveCSThreshold)
+      return initialCtx;
   }
   return ctxPolicy.evolve(prev, I);
 }
 
+AndersNodeFactory::CtxKey
+Andersen::evolveContext(AndersNodeFactory::CtxKey prev,
+                        const llvm::Instruction *I) const {
+  const llvm::Function *callee = nullptr;
+  if (I) {
+    if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(I))
+      callee = cb->getCalledFunction();
+  }
+  return evolveContextForCallee(prev, I, callee);
+}
+
 // Compute per-function context-need scores using the peLabel map captured from
-// HVN. For each pointer-typed formal parameter, we collect the peLabels of all
-// actual arguments (from COPY constraints dest=formal, src=actual). If any
-// formal receives actuals with more than one distinct peLabel, the callers pass
-// pointer-inequivalent values and context sensitivity would help that param.
-// The score is the fraction of pointer formals that are "diverse" in this sense.
-void Andersen::computeContextNeed() {
-  // Map: function → (formal node → set of peLabels from callers)
+// HVN and the pre-rewrite argument-passing edges (formal <- actual). Using
+// pre-rewrite edges ensures that actuals rewritten from COPY to ADDR_OF or
+// formals merged during HVN are not lost.
+void Andersen::computeContextNeed(
+    const std::vector<FormalActualEdge> &argEdges) {
+  contextNeed.clear();
+  // Map: function → (formal node → list of peLabels from callers)
   llvm::DenseMap<const llvm::Function *,
                  llvm::DenseMap<NodeIndex, llvm::SmallVector<unsigned, 4>>>
       paramLabels;
 
-  for (const auto &c : constraints) {
-    if (c.getType() != AndersConstraint::COPY)
-      continue;
-
-    NodeIndex dest = nodeFactory.getMergeTarget(c.getDest());
-    const llvm::Value *val = nodeFactory.getValueForNode(dest);
-    if (!val || !llvm::isa<llvm::Argument>(val))
-      continue;
-
-    const auto *arg = llvm::cast<llvm::Argument>(val);
-    const llvm::Function *F = arg->getParent();
-
-    NodeIndex src = nodeFactory.getMergeTarget(c.getSrc());
-    auto labelIt = hvnPELabels.find(src);
+  for (const auto &edge : argEdges) {
+    auto labelIt = hvnPELabels.find(edge.actual);
+    if (labelIt == hvnPELabels.end())
+      labelIt = hvnPELabels.find(nodeFactory.getMergeTarget(edge.actual));
     unsigned label = labelIt != hvnPELabels.end() ? labelIt->second : 0;
     // label == 0 means non-pointer; skip
     if (label == 0)
       continue;
-    paramLabels[F][dest].push_back(label);
+    paramLabels[edge.func][edge.formal].push_back(label);
   }
 
   for (auto &[F, params] : paramLabels) {
@@ -493,12 +493,18 @@ bool Andersen::getPointsToSet(const llvm::Value *v,
       continue;
     }
     NodeIndex rep = nodeFactory.getMergeTarget(n);
-    auto ptsItr = ptsGraph.find(rep);
-    if (ptsItr == ptsGraph.end())
-      continue;
-    sawKnown = true;
-    for (auto idx : ptsItr->second)
-      ptsSet.insert(static_cast<unsigned>(idx));
+    if (ptsSetImpl == PtsSetImpl::SPARSE_BITVECTOR) {
+      if (rep >= sparsePtsGraph.size() || sparsePtsGraph[rep].isEmpty())
+        continue;
+      sawKnown = true;
+      ptsSet.unionWith(sparsePtsGraph[rep]);
+    } else {
+      if (rep >= bddPtsGraph.size() || bddPtsGraph[rep].isEmpty())
+        continue;
+      sawKnown = true;
+      for (auto idx : bddPtsGraph[rep])
+        ptsSet.insert(static_cast<unsigned>(idx));
+    }
   }
 
   if (sawUnknown)
@@ -522,12 +528,17 @@ bool Andersen::getPointsToSetInContext(const llvm::Value *v,
   }
 
   NodeIndex rep = nodeFactory.getMergeTarget(n);
-  auto ptsItr = ptsGraph.find(rep);
-  if (ptsItr == ptsGraph.end())
-    return false;
+  if (ptsSetImpl == PtsSetImpl::SPARSE_BITVECTOR) {
+    if (rep >= sparsePtsGraph.size() || sparsePtsGraph[rep].isEmpty())
+      return false;
+    ptsSet = sparsePtsGraph[rep];
+    return true;
+  }
 
+  if (rep >= bddPtsGraph.size() || bddPtsGraph[rep].isEmpty())
+    return false;
   ptsSet.clear();
-  for (auto idx : ptsItr->second)
+  for (auto idx : bddPtsGraph[rep])
     ptsSet.insert(static_cast<unsigned>(idx));
   return true;
 }
@@ -554,6 +565,7 @@ bool Andersen::getPointsToSetInContext(
 
 bool Andersen::runOnModule(const Module &M) {
   LOG_INFO("Starting Andersen analysis on module: {}", M.getName().str());
+  stats = Stats{};
 
   // When adaptive CS is requested with k>0, we do a lightweight two-phase
   // collection:
@@ -572,21 +584,35 @@ bool Andersen::runOnModule(const Module &M) {
     visitedFunctions.clear();
     collectConstraints(M);
 
+    // Capture formal <- actual edges BEFORE HVN merges nodes or rewrites
+    // COPY(formal, &x) into ADDR_OF(formal, x).
+    std::vector<FormalActualEdge> argEdges;
+    for (const auto &c : constraints) {
+      if (c.getType() != AndersConstraint::COPY)
+        continue;
+      NodeIndex dest = c.getDest();
+      const llvm::Value *val = nodeFactory.getValueForNode(dest);
+      if (const auto *arg = llvm::dyn_cast_or_null<llvm::Argument>(val))
+        argEdges.push_back({arg->getParent(), dest, c.getSrc()});
+    }
+
     // Run HVN on CI constraints and score. We don't keep the rewritten CI
     // constraints — they're discarded after scoring.
     runHVNAndCapturePELabels(constraints, nodeFactory, hvnPELabels);
-    computeContextNeed();
+    computeContextNeed(argEdges);
     LOG_INFO("Adaptive CS: scored {} functions", contextNeed.size());
 
     // Phase 1: reset state and re-collect using the adaptive CS policy
     constraints.clear();
     nodeFactory = AndersNodeFactory();
-    ptsGraph.clear();
+    sparsePtsGraph.clear();
+    bddPtsGraph.clear();
     ctxPolicy = savedPolicy;
     initialCtx = ctxPolicy.initialCtx();
     globalCtx = ctxPolicy.globalCtx();
     visitedFunctions.clear();
-    LOG_INFO("Adaptive CS: re-collecting constraints with adaptive context policy");
+    LOG_INFO(
+        "Adaptive CS: re-collecting constraints with adaptive context policy");
   }
 
   visitedFunctions.clear();
@@ -598,6 +624,8 @@ bool Andersen::runOnModule(const Module &M) {
   // Update statistics after constraint collection
   size_t numConstraints = constraints.size();
   size_t numValueNodes = nodeFactory.getNumNodes();
+  stats.numNodes = numValueNodes;
+  stats.numConstraintsBeforeOpt = numConstraints;
   NumConstraints = numConstraints;
   NumValueNodes = numValueNodes;
   LOG_INFO("Collected {} constraints and created {} value nodes",
@@ -624,6 +652,7 @@ bool Andersen::runOnModule(const Module &M) {
 
   LOG_INFO("Starting constraint optimization...");
   optimizeConstraints();
+  stats.numConstraintsAfterOpt = constraints.size();
   LOG_INFO("Constraint optimization completed");
   if (!AndersenDumpConstraintsAfterOptimize.empty())
     serializeConstraints(AndersenDumpConstraintsAfterOptimize,
@@ -704,13 +733,22 @@ void Andersen::dumpConstraintsPlainVanilla() const {
 void Andersen::dumpPtsGraphPlainVanilla() const {
   for (unsigned i = 0, e = nodeFactory.getNumNodes(); i < e; ++i) {
     NodeIndex rep = nodeFactory.getMergeTarget(i);
-    auto ptsItr = ptsGraph.find(rep);
-    if (ptsItr != ptsGraph.end()) {
-      std::stringstream ss;
-      ss << i;
-      for (auto v : ptsItr->second)
-        ss << " " << v;
-      LOG_DEBUG("{}", ss.str());
+    if (ptsSetImpl == PtsSetImpl::SPARSE_BITVECTOR) {
+      if (rep < sparsePtsGraph.size() && !sparsePtsGraph[rep].isEmpty()) {
+        std::stringstream ss;
+        ss << i;
+        for (auto v : sparsePtsGraph[rep])
+          ss << " " << v;
+        LOG_DEBUG("{}", ss.str());
+      }
+    } else {
+      if (rep < bddPtsGraph.size() && !bddPtsGraph[rep].isEmpty()) {
+        std::stringstream ss;
+        ss << i;
+        for (auto v : bddPtsGraph[rep])
+          ss << " " << v;
+        LOG_DEBUG("{}", ss.str());
+      }
     }
   }
 }
@@ -733,7 +771,18 @@ void Andersen::serializeConstraints(
     return;
   }
 
-  auto formatValue = [](const llvm::Value *value) -> std::string {
+  const Module *ownerModule = nullptr;
+  for (unsigned i = 0, e = nodeFactory.getNumNodes(); i < e && !ownerModule;
+       ++i) {
+    const llvm::Value *val = nodeFactory.getValueForNode(i);
+    if (const auto *gv = llvm::dyn_cast_or_null<llvm::GlobalValue>(val))
+      ownerModule = gv->getParent();
+    else if (const auto *inst = llvm::dyn_cast_or_null<llvm::Instruction>(val))
+      ownerModule = inst->getModule();
+  }
+  ModuleSlotTracker mst(ownerModule);
+
+  auto formatValue = [&](const llvm::Value *value) -> std::string {
     if (value == nullptr)
       return "-";
     if (value->hasName())
@@ -741,7 +790,10 @@ void Andersen::serializeConstraints(
 
     std::string rendered;
     raw_string_ostream os(rendered);
-    value->printAsOperand(os, false);
+    if (ownerModule)
+      value->printAsOperand(os, false, mst);
+    else
+      value->printAsOperand(os, false);
     os.flush();
     return rendered;
   };

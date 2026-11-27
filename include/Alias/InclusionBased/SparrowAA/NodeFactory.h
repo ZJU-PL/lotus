@@ -168,6 +168,8 @@ private:
   /// Reverse map: LLVM value → all node indices across all contexts.
   /// Used by `getValueNodesFor` to support context-insensitive union queries.
   llvm::DenseMap<const llvm::Value *, std::vector<NodeIndex>> valueNodeBuckets;
+  /// Fast O(1) lookup of global object nodes across all calling contexts.
+  llvm::DenseMap<const llvm::Value *, NodeIndex> globalObjMap;
 
 public:
   AndersNodeFactory();

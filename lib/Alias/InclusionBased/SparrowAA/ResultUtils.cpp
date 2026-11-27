@@ -17,60 +17,94 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/ModuleSlotTracker.h>
 #include <llvm/Support/raw_ostream.h>
 
 using namespace llvm;
 
 namespace sparrow_aa {
 
+ValueNameCache buildValueNameCache(const Module &M) {
+  ValueNameCache cache;
+  ModuleSlotTracker MST(&M);
+  auto recordUnnamed = [&](const Value *V) {
+    if (V->hasName())
+      return;
+    std::string rendered;
+    raw_string_ostream rso(rendered);
+    V->printAsOperand(rso, false, MST);
+    rso.flush();
+    cache.try_emplace(V, std::move(rendered));
+  };
+
+  for (const GlobalVariable &GV : M.globals())
+    recordUnnamed(&GV);
+  for (const Function &F : M) {
+    recordUnnamed(&F);
+    if (F.isDeclaration())
+      continue;
+    MST.incorporateFunction(F);
+    for (const Argument &A : F.args())
+      if (A.getType()->isPointerTy())
+        recordUnnamed(&A);
+    for (const BasicBlock &BB : F)
+      for (const Instruction &I : BB)
+        if (I.getType()->isPointerTy())
+          recordUnnamed(&I);
+  }
+  return cache;
+}
+
 /**
  * @brief Print a value's name or representation to an output stream.
- *
- * @param V The value to print
- * @param OS The output stream
  */
-static void printValue(const Value *V, raw_ostream &OS) {
-  if (V->hasName())
+static void printValue(const Value *V, raw_ostream &OS,
+                       ModuleSlotTracker *MST = nullptr,
+                       const ValueNameCache *NameCache = nullptr) {
+  if (V->hasName()) {
     OS << V->getName();
+    return;
+  }
+  if (NameCache) {
+    auto it = NameCache->find(V);
+    if (it != NameCache->end()) {
+      OS << it->second;
+      return;
+    }
+  }
+  if (MST)
+    V->printAsOperand(OS, false, *MST);
   else
     V->printAsOperand(OS, false);
 }
 
-/**
- * @brief Print the points-to set for a value.
- *
- * Retrieves and prints all objects that the given pointer value may point to,
- * including annotations for global variables, stack allocations, heap
- * allocations, and function pointers.
- *
- * @param V The pointer value to query
- * @param Anders The Andersen analysis instance
- * @param OS The output stream
- */
-void printPointsToSet(const Value *V, Andersen &Anders, raw_ostream &OS) {
+static void printPointsToSetImpl(const Value *V, Andersen &Anders,
+                                 raw_ostream &OS, ModuleSlotTracker *MST,
+                                 const ValueNameCache *NameCache) {
   if (!V->getType()->isPointerTy())
     return;
 
   std::vector<const Value *> ptsSet;
   if (!Anders.getPointsToSet(V, ptsSet)) {
     OS << "  ";
-    printValue(V, OS);
+    printValue(V, OS, MST, NameCache);
     OS << " points to unknown\n";
     return;
   }
   if (ptsSet.empty()) {
     OS << "  ";
-    printValue(V, OS);
+    printValue(V, OS, MST, NameCache);
     OS << " points to nothing\n";
     return;
   }
 
   OS << "  ";
-  printValue(V, OS);
+  printValue(V, OS, MST, NameCache);
   OS << " points to " << ptsSet.size() << " location(s):\n";
   for (const Value *T : ptsSet) {
     OS << "    - ";
-    printValue(T, OS);
+    printValue(T, OS, MST, NameCache);
     if (isa<GlobalVariable>(T))
       OS << " [global]";
     else if (isa<AllocaInst>(T))
@@ -81,6 +115,20 @@ void printPointsToSet(const Value *V, Andersen &Anders, raw_ostream &OS) {
       OS << " [function]";
     OS << "\n";
   }
+}
+
+void printPointsToSet(const Value *V, Andersen &Anders, raw_ostream &OS) {
+  printPointsToSetImpl(V, Anders, OS, nullptr, nullptr);
+}
+
+void printPointsToSet(const Value *V, Andersen &Anders, raw_ostream &OS,
+                      ModuleSlotTracker &MST) {
+  printPointsToSetImpl(V, Anders, OS, &MST, nullptr);
+}
+
+void printPointsToSet(const Value *V, Andersen &Anders, raw_ostream &OS,
+                      const ValueNameCache &NameCache) {
+  printPointsToSetImpl(V, Anders, OS, nullptr, &NameCache);
 }
 
 /**
@@ -112,6 +160,7 @@ void performAliasQueries(Module &M, AndersenAAResult &AAResult,
 
   OS << "Total pointers: " << Pointers.size() << "\n\n";
 
+  ModuleSlotTracker MST(&M);
   unsigned Counts[3] = {0};
   const char *Names[] = {"NoAlias", "MayAlias", "MustAlias"};
 
@@ -127,9 +176,9 @@ void performAliasQueries(Module &M, AndersenAAResult &AAResult,
 
       if (R != AliasResult::NoAlias) {
         OS << "  ";
-        Pointers[i]->printAsOperand(OS, false);
+        Pointers[i]->printAsOperand(OS, false, MST);
         OS << " and ";
-        Pointers[j]->printAsOperand(OS, false);
+        Pointers[j]->printAsOperand(OS, false, MST);
         OS << " -> " << Names[idx] << "\n";
       }
     }

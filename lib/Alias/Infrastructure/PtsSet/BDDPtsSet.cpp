@@ -315,6 +315,18 @@ bool BDDAndersPtsSet::unionWith(const BDDAndersPtsSet &other) {
   return changed;
 }
 
+bool BDDAndersPtsSet::intersectAssign(const BDDAndersPtsSet &other) {
+  DdManager *mgr = getManager();
+  DdNode *inter = Cudd_bddAnd(mgr, impl->bdd, other.impl->bdd);
+  Cudd_Ref(inter);
+  const bool changed = inter != impl->bdd;
+  Cudd_RecursiveDeref(mgr, impl->bdd);
+  impl->bdd = inter;
+  if (changed)
+    cache.reset();
+  return changed;
+}
+
 bool BDDAndersPtsSet::differenceWith(const BDDAndersPtsSet &other) {
   DdManager *mgr = getManager();
   DdNode *diff = Cudd_bddAnd(mgr, impl->bdd, Cudd_Not(other.impl->bdd));
@@ -325,6 +337,16 @@ bool BDDAndersPtsSet::differenceWith(const BDDAndersPtsSet &other) {
   if (changed)
     cache.reset();
   return changed;
+}
+
+void BDDAndersPtsSet::setDifference(const BDDAndersPtsSet &lhs,
+                                    const BDDAndersPtsSet &rhs) {
+  DdManager *mgr = getManager();
+  DdNode *diff = Cudd_bddAnd(mgr, lhs.impl->bdd, Cudd_Not(rhs.impl->bdd));
+  Cudd_Ref(diff);
+  Cudd_RecursiveDeref(mgr, impl->bdd);
+  impl->bdd = diff;
+  cache.reset();
 }
 
 bool BDDAndersPtsSet::complement() {

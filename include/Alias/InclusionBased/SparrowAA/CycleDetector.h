@@ -2,75 +2,20 @@
  * @file CycleDetector.h
  * @brief Generic SCC-based cycle detector for Andersen's constraint graph.
  *
- * ## Algorithm
- *
- * `CycleDetector` implements **Nuutila's improved Tarjan SCC algorithm**
- * (Nuutila & Soisalon-Soininen, 1994).  The key difference from classic
- * Tarjan is the use of an `inComponent` set instead of a "lowlink" array,
- * which avoids redundant stack operations and is slightly faster in practice.
- *
- * The algorithm assigns a DFS timestamp to each node on first visit.  When
- * the DFS unwinds, if a node's timestamp equals its minimum reachable
- * timestamp (i.e., it is the root of an SCC), all nodes on the SCC stack
- * with a higher timestamp belong to the same SCC and are collapsed.
- *
- * ## Usage
- *
- * Subclass `CycleDetector<MyGraph>` and implement the three pure-virtual
- * hooks:
- *
- * ```cpp
- * class MyCycleDetector : public CycleDetector<MyGraph> {
- *   NodeType *getRep(NodeIndex n) override { ... }
- *   void processNodeOnCycle(const NodeType *n, const NodeType *rep) override {
- * ... } void processCycleRepNode(const NodeType *rep) override { ... } void
- * run() override { runOnGraph(&myGraph); }
- * };
- * ```
- *
- * - `getRep` must return the current representative of a (possibly merged)
- *   node.  During solving, nodes in the same SCC are merged; `getRep`
- *   follows the union-find chain.
- * - `processNodeOnCycle` is called for each non-representative node in an
- *   SCC.  Typically merges the node into the representative.
- * - `processCycleRepNode` is called once for the representative of each SCC
- *   (including trivial SCCs of size 1).
- *
- * @tparam GraphType  The concrete graph type; must have an
- *                    `AndersGraphTraits<GraphType>` specialisation.
- *
- * ## Iterative DFS to Avoid Stack Overflow
- *
- * The original recursive `visit()` could overflow the native call stack on
- * large constraint graphs (deep chains of copy edges).  The implementation
- * now uses an explicit worklist to perform the same Nuutila SCC algorithm
- * iteratively.  Each worklist frame stores the node and its current child
- * iterator so that the DFS can be resumed after processing each child.
- * A separate `entryTime` map records the timestamp assigned when a node was
- * first pushed, allowing the SCC-root check (dfsNum[node] == entryTime) to
- * work correctly even after dfsNum[node] has been lowered by back-edges.
+ * Implements Nuutila's improved Tarjan SCC algorithm iteratively with dense
+ * arrays indexed by NodeIndex for minimal overhead.
  */
 
 #pragma once
 
 #include "Alias/InclusionBased/SparrowAA/GraphTraits.h"
+#include "Alias/InclusionBased/SparrowAA/NodeFactory.h"
 
-#include <stack>
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
 #include <vector>
 
-#include <llvm/ADT/DenseMap.h>
-#include <llvm/ADT/DenseSet.h>
-
-/**
- * @class CycleDetector
- * @brief Abstract base class for SCC detection in Andersen's constraint graph.
- *
- * Subclasses must implement `getRep`, `processNodeOnCycle`,
- * `processCycleRepNode`, and `run`.  The DFS traversal and SCC bookkeeping
- * are handled entirely by this base class.
- *
- * @tparam GraphType  The concrete graph type.
- */
 template <class GraphType> class CycleDetector {
 public:
   using GraphTraits = AndersGraphTraits<GraphType>;
@@ -80,40 +25,47 @@ public:
 
 private:
   /// Stack of nodes whose SCC membership has not yet been finalised.
-  std::stack<const NodeType *> sccStack;
+  std::vector<const NodeType *> sccStack;
 
-  /// Maps each visited node to its current minimum-reachable DFS timestamp
-  /// (the "lowlink" equivalent in Nuutila's algorithm).
-  llvm::DenseMap<const NodeType *, unsigned> dfsNum;
+  /// Dense arrays indexed by NodeIndex (0 = unvisited; timestamps start at 1).
+  std::vector<unsigned> dfsNum;
+  std::vector<unsigned> entryTime;
+  std::vector<uint8_t> inComponent;
 
-  /// Records the DFS discovery timestamp assigned when a node was first
-  /// pushed onto the worklist.  Unlike dfsNum, this value is never lowered
-  /// by back-edges and is used to detect SCC roots.
-  llvm::DenseMap<const NodeType *, unsigned> entryTime;
+  /// Nodes touched in the current run (enables O(|visited|) reset in runOnNode).
+  std::vector<NodeIndex> visitedNodes;
 
-  /// Tracks nodes that have been assigned to a completed SCC.
-  llvm::DenseSet<const NodeType *> inComponent;
-
-  /// Monotonically increasing DFS timestamp counter.
+  /// Monotonically increasing DFS timestamp counter (starts at 1).
   unsigned timestamp;
 
-  // -----------------------------------------------------------------------
   struct WorkItem {
     NodeType *node;
+    NodeIndex id;
     child_iterator childIt;
     child_iterator childEnd;
   };
 
+  void ensureCapacity(NodeIndex id) {
+    if (id < dfsNum.size())
+      return;
+    size_t newSize = std::max<size_t>(id + 1, dfsNum.size() * 2 + 64);
+    dfsNum.resize(newSize, 0);
+    entryTime.resize(newSize, 0);
+    inComponent.resize(newSize, 0);
+  }
+
   void visit(NodeType *startNode) {
     std::vector<WorkItem> worklist;
 
-    // Push a node onto the worklist for the first time.
     auto pushNode = [&](NodeType *node) {
+      NodeIndex id = node->getNodeIndex();
+      ensureCapacity(id);
       unsigned ts = timestamp++;
-      dfsNum[node] = ts;
-      entryTime[node] = ts;
-      worklist.push_back(
-          {node, GraphTraits::child_begin(node), GraphTraits::child_end(node)});
+      dfsNum[id] = ts;
+      entryTime[id] = ts;
+      visitedNodes.push_back(id);
+      worklist.push_back({node, id, GraphTraits::child_begin(node),
+                          GraphTraits::child_end(node)});
     };
 
     pushNode(startNode);
@@ -121,52 +73,44 @@ private:
     while (!worklist.empty()) {
       WorkItem &item = worklist.back();
       NodeType *node = item.node;
+      NodeIndex id = item.id;
 
       if (item.childIt != item.childEnd) {
-        // There is still a child to process.
         NodeType *succRep = getRep(*item.childIt);
         ++item.childIt;
+        NodeIndex succId = succRep->getNodeIndex();
+        ensureCapacity(succId);
 
-        if (!dfsNum.count(succRep)) {
-          // Tree edge: visit the successor.
+        if (dfsNum[succId] == 0) {
           pushNode(succRep);
-          // After pushNode returns we will re-enter the loop and process
-          // the successor's children before coming back to this node.
         } else {
-          // Back/cross edge: propagate the minimum timestamp upward.
-          if (!inComponent.count(succRep) && dfsNum[node] > dfsNum[succRep])
-            dfsNum[node] = dfsNum[succRep];
+          if (!inComponent[succId] && dfsNum[id] > dfsNum[succId])
+            dfsNum[id] = dfsNum[succId];
         }
       } else {
-        // All children of `node` have been processed — post-order work.
         worklist.pop_back();
 
-        // Propagate minimum timestamp to the parent frame (if any).
         if (!worklist.empty()) {
-          NodeType *parent = worklist.back().node;
-          if (!inComponent.count(node) && dfsNum[parent] > dfsNum[node])
-            dfsNum[parent] = dfsNum[node];
+          NodeIndex parentId = worklist.back().id;
+          if (!inComponent[id] && dfsNum[parentId] > dfsNum[id])
+            dfsNum[parentId] = dfsNum[id];
         }
 
-        // SCC-root check: node is the root of an SCC iff its dfsNum was
-        // never lowered below its entry timestamp.
-        unsigned myEntry = entryTime[node];
-        if (dfsNum[node] != myEntry) {
-          // Not an SCC root — push onto the SCC stack and continue.
-          sccStack.push(node);
+        unsigned myEntry = entryTime[id];
+        if (dfsNum[id] != myEntry) {
+          sccStack.push_back(node);
           continue;
         }
 
-        // node is an SCC root: pop all nodes on the SCC stack that were
-        // discovered after this node (they belong to the same SCC).
-        inComponent.insert(node);
+        inComponent[id] = 1;
         while (!sccStack.empty()) {
-          const NodeType *cycleNode = sccStack.top();
-          if (dfsNum[cycleNode] < myEntry)
+          const NodeType *cycleNode = sccStack.back();
+          NodeIndex cId = cycleNode->getNodeIndex();
+          if (dfsNum[cId] < myEntry)
             break;
           processNodeOnCycle(cycleNode, node);
-          inComponent.insert(cycleNode);
-          sccStack.pop();
+          inComponent[cId] = 1;
+          sccStack.pop_back();
         }
 
         processCycleRepNode(node);
@@ -175,49 +119,77 @@ private:
   }
 
 protected:
-  // Nodes may get merged during the analysis. This function returns the merge
-  // target (if the node is merged into another node) or the node itself (if the
-  // node has not been merged into another node).
   virtual NodeType *getRep(NodeIndex node) = 0;
-  // Specify how to process the non-rep nodes if a cycle is found.
   virtual void processNodeOnCycle(const NodeType *node,
                                   const NodeType *repNode) = 0;
-  // Specify how to process the rep nodes if a cycle is found.
   virtual void processCycleRepNode(const NodeType *node) = 0;
 
-  // Running the cycle detection algorithm on a given graph G.
-  void runOnGraph(GraphType *graph) {
-    assert(sccStack.empty() && "sccStack is not empty before cycle detection!");
-    assert(dfsNum.empty() && "dfsNum is not empty before cycle detection!");
-    assert(inComponent.empty() &&
-           "inComponent is not empty before cycle detection!");
+  void reserveSCCState(size_t numNodes) {
+    if (numNodes > dfsNum.size()) {
+      dfsNum.resize(numNodes, 0);
+      entryTime.resize(numNodes, 0);
+      inComponent.resize(numNodes, 0);
+    }
+  }
 
-    for (auto itr = GraphTraits::node_begin(graph),
-              ite = GraphTraits::node_end(graph);
-         itr != ite; ++itr) {
-      NodeType *repNode = getRep(itr->getNodeIndex());
-      if (!dfsNum.count(repNode))
+  void runOnNodeList(const std::vector<NodeIndex> &nodeIndices) {
+    assert(sccStack.empty() && "sccStack is not empty before cycle detection!");
+
+    for (NodeIndex idx : nodeIndices) {
+      NodeType *repNode = getRep(idx);
+      NodeIndex repId = repNode->getNodeIndex();
+      ensureCapacity(repId);
+      if (dfsNum[repId] == 0)
         visit(repNode);
     }
 
     assert(sccStack.empty() && "sccStack not empty after cycle detection!");
   }
 
-  // Running the cycle detection algorithm starting from a single node.
-  // Used when walking the entire graph is not desirable.
-  //
+  void runOnGraph(GraphType *graph) {
+    assert(sccStack.empty() && "sccStack is not empty before cycle detection!");
+
+    std::vector<NodeIndex> initialNodes;
+    for (auto itr = GraphTraits::node_begin(graph),
+              ite = GraphTraits::node_end(graph);
+         itr != ite; ++itr) {
+      initialNodes.push_back(itr->getNodeIndex());
+    }
+
+    runOnNodeList(initialNodes);
+  }
+
+  void resetVisitedState() {
+    for (NodeIndex id : visitedNodes) {
+      dfsNum[id] = 0;
+      entryTime[id] = 0;
+      inComponent[id] = 0;
+    }
+    visitedNodes.clear();
+    timestamp = 1;
+  }
+
   void runOnNode(NodeIndex node) {
     assert(sccStack.empty() && "sccStack is not empty before cycle detection!");
 
-    // Reset per-run state so that nodes visited in a previous runOnNode call
-    // are not incorrectly treated as already-visited.
-    dfsNum.clear();
-    entryTime.clear();
-    inComponent.clear();
-    timestamp = 0;
+    resetVisitedState();
 
     NodeType *repNode = getRep(node);
+    NodeIndex repId = repNode->getNodeIndex();
+    ensureCapacity(repId);
     visit(repNode);
+
+    assert(sccStack.empty() && "sccStack not empty after cycle detection!");
+  }
+
+  void runOnNodeBatched(NodeIndex node) {
+    assert(sccStack.empty() && "sccStack is not empty before cycle detection!");
+
+    NodeType *repNode = getRep(node);
+    NodeIndex repId = repNode->getNodeIndex();
+    ensureCapacity(repId);
+    if (dfsNum[repId] == 0)
+      visit(repNode);
 
     assert(sccStack.empty() && "sccStack not empty after cycle detection!");
   }
@@ -226,12 +198,13 @@ protected:
     dfsNum.clear();
     entryTime.clear();
     inComponent.clear();
+    visitedNodes.clear();
+    sccStack.clear();
   }
 
 public:
-  CycleDetector() : timestamp(0) {}
+  CycleDetector() : timestamp(1) {}
+  virtual ~CycleDetector() = default;
 
-  // The public interface of running the detector.
   virtual void run() = 0;
 };
-

@@ -58,10 +58,16 @@ AliasResult AndersenAAResult::andersenAlias(const Value *v1, const Value *v2) {
   if (isNull1 || isNull2)
     return AliasResult::NoAlias;
 
-  // MustAlias only when both sets are singletons pointing to the same object.
-  if (s1.getSize() == 1 && s2.getSize() == 1 && *s1.begin() == *s2.begin())
-    return AliasResult::MustAlias;
+  // UniversalObj conservatively represents any unknown memory object: it may
+  // alias any non-null memory object and must never yield NoAlias or MustAlias.
+  NodeIndex univObj = (anders.nodeFactory).getUniversalObjNode();
+  if (s1.has(univObj) || s2.has(univObj))
+    return AliasResult::MayAlias;
 
+  // SparrowAA is flow-insensitive, field-insensitive, and allocation-site
+  // abstracted, so distinct SSA pointers sharing a singleton abstract object
+  // (e.g. different struct fields or loop iterations) are MayAlias, not
+  // MustAlias. Exact identity (v1 == v2) is handled in alias().
   if (s1.intersectWith(s2))
     return AliasResult::MayAlias;
 

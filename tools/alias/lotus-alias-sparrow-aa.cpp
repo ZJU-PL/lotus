@@ -26,6 +26,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/ModuleSlotTracker.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Format.h>
@@ -105,9 +106,15 @@ static cl::opt<bool> QuietLogging(
     cl::desc("Suppress most log output (equivalent to --log-level=off)"),
     cl::init(false), cl::cat(SparrowAACategory));
 
-static void printValue(const Value *V, raw_ostream &OS) {
-  if (V->hasName())
+static void printValue(const Value *V, raw_ostream &OS,
+                       const sparrow_aa::ValueNameCache &NameCache) {
+  if (V->hasName()) {
     OS << V->getName();
+    return;
+  }
+  auto it = NameCache.find(V);
+  if (it != NameCache.end())
+    OS << it->second;
   else
     V->printAsOperand(OS, false);
 }
@@ -171,7 +178,10 @@ int main(int argc, char **argv) {
            << "\nRunning analysis...\n";
   }
 
-  Andersen Anders(*M, policy);
+  // Construct AndersenAAResult once and reuse its underlying Andersen instance
+  // so --print-alias-queries never runs the whole-program analysis twice.
+  AndersenAAResult AAResult(*M, policy);
+  Andersen &Anders = AAResult.getAndersen();
   if (Verbose && !OnlyStatistics)
     errs() << "Done.\n\n";
 
@@ -181,18 +191,25 @@ int main(int argc, char **argv) {
       outs() << " (" << policy.name << ")";
     outs() << "\n\n";
 
+    sparrow_aa::ValueNameCache NameCache;
+    if (PrintAllocSites || PrintPointsTo || PrintGlobalsOnly)
+      NameCache = sparrow_aa::buildValueNameCache(*M);
+
     if (PrintAllocSites) {
       std::vector<const Value *> allocSites;
       Anders.getAllAllocationSites(allocSites);
       outs() << "--- Allocation Sites (" << allocSites.size() << ") ---\n\n";
       for (const Value *V : allocSites) {
         outs() << "  ";
-        printValue(V, outs());
+        printValue(V, outs(), NameCache);
         if (auto *GV = dyn_cast<GlobalVariable>(V))
           outs() << " [global, " << (GV->isConstant() ? "const]" : "mutable]");
-        else if (auto *AI = dyn_cast<AllocaInst>(V))
-          outs() << " [stack, in " << AI->getFunction()->getName() << "]";
-        else if (isa<CallInst>(V))
+        else if (auto *AI = dyn_cast<AllocaInst>(V)) {
+          if (AI->getParent() && AI->getFunction())
+            outs() << " [stack, in " << AI->getFunction()->getName() << "]";
+          else
+            outs() << " [stack]";
+        } else if (isa<CallBase>(V))
           outs() << " [heap]";
         else if (isa<Function>(V))
           outs() << " [function]";
@@ -207,7 +224,7 @@ int main(int argc, char **argv) {
       for (const GlobalVariable &GV : M->globals())
         if (GV.getType()->isPointerTy()) {
           found = true;
-          sparrow_aa::printPointsToSet(&GV, Anders, outs());
+          sparrow_aa::printPointsToSet(&GV, Anders, outs(), NameCache);
         }
       if (!found)
         outs() << "  (none)\n";
@@ -225,7 +242,7 @@ int main(int argc, char **argv) {
                 header = true;
               }
               outs() << "  Arg: ";
-              sparrow_aa::printPointsToSet(&A, Anders, outs());
+              sparrow_aa::printPointsToSet(&A, Anders, outs(), NameCache);
             }
           for (const BasicBlock &BB : F)
             for (const Instruction &I : BB)
@@ -234,7 +251,7 @@ int main(int argc, char **argv) {
                   outs() << "Function: " << F.getName() << "\n";
                   header = true;
                 }
-                sparrow_aa::printPointsToSet(&I, Anders, outs());
+                sparrow_aa::printPointsToSet(&I, Anders, outs(), NameCache);
               }
           if (header)
             outs() << "\n";
@@ -243,7 +260,6 @@ int main(int argc, char **argv) {
     }
 
     if (PrintAliasQueries) {
-      AndersenAAResult AAResult(*M);
       sparrow_aa::performAliasQueries(*M, AAResult, outs());
     }
     outs() << "\nAnalysis completed.\n";
@@ -273,7 +289,15 @@ int main(int argc, char **argv) {
   }
 
   if (OnlyStatistics || Verbose) {
+    const auto &S = Anders.getStats();
     errs() << "\n=== Statistics ===\n";
+    errs() << "  Nodes:                  " << S.numNodes << "\n"
+           << "  Constraints (raw):      " << S.numConstraintsBeforeOpt << "\n"
+           << "  Constraints (opt):      " << S.numConstraintsAfterOpt << "\n"
+           << "  Solving iterations:     " << S.numSolvingIterations << "\n"
+           << "  Non-empty pts sets:     " << S.numNonEmptyPtsSets << "\n"
+           << "  Max pts set size:       " << S.maxPtsSetSize << "\n"
+           << "  Avg pts set size:       " << S.avgPtsSetSize << "\n";
     PrintStatistics(errs());
   }
 

@@ -24,6 +24,9 @@ public:
                           const llvm::MemoryLocation &);
   bool pointsToConstantMemory(const llvm::MemoryLocation &, bool);
 
+  Andersen &getAndersen() { return anders; }
+  const Andersen &getAndersen() const { return anders; }
+
   // Public method to access points-to information
   bool getPointsToSet(const llvm::Value *Ptr,
                       std::vector<const llvm::Value *> &PtsSet) const {

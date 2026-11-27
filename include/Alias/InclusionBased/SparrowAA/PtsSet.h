@@ -38,10 +38,12 @@
  */
 class AndersPtsSet {
 private:
-  llvm::SparseBitVector<> bitvec; ///< Underlying sparse bit-vector storage.
+  // 512-bit elements (64 bytes = 1 cache line) reduce linked-list hops and
+  // allocator overhead by 4x compared to the default 128-bit elements.
+  llvm::SparseBitVector<512> bitvec; ///< Underlying sparse bit-vector storage.
 
 public:
-  using iterator = llvm::SparseBitVector<>::iterator;
+  using iterator = llvm::SparseBitVector<512>::iterator;
 
   /**
    * @brief Return `true` if @p idx is in this set.
@@ -54,7 +56,7 @@ public:
   bool has(unsigned idx) const {
     // SparseBitVector::test() lacks a const qualifier, so we use contains()
     // with a single-element vector as a workaround.
-    llvm::SparseBitVector<> idVec;
+    llvm::SparseBitVector<512> idVec;
     idVec.set(idx);
     return bitvec.contains(idVec);
   }
@@ -74,6 +76,17 @@ public:
 
   /// @brief Union @p other into this set.  @return `true` if the set changed.
   bool unionWith(const AndersPtsSet &other) { return bitvec |= other.bitvec; }
+
+  /// @brief Intersect this set in-place with @p other. @return `true` if changed.
+  bool intersectAssign(const AndersPtsSet &other) {
+    return bitvec &= other.bitvec;
+  }
+
+  /// @brief Replace this set with (@p lhs \ @p rhs) in a single pass.
+  void setDifference(const AndersPtsSet &lhs, const AndersPtsSet &rhs) {
+    bitvec.clear();
+    bitvec.intersectWithComplement(lhs.bitvec, rhs.bitvec);
+  }
 
   /// @brief Remove all elements from the set.
   void clear() { bitvec.clear(); }

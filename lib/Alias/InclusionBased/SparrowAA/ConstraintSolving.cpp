@@ -1,11 +1,11 @@
 /**
  * @file ConstraintSolving.cpp
- * @brief Constraint solving phase using worklist-based propagation.
+ * @brief Constraint solving phase using worklist-based delta propagation.
  *
  * This file implements the constraint solving algorithm that propagates
- * points-to information through the constraint graph. Uses a worklist algorithm
- * with cycle detection (HCD: Hybrid Cycle Detection, LCD: Lazy Cycle Detection)
- * to handle strongly connected components efficiently.
+ * points-to information through the constraint graph. Uses dense node arrays,
+ * difference (delta) propagation, and optional cycle detection (HCD: Hybrid
+ * Cycle Detection, LCD: Lazy Cycle Detection).
  *
  * @author rainoftime
  */
@@ -14,12 +14,15 @@
 #include "Alias/InclusionBased/SparrowAA/Log.h"
 #include "Alias/InclusionBased/SparrowAA/SparseBitVectorGraph.h"
 
-#include <map>
-#include <queue>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/DenseSet.h>
-#include <llvm/ADT/SmallSet.h>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/SparseBitVector.h>
 #include <llvm/ADT/Statistic.h>
 #include <llvm/ADT/iterator_range.h>
 #include <llvm/Support/CommandLine.h>
@@ -45,176 +48,150 @@ extern cl::OptionCategory AndersenCategory;
 
 cl::opt<bool> EnableHCD("enable-hcd",
                         cl::desc("Enable the hybrid cycle detection algorithm"),
-                        cl::cat(AndersenCategory));
+                        cl::init(true), cl::cat(AndersenCategory));
 cl::opt<bool> EnableLCD("enable-lcd",
                         cl::desc("Enable the lazy cycle detection algorithm"),
-                        cl::cat(AndersenCategory));
+                        cl::init(true), cl::cat(AndersenCategory));
 
 namespace {
 
-// Define CCG (Copy Constraint Graph) type for use in collapseNodes
-using CCG = SparseBitVectorGraph;
-
-// This class represent the constraint graph
+// Dense constraint graph node backed by 512-bit SparseBitVectors for compact
+// storage and fast bitwise unions when collapsing cycles.
 class ConstraintGraphNode {
 private:
-  NodeIndex idx;
-
-  // We use set rather than SmallSet because we need the capability of iteration
-  using NodeSet = std::set<NodeIndex>;
-  NodeSet copyEdges, loadEdges, storeEdges;
-
-  bool insertCopyEdge(NodeIndex dst) { return copyEdges.insert(dst).second; }
-  bool removeCopyEdge(NodeIndex dst) { return copyEdges.erase(dst); }
-  bool insertLoadEdge(NodeIndex dst) { return loadEdges.insert(dst).second; }
-  bool removeLoadEdge(NodeIndex dst) { return loadEdges.erase(dst); }
-  bool insertStoreEdge(NodeIndex dst) { return storeEdges.insert(dst).second; }
-  bool removeStoreEdge(NodeIndex dst) { return storeEdges.erase(dst); }
-  bool isEmpty() const {
-    return copyEdges.empty() && loadEdges.empty() && storeEdges.empty();
-  }
-
-  void mergeEdges(const ConstraintGraphNode &other) {
-    copyEdges.insert(other.copyEdges.begin(), other.copyEdges.end());
-    loadEdges.insert(other.loadEdges.begin(), other.loadEdges.end());
-    storeEdges.insert(other.storeEdges.begin(), other.storeEdges.end());
-  }
-
-  ConstraintGraphNode(NodeIndex i) : idx(i) {}
+  NodeIndex idx = 0;
+  using EdgeSet = llvm::SparseBitVector<512>;
+  EdgeSet copyEdges, loadEdges, storeEdges;
 
 public:
-  using iterator = NodeSet::iterator;
-  using const_iterator = NodeSet::const_iterator;
+  using iterator = EdgeSet::iterator;
+  using const_iterator = EdgeSet::iterator;
+
+  ConstraintGraphNode() = default;
+  explicit ConstraintGraphNode(NodeIndex i) : idx(i) {}
 
   NodeIndex getNodeIndex() const { return idx; }
 
-  bool replaceCopyEdge(NodeIndex oldIdx, NodeIndex newIdx) {
-    return removeCopyEdge(oldIdx) && insertCopyEdge(newIdx);
+  bool insertCopyEdge(NodeIndex dst) { return copyEdges.test_and_set(dst); }
+  bool mergeCopyEdges(const EdgeSet &other, NodeIndex self) {
+    bool changed = (copyEdges |= other);
+    if (changed)
+      copyEdges.reset(self);
+    return changed;
   }
-  bool replaceLoadEdge(NodeIndex oldIdx, NodeIndex newIdx) {
-    return removeLoadEdge(oldIdx) && insertLoadEdge(newIdx);
+  void removeCopyEdge(NodeIndex dst) { copyEdges.reset(dst); }
+  bool insertLoadEdge(NodeIndex dst) { return loadEdges.test_and_set(dst); }
+  void removeLoadEdge(NodeIndex dst) { loadEdges.reset(dst); }
+  bool insertStoreEdge(NodeIndex dst) { return storeEdges.test_and_set(dst); }
+  void removeStoreEdge(NodeIndex dst) { storeEdges.reset(dst); }
+
+  const EdgeSet &getLoadEdges() const { return loadEdges; }
+  const EdgeSet &getStoreEdges() const { return storeEdges; }
+
+  bool hasEdges() const {
+    return !copyEdges.empty() || !loadEdges.empty() || !storeEdges.empty();
   }
-  bool replaceStoreEdge(NodeIndex oldIdx, NodeIndex newIdx) {
-    return removeStoreEdge(oldIdx) && insertStoreEdge(newIdx);
+  bool hasLoads() const { return !loadEdges.empty(); }
+  bool hasStores() const { return !storeEdges.empty(); }
+  bool hasCopies() const { return !copyEdges.empty(); }
+
+  void mergeEdges(const ConstraintGraphNode &other) {
+    copyEdges |= other.copyEdges;
+    loadEdges |= other.loadEdges;
+    storeEdges |= other.storeEdges;
   }
 
-  iterator begin() { return copyEdges.begin(); }
-  iterator end() { return copyEdges.end(); }
-  [[nodiscard]] const_iterator begin() const { return copyEdges.begin(); }
-  [[nodiscard]] const_iterator end() const { return copyEdges.end(); }
-
-  [[nodiscard]] const_iterator load_begin() const { return loadEdges.begin(); }
-  [[nodiscard]] const_iterator load_end() const { return loadEdges.end(); }
-  llvm::iterator_range<const_iterator> loads() const {
-    return llvm::iterator_range<const_iterator>(load_begin(), load_end());
+  void clear() {
+    copyEdges.clear();
+    loadEdges.clear();
+    storeEdges.clear();
   }
 
-  [[nodiscard]] const_iterator store_begin() const { return storeEdges.begin(); }
-  [[nodiscard]] const_iterator store_end() const { return storeEdges.end(); }
-  llvm::iterator_range<const_iterator> stores() const {
-    return llvm::iterator_range<const_iterator>(store_begin(), store_end());
+  void replaceCopyEdge(NodeIndex oldIdx, NodeIndex newIdx) {
+    copyEdges.reset(oldIdx);
+    copyEdges.set(newIdx);
+  }
+  void replaceLoadEdge(NodeIndex oldIdx, NodeIndex newIdx) {
+    loadEdges.reset(oldIdx);
+    loadEdges.set(newIdx);
+  }
+  void replaceStoreEdge(NodeIndex oldIdx, NodeIndex newIdx) {
+    storeEdges.reset(oldIdx);
+    storeEdges.set(newIdx);
   }
 
-  friend class ConstraintGraph;
+  iterator begin() const { return copyEdges.begin(); }
+  iterator end() const { return copyEdges.end(); }
+
+  iterator load_begin() const { return loadEdges.begin(); }
+  iterator load_end() const { return loadEdges.end(); }
+  llvm::iterator_range<iterator> loads() const {
+    return llvm::iterator_range<iterator>(load_begin(), load_end());
+  }
+
+  iterator store_begin() const { return storeEdges.begin(); }
+  iterator store_end() const { return storeEdges.end(); }
+  llvm::iterator_range<iterator> stores() const {
+    return llvm::iterator_range<iterator>(store_begin(), store_end());
+  }
 };
 
+// Fixed-size dense constraint graph indexed directly by NodeIndex.
+// Because `nodes` is sized once to `numNodes`, pointers to nodes never
+// invalidate during solving or online cycle collapsing.
 class ConstraintGraph {
 private:
-  using NodeMapTy = std::map<NodeIndex, ConstraintGraphNode>;
-  NodeMapTy graph;
+  std::vector<ConstraintGraphNode> nodes;
 
 public:
-  using iterator = NodeMapTy::iterator;
-  using const_iterator = NodeMapTy::const_iterator;
+  using iterator = std::vector<ConstraintGraphNode>::iterator;
+  using const_iterator = std::vector<ConstraintGraphNode>::const_iterator;
 
-  ConstraintGraph() {}
+  explicit ConstraintGraph(unsigned numNodes) {
+    nodes.reserve(numNodes);
+    for (unsigned i = 0; i < numNodes; ++i)
+      nodes.emplace_back(i);
+  }
 
   bool insertCopyEdge(NodeIndex src, NodeIndex dst) {
-    auto itr = graph.find(src);
-    if (itr == graph.end()) {
-      ConstraintGraphNode srcNode(src);
-      srcNode.insertCopyEdge(dst);
-      graph.insert(std::make_pair(src, std::move(srcNode)));
-      return true;
-    } else
-      return (itr->second).insertCopyEdge(dst);
+    if (src == dst)
+      return false;
+    return nodes[src].insertCopyEdge(dst);
   }
 
   bool insertLoadEdge(NodeIndex src, NodeIndex dst) {
-    auto itr = graph.find(src);
-    if (itr == graph.end()) {
-      ConstraintGraphNode srcNode(src);
-      srcNode.insertLoadEdge(dst);
-      graph.insert(std::make_pair(src, std::move(srcNode)));
-      return true;
-    } else
-      return (itr->second).insertLoadEdge(dst);
+    return nodes[src].insertLoadEdge(dst);
   }
 
   bool insertStoreEdge(NodeIndex src, NodeIndex dst) {
-    auto itr = graph.find(src);
-    if (itr == graph.end()) {
-      ConstraintGraphNode srcNode(src);
-      srcNode.insertStoreEdge(dst);
-      graph.insert(std::make_pair(src, std::move(srcNode)));
-      return true;
-    } else
-      return (itr->second).insertStoreEdge(dst);
+    return nodes[src].insertStoreEdge(dst);
   }
 
-  void mergeNodes(NodeIndex dst, NodeIndex src) {
-    auto srcItr = graph.find(src);
-    if (srcItr == graph.end())
-      return;
-
-    // Take a copy of the source edges before potentially invalidating the
-    // iterator by inserting a new dst node below.
-    ConstraintGraphNode srcNodeCopy = srcItr->second;
-
-    auto dstItr = graph.find(dst);
-    if (dstItr == graph.end()) {
-      // Create a fresh node for dst (not a copy of src — src has the wrong
-      // index).  Then merge src's edges into it.
-      ConstraintGraphNode dstNode(dst);
-      dstNode.mergeEdges(srcNodeCopy);
-      graph.insert(std::make_pair(dst, std::move(dstNode)));
-    } else {
-      (dstItr->second).mergeEdges(srcNodeCopy);
-    }
+  bool mergeNodes(NodeIndex dst, NodeIndex src) {
+    if (!nodes[src].hasEdges())
+      return false;
+    nodes[dst].mergeEdges(nodes[src]);
+    return true;
   }
 
-  void deleteNode(NodeIndex idx) { graph.erase(idx); }
+  void deleteNode(NodeIndex idx) { nodes[idx].clear(); }
 
-  ConstraintGraphNode *getNodeWithIndex(NodeIndex idx) {
-    auto itr = graph.find(idx);
-    if (itr == graph.end())
-      return nullptr;
-    else
-      return &(itr->second);
-  }
+  ConstraintGraphNode *getNodeWithIndex(NodeIndex idx) { return &nodes[idx]; }
+  ConstraintGraphNode *getOrInsertNode(NodeIndex idx) { return &nodes[idx]; }
 
-  ConstraintGraphNode *getOrInsertNode(NodeIndex idx) {
-    auto itr = graph.find(idx);
-    if (itr == graph.end()) {
-      ConstraintGraphNode newNode(idx);
-      itr = graph.insert(std::make_pair(idx, newNode)).first;
-    }
-    return &(itr->second);
-  }
-
-  iterator begin() { return graph.begin(); }
-  iterator end() { return graph.end(); }
-  const_iterator begin() const { return graph.begin(); }
-  const_iterator end() const { return graph.end(); }
+  iterator begin() { return nodes.begin(); }
+  iterator end() { return nodes.end(); }
+  const_iterator begin() const { return nodes.begin(); }
+  const_iterator end() const { return nodes.end(); }
 };
 
 } // namespace
 
-// Specialize the AnderGraphTraits for ConstraintGraph
+// Specialize AndersGraphTraits for ConstraintGraph
 template <> class AndersGraphTraits<ConstraintGraph> {
 public:
   using NodeType = ConstraintGraphNode;
-  using NodeIterator = MapValueIterator<ConstraintGraph::const_iterator>;
+  using NodeIterator = ConstraintGraph::const_iterator;
   using ChildIterator = ConstraintGraphNode::iterator;
 
   static inline ChildIterator child_begin(const NodeType *n) {
@@ -223,85 +200,88 @@ public:
   static inline ChildIterator child_end(const NodeType *n) { return n->end(); }
 
   static inline NodeIterator node_begin(const ConstraintGraph *g) {
-    return NodeIterator(g->begin());
+    return g->begin();
   }
   static inline NodeIterator node_end(const ConstraintGraph *g) {
-    return NodeIterator(g->end());
+    return g->end();
   }
 };
 
 namespace {
 
+// Dense O(1) FIFO worklist with byte membership bitset.
+class AndersWorkList {
+private:
+  std::vector<NodeIndex> list;
+  size_t head = 0;
+  std::vector<uint8_t> inSet;
+
+public:
+  explicit AndersWorkList(unsigned numNodes) : inSet(numNodes, 0) {}
+
+  void enqueue(NodeIndex elem) {
+    if (!inSet[elem]) {
+      inSet[elem] = 1;
+      list.push_back(elem);
+    }
+  }
+
+  NodeIndex dequeue() {
+    assert(head < list.size() && "Trying to dequeue an empty queue!");
+    NodeIndex ret = list[head++];
+    inSet[ret] = 0;
+    if (head == list.size()) {
+      list.clear();
+      head = 0;
+    }
+    return ret;
+  }
+
+  bool isEmpty() const { return head >= list.size(); }
+};
+
 template <typename PtsSetType>
 static void collapseNodes(NodeIndex dst, NodeIndex src,
                           AndersNodeFactory &nodeFactory,
-                          std::map<NodeIndex, PtsSetType> &ptsGraph,
-                          ConstraintGraph &constraintGraph) {
+                          std::vector<PtsSetType> &ptsGraph,
+                          std::vector<PtsSetType> &oldPtsGraph,
+                          ConstraintGraph &constraintGraph,
+                          AndersWorkList &nextWorkList) {
   if (dst == src)
     return;
 
   ++NumNodesCollapsed;
 
   nodeFactory.mergeNode(dst, src);
-  if (ptsGraph.count(src))
-    ptsGraph[dst].unionWith(ptsGraph[src]);
-  constraintGraph.mergeNodes(dst, src);
+  bool ptsChanged = false;
+  if (!ptsGraph[src].isEmpty()) {
+    ptsChanged = ptsGraph[dst].unionWith(ptsGraph[src]);
+    ptsGraph[src].clear();
+  }
 
-  ptsGraph.erase(src);
+  bool edgesMerged = constraintGraph.mergeNodes(dst, src);
+  bool oldShrunk = false;
+  if (edgesMerged) {
+    // Only elements already propagated along BOTH dst's and src's edges remain
+    // propagated along the merged edge set.
+    oldShrunk = oldPtsGraph[dst].intersectAssign(oldPtsGraph[src]);
+  }
+  oldPtsGraph[src].clear();
   constraintGraph.deleteNode(src);
+
+  if ((ptsChanged || oldShrunk) && !ptsGraph[dst].isEmpty())
+    nextWorkList.enqueue(dst);
 }
 
-// The worklist for our analysis
-class AndersWorkList {
-private:
-  // The FIFO queue
-  std::queue<NodeIndex> list;
-  // Avoid duplicate entries in FIFO queue
-  llvm::SmallSet<NodeIndex, 16> set;
-
-public:
-  AndersWorkList() {}
-  void enqueue(NodeIndex elem) {
-    if (!set.count(elem)) {
-      list.push(elem);
-      set.insert(elem);
-    }
-  }
-  NodeIndex dequeue() {
-    assert(!list.empty() && "Trying to dequeue an empty queue!");
-    NodeIndex ret = list.front();
-    list.pop();
-    set.erase(ret);
-    return ret;
-  }
-  bool isEmpty() const { return list.empty(); }
-};
-
-// The technique used here is described in "The Ant and the Grasshopper: Fast
-// and Accurate Pointer Analysis for Millions of Lines of Code. In Programming
-// Language Design and Implementation (PLDI), June 2007." It is known as the
-// "HCD" (Hybrid Cycle Detection) algorithm. It is called a hybrid because it
-// performs an offline analysis and uses its results during the solving (online)
-// phase. This is just the offline portion
+// Offline portion of HCD (Hybrid Cycle Detection, PLDI 2007).
 class OfflineCycleDetector : public CycleDetector<SparseBitVectorGraph> {
 private:
-  // The node factory
   AndersNodeFactory &nodeFactory;
-
-  // The offline constraint graph
   SparseBitVectorGraph offlineGraph;
-  // If a mapping <p, q> is in this map, it means that *p and q are in the same
-  // cycle in the offline constraint graph, and anything that p points to during
-  // the online constraint solving phase can be immediately collapse with q
   DenseMap<NodeIndex, NodeIndex> collapseMap;
-  // Holds the pairs of VAR nodes that we are going to merge together
   DenseMap<NodeIndex, NodeIndex> mergeMap;
-  // Used to collect the scc nodes on a cycle
-  SparseBitVector<> scc;
+  llvm::SparseBitVector<512> scc;
 
-  // Return the node index of the "ref node" (used to represent *n) of n.
-  // We won't actually create that ref node. We cannot use the NodeIndex of that
-  // refNode to index into nodeFactory
   NodeIndex getRefNodeIndex(NodeIndex n) const {
     return n + nodeFactory.getNumNodes();
   }
@@ -314,18 +294,16 @@ private:
       switch (c.getType()) {
       case AndersConstraint::ADDR_OF:
         break;
-      case AndersConstraint::LOAD: {
+      case AndersConstraint::LOAD:
         offlineGraph.insertEdge(getRefNodeIndex(srcTgt), dstTgt);
         break;
-      }
-      case AndersConstraint::STORE: {
+      case AndersConstraint::STORE:
         offlineGraph.insertEdge(srcTgt, getRefNodeIndex(dstTgt));
         break;
-      }
-      case AndersConstraint::COPY: {
-        offlineGraph.insertEdge(srcTgt, dstTgt);
+      case AndersConstraint::COPY:
+        if (srcTgt != dstTgt)
+          offlineGraph.insertEdge(srcTgt, dstTgt);
         break;
-      }
       }
     }
   }
@@ -334,17 +312,14 @@ private:
     return offlineGraph.getOrInsertNode(idx);
   }
 
-  // Specify how to process the non-rep nodes if a cycle is found
   void processNodeOnCycle(const NodeType *node,
                           const NodeType *repNode) override {
-    (void)repNode; // Unused parameter
+    (void)repNode;
     scc.set(node->getNodeIndex());
   }
 
-  // Specify how to process the rep nodes if a cycle is found
   void processCycleRepNode(const NodeType *node) override {
-    // A trivial cycle is not interesting
-    if (scc.count() == 0)
+    if (scc.empty())
       return;
 
     scc.set(node->getNodeIndex());
@@ -356,25 +331,17 @@ private:
         break;
       }
     }
-    // If the SCC contains only REF nodes there is no VAR node to serve as
-    // the representative; skip it (no merge/collapse is possible).
     if (repNode == AndersNodeFactory::InvalidIndex) {
       scc.clear();
       return;
     }
 
-    for (auto itr = scc.begin(), ite = scc.end(); itr != ite; ++itr) {
-      NodeIndex cycleNode = *itr;
+    for (auto cycleNode : scc) {
       if (cycleNode == repNode)
         continue;
-      // REF nodes start at exactly getNumNodes(), so use >= (not >) to
-      // correctly classify the first REF node (index == getNumNodes()).
       if (cycleNode >= nodeFactory.getNumNodes())
-        // For REF nodes, insert it to the collapse map
         collapseMap[cycleNode - nodeFactory.getNumNodes()] = repNode;
       else
-        // For VAR nodes, insert it to the merge map
-        // We don't merge the nodes immediately to avoid affecting the DFS
         mergeMap[cycleNode] = repNode;
     }
 
@@ -384,217 +351,181 @@ private:
 public:
   OfflineCycleDetector(const std::vector<AndersConstraint> &cs,
                        AndersNodeFactory &n)
-      : nodeFactory(n) {
-    // Build the offline constraint graph first before we move on
+      : nodeFactory(n), offlineGraph(n.getNumNodes() * 2) {
+    reserveSCCState(n.getNumNodes() * 2);
     buildOfflineConstraintGraph(cs);
   }
 
   void run() override {
-    runOnGraph(&offlineGraph);
+    runOnNodeList(offlineGraph.getActiveNodes());
 
-    // Merge the nodes in mergeMap
     for (auto const &mapping : mergeMap)
       nodeFactory.mergeNode(mapping.second, mapping.first);
 
-    // We don't need these structures any more. The only thing we keep should be
-    // those info that are necessary to answer collapsing target queries
     mergeMap.clear();
     offlineGraph.releaseMemory();
     releaseSCCMemory();
   }
 
-  // Return InvalidIndex if no collapse target found
-  NodeIndex getCollapseTarget(NodeIndex n) {
+  NodeIndex getCollapseTarget(NodeIndex n) const {
     auto itr = collapseMap.find(n);
     if (itr == collapseMap.end())
       return AndersNodeFactory::InvalidIndex;
-    else
-      return itr->second;
+    return itr->second;
   }
 };
 
-// Template version of buildConstraintGraph function to support different PtsSet
-// types
 template <typename PtsSetType>
 void buildConstraintGraph(ConstraintGraph &cGraph,
                           const std::vector<AndersConstraint> &constraints,
                           AndersNodeFactory &nodeFactory,
-                          std::map<NodeIndex, PtsSetType> &ptsGraph) {
+                          std::vector<PtsSetType> &ptsGraph) {
   for (auto const &c : constraints) {
     NodeIndex srcTgt = nodeFactory.getMergeTarget(c.getSrc());
     NodeIndex dstTgt = nodeFactory.getMergeTarget(c.getDest());
     switch (c.getType()) {
-    case AndersConstraint::ADDR_OF: {
-      // We don't want to replace src with srcTgt because, after all, the
-      // address of a variable is NOT the same as the address of another
-      // variable
+    case AndersConstraint::ADDR_OF:
       ptsGraph[dstTgt].insert(c.getSrc());
       break;
-    }
-    case AndersConstraint::LOAD: {
+    case AndersConstraint::LOAD:
       cGraph.insertLoadEdge(srcTgt, dstTgt);
       break;
-    }
-    case AndersConstraint::STORE: {
+    case AndersConstraint::STORE:
       cGraph.insertStoreEdge(dstTgt, srcTgt);
       break;
-    }
-    case AndersConstraint::COPY: {
+    case AndersConstraint::COPY:
       cGraph.insertCopyEdge(srcTgt, dstTgt);
       break;
-    }
     }
   }
 }
 
-static void
-buildConstraintGraph(ConstraintGraph &cGraph,
-                     const std::vector<AndersConstraint> &constraints,
-                     AndersNodeFactory &nodeFactory,
-                     std::map<NodeIndex, DefaultPtsSet> &ptsGraph) {
-  buildConstraintGraph<DefaultPtsSet>(cGraph, constraints, nodeFactory,
-                                      ptsGraph);
-}
-
-// Template version of OnlineCycleDetector class
+// Batched online cycle detector (LCD, PLDI 2007): shares DFS state across all
+// candidates in a batch so each reachable node is explored at most once.
 template <typename PtsSetType>
 class OnlineCycleDetectorT : public CycleDetector<ConstraintGraph> {
 private:
   AndersNodeFactory &nodeFactory;
   ConstraintGraph &constraintGraph;
-  std::map<NodeIndex, PtsSetType> &ptsGraph;
-  std::queue<std::pair<NodeIndex, NodeIndex>> &cycleCandidates;
+  std::vector<PtsSetType> &ptsGraph;
+  std::vector<PtsSetType> &oldPtsGraph;
+  AndersWorkList *nextWorkList;
+  const std::vector<std::pair<NodeIndex, NodeIndex>> &cycleCandidates;
 
   NodeType *getRep(NodeIndex idx) override {
     return constraintGraph.getOrInsertNode(nodeFactory.getMergeTarget(idx));
   }
 
-  // Specify how to process the non-rep nodes if a cycle is found
   void processNodeOnCycle(const NodeType *node,
                           const NodeType *repNode) override {
     NodeIndex repIdx = nodeFactory.getMergeTarget(repNode->getNodeIndex());
     NodeIndex cycleIdx = nodeFactory.getMergeTarget(node->getNodeIndex());
-    // errs() << "Collapse node " << cycleIdx << " with node " << repIdx <<
-    // "\n";
-
-    collapseNodes(repIdx, cycleIdx, nodeFactory, ptsGraph, constraintGraph);
+    collapseNodes(repIdx, cycleIdx, nodeFactory, ptsGraph, oldPtsGraph,
+                  constraintGraph, *nextWorkList);
   }
 
-  // Specify how to process the rep nodes if a cycle is found
-  void processCycleRepNode(const NodeType *node) override {
-    (void)node; // Unused parameter
-    // Do nothing, I guess?
-  }
+  void processCycleRepNode(const NodeType *node) override { (void)node; }
 
 public:
   OnlineCycleDetectorT(AndersNodeFactory &n, ConstraintGraph &co,
-                       std::map<NodeIndex, PtsSetType> &p,
-                       std::queue<std::pair<NodeIndex, NodeIndex>> &cc)
-      : nodeFactory(n), constraintGraph(co), ptsGraph(p), cycleCandidates(cc) {}
+                       std::vector<PtsSetType> &p,
+                       std::vector<PtsSetType> &oldP, AndersWorkList &nextWL,
+                       const std::vector<std::pair<NodeIndex, NodeIndex>> &cc)
+      : nodeFactory(n), constraintGraph(co), ptsGraph(p), oldPtsGraph(oldP),
+        nextWorkList(&nextWL), cycleCandidates(cc) {
+    reserveSCCState(n.getNumNodes());
+  }
+
+  void setNextWorkList(AndersWorkList &nextWL) { nextWorkList = &nextWL; }
 
   void run() override {
-    // Perform cycle detection on for nodes on the candidate list
-    std::queue<std::pair<NodeIndex, NodeIndex>> tempCandidates =
-        cycleCandidates;
-    while (!tempCandidates.empty()) {
-      auto candidate = tempCandidates.front();
-      tempCandidates.pop();
-      runOnNode(candidate.first);
-    }
+    resetVisitedState();
+    for (const auto &candidate : cycleCandidates)
+      runOnNodeBatched(candidate.first);
   }
 };
-
-// Backward compatibility for the original version
-class OnlineCycleDetector : public OnlineCycleDetectorT<AndersPtsSet> {
-public:
-  using OnlineCycleDetectorT<AndersPtsSet>::OnlineCycleDetectorT;
-};
-
-// Add specialized version for DefaultPtsSet
-using DefaultOnlineCycleDetector = OnlineCycleDetectorT<DefaultPtsSet>;
 
 } // end of anonymous namespace
 
-/// solveConstraints - This stage iteratively processes the constraints list
-/// propagating constraints (adding edges to the Nodes in the points-to graph)
-/// until a fixed point is reached.
-///
-/// We use a variant of the technique called "Lazy Cycle Detection", which is
-/// described in "The Ant and the Grasshopper: Fast and Accurate Pointer
-/// Analysis for Millions of Lines of Code. In Programming Language Design and
-/// Implementation (PLDI), June 2007."
-/// The paper describes performing cycle detection one node at a time, which can
-/// be expensive if there are no cycles, but there are long chains of nodes that
-/// it heuristically believes are cycles (because it will DFS from each node
-/// without state from previous nodes).
-/// Instead, we use the heuristic to build a worklist of nodes to check, then
-/// cycle detect them all at the same time to do this more cheaply.  This
-/// catches cycles slightly later than the original technique did, but does it
-/// make significantly cheaper.
-void Andersen::solveConstraints() {
-  LOG_INFO("Creating offline cycle detector...");
-  // We'll do offline HCD first
-  OfflineCycleDetector offlineInfo(constraints, nodeFactory);
-  if (EnableHCD)
-    offlineInfo.run();
+template <typename PtsSetType>
+void Andersen::solveConstraintsImpl(std::vector<PtsSetType> &ptsGraph) {
+  const unsigned numNodes = nodeFactory.getNumNodes();
+  ptsGraph.clear();
+  ptsGraph.resize(numNodes);
+
+  // Only build and run OfflineCycleDetector when HCD is enabled.
+  std::unique_ptr<OfflineCycleDetector> offlineInfo;
+  if (EnableHCD) {
+    LOG_INFO("Creating offline cycle detector...");
+    offlineInfo =
+        std::make_unique<OfflineCycleDetector>(constraints, nodeFactory);
+    offlineInfo->run();
+  }
 
   LOG_INFO("Building constraint graph...");
-  // Now build the constraint graph
-  ConstraintGraph constraintGraph;
+  ConstraintGraph constraintGraph(numNodes);
   buildConstraintGraph(constraintGraph, constraints, nodeFactory, ptsGraph);
-  // The constraint vector is useless now
+  // The constraint vector is no longer needed during solving.
   constraints.clear();
   LOG_INFO("Constraint graph built, starting fixed-point iteration...");
 
-  // We switch between two work lists instead of relying on only one work list
-  AndersWorkList workList1, workList2;
-  // The "current" and the "next" work list
+  // oldPtsGraph[u] holds the subset of ptsGraph[u] already propagated along
+  // all current copy/load/store edges of u.
+  std::vector<PtsSetType> oldPtsGraph(numNodes);
+
+  AndersWorkList workList1(numNodes), workList2(numNodes);
   AndersWorkList *currWorkList = &workList1, *nextWorkList = &workList2;
-  // The set of nodes that LCD believes might be on a cycle
-  std::queue<std::pair<NodeIndex, NodeIndex>> cycleCandidates;
-  // The set of edges that LCD believes not on a cycle
+
+  // LCD candidate batch and persistent checked-edges set (PLDI 2007).
+  std::vector<std::pair<NodeIndex, NodeIndex>> cycleCandidates;
   DenseSet<std::pair<NodeIndex, NodeIndex>> checkedEdges;
 
-  // Scan the node list, add it to work list if the node a representative and
-  // can contribute to the calculation right now.
-  LOG_INFO("Initializing work list from {} points-to graph entries...",
-           ptsGraph.size());
-  for (auto const &mapping : ptsGraph) {
-    NodeIndex node = mapping.first;
-    if (nodeFactory.getMergeTarget(node) == node &&
-        constraintGraph.getNodeWithIndex(node) != nullptr)
-      currWorkList->enqueue(node);
+  size_t initEntries = 0;
+  for (NodeIndex node = 0; node < numNodes; ++node) {
+    if (!ptsGraph[node].isEmpty()) {
+      ++initEntries;
+      if (nodeFactory.getMergeTarget(node) == node &&
+          (constraintGraph.getNodeWithIndex(node)->hasEdges() ||
+           (EnableHCD &&
+            offlineInfo->getCollapseTarget(node) !=
+                AndersNodeFactory::InvalidIndex))) {
+        currWorkList->enqueue(node);
+      }
+    }
   }
+  LOG_INFO("Initializing work list from {} points-to graph entries...",
+           initEntries);
   LOG_INFO("Work list initialized, entering main solving loop...");
+
+  // Reusable online cycle detector (allocates dense SCC state once when LCD is
+  // enabled and resets only visited entries between batches).
+  std::unique_ptr<OnlineCycleDetectorT<PtsSetType>> onlineCycleDetector;
+  if (EnableLCD) {
+    onlineCycleDetector = std::make_unique<OnlineCycleDetectorT<PtsSetType>>(
+        nodeFactory, constraintGraph, ptsGraph, oldPtsGraph, *nextWorkList,
+        cycleCandidates);
+  }
+
+  // Reusable scratch buffers to avoid heap allocations in the hot loop.
+  PtsSetType delta;
+  PtsSetType bulkUnion;
+  llvm::SparseBitVector<512> deltaReps;
+  SmallVector<std::pair<NodeIndex, NodeIndex>, 16> edgeUpdates;
 
   unsigned iterCount = 0;
   while (!currWorkList->isEmpty()) {
-    // Iteration begins
     ++NumIterations;
     if (++iterCount == 1 || iterCount % 100 == 0) {
       LOG_INFO("Solving iteration {}", iterCount);
     }
 
-    // First we've got to check if there is any cycle candidates in the last
-    // iteration. If there is, detect and collapse cycle
-    if (iterCount == 1)
-      LOG_INFO("  - Checking cycle candidates...");
     if (EnableLCD && !cycleCandidates.empty()) {
-      // Detect and collapse cycles online
       NumCyclesDetected += cycleCandidates.size();
-      DefaultOnlineCycleDetector cycleDetector(nodeFactory, constraintGraph,
-                                               ptsGraph, cycleCandidates);
-      cycleDetector.run();
-
-      // Empty the candidate queue.
-      while (!cycleCandidates.empty())
-        cycleCandidates.pop();
-
-      checkedEdges.clear();
+      onlineCycleDetector->setNextWorkList(*nextWorkList);
+      onlineCycleDetector->run();
+      cycleCandidates.clear();
     }
 
-    if (iterCount == 1)
-      LOG_INFO("  - Processing worklist...");
     unsigned nodeCount = 0;
     while (!currWorkList->isEmpty()) {
       NodeIndex node = currWorkList->dequeue();
@@ -603,148 +534,176 @@ void Andersen::solveConstraints() {
       }
       ++NumWorkListProcessed;
       node = nodeFactory.getMergeTarget(node);
-      // errs() << "Examining node " << node << "\n";
 
-      ConstraintGraphNode *cNode = constraintGraph.getNodeWithIndex(node);
-      if (cNode == nullptr)
+      if (ptsGraph[node].isEmpty())
         continue;
 
-      auto ptsItr = ptsGraph.find(node);
-      if (ptsItr != ptsGraph.end()) {
-        // Check indirect constraints and add copy edge to the constraint graph
-        // if necessary
-        const auto &ptsSet = ptsItr->second;
+      delta.setDifference(ptsGraph[node], oldPtsGraph[node]);
+      if (delta.isEmpty())
+        continue;
 
-        // This is where we perform HCD: check if node has a collapse target,
-        // and if it does, merge them immediately
-        if (EnableHCD) {
-          NodeIndex collapseTarget = offlineInfo.getCollapseTarget(node);
-          if (collapseTarget != AndersNodeFactory::InvalidIndex) {
-            // errs() << "node = " << node << ", collapseTgt = " <<
-            // collapseTarget << "\n";
-            NodeIndex ctRep = nodeFactory.getMergeTarget(collapseTarget);
-            // Here we have to pay special attention to whether the node
-            // points-to itself.
-            bool mergeSelf = false;
-            for (auto v : ptsSet) {
-              NodeIndex vRep = nodeFactory.getMergeTarget(v);
-              if (vRep == node) {
-                mergeSelf = true;
-                continue;
-              }
-              collapseNodes(ctRep, vRep, nodeFactory, ptsGraph,
-                            constraintGraph);
+      // HCD: check if `node` has an offline collapse target before marking
+      // `delta` as propagated, so any collapse into `ctRep` preserves delta.
+      if (EnableHCD) {
+        NodeIndex collapseTarget = offlineInfo->getCollapseTarget(node);
+        if (collapseTarget != AndersNodeFactory::InvalidIndex) {
+          NodeIndex ctRep = nodeFactory.getMergeTarget(collapseTarget);
+          bool mergeSelf = false;
+          bool mergedIntoNode = false;
+          for (auto v : delta) {
+            NodeIndex vRep = nodeFactory.getMergeTarget(static_cast<NodeIndex>(v));
+            if (vRep == node) {
+              mergeSelf = true;
+              continue;
             }
+            if (ctRep == node)
+              mergedIntoNode = true;
+            collapseNodes(ctRep, vRep, nodeFactory, ptsGraph, oldPtsGraph,
+                          constraintGraph, *nextWorkList);
+            ctRep = nodeFactory.getMergeTarget(ctRep);
+          }
 
-            if (mergeSelf) {
-              collapseNodes(ctRep, node, nodeFactory, ptsGraph,
-                            constraintGraph);
-              // If the node collapsing succeeds, we can't proceed here because
-              // node no longer exists. Push ctRep to the worklist and proceed
-              if (ctRep != node) {
-                nextWorkList->enqueue(ctRep);
-                continue;
-              }
+          if (mergeSelf) {
+            collapseNodes(ctRep, node, nodeFactory, ptsGraph, oldPtsGraph,
+                          constraintGraph, *nextWorkList);
+            if (ctRep != node) {
+              nextWorkList->enqueue(ctRep);
+              continue;
             }
           }
+          if (mergedIntoNode) {
+            delta.setDifference(ptsGraph[node], oldPtsGraph[node]);
+            if (delta.isEmpty())
+              continue;
+          }
         }
+      }
 
-        for (auto v : ptsSet) {
-          DenseMap<NodeIndex, NodeIndex> updateMap;
+      ConstraintGraphNode *cNode = constraintGraph.getNodeWithIndex(node);
+      if (!cNode->hasEdges())
+        continue;
 
-          NodeIndex vRep = nodeFactory.getMergeTarget(v);
-          for (auto const &dst : cNode->loads()) {
+      // Mark `delta` as propagated along all current edges of `node`.
+      oldPtsGraph[node].unionWith(delta);
+
+      // Process complex (load/store) edges only for newly arrived targets in
+      // `delta`. Merging copy edges via SparseBitVector OR and aggregating the
+      // points-to union reduces O(|delta| * |edges|) to O(|delta| + |edges|).
+      if (cNode->hasLoads() || cNode->hasStores()) {
+        deltaReps.clear();
+        for (auto v : delta)
+          deltaReps.set(nodeFactory.getMergeTarget(static_cast<NodeIndex>(v)));
+
+        if (cNode->hasLoads()) {
+          edgeUpdates.clear();
+          for (auto dst : cNode->loads()) {
+            NodeIndex tgtNode = nodeFactory.getMergeTarget(dst);
+            if (tgtNode != dst)
+              edgeUpdates.emplace_back(dst, tgtNode);
+          }
+          for (const auto &upd : edgeUpdates)
+            cNode->replaceLoadEdge(upd.first, upd.second);
+
+          const auto &loadEdgeSet = cNode->getLoadEdges();
+          bulkUnion.clear();
+          for (NodeIndex vRep : deltaReps) {
             ++NumLoadEdgesProcessed;
-            NodeIndex tgtNode = nodeFactory.getMergeTarget(dst);
-            // errs() << "Examining load edge " << node << " -> " << tgtNode <<
-            // "\n";
-            if (constraintGraph.insertCopyEdge(vRep, tgtNode)) {
-              // errs() << "\tInsert copy edge " << v << " -> " << tgtNode <<
-              // "\n";
+            ConstraintGraphNode *vNode = constraintGraph.getNodeWithIndex(vRep);
+            if (vNode->mergeCopyEdges(loadEdgeSet, vRep)) {
               ++NumCopyEdgesAdded;
-              nextWorkList->enqueue(vRep);
+              if (!ptsGraph[vRep].isEmpty())
+                bulkUnion.unionWith(ptsGraph[vRep]);
             }
-
-            // If we find that dst has been merged to elsewhere, remember this
-            // fact to update the constraint graph later
-            if (tgtNode != dst)
-              updateMap[dst] = tgtNode;
           }
-
-          // Now perform the load edge updates
-          for (auto const &mapping : updateMap)
-            cNode->replaceLoadEdge(mapping.first, mapping.second);
-          updateMap.clear();
-
-          for (auto const &dst : cNode->stores()) {
-            ++NumStoreEdgesProcessed;
-            NodeIndex tgtNode = nodeFactory.getMergeTarget(dst);
-            if (constraintGraph.insertCopyEdge(tgtNode, vRep)) {
-              // errs() << "\tInsert copy edge " << tgtNode << " -> " << v <<
-              // "\n";
-              ++NumCopyEdgesAdded;
-              nextWorkList->enqueue(tgtNode);
+          if (!bulkUnion.isEmpty()) {
+            for (NodeIndex tgtNode : loadEdgeSet) {
+              ++NumPtsSetUnions;
+              if (ptsGraph[tgtNode].unionWith(bulkUnion))
+                nextWorkList->enqueue(tgtNode);
             }
-
-            // If we find that dst has been merged to elsewhere, remember this
-            // fact to update the constraint graph later
-            if (tgtNode != dst)
-              updateMap[dst] = tgtNode;
           }
-
-          // Now perform the store edge updates
-          for (auto const &mapping : updateMap)
-            cNode->replaceStoreEdge(mapping.first, mapping.second);
         }
 
-        DenseMap<NodeIndex, NodeIndex> updateMap;
-        // Finally, it's time to propagate pts-to info along the copy edges
-        for (auto const &dst : *cNode) {
-          NodeIndex tgtNode = nodeFactory.getMergeTarget(dst);
-          if (node == tgtNode)
-            continue;
-          auto &tgtPtsSet = ptsGraph[tgtNode];
+        if (cNode->hasStores()) {
+          edgeUpdates.clear();
+          for (auto dst : cNode->stores()) {
+            NodeIndex tgtNode = nodeFactory.getMergeTarget(dst);
+            if (tgtNode != dst)
+              edgeUpdates.emplace_back(dst, tgtNode);
+          }
+          for (const auto &upd : edgeUpdates)
+            cNode->replaceStoreEdge(upd.first, upd.second);
 
-          // errs() << "pts[" << tgtNode << "] |= pts[" << node << "]\n";
+          const auto &storeEdgeSet = cNode->getStoreEdges();
+          bulkUnion.clear();
+          for (NodeIndex tgtNode : storeEdgeSet) {
+            ++NumStoreEdgesProcessed;
+            ConstraintGraphNode *tNode =
+                constraintGraph.getNodeWithIndex(tgtNode);
+            if (tNode->mergeCopyEdges(deltaReps, tgtNode)) {
+              ++NumCopyEdgesAdded;
+              if (!ptsGraph[tgtNode].isEmpty())
+                bulkUnion.unionWith(ptsGraph[tgtNode]);
+            }
+          }
+          if (!bulkUnion.isEmpty()) {
+            for (NodeIndex vRep : deltaReps) {
+              ++NumPtsSetUnions;
+              if (ptsGraph[vRep].unionWith(bulkUnion))
+                nextWorkList->enqueue(vRep);
+            }
+          }
+        }
+      }
+
+      // Propagate `delta` along copy edges.
+      if (cNode->hasCopies()) {
+        edgeUpdates.clear();
+        for (auto dst : *cNode) {
+          NodeIndex tgtNode = nodeFactory.getMergeTarget(dst);
+          if (node == tgtNode) {
+            edgeUpdates.emplace_back(dst, AndersNodeFactory::InvalidIndex);
+            continue;
+          }
+          auto &tgtPtsSet = ptsGraph[tgtNode];
           ++NumPtsSetUnions;
-          bool isChanged = tgtPtsSet.unionWith(ptsSet);
+          bool isChanged = tgtPtsSet.unionWith(delta);
 
           if (isChanged) {
             nextWorkList->enqueue(tgtNode);
           } else if (EnableLCD) {
-            // This is where we do lazy cycle detection.
-            // If this is a cycle candidate (equal points-to sets and this
-            // particular edge has not been cycle-checked previously), add to
-            // the list to check for cycles on the next iteration
             auto edgePair = std::make_pair(node, tgtNode);
-            if (!checkedEdges.count(edgePair) && ptsSet == tgtPtsSet) {
+            if (!checkedEdges.count(edgePair) && ptsGraph[node] == tgtPtsSet) {
               checkedEdges.insert(edgePair);
-              cycleCandidates.push(edgePair);
+              cycleCandidates.push_back(edgePair);
             }
           }
 
           if (tgtNode != dst)
-            updateMap[dst] = tgtNode;
+            edgeUpdates.emplace_back(dst, tgtNode);
         }
-
-        // Now perform the copy edge updates
-        for (auto const &mapping : updateMap)
-          cNode->replaceCopyEdge(mapping.first, mapping.second);
+        for (const auto &upd : edgeUpdates) {
+          if (upd.second == AndersNodeFactory::InvalidIndex)
+            cNode->removeCopyEdge(upd.first);
+          else
+            cNode->replaceCopyEdge(upd.first, upd.second);
+        }
       }
     }
-    // Swap the current and the next worklist
+
     std::swap(currWorkList, nextWorkList);
   }
 
   LOG_INFO("Constraint solving loop completed, calculating statistics...");
 
-  // Calculate points-to set statistics
   unsigned long long totalPtsSetSize = 0;
   unsigned maxSize = 0;
-  unsigned numNonEmptyPtsSets = 0;
+  size_t numNonEmptyPtsSets = 0;
 
-  for (const auto &mapping : ptsGraph) {
-    unsigned size = mapping.second.getSize();
+  for (const auto &pts : ptsGraph) {
+    if (pts.isEmpty())
+      continue;
+    unsigned size = pts.getSize();
     if (size > 0) {
       totalPtsSetSize += size;
       ++numNonEmptyPtsSets;
@@ -753,7 +712,25 @@ void Andersen::solveConstraints() {
     }
   }
 
+  stats.numSolvingIterations = iterCount;
+  stats.numNonEmptyPtsSets = numNonEmptyPtsSets;
+  stats.maxPtsSetSize = maxSize;
+  stats.avgPtsSetSize =
+      numNonEmptyPtsSets > 0
+          ? static_cast<unsigned>(totalPtsSetSize / numNonEmptyPtsSets)
+          : 0;
+
   MaxPtsSetSize = maxSize;
   if (numNonEmptyPtsSets > 0)
     AvgPtsSetSize = totalPtsSetSize / numNonEmptyPtsSets;
+}
+
+void Andersen::solveConstraints() {
+  if (ptsSetImpl == PtsSetImpl::SPARSE_BITVECTOR) {
+    bddPtsGraph.clear();
+    solveConstraintsImpl(sparsePtsGraph);
+  } else {
+    sparsePtsGraph.clear();
+    solveConstraintsImpl(bddPtsGraph);
+  }
 }

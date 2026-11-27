@@ -17,7 +17,7 @@ The implementation includes four optional optimizations that can be enabled via 
 - **HCD** (Hybrid Cycle Detection): Offline cycle detection that identifies collapse targets before constraint solving, then applies them during online solving
 - **LCD** (Lazy Cycle Detection): Online cycle detection that batches cycle candidates and checks them together for efficiency
 
-All optimizations are **disabled by default**. HVN and HU run during the constraint optimization phase, while HCD and LCD run during the constraint solving phase.
+**HCD** and **LCD** are **enabled by default** during constraint solving (use `--enable-hcd=false` / `--enable-lcd=false` to disable). **HVN** and **HU** run during the constraint optimization phase and are opt-in (`--enable-hvn`, `--enable-hu`) so raw collected/optimized constraint snapshots stay predictable by default.
 
 ## Context sensitivity
 

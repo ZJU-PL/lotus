@@ -127,6 +127,8 @@ NodeIndex AndersNodeFactory::createObjectNode(const Value *val, CtxKey ctx) {
   if (val != nullptr) {
     auto &bucket = objNodeMap[ctxKeyOrNull(ctx)];
     bucket[val] = nextIdx;
+    if (isa<GlobalValue>(val))
+      globalObjMap[val] = nextIdx;
   }
 
   return nextIdx;
@@ -177,8 +179,24 @@ NodeIndex AndersNodeFactory::createVarargNode(const llvm::Function *f,
   return nextIdx;
 }
 
+static const llvm::Value *unwrapGlobalAliases(const llvm::Value *val) {
+  unsigned depth = 0;
+  while (const auto *ga = dyn_cast<GlobalAlias>(val)) {
+    const Constant *aliasee = ga->getAliasee();
+    if (!aliasee || ++depth > 64)
+      break;
+    val = aliasee;
+  }
+  return val;
+}
+
 NodeIndex AndersNodeFactory::getValueNodeFor(const Value *val,
                                              CtxKey ctx) const {
+  if (!val)
+    return InvalidIndex;
+
+  val = unwrapGlobalAliases(val);
+
   if (const Constant *c = dyn_cast<Constant>(val))
     if (!isa<GlobalValue>(c) && isa<PointerType>(c->getType()))
       return getValueNodeForConstant(c, ctx);
@@ -221,37 +239,56 @@ NodeIndex AndersNodeFactory::getValueNodeFor(const Value *val,
 
 NodeIndex AndersNodeFactory::getValueNodeForConstant(const llvm::Constant *c,
                                                      CtxKey ctx) const {
-  assert(isa<PointerType>(c->getType()) && "Not a constant pointer!");
+  if (!c || !isa<PointerType>(c->getType()))
+    return getUniversalPtrNode();
 
   if (isa<ConstantPointerNull>(c) || isa<UndefValue>(c))
     return getNullPtrNode();
-  else if (const GlobalAlias *ga = dyn_cast<GlobalAlias>(c))
+  if (const GlobalAlias *ga = dyn_cast<GlobalAlias>(c))
     return getValueNodeForConstant(ga->getAliasee(), ctx);
-  else if (const GlobalValue *gv = dyn_cast<GlobalValue>(c))
-    return getValueNodeFor(gv, ctx);
-  else if (const ConstantExpr *ce = dyn_cast<ConstantExpr>(c)) {
+  if (const auto *dso = dyn_cast<DSOLocalEquivalent>(c))
+    return getValueNodeForConstant(dso->getGlobalValue(), ctx);
+  if (const auto *noCfi = dyn_cast<NoCFIValue>(c))
+    return getValueNodeForConstant(noCfi->getGlobalValue(), ctx);
+  if (isa<BlockAddress>(c))
+    return getUniversalPtrNode();
+  if (const GlobalValue *gv = dyn_cast<GlobalValue>(c)) {
+    NodeIndex idx = getValueNodeFor(gv, ctx);
+    return idx != InvalidIndex ? idx : getUniversalPtrNode();
+  }
+  if (const ConstantExpr *ce = dyn_cast<ConstantExpr>(c)) {
     switch (ce->getOpcode()) {
     // Pointer to any field within a struct is treated as a pointer to the first
     // field
-    case Instruction::GetElementPtr:
-      return getValueNodeFor(c->getOperand(0), ctx);
+    case Instruction::GetElementPtr: {
+      NodeIndex idx = getValueNodeFor(ce->getOperand(0), ctx);
+      return idx != InvalidIndex ? idx : getUniversalPtrNode();
+    }
     case Instruction::IntToPtr:
     case Instruction::PtrToInt:
       return getUniversalPtrNode();
     case Instruction::BitCast:
+    case Instruction::AddrSpaceCast:
       return getValueNodeForConstant(ce->getOperand(0), ctx);
     default:
-      LOG_ERROR("Constant Expr not yet handled: {}", *ce);
-      llvm_unreachable(0);
+      LOG_WARN("Constant Expr not handled precisely (falling back to universal "
+               "ptr): {}",
+               *ce);
+      return getUniversalPtrNode();
     }
   }
 
-  llvm_unreachable("Unknown constant pointer!");
-  return InvalidIndex;
+  LOG_WARN("Unknown constant pointer (falling back to universal ptr): {}", *c);
+  return getUniversalPtrNode();
 }
 
 NodeIndex AndersNodeFactory::getObjectNodeFor(const Value *val,
                                               CtxKey ctx) const {
+  if (!val)
+    return InvalidIndex;
+
+  val = unwrapGlobalAliases(val);
+
   if (const Constant *c = dyn_cast<Constant>(val))
     if (!isa<GlobalValue>(c))
       return getObjectNodeForConstant(c, ctx);
@@ -270,18 +307,17 @@ NodeIndex AndersNodeFactory::getObjectNodeFor(const Value *val,
   // must be accessible from any calling context.
   if (ctx != nullptr) {
     if (isa<GlobalValue>(val)) {
-      // Global: fall back to any context that has an object node for this
-      // value.
-      for (auto const &entry : objNodeMap) {
-        auto found = entry.second.find(val);
-        if (found != entry.second.end())
-          return found->second;
-      }
+      auto it = globalObjMap.find(val);
+      if (it != globalObjMap.end())
+        return it->second;
     }
     return InvalidIndex;
   }
 
-  // Context-insensitive fallback: scan all (single) context.
+  // Context-insensitive fallback: check global cache first, then single bucket.
+  auto git = globalObjMap.find(val);
+  if (git != globalObjMap.end())
+    return git->second;
   for (auto const &entry : objNodeMap) {
     auto found = entry.second.find(val);
     if (found != entry.second.end())
@@ -292,15 +328,24 @@ NodeIndex AndersNodeFactory::getObjectNodeFor(const Value *val,
 
 NodeIndex AndersNodeFactory::getObjectNodeForConstant(const llvm::Constant *c,
                                                       CtxKey ctx) const {
-  assert(isa<PointerType>(c->getType()) && "Not a constant pointer!");
+  if (!c || !isa<PointerType>(c->getType()))
+    return getUniversalObjNode();
 
-  if (isa<ConstantPointerNull>(c))
+  if (isa<ConstantPointerNull>(c) || isa<UndefValue>(c))
     return getNullObjectNode();
-  else if (const GlobalAlias *ga = dyn_cast<GlobalAlias>(c))
+  if (const GlobalAlias *ga = dyn_cast<GlobalAlias>(c))
     return getObjectNodeForConstant(ga->getAliasee(), ctx);
-  else if (const GlobalValue *gv = dyn_cast<GlobalValue>(c))
-    return getObjectNodeFor(gv, ctx);
-  else if (const ConstantExpr *ce = dyn_cast<ConstantExpr>(c)) {
+  if (const auto *dso = dyn_cast<DSOLocalEquivalent>(c))
+    return getObjectNodeForConstant(dso->getGlobalValue(), ctx);
+  if (const auto *noCfi = dyn_cast<NoCFIValue>(c))
+    return getObjectNodeForConstant(noCfi->getGlobalValue(), ctx);
+  if (isa<BlockAddress>(c))
+    return getUniversalObjNode();
+  if (const GlobalValue *gv = dyn_cast<GlobalValue>(c)) {
+    NodeIndex idx = getObjectNodeFor(gv, ctx);
+    return idx != InvalidIndex ? idx : getUniversalObjNode();
+  }
+  if (const ConstantExpr *ce = dyn_cast<ConstantExpr>(c)) {
     switch (ce->getOpcode()) {
     // Pointer to any field within a struct is treated as a pointer to the first
     // field
@@ -310,15 +355,18 @@ NodeIndex AndersNodeFactory::getObjectNodeForConstant(const llvm::Constant *c,
     case Instruction::PtrToInt:
       return getUniversalObjNode();
     case Instruction::BitCast:
+    case Instruction::AddrSpaceCast:
       return getObjectNodeForConstant(ce->getOperand(0), ctx);
     default:
-      LOG_ERROR("Constant Expr not yet handled: {}", *ce);
-      llvm_unreachable(0);
+      LOG_WARN("Constant Expr not handled precisely (falling back to universal "
+               "obj): {}",
+               *ce);
+      return getUniversalObjNode();
     }
   }
 
-  llvm_unreachable("Unknown constant pointer!");
-  return InvalidIndex;
+  LOG_WARN("Unknown constant pointer (falling back to universal obj): {}", *c);
+  return getUniversalObjNode();
 }
 
 NodeIndex AndersNodeFactory::getReturnNodeFor(const llvm::Function *f,
@@ -398,13 +446,18 @@ NodeIndex AndersNodeFactory::getMergeTarget(NodeIndex n) {
   }
   NodeIndex ret = nodes[n].mergeTarget;
   if (ret != n) {
-    std::vector<NodeIndex> path(1, n);
-    while (ret != nodes[ret].mergeTarget) {
-      path.push_back(ret);
-      ret = nodes[ret].mergeTarget;
+    NodeIndex root = ret;
+    while (root != nodes[root].mergeTarget)
+      root = nodes[root].mergeTarget;
+    if (ret != root) {
+      NodeIndex cur = n;
+      while (cur != root) {
+        NodeIndex next = nodes[cur].mergeTarget;
+        nodes[cur].mergeTarget = root;
+        cur = next;
+      }
     }
-    for (auto idx : path)
-      nodes[idx].mergeTarget = ret;
+    ret = root;
   }
   assert(ret < nodes.size());
   return ret;

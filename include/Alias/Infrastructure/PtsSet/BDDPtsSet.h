@@ -54,7 +54,9 @@ public:
   bool contains(const BDDAndersPtsSet &other) const;
   bool intersectWith(const BDDAndersPtsSet &other) const;
   bool unionWith(const BDDAndersPtsSet &other);
+  bool intersectAssign(const BDDAndersPtsSet &other);
   bool differenceWith(const BDDAndersPtsSet &other);
+  void setDifference(const BDDAndersPtsSet &lhs, const BDDAndersPtsSet &rhs);
   bool complement();
 
   void clear();

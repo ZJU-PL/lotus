@@ -78,28 +78,38 @@ bool Andersen::addConstraintForExternalLibrary(
         constraints.emplace_back(AndersConstraint::ADDR_OF, ptrIndex, objIndex);
         handled = true;
       }
-    } else if (allocInfo->ptrOutArgIndex >= 0) {
-      NodeIndex outIndex = nodeFactory.getValueNodeFor(
-          cs->getArgOperand(allocInfo->ptrOutArgIndex), callerCtx);
-      assert(outIndex != AndersNodeFactory::InvalidIndex &&
-             "Failed to find out-arg node for allocator");
-      // Create a temporary value node to represent the pointer to the new obj.
-      NodeIndex tmpPtr = nodeFactory.createValueNode(nullptr, callerCtx);
-      constraints.emplace_back(AndersConstraint::ADDR_OF, tmpPtr, objIndex);
-      constraints.emplace_back(AndersConstraint::STORE, outIndex, tmpPtr);
-      handled = true;
+    } else if (allocInfo->ptrOutArgIndex >= 0 &&
+               allocInfo->ptrOutArgIndex < static_cast<int>(cs->arg_size())) {
+      const Value *outArg = cs->getArgOperand(allocInfo->ptrOutArgIndex);
+      if (outArg->getType()->isPointerTy()) {
+        NodeIndex outIndex = nodeFactory.getValueNodeFor(outArg, callerCtx);
+        if (outIndex != AndersNodeFactory::InvalidIndex) {
+          // Create a temporary value node to represent the pointer to the new
+          // obj.
+          NodeIndex tmpPtr = nodeFactory.createValueNode(nullptr, callerCtx);
+          constraints.emplace_back(AndersConstraint::ADDR_OF, tmpPtr, objIndex);
+          constraints.emplace_back(AndersConstraint::STORE, outIndex, tmpPtr);
+          handled = true;
+        }
+      }
     }
   }
 
   // Memory copy-style effects (memcpy/memmove/bcopy/llvm.memcpy/...)
   auto copyEffects = specMgr.getCopyEffects(f);
   for (const auto &copy : copyEffects) {
-    if (copy.dstArgIndex >= 0 && copy.srcArgIndex >= 0 && copy.dstIsRegion &&
-        copy.srcIsRegion) {
-      NodeIndex dstIndex = nodeFactory.getValueNodeFor(
-          cs->getArgOperand(copy.dstArgIndex), callerCtx);
-      NodeIndex srcIndex = nodeFactory.getValueNodeFor(
-          cs->getArgOperand(copy.srcArgIndex), callerCtx);
+    if (copy.dstArgIndex >= 0 && copy.srcArgIndex >= 0 &&
+        copy.dstArgIndex < static_cast<int>(cs->arg_size()) &&
+        copy.srcArgIndex < static_cast<int>(cs->arg_size()) &&
+        copy.dstIsRegion && copy.srcIsRegion) {
+      const Value *dstArg = cs->getArgOperand(copy.dstArgIndex);
+      const Value *srcArg = cs->getArgOperand(copy.srcArgIndex);
+      if (!dstArg->getType()->isPointerTy() ||
+          !srcArg->getType()->isPointerTy()) {
+        continue;
+      }
+      NodeIndex dstIndex = nodeFactory.getValueNodeFor(dstArg, callerCtx);
+      NodeIndex srcIndex = nodeFactory.getValueNodeFor(srcArg, callerCtx);
       if (dstIndex == AndersNodeFactory::InvalidIndex ||
           srcIndex == AndersNodeFactory::InvalidIndex) {
         continue;
@@ -113,11 +123,14 @@ bool Andersen::addConstraintForExternalLibrary(
       if (copy.returnsAlias) {
         NodeIndex retIndex = nodeFactory.getValueNodeFor(cs, callerCtx);
         if (retIndex != AndersNodeFactory::InvalidIndex) {
-          NodeIndex aliased =
-              (copy.retArgIndex >= 0)
-                  ? nodeFactory.getValueNodeFor(
-                        cs->getArgOperand(copy.retArgIndex), callerCtx)
-                  : dstIndex;
+          NodeIndex aliased = dstIndex;
+          if (copy.retArgIndex >= 0 &&
+              copy.retArgIndex < static_cast<int>(cs->arg_size())) {
+            const Value *retArg = cs->getArgOperand(copy.retArgIndex);
+            aliased = retArg->getType()->isPointerTy()
+                          ? nodeFactory.getValueNodeFor(retArg, callerCtx)
+                          : AndersNodeFactory::InvalidIndex;
+          }
           if (aliased != AndersNodeFactory::InvalidIndex)
             constraints.emplace_back(AndersConstraint::COPY, retIndex, aliased);
         }
@@ -141,32 +154,36 @@ bool Andersen::addConstraintForExternalLibrary(
           constraints.emplace_back(AndersConstraint::COPY, retIndex,
                                    nodeFactory.getNullPtrNode());
           handled = true;
-        } else if (ra.argIndex >= 0 && ra.argIndex < (int)cs->arg_size()) {
-          NodeIndex argIndex = nodeFactory.getValueNodeFor(
-              cs->getArgOperand(ra.argIndex), callerCtx);
-          if (argIndex != AndersNodeFactory::InvalidIndex) {
-            constraints.emplace_back(AndersConstraint::COPY, retIndex,
-                                     argIndex);
-            handled = true;
+        } else if (ra.argIndex >= 0 &&
+                   ra.argIndex < static_cast<int>(cs->arg_size())) {
+          const Value *srcArg = cs->getArgOperand(ra.argIndex);
+          if (srcArg->getType()->isPointerTy()) {
+            NodeIndex argIndex = nodeFactory.getValueNodeFor(srcArg, callerCtx);
+            if (argIndex != AndersNodeFactory::InvalidIndex) {
+              constraints.emplace_back(AndersConstraint::COPY, retIndex,
+                                       argIndex);
+              handled = true;
+            }
           }
         }
       }
     }
   }
 
-  if (f->getName() == "llvm.va_start") {
+  if (f->getName() == "llvm.va_start" && cs->arg_size() >= 1) {
     const Instruction *inst = cs;
     const Function *parentF = inst->getParent()->getParent();
-    assert(parentF->getFunctionType()->isVarArg());
-    NodeIndex arg0Index =
-        nodeFactory.getValueNodeFor(cs->getArgOperand(0), callerCtx);
-    assert(arg0Index != AndersNodeFactory::InvalidIndex &&
-           "Failed to find arg0 node");
-    NodeIndex vaIndex = nodeFactory.getVarargNodeFor(parentF, callerCtx);
-    assert(vaIndex != AndersNodeFactory::InvalidIndex &&
-           "Failed to find va node");
-    constraints.emplace_back(AndersConstraint::ADDR_OF, arg0Index, vaIndex);
-
+    const Value *arg0 = cs->getArgOperand(0);
+    if (parentF->getFunctionType()->isVarArg() &&
+        arg0->getType()->isPointerTy()) {
+      NodeIndex arg0Index = nodeFactory.getValueNodeFor(arg0, callerCtx);
+      NodeIndex vaIndex = nodeFactory.getVarargNodeFor(parentF, callerCtx);
+      if (arg0Index != AndersNodeFactory::InvalidIndex &&
+          vaIndex != AndersNodeFactory::InvalidIndex) {
+        constraints.emplace_back(AndersConstraint::ADDR_OF, arg0Index, vaIndex);
+        return true;
+      }
+    }
     return true;
   }
 

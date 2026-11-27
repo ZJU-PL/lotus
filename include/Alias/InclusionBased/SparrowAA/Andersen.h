@@ -70,8 +70,8 @@
 #include "Alias/InclusionBased/SparrowAA/ConstraintSnapshot.h"
 #include "Alias/InclusionBased/SparrowAA/NodeFactory.h"
 #include "Alias/InclusionBased/SparrowAA/TemplatePtsSet.h"
-#include "Alias/Infrastructure/Spec/AliasSpecManager.h"
 
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -150,6 +150,17 @@ void runHVNAndCapturePELabels(std::vector<AndersConstraint> &constraints,
  *       LLVM `AAResultBase` interface.
  */
 class Andersen {
+public:
+  struct Stats {
+    size_t numNodes = 0;
+    size_t numConstraintsBeforeOpt = 0;
+    size_t numConstraintsAfterOpt = 0;
+    size_t numSolvingIterations = 0;
+    size_t numNonEmptyPtsSets = 0;
+    unsigned maxPtsSetSize = 0;
+    unsigned avgPtsSetSize = 0;
+  };
+
 private:
   /// Factory that allocates and manages all `AndersNode` objects.
   AndersNodeFactory nodeFactory;
@@ -157,14 +168,29 @@ private:
   /// All inclusion constraints collected from the module.
   std::vector<AndersConstraint> constraints;
 
-  /// The points-to graph: maps each node index to its points-to set.
-  /// Populated by `solveConstraints()` and queried by `getPointsToSet()`.
-  std::map<NodeIndex, DefaultPtsSet, std::less<NodeIndex>,
-           std::allocator<std::pair<const NodeIndex, DefaultPtsSet>>>
-      ptsGraph;
+  /// Active points-to set backend captured at construction time.
+  PtsSetImpl ptsSetImpl = PtsSetImpl::SPARSE_BITVECTOR;
 
-  /// Library-function spec manager used during constraint collection.
-  lotus::alias::AliasSpecManager specManager;
+  /// Dense points-to graph indexed by representative NodeIndex.
+  /// Exactly one of `sparsePtsGraph` / `bddPtsGraph` is populated depending on
+  /// `ptsSetImpl`, avoiding std::map overhead and RuntimePtsSet type erasure.
+  std::vector<AndersPtsSet> sparsePtsGraph;
+  std::vector<BDDAndersPtsSet> bddPtsGraph;
+
+  /// Cached metadata for address-taken functions to accelerate indirect-call
+  /// target matching without rescanning M or repeatedly calling
+  /// Function::hasAddressTaken().
+  struct AddrTakenFunctionInfo {
+    const llvm::Function *func = nullptr;
+    bool retIsPtr = false;
+    unsigned numParams = 0;
+    uint64_t paramPtrMask = 0;
+  };
+  std::vector<AddrTakenFunctionInfo> varArgAddrTakenFunctions;
+  llvm::DenseMap<unsigned, std::vector<AddrTakenFunctionInfo>>
+      fixedArgAddrTakenFunctions;
+
+  Stats stats;
 
   ContextPolicy ctxPolicy;              ///< The active context policy.
   AndersNodeFactory::CtxKey initialCtx; ///< Context for the entry point.
@@ -215,6 +241,8 @@ private:
                                      AndersNodeFactory::CtxKey);
   void optimizeConstraints();
   void solveConstraints();
+  template <typename PtsSetType>
+  void solveConstraintsImpl(std::vector<PtsSetType> &ptsGraph);
 
   // Helper functions for constraint collection
   void collectConstraintsForGlobals(const llvm::Module &,
@@ -232,11 +260,20 @@ private:
                                     const llvm::Function *f,
                                     AndersNodeFactory::CtxKey callerCtx,
                                     AndersNodeFactory::CtxKey calleeCtx);
+  AndersNodeFactory::CtxKey
+  evolveContextForCallee(AndersNodeFactory::CtxKey prev,
+                         const llvm::Instruction *I,
+                         const llvm::Function *callee) const;
 
   // Helper functions for constraint optimization
   NodeIndex getRefNodeIndex(NodeIndex n) const;
   NodeIndex getAdrNodeIndex(NodeIndex n) const;
-  void computeContextNeed();
+  struct FormalActualEdge {
+    const llvm::Function *func;
+    NodeIndex formal;
+    NodeIndex actual;
+  };
+  void computeContextNeed(const std::vector<FormalActualEdge> &argEdges);
 
   // For debugging
   void dumpConstraint(const AndersConstraint &) const;
@@ -298,6 +335,8 @@ public:
   // analysis) into the first arugment
   void
   getAllAllocationSites(std::vector<const llvm::Value *> &allocSites) const;
+
+  const Stats &getStats() const { return stats; }
 
   friend class AndersenAAResult;
 };
