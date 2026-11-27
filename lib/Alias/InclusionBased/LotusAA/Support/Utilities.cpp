@@ -185,8 +185,15 @@ void IntraLotusAA::clearGlobalCgResult() {
 void IntraLotusAA::clearMemObjectResult() {
   lotus_clear_hash(&guarded_points_to_signature_cache_);
   lotus_clear_hash(&must_kill_forests);
-  lotus_clear_hash(&reachability_cache);
-  lotus_clear_hash(&avoiding_reachability_cache);
+  bb_reachability_ready_ = false;
+  bb_to_scc_.clear();
+  scc_reach_.clear();
+  lotus_clear_hash(&bb_avoiding_reachability_cache_);
+  locator_to_stores_.clear();
+  fingerprint_to_loads_.clear();
+  block_fp_loads_.clear();
+  indexed_loads_.clear();
+  all_loads_indexed_ = false;
 
   for (auto &it : pt_results) {
     if (it.second != NullPTS)

@@ -15,6 +15,8 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include <llvm/Analysis/PostDominators.h>
 #include <llvm/IR/Dominators.h>
@@ -72,6 +74,15 @@ class GSAFChecker : public llvm::ModulePass {
       FuncTraceMap;
   SMTAdvisor4Inlining SMTAdvisor;
   ThreadPool::TaskGroup ReportTasks;
+
+  struct PooledSMTFactory {
+    std::unique_ptr<SMTFactory> Factory;
+    unsigned Uses = 0;
+  };
+  std::mutex FactoryPoolMutex;
+  std::vector<PooledSMTFactory> FactoryPool;
+  PooledSMTFactory acquireSMTFactory();
+  void releaseSMTFactory(PooledSMTFactory &&entry);
 
 public:
   static char ID;

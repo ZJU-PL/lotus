@@ -48,6 +48,8 @@ public:
 
   SMTSolver createSMTSolver();
 
+  SMTSolver createSimpleSMTSolver();
+
   SMTSolver createSMTSolverWithTactic(const std::string &Tactic = "smt");
 
   SMTExpr createEmptySMTExpr();

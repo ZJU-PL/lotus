@@ -189,13 +189,16 @@ void FunctionAnalyzer::initOutputSummary(
   assert(AllSmry);
 
   auto *CalleeGraph = Parent->getGraph(Callee);
+  if (!CalleeGraph)
+    return;
   auto *RetNode =
       nodeOfKind<GuardedValueFlowNode::Kind::CallSiteCommonOutput,
                  GuardedValueFlowCallOutputNode>(Node)
           ? (const GuardedValueFlowNode *)CalleeGraph->getCommonReturn()
           : (const GuardedValueFlowNode *)CalleeGraph->getPseudoReturn(
                 Node->getIndex());
-  assert(RetNode);
+  if (!RetNode)
+    return;
   auto SmryIt = AllSmry->OutSmrys.find(RetNode);
   if (SmryIt == AllSmry->OutSmrys.end()) {
     return;
@@ -219,12 +222,12 @@ void FunctionAnalyzer::initOutputSummary(
         }
       } else if (nodeOfKind<GuardedValueFlowNode::Kind::CommonArgument,
                             GuardedValueFlowNode>(SrcNode)) {
-        OutputSmryMap[std::make_tuple(
-                          GraphCS->getCommonInput(
-                              ((const GuardedValueFlowNode *)SrcNode)
-                                  ->getIndex()),
-                          Node, Callee)]
-            .insert(OutSmry);
+        size_t ArgIdx = ((const GuardedValueFlowNode *)SrcNode)->getIndex();
+        if (ArgIdx < GraphCS->getCommonInputs().size()) {
+          OutputSmryMap[std::make_tuple(GraphCS->getCommonInput(ArgIdx), Node,
+                                        Callee)]
+              .insert(OutSmry);
+        }
       } else {
         assert((nodeOfKind<GuardedValueFlowNode::Kind::PseudoArgument,
                            GuardedValueFlowNode>(SrcNode)));
@@ -355,30 +358,39 @@ void FunctionAnalyzer::matchFormalActual(
     const std::string &FormalDesc = detail::encodingSymbol(Formal);
     SMTExpr FormalExpr = Solver->getSMTFactory().createBitVecConst(
         FormalDesc + RenameSuffix,
-        Parent->DL->getTypeSizeInBits(Formal->getType()));
+        detail::encodingTypeSize(Parent->getModule()->getDataLayout(),
+                                 Formal->getType()));
     if (nodeOfKind<GuardedValueFlowNode::Kind::VariableArgument,
                    GuardedValueFlowNode>(Formal)) {
       unsigned VarActualArgStart = CalleeGraph->getNumCommonArgument();
       unsigned VarActualArgEnd = GraphCS->getCommonInputs().size();
       if (VarActualArgStart < VarActualArgEnd) {
-        unsigned Idx = VarActualArgStart;
-        SMTExpr Mapping = (FormalExpr == Solver->getOrInsertExpr(
-                                             GraphCS->getCommonInputs()[Idx]));
-        for (; Idx < VarActualArgEnd; Idx++) {
+        SMTExpr Mapping = Solver->getSMTFactory().createEmptySMTExpr();
+        bool HasMapping = false;
+        for (unsigned Idx = VarActualArgStart; Idx < VarActualArgEnd; Idx++) {
           auto *ActualNode = GraphCS->getCommonInputs()[Idx];
-          assert(ActualNode);
-          Mapping =
-              Mapping || (FormalExpr == Solver->getOrInsertExpr(ActualNode));
+          if (!ActualNode)
+            continue;
+          SMTExpr ActualExpr = Solver->getOrInsertExpr(ActualNode);
+          if (!ActualExpr.isBitVector() ||
+              ActualExpr.getBitVecSize() != FormalExpr.getBitVecSize()) {
+            continue;
+          }
+          SMTExpr Eq = (FormalExpr == ActualExpr);
+          Mapping = HasMapping ? (Mapping || Eq) : Eq;
+          HasMapping = true;
 
           Solver->addAll(Solver->getDataDeps(ActualNode));
         }
-        Solver->add(Mapping);
+        if (HasMapping)
+          Solver->add(Mapping);
       }
     } else {
       const GuardedValueFlowNode *ActualNode = nullptr;
       if (nodeOfKind<GuardedValueFlowNode::Kind::CommonArgument,
                      GuardedValueFlowNode>(Formal)) {
-        ActualNode = GraphCS->getCommonInput(Formal->getIndex());
+        if (Formal->getIndex() < GraphCS->getCommonInputs().size())
+          ActualNode = GraphCS->getCommonInput(Formal->getIndex());
       } else {
         ActualNode =
             GraphCS->getPseudoInput(Smry->getFunction(), Formal->getIndex());
@@ -387,7 +399,11 @@ void FunctionAnalyzer::matchFormalActual(
         continue;
       }
 
-      SMTExpr Mapping = (FormalExpr == Solver->getOrInsertExpr(ActualNode));
+      SMTExpr ActualExpr = Solver->getOrInsertExpr(ActualNode);
+      if (FormalExpr.getBitVecSize() != ActualExpr.getBitVecSize()) {
+        continue;
+      }
+      SMTExpr Mapping = (FormalExpr == ActualExpr);
       Solver->add(Mapping);
 
       Solver->addAll(Solver->getDataDeps(ActualNode));
@@ -472,17 +488,22 @@ bool FunctionAnalyzer::inlineReturnSymbolicSummary(
     return false;
   }
 
+  auto *CalleeGraph = Parent->getGraph(Callee);
+  if (!CalleeGraph)
+    return false;
   const GuardedValueFlowReturnNode *RetNodeInCallee = nullptr;
   if (CSIdx >= 0) {
-    RetNodeInCallee = Parent->getGraph(Callee)->getPseudoReturn(CSIdx);
+    RetNodeInCallee = CalleeGraph->getPseudoReturn(CSIdx);
   } else {
-    RetNodeInCallee = Parent->getGraph(Callee)->getCommonReturn();
+    RetNodeInCallee = CalleeGraph->getCommonReturn();
   }
+  if (!RetNodeInCallee)
+    return false;
 
   auto It = Parent->FuncSmryMap.find(Callee);
-  assert(It != Parent->FuncSmryMap.end());
+  if (It == Parent->FuncSmryMap.end() || !It->second)
+    return false;
   GSAFSummary *AllSmry = It->second;
-  assert(AllSmry);
   auto SymSmryPair = AllSmry->RetSmrys.find(RetNodeInCallee);
   if (SymSmryPair == AllSmry->RetSmrys.end()) {
     // This may happen in SCC.
@@ -505,12 +526,15 @@ bool FunctionAnalyzer::inlineReturnSymbolicSummary(
 
   SMTExpr FormalRetExpr = Solver->getSMTFactory().createBitVecConst(
       detail::encodingSymbol(SymSmryPair->first) + RenamingSuffix,
-      Parent->DL->getTypeSizeInBits(SymSmryPair->first->getType()));
+      detail::encodingTypeSize(Parent->getModule()->getDataLayout(),
+                               SymSmryPair->first->getType()));
   SMTExpr NodeExpr = Solver->getOrInsertExpr(Node);
 
-  assert(FormalRetExpr.isBitVector() && NodeExpr.isBitVector());
-  assert(FormalRetExpr.getBitVecSize() == NodeExpr.getBitVecSize());
+  if (!FormalRetExpr.isBitVector() || !NodeExpr.isBitVector() ||
+      FormalRetExpr.getBitVecSize() != NodeExpr.getBitVecSize())
+    return false;
 
+  CallSiteOutputCache.add(Node);
   Solver->add(FormalRetExpr == NodeExpr);
   return true;
 }
@@ -563,7 +587,8 @@ bool FunctionAnalyzer::inlineReturnSymbolicSummary(
                      GuardedValueFlowCallOutputNode>(CSO)) {
         if (Sources.count(callSite(CSO)) ||
             SourceWrapperSmryMap.count(callSite(CSO))) {
-          if (CommonCSOCache.front() == CurrentSrcSiteOutput) {
+          if (!CommonCSOCache.empty() &&
+              CommonCSOCache.front() == CurrentSrcSiteOutput) {
             auto It = CommonCSOCache.begin();
             ++It;
             CommonCSOCache.insert(It, CSO);
@@ -624,11 +649,19 @@ bool FunctionAnalyzer::inlineReturnSymbolicSummary(
 }
 
 void FunctionAnalyzer::buildReturnSymbolicSummary() {
-  if (!GSAFOptions::EnableCSSymSummary) {
+  if (!GSAFOptions::EnableCSSymSummary || !Parent->hasNonBackEdgeCaller(F)) {
     return;
   }
 
-  Solver->reset();
+  if (Graph->return_begin() == Graph->return_end()) {
+    return;
+  }
+
+  if (Solver) {
+    Solver->reset();
+  } else {
+    ensureSolver();
+  }
   resetState();
 
   for (auto It = Graph->return_begin(), E = Graph->return_end(); It != E;
@@ -778,13 +811,13 @@ void FunctionAnalyzer::inlineCalleeOutSummary(
   assert(RetNode);
 
   if (OutSmry->getInlineDepth() >= GSAFOptions::InlineDepth) {
-    assert(isa<GuardedValueFlowNode>(OutSmry->getSourceNode()) &&
+    assert(isa<GuardedValueFlowArgumentNode>(OutSmry->getSourceNode()) &&
            "Such summaries have been removed during initialization!");
     return;
   }
 
   TraceBuilder.push();
-  if (isa<GuardedValueFlowNode>(OutSmry->getSourceNode()) &&
+  if (isa<GuardedValueFlowArgumentNode>(OutSmry->getSourceNode()) &&
       !OutSmry->getSourceSite()) {
     TraceBuilder.add(CS);
   }
@@ -802,7 +835,7 @@ void FunctionAnalyzer::inlineCalleeOutSummary(
   // copy to the current context and renaming for context sensitivity
   std::string RenamingSuffix = format_str("_CS%p", CS->getInstruction());
 
-  if (isa<GuardedValueFlowNode>(OutSmry->getSourceNode()) &&
+  if (isa<GuardedValueFlowArgumentNode>(OutSmry->getSourceNode()) &&
       !OutSmry->getSourceSite()) {
   } else {
     // If it does not start from an argument, the initial control deps must be
@@ -837,20 +870,24 @@ void FunctionAnalyzer::inlineCalleeOutSummary(
     assert(Case == 1);
 
     auto *OutSmrySrc = OutSmry->getSourceNode();
-    if (auto *Arg = dyn_cast<GuardedValueFlowArgumentNode>(OutSmrySrc)) {
+    if (auto *Arg = dyn_cast_or_null<GuardedValueFlowArgumentNode>(OutSmrySrc)) {
       if (nodeOfKind<GuardedValueFlowNode::Kind::CommonArgument,
                      GuardedValueFlowNode>(OutSmrySrc)) {
-        search(CS->getCommonInput(Arg->getIndex()), nullptr, Src, Depth);
+        if (Arg->getIndex() < CS->getCommonInputs().size())
+          search(CS->getCommonInput(Arg->getIndex()), nullptr, Src, Depth);
       } else if (nodeOfKind<GuardedValueFlowNode::Kind::PseudoArgument,
                             GuardedValueFlowNode>(OutSmrySrc)) {
         if (auto *PseudoInput =
                 CS->getPseudoInput(OutSmry->getFunction(), Arg->getIndex())) {
           search(PseudoInput, nullptr, Src, Depth);
         }
+      } else if (nodeOfKind<GuardedValueFlowNode::Kind::VariableArgument,
+                            GuardedValueFlowNode>(OutSmrySrc)) {
+        for (size_t I = 0; I < CS->getCommonInputs().size(); ++I) {
+          if (auto *Actual = CS->getCommonInput(I))
+            search(Actual, nullptr, Src, Depth);
+        }
       }
-    } else {
-      llvm_unreachable("When searching from output to input, the source of the "
-                       "output summary trace must be an argument node!");
     }
   }
 

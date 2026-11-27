@@ -63,6 +63,10 @@
 #include <tuple>
 #include <unordered_map>
 
+#include <llvm/ADT/BitVector.h>
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/DenseSet.h>
+#include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Value.h>
 
@@ -90,6 +94,7 @@ public:
   static bool lotus_enable_score_computation;
   static bool lotus_enable_summary_value;
   static bool lotus_enable_must_kill;
+  static bool lotus_enable_pathcond_smt;
   static int lotus_restrict_output_pts;
   static int lotus_memory_max_passing_func;
   static int lotus_restrict_right_value_count;
@@ -237,12 +242,19 @@ private:
   // Tuna-style staged strong-update state.  Forests are cached at loads and
   // inherited from an immediate dominating must-alias load.
   std::map<LoadInst *, MustKillForest, llvm_cmp> must_kill_forests;
-  std::map<std::pair<const Instruction *, const Instruction *>, bool>
-      reachability_cache;
-  std::map<std::tuple<const Instruction *, const Instruction *,
-                      const Instruction *>,
+  bool bb_reachability_ready_ = false;
+  DenseMap<const BasicBlock *, unsigned> bb_to_scc_;
+  std::vector<BitVector> scc_reach_;
+  std::map<std::tuple<const BasicBlock *, const BasicBlock *,
+                      const BasicBlock *>,
            bool>
-      avoiding_reachability_cache;
+      bb_avoiding_reachability_cache_;
+  DenseMap<ObjectLocator *, SmallVector<StoreInst *, 4>> locator_to_stores_;
+  DenseMap<size_t, SmallVector<LoadInst *, 4>> fingerprint_to_loads_;
+  std::map<std::pair<BasicBlock *, size_t>, SmallVector<LoadInst *, 4>>
+      block_fp_loads_;
+  DenseSet<LoadInst *> indexed_loads_;
+  bool all_loads_indexed_ = false;
 
   // Flags
   bool is_PTA_computed;
@@ -324,6 +336,11 @@ private:
 
   void collectPathSensitiveLoadValues(LoadInst *load, mem_value_t &result,
                                       bool create_symbol);
+  void ensureBBReachability();
+  bool bbReachesNonEmpty(const BasicBlock *src, const BasicBlock *dst);
+  void indexStoreForStrongUpdates(StoreInst *store, PTResult *store_pts);
+  void indexLoadForStrongUpdates(LoadInst *load);
+  void ensureAllLoadsIndexed();
   MustKillForest &getOrCreateMustKillForest(LoadInst *load);
   LoadInst *findImmediateMustAliasAnchor(LoadInst *load);
   bool instructionReaches(const Instruction *source,
@@ -347,6 +364,11 @@ public:
     unsigned candidate_store_count = 0;
     unsigned root_store_count = 0;
   };
+
+  /// O(1) SCC-bitvector CFG reachability check between basic blocks.
+  bool blockReaches(const BasicBlock *src, const BasicBlock *dst) {
+    return bbReachesNonEmpty(src, dst);
+  }
 
   IntraLotusAA(Function *F, LotusAA *lotus_aa);
   ~IntraLotusAA();

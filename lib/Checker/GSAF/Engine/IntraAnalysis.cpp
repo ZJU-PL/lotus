@@ -69,24 +69,6 @@ FunctionAnalyzer::FunctionAnalyzer(GSAFChecker *P, Function *F)
       1);
   SMTTimeChecker->suspend();
 
-  Fctry = new SMTFactory;
-
-  if (GSAFOptions::SolverVersion == 1) {
-    auto *configured = new GSAFSolver(*Fctry, P->getModule()->getDataLayout());
-    configured->setModels(P->Models, GSAFOptions::EnableHeapAllocFailure,
-                          GSAFOptions::EnableFileAllocFailure);
-    Solver = configured;
-  } else if (GSAFOptions::SolverVersion == 2) {
-    auto *configured =
-        new DTGSAFSolver(*Fctry, P->getModule()->getDataLayout(), DT);
-    configured->setModels(P->Models, GSAFOptions::EnableHeapAllocFailure,
-                          GSAFOptions::EnableFileAllocFailure);
-    Solver = configured;
-  } else {
-    llvm_unreachable(
-        "Unsupported symbolic expression solver (can be 1 and 2).");
-  }
-
   initSummary();
 
   // TSV is the only vulnerability
@@ -94,11 +76,115 @@ FunctionAnalyzer::FunctionAnalyzer(GSAFChecker *P, Function *F)
       Parent->Vuln->getVulnerability(1));
 }
 
+void FunctionAnalyzer::ensureSolver() {
+  if (Solver)
+    return;
+  OwnedFactory = Parent->acquireSMTFactory();
+  Fctry = OwnedFactory.Factory.get();
+  if (GSAFOptions::SolverVersion == 1) {
+    auto *configured =
+        new GSAFSolver(*Fctry, Parent->getModule()->getDataLayout());
+    configured->setModels(Parent->Models, GSAFOptions::EnableHeapAllocFailure,
+                          GSAFOptions::EnableFileAllocFailure);
+    Solver = configured;
+  } else if (GSAFOptions::SolverVersion == 2) {
+    auto *configured =
+        new DTGSAFSolver(*Fctry, Parent->getModule()->getDataLayout(), DT);
+    configured->setModels(Parent->Models, GSAFOptions::EnableHeapAllocFailure,
+                          GSAFOptions::EnableFileAllocFailure);
+    Solver = configured;
+  } else {
+    llvm_unreachable(
+        "Unsupported symbolic expression solver (can be 1 and 2).");
+  }
+}
+
+void FunctionAnalyzer::buildRelevantNodes() {
+  if (RelevantNodesBuilt)
+    return;
+  RelevantNodesBuilt = true;
+
+  std::unordered_map<const GuardedValueFlowNode *,
+                     std::vector<const GuardedValueFlowNode *>>
+      RevParents;
+  std::vector<const GuardedValueFlowNode *> CommonArgWorklist;
+  std::vector<const GuardedValueFlowNode *> AnyWorklist;
+
+  for (const auto &NodePtr : Graph->nodes()) {
+    const GuardedValueFlowNode *Node = NodePtr.get();
+    if (!Node)
+      continue;
+    for (const GuardedValueFlowNode *P :
+         Node->getValueFlowParents(GSAFOptions::EnableArithmeticFlow)) {
+      RevParents[P].push_back(Node);
+    }
+
+    bool IsCommonArgRelevant = false;
+    bool IsAnyRelevant = false;
+    for (const GuardedValueFlowSite *Site : Node->useSites()) {
+      if (!Site)
+        continue;
+      if (isa<GuardedValueFlowReturnSite>(Site)) {
+        IsCommonArgRelevant = true;
+        IsAnyRelevant = true;
+        break;
+      }
+      if (auto *CS = dyn_cast<GuardedValueFlowCallSite>(Site)) {
+        if (hasSummary(CS, Node) ||
+            TSV->isPotentialCommonArgSinkCallSite(CS, Node)) {
+          IsCommonArgRelevant = true;
+          IsAnyRelevant = true;
+          break;
+        }
+        if (TSV->isPotentialSinkCallSite(CS, Node)) {
+          IsAnyRelevant = true;
+        }
+      } else {
+        if (TSV->isPotentialCommonArgNonCallSite(Site, Node)) {
+          IsCommonArgRelevant = true;
+          IsAnyRelevant = true;
+          break;
+        }
+        if (TSV->isPotentialNonCallRelevantSite(Site, Node)) {
+          IsAnyRelevant = true;
+        }
+      }
+    }
+    if (IsCommonArgRelevant && CanReachCommonArgSite.insert(Node).second)
+      CommonArgWorklist.push_back(Node);
+    if (IsAnyRelevant && CanReachAnyRelevantSite.insert(Node).second)
+      AnyWorklist.push_back(Node);
+  }
+
+  auto propagateBack =
+      [&](std::vector<const GuardedValueFlowNode *> &Worklist,
+          std::unordered_set<const GuardedValueFlowNode *> &ReachSet) {
+        while (!Worklist.empty()) {
+          const GuardedValueFlowNode *Cur = Worklist.back();
+          Worklist.pop_back();
+          auto It = RevParents.find(Cur);
+          if (It == RevParents.end())
+            continue;
+          for (const GuardedValueFlowNode *Pred : It->second) {
+            if (ReachSet.insert(Pred).second)
+              Worklist.push_back(Pred);
+          }
+        }
+      };
+
+  propagateBack(CommonArgWorklist, CanReachCommonArgSite);
+  propagateBack(AnyWorklist, CanReachAnyRelevantSite);
+}
+
 FunctionAnalyzer::~FunctionAnalyzer() {
   delete Solver;
+  Solver = nullptr;
+  CtrlConds.reset();
   delete TimeChecker;
   delete SMTTimeChecker;
-  delete Fctry;
+  Fctry = nullptr;
+  if (OwnedFactory.Factory)
+    Parent->releaseSMTFactory(std::move(OwnedFactory));
 }
 
 void FunctionAnalyzer::pushState() {
@@ -149,6 +235,14 @@ void FunctionAnalyzer::run() {
       gvfg::GuardedValueFlowSerializer::writeDot(
           *Graph, (F->getName().str() + "-gsaf-value-flow.dot").c_str()););
 
+  const bool HasCaller = Parent->hasNonBackEdgeCaller(F);
+  if (SrcVec.empty() && SourceWrapperSmryMap.empty() &&
+      SourceOutSmryVec.empty() && !HasCaller) {
+    return;
+  }
+
+  buildRelevantNodes();
+
   DEBUG_TRACE(dbgs() << "\t [Search from vulnerability-specified sources]\n");
   for (auto &SrcIt : SrcVec) {
     const auto *SrcNode = SrcIt.first;
@@ -168,6 +262,7 @@ void FunctionAnalyzer::run() {
       continue;
     }
 
+    ensureSolver();
     pushState();
     TraceBuilder.push();
     Solver->push();
@@ -210,6 +305,7 @@ void FunctionAnalyzer::run() {
         continue;
       }
 
+      ensureSolver();
       pushState();
       TraceBuilder.push();
       Solver->push();
@@ -234,38 +330,51 @@ void FunctionAnalyzer::run() {
     }
   }
 
-  // search from arguments
+  // search from arguments (only produces interprocedural summaries for callers)
   DEBUG_TRACE(dbgs() << "\t [Search from arguments]\n");
-  for (auto ArgIt = Graph->arg_begin(), E = Graph->arg_end(); ArgIt != E;
-       ++ArgIt) {
-    auto *ArgNode = *ArgIt;
+  if (HasCaller) {
+    for (auto ArgIt = Graph->arg_begin(), E = Graph->arg_end(); ArgIt != E;
+         ++ArgIt) {
+      auto *ArgNode = *ArgIt;
 
-    if (!GSAFOptions::EnableSideEffectSource &&
-        nodeOfKind<GuardedValueFlowNode::Kind::PseudoArgument,
-                   GuardedValueFlowNode>(ArgNode)) {
-      continue;
+      if (!GSAFOptions::EnableSideEffectSource &&
+          nodeOfKind<GuardedValueFlowNode::Kind::PseudoArgument,
+                     GuardedValueFlowNode>(ArgNode)) {
+        continue;
+      }
+
+      const bool IsCommonArg =
+          nodeOfKind<GuardedValueFlowNode::Kind::CommonArgument,
+                     GuardedValueFlowNode>(ArgNode);
+      const auto &ReachSet =
+          IsCommonArg ? CanReachCommonArgSite : CanReachAnyRelevantSite;
+      if (!ReachSet.count(ArgNode)) {
+        continue;
+      }
+
+      DEBUG_TRACE(dbgs() << "\t [Search from arguments -> " << *ArgNode
+                         << "]\n");
+
+      if (TSV->checkNode(ArgNode, TraceBuilder)) {
+        DEBUG_TRACE(dbgs() << "\t " << SKIP_STR << *ArgNode << "...\n");
+        continue;
+      }
+
+      ensureSolver();
+      pushState();
+      TraceBuilder.push();
+      Solver->push();
+
+      TraceBuilder.add(ArgNode);
+      TraceBuilder.add(nullptr);
+
+      bottomUpDepthFirstSearch(ArgNode, nullptr,
+                               std::make_pair(ArgNode, nullptr), 0);
+
+      Solver->pop();
+      TraceBuilder.pop();
+      popState();
     }
-
-    DEBUG_TRACE(dbgs() << "\t [Search from arguments -> " << *ArgNode << "]\n");
-
-    if (TSV->checkNode(ArgNode, TraceBuilder)) {
-      DEBUG_TRACE(dbgs() << "\t " << SKIP_STR << *ArgNode << "...\n");
-      continue;
-    }
-
-    pushState();
-    TraceBuilder.push();
-    Solver->push();
-
-    TraceBuilder.add(ArgNode);
-    TraceBuilder.add(nullptr);
-
-    bottomUpDepthFirstSearch(ArgNode, nullptr, std::make_pair(ArgNode, nullptr),
-                             0);
-
-    Solver->pop();
-    TraceBuilder.pop();
-    popState();
   }
 
   // search from call site outputs
@@ -273,11 +382,15 @@ void FunctionAnalyzer::run() {
   for (auto &SrcOutSmryIt : SourceOutSmryVec) {
     auto *CallSiteOutput = SrcOutSmryIt.first;
     auto *OutSmry = SrcOutSmryIt.second;
-    assert(!isa<GuardedValueFlowNode>(OutSmry->getSourceNode()));
+    assert(!isa<GuardedValueFlowArgumentNode>(OutSmry->getSourceNode()));
+
+    if (!CanReachAnyRelevantSite.count(CallSiteOutput))
+      continue;
 
     DEBUG_TRACE(dbgs() << "\t [Search from SourceOutSmryVec -> "
                        << *CallSiteOutput << "]\n");
 
+    ensureSolver();
     auto Src = std::make_pair(CallSiteOutput, callSite(CallSiteOutput));
     inlineCalleeOutSummary(callSite(CallSiteOutput), OutSmry, CallSiteOutput,
                            Src, OutSmry->getInlineDepth() + 1);
@@ -423,6 +536,14 @@ void FunctionAnalyzer::search(const GuardedValueFlowNode *Node,
 void FunctionAnalyzer::bottomUpDepthFirstSearch(
     const GuardedValueFlowNode *Node, const GuardedValueFlowNode *PrevNode,
     Vulnerability::ValueSitePairType Src, unsigned InlineDepth) {
+  const bool IsCommonArgSrc =
+      !Src.second && nodeOfKind<GuardedValueFlowNode::Kind::CommonArgument,
+                                GuardedValueFlowNode>(Src.first);
+  const auto &ReachSet =
+      IsCommonArgSrc ? CanReachCommonArgSite : CanReachAnyRelevantSite;
+  if (RelevantNodesBuilt && !ReachSet.count(Node))
+    return;
+
   auto key = std::make_tuple(Node, Src.first, Src.second);
   if (!ActiveBackwardSearch.insert(key).second)
     return;
@@ -534,6 +655,14 @@ void FunctionAnalyzer::bottomUpDepthFirstSearch(
 
   // continue to search
   auto FlowParents = valueFlowParents(Node, GSAFOptions::EnableArithmeticFlow);
+  if (RelevantNodesBuilt) {
+    FlowParents.erase(
+        std::remove_if(FlowParents.begin(), FlowParents.end(),
+                       [&](const GuardedValueFlowNode *P) {
+                         return P == PrevNode || !ReachSet.count(P);
+                       }),
+        FlowParents.end());
+  }
   for (auto It = FlowParents.begin(), Next = It, E = FlowParents.end(); It != E;
        It = Next) {
     ++Next;
@@ -610,9 +739,7 @@ int FunctionAnalyzer::checkUseSite(
       SiteCanReach = 0;
     }
 
-    if (Node->getParentBasicBlock() == UseSiteBlock &&
-        !properlyDominatedBlocks(PDT, UseSiteBlock).empty()) {
-      // Caching Result to all BasicBlocks that post-dom InstBlock,
+    if (Node->getParentBasicBlock() == UseSiteBlock) {
       auto DominanceRange5 = properlyDominatedBlocks(PDT, UseSiteBlock);
       for (auto I = DominanceRange5.begin(), E = DominanceRange5.end(); I != E;
            I++) {
@@ -622,8 +749,7 @@ int FunctionAnalyzer::checkUseSite(
       }
     }
 
-    if (Result != SMTSolver::SMTRT_Sat &&
-        !properDominators(DT, UseSiteBlock).empty()) {
+    if (Result != SMTSolver::SMTRT_Sat) {
       auto DominanceRange6 = properDominators(DT, UseSiteBlock);
       for (auto I = DominanceRange6.begin(), E = DominanceRange6.end(); I != E;
            I++) {
@@ -806,6 +932,17 @@ void FunctionAnalyzer::tryReport(std::shared_ptr<VulnerabilityTrace> Trace) {
   TimeChecker->check();
   if (SMTTimeChecker->isTimeOut())
     return;
+
+  // Fast path: when there are no deferred callee summary constraints,
+  // Solver->check() already proved the current assertions satisfiable, so no
+  // additional SMT check or cross-context translation is needed.
+  if (NonSymDepsCache.empty() && SymbDepsCache.empty()) {
+    SummaryBase::SMTWriteLock();
+    Trace->setReported(true);
+    BugTraces.push_back(std::make_pair(1, Trace));
+    SummaryBase::SMTWriteUnlock();
+    return;
+  }
 
   SMTFactory *F = new SMTFactory;
   SMTSolver *S = new SMTSolver(F->createSMTSolver());

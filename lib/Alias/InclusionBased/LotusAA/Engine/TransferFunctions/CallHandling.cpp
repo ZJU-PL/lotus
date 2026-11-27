@@ -645,7 +645,7 @@ void IntraLotusAA::processCalleeOutput(
 }
 
 void IntraLotusAA::cacheFunctionCallInfo() {
-  if (func_obj)
+  if (!IntraLotusAAConfig::lotus_enable_score_computation || func_obj)
     return;
 
   func_obj = newObject(nullptr);

@@ -59,6 +59,26 @@ public:
   virtual SiteType
   checkSite(const GuardedValueFlowSite *CurrSite,
             const VulnerabilityTraceBuilder &TraceHistory) override;
+  virtual bool
+  isPotentialSinkCallSite(const GuardedValueFlowCallSite *CS,
+                          const GuardedValueFlowNode *Node) const override {
+    return CS && CS->isCommonInput(Node);
+  }
+  virtual bool
+  isPotentialCommonArgSinkCallSite(const GuardedValueFlowCallSite *,
+                                   const GuardedValueFlowNode *) const override {
+    return false;
+  }
+  virtual bool
+  isPotentialNonCallRelevantSite(const GuardedValueFlowSite *Site,
+                                 const GuardedValueFlowNode *) const override {
+    return Site && !isa<GuardedValueFlowGEPReferenceSite>(Site);
+  }
+  virtual bool
+  isPotentialCommonArgNonCallSite(const GuardedValueFlowSite *,
+                                  const GuardedValueFlowNode *) const override {
+    return false;
+  }
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) override {
     AU.addRequired<TargetLibraryInfoWrapperPass>();
@@ -125,17 +145,21 @@ void UseAfterFree::setPrerequisites(
     // p = realloc(q, ...): p != 0 && p != q
     // p = reallocf(q, ...): p != q
 
-    auto *call = cast<GuardedValueFlowCallSite>(CurrSite);
+    auto *call = dyn_cast_or_null<GuardedValueFlowCallSite>(CurrSite);
+    if (!call)
+      return;
     Function *F = call->getCalledFunction();
     Instruction *CallInst = CurrSite->getInstruction();
 
-    if (F && F->arg_size() == 2 &&
+    if (F && F->arg_size() == 2 && !call->getCommonInputs().empty() &&
+        call->getCommonInput(0) &&
         F->getReturnType() == call->getCommonInput(0)->getType()) {
       auto *PNode = CurrSite->getGraph()->findNode(CallInst);
-      assert(PNode);
+      auto *QNode = TraceHistory.recentObjAs<GuardedValueFlowNode>();
+      if (!PNode || !QNode)
+        return;
       SMTExpr P = Solver->getOrInsertExpr(PNode);
-      SMTExpr Q = Solver->getOrInsertExpr(
-          TraceHistory.recentObjAs<GuardedValueFlowNode>());
+      SMTExpr Q = Solver->getOrInsertExpr(QNode);
 
       if (F->getName() == "realloc") {
         Prerequisites.push_back(P != 0 && P != Q);
@@ -143,10 +167,8 @@ void UseAfterFree::setPrerequisites(
         Prerequisites.push_back(P != Q);
       }
     }
-  } else {
-    Prerequisites.push_back(
-        Solver->getOrInsertExpr(
-            TraceHistory.recentObjAs<GuardedValueFlowNode>()) != 0);
+  } else if (auto *Recent = TraceHistory.recentObjAs<GuardedValueFlowNode>()) {
+    Prerequisites.push_back(Solver->getOrInsertExpr(Recent) != 0);
   }
 }
 
@@ -209,7 +231,8 @@ UseAfterFree::checkSite(const GuardedValueFlowSite *CurSite,
              !isa<GuardedValueFlowReturnSite>(CurSite));
       return ST_Sink;
     }
-  } else if (SrcSite->getParentFunction() != CurSite->getParentFunction()) {
+  } else if (!SrcSite ||
+             SrcSite->getParentFunction() != CurSite->getParentFunction()) {
     // search from a pseudo output node with an output summary
     if (auto *GraphCS = dyn_cast<GuardedValueFlowCallSite>(CurSite)) {
       if (GraphCS->isCommonInput(CurNode)) {

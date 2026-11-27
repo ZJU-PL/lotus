@@ -237,35 +237,24 @@ bool SMTFactory::visit(SMTExpr &Expr2Visit,
 
 SMTSolver SMTFactory::createSMTSolver() {
   z3::solver Ret(Ctx);
-  // If Tactic == qfbv_tactic or pp_qfbv_tactic,
-  // only use the result of the incremental solver.
-  // That is, when the incremental solver returns unknown,
-  // just return unknown.
-  /* std::string& Tactic = IncTactic.getValue();
-  if (Tactic == "pp_qfbv_tactic" || Tactic == "pp_qfbv_light_tactic"
-                  || Tactic == "pp_inc_bv_solver" || Tactic == "qfbv_tactic") {
-          z3::params Z3Params(Ctx);
-          Z3Params.set("solver2_unknown", 0u);
-          Ret.set(Z3Params);
-  }
-  */
+  z3::model Z3Model(Ctx);
+  return SMTSolver(this, Ret, Z3Model);
+}
 
-  Ret.check(); // a trick for initializing the ModelCache(In version 4.6 we can
-               // construct a model without the solver)
-  z3::model Z3Model = Ret.get_model();
+SMTSolver SMTFactory::createSimpleSMTSolver() {
+  z3::solver Ret(Ctx, Z3_mk_simple_solver(Ctx));
+  z3::model Z3Model(Ctx);
   return SMTSolver(this, Ret, Z3Model);
 }
 
 SMTSolver SMTFactory::createSMTSolverWithTactic(const std::string &Tactic) {
   if (Tactic.empty()) {
     z3::solver Ret(Ctx);
-    Ret.check(); // a trick for initializing the ModelCache
-    z3::model Z3Model = Ret.get_model();
+    z3::model Z3Model(Ctx);
     return SMTSolver(this, Ret, Z3Model);
   } else {
     z3::solver Ret = z3::tactic(Ctx, Tactic.c_str()).mk_solver();
-    Ret.check(); // a trick for initializing the ModelCache
-    z3::model Z3Model = Ret.get_model();
+    z3::model Z3Model(Ctx);
     return SMTSolver(this, Ret, Z3Model);
   }
 }

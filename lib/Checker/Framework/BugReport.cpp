@@ -132,10 +132,7 @@ static std::vector<NodeTag> inferNodeTags(Instruction *I) {
 void BugDiagStep::populateDebugInfo(DebugInfoAnalysis &debugInfo) {
   // Extract LLVM IR representation
   if (inst) {
-    std::string ir_str;
-    raw_string_ostream ir_os(ir_str);
-    inst->print(ir_os);
-    llvm_ir = ir_os.str();
+    llvm_ir = debugInfo.getIRString(inst);
 
     // Extract variable name using DebugInfoAnalysis
     var_name = debugInfo.getVariableName(inst);

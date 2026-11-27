@@ -54,12 +54,14 @@
 
 #include <algorithm>
 
+#include <llvm/ADT/ScopeExit.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/ModuleSlotTracker.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/Support/Casting.h>
 #include <llvm/Support/raw_ostream.h>
@@ -89,6 +91,8 @@ static BasicBlock *getValueBlock(Value *V, Function &F) {
   return F.empty() ? nullptr : &F.getEntryBlock();
 }
 
+static thread_local ModuleSlotTracker *ActiveSlotTracker = nullptr;
+
 static void setValueDescription(GuardedValueFlowNode *node, Value *value) {
   if (!node || !value)
     return;
@@ -103,7 +107,10 @@ static void setValueDescription(GuardedValueFlowNode *node, Value *value) {
 
   std::string buffer;
   raw_string_ostream os(buffer);
-  value->printAsOperand(os, false);
+  if (ActiveSlotTracker)
+    value->printAsOperand(os, false, *ActiveSlotTracker);
+  else
+    value->printAsOperand(os, false);
   node->setDescription(os.str());
 }
 
@@ -348,7 +355,8 @@ getOrCreateOperandRepresentation(GuardedValueFlowGraph &graph, Value *V,
   // operand nodes. Aggregate constants and constant expressions are expanded so
   // downstream users can traverse through the same value-flow interface they
   // use for instructions.
-  if (isa<ConstantPointerNull>(V) || isa<ConstantAggregateZero>(V))
+  if (isa<ConstantPointerNull>(V) || isa<ConstantAggregateZero>(V) ||
+      isa<UndefValue>(V))
     return findOrCreateValueNode(graph, V, F);
   if (isa<ConstantExpr>(V))
     return modelConstantExpr(cast<ConstantExpr>(V), graph, F, failed);
@@ -368,32 +376,43 @@ static GuardedValueFlowNode *createConcatAggregate(GuardedValueFlowGraph &graph,
   if (!result->children().empty())
     return result;
 
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  SmallVector<GuardedValueFlowNode *, 8> operand_nodes;
+  auto append_operand = [&](Value *operand) {
+    if (!operand || !operand->getType() || !operand->getType()->isSized() ||
+        DL.getTypeSizeInBits(operand->getType()) == 0)
+      return;
+    if (auto *child =
+            getOrCreateOperandRepresentation(graph, operand, F, failed))
+      operand_nodes.push_back(child);
+  };
+
+  if (auto *CA = dyn_cast<ConstantArray>(aggregate)) {
+    for (Value *operand : CA->operands())
+      append_operand(operand);
+  } else if (auto *CV = dyn_cast<ConstantVector>(aggregate)) {
+    for (Value *operand : CV->operands())
+      append_operand(operand);
+  } else if (auto *CS = dyn_cast<ConstantStruct>(aggregate)) {
+    for (Value *operand : CS->operands())
+      append_operand(operand);
+  } else if (auto *CDS = dyn_cast<ConstantDataSequential>(aggregate)) {
+    for (unsigned idx = 0; idx < CDS->getNumElements(); ++idx)
+      append_operand(CDS->getElementAsConstant(idx));
+  } else if (auto *C = dyn_cast<Constant>(aggregate)) {
+    for (Value *operand : C->operands())
+      append_operand(operand);
+  }
+
+  if (operand_nodes.empty())
+    return result;
+
   auto *opcode = createOpcodeNode(
       graph, GuardedValueFlowOpcodeNode::OpcodeKind::Concat,
       aggregate->getType(), getValueBlock(aggregate, F),
       GuardedValueFlowNode::Kind::SimpleOpcode, "const.concat");
-
-  if (auto *CA = dyn_cast<ConstantArray>(aggregate)) {
-    for (Value *operand : CA->operands())
-      opcode->addChild(
-          getOrCreateOperandRepresentation(graph, operand, F, failed));
-  } else if (auto *CV = dyn_cast<ConstantVector>(aggregate)) {
-    for (Value *operand : CV->operands())
-      opcode->addChild(
-          getOrCreateOperandRepresentation(graph, operand, F, failed));
-  } else if (auto *CS = dyn_cast<ConstantStruct>(aggregate)) {
-    for (Value *operand : CS->operands())
-      opcode->addChild(
-          getOrCreateOperandRepresentation(graph, operand, F, failed));
-  } else if (auto *CDS = dyn_cast<ConstantDataSequential>(aggregate)) {
-    for (unsigned idx = 0; idx < CDS->getNumElements(); ++idx)
-      opcode->addChild(getOrCreateOperandRepresentation(
-          graph, CDS->getElementAsConstant(idx), F, failed));
-  } else if (auto *C = dyn_cast<Constant>(aggregate)) {
-    for (Value *operand : C->operands())
-      opcode->addChild(
-          getOrCreateOperandRepresentation(graph, operand, F, failed));
-  }
+  for (GuardedValueFlowNode *child : operand_nodes)
+    opcode->addChild(child);
 
   result->addChild(opcode);
   return result;
@@ -1080,13 +1099,8 @@ static bool buildInstruction(GuardedValueFlowGraph &graph, Instruction &I,
     }
     if (I.getNumOperands() == 0)
       return true;
-    GuardedValueFlowReturnNode *common_return = nullptr;
-    for (const auto &node_ptr : graph.nodes()) {
-      if (node_ptr->getKind() == GuardedValueFlowNode::Kind::CommonReturn) {
-        common_return = dyn_cast<GuardedValueFlowReturnNode>(node_ptr.get());
-        break;
-      }
-    }
+    GuardedValueFlowReturnNode *common_return =
+        const_cast<GuardedValueFlowReturnNode *>(graph.getCommonReturn());
     if (!common_return)
       return true;
     auto *value_node =
@@ -1510,13 +1524,14 @@ bool GuardedValueFlowGraphBuilderPass::runOnModule(Module &M) {
   graphs_.clear();
   auto &cda_pass = getAnalysis<gsa::ControlDependenceAnalysisPass>();
   (void)getAnalysis<gsa::GateAnalysisPass>();
+  ModuleSlotTracker slot_tracker(&M, /*ShouldInitializeAllMetadata=*/false);
 
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
     if (!cda_pass.hasAnalysisFor(F))
       continue;
-    if (auto graph = buildGraph(F))
+    if (auto graph = buildGraph(F, slot_tracker))
       graphs_[&F] = std::move(graph);
   }
   return false;
@@ -1538,7 +1553,13 @@ void GuardedValueFlowGraphBuilderPass::invalidateGraph(const Function &F) {
 }
 
 std::unique_ptr<GuardedValueFlowGraph>
-GuardedValueFlowGraphBuilderPass::buildGraph(Function &F) {
+GuardedValueFlowGraphBuilderPass::buildGraph(Function &F,
+                                             ModuleSlotTracker &slot_tracker) {
+  slot_tracker.incorporateFunction(F);
+  ModuleSlotTracker *prev_tracker = ActiveSlotTracker;
+  ActiveSlotTracker = &slot_tracker;
+  auto restore_tracker =
+      make_scope_exit([&] { ActiveSlotTracker = prev_tracker; });
   auto graph = std::make_unique<GuardedValueFlowGraph>(&F);
   auto &cda = getAnalysis<gsa::ControlDependenceAnalysisPass>()
                   .getControlDependenceAnalysis(F);

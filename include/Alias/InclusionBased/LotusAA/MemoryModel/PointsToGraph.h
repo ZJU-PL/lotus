@@ -45,10 +45,14 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <tuple>
 #include <vector>
 
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/Hashing.h>
+#include <llvm/ADT/SmallVector.h>
 #include <llvm/Analysis/PostDominators.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Dominators.h>
@@ -150,7 +154,8 @@ private:
   PTGraph *parent_graph;
 
   void visit(PTResult *target, int64_t off, path_cond_t cond,
-             std::set<PTResult *> &visited);
+             std::set<PTResult *> &visited,
+             std::map<std::pair<PTResult *, int64_t>, path_cond_t> &seen_cond);
 
 public:
   PTResultIterator(PTResult *target, PTGraph *parent_graph);
@@ -165,6 +170,162 @@ public:
   int size() { return res.size(); }
 
   friend raw_ostream &operator<<(raw_ostream &out, PTResultIterator &pt_it);
+};
+
+/// Hybrid complement-edge ROBDD + hash-consed AIG + lazy incremental Tseitin
+/// SAT manager for exact PathCond Boolean reasoning.
+///
+/// On typical functions the ROBDD stays compact and answers equivalence,
+/// tautology, and satisfiability in O(1). When a high-cutwidth CFG (e.g., a
+/// large goto/switch state machine) exceeds the per-op or per-function BDD
+/// budget, construction stays O(1) via the exact complement-edge AIG and
+/// satisfiability/tautology queries are answered exactly by incremental
+/// propositional CDCL SAT without any loss of soundness or precision.
+class PathCondBddManager {
+public:
+  static constexpr uint32_t INVALID_ID = PathCond::INVALID_BDD_ID;
+  static constexpr uint32_t FALSE_ID = PathCond::FALSE_BDD_ID;
+  static constexpr uint32_t TRUE_ID = PathCond::TRUE_BDD_ID;
+  static constexpr size_t MAX_BDD_NODES = 65536;
+  static constexpr unsigned MAX_BDD_STEPS = 4096;
+
+  struct FormulaIds {
+    uint32_t bdd;
+    uint32_t aig;
+  };
+
+private:
+  struct Node {
+    uint32_t var;
+    uint32_t low;  // Always regular (even)
+    uint32_t high; // Regular or complemented
+  };
+
+  struct AigNode {
+    uint32_t lhs; // For primary input vars: lhs == rhs == var
+    uint32_t rhs; // For AND gates: lhs < rhs
+    // 256-bit concrete simulation signatures across independent assignments
+    // (bit 0 = all-0, bit 1 = all-1, remaining bits deterministic pseudorandom).
+    // Since all primary input variables are unconstrained, any non-zero bit
+    // witnesses exact satisfiability in O(1) without invoking SAT.
+    uint64_t sim[4];
+  };
+
+  struct NodeKey {
+    uint32_t var;
+    uint32_t low;
+    uint32_t high;
+
+    bool operator==(const NodeKey &other) const {
+      return var == other.var && low == other.low && high == other.high;
+    }
+  };
+
+  struct NodeKeyInfo {
+    static inline NodeKey getEmptyKey() {
+      return NodeKey{std::numeric_limits<uint32_t>::max(), 0, 0};
+    }
+    static inline NodeKey getTombstoneKey() {
+      return NodeKey{std::numeric_limits<uint32_t>::max() - 1, 0, 0};
+    }
+    static unsigned getHashValue(const NodeKey &key) {
+      return static_cast<unsigned>(hash_combine(key.var, key.low, key.high));
+    }
+    static bool isEqual(const NodeKey &lhs, const NodeKey &rhs) {
+      return lhs == rhs;
+    }
+  };
+
+  struct SwitchEncoding {
+    FormulaIds default_ids{FALSE_ID, FALSE_ID};
+    DenseMap<const ConstantInt *, FormulaIds> case_ids;
+  };
+
+  struct MutexGroup {
+    FormulaIds none_yet{TRUE_ID, TRUE_ID};
+    std::map<const void *, FormulaIds> member_ids;
+  };
+
+  struct BranchNoValEntry {
+    uint32_t var = std::numeric_limits<uint32_t>::max();
+    const BasicBlock *first_succ = nullptr;
+  };
+
+  struct SatState;
+
+  std::vector<Node> nodes_;
+  std::vector<AigNode> aig_nodes_;
+  std::vector<uint32_t> var_to_aig_;
+  uint32_t next_var_ = 0;
+  DenseMap<NodeKey, uint32_t, NodeKeyInfo> unique_table_;
+  DenseMap<uint64_t, uint32_t> and_cache_;
+  DenseMap<uint64_t, uint32_t> aig_unique_;
+
+  DenseMap<const Value *, uint32_t> value_vars_;
+  uint32_t null_value_var_ = std::numeric_limits<uint32_t>::max();
+  DenseMap<const BasicBlock *, BranchNoValEntry> branch_noval_vars_;
+  DenseMap<const BasicBlock *, uint32_t> invoke_vars_;
+  DenseMap<const BasicBlock *, uint32_t> block_vars_;
+  DenseMap<const PathCond *, uint32_t> imported_vars_;
+  std::map<std::pair<const BasicBlock *, const Value *>, SwitchEncoding>
+      switch_encodings_;
+  std::map<std::pair<const BasicBlock *, const Value *>, MutexGroup>
+      fallback_switch_groups_;
+  DenseMap<const Value *, MutexGroup> call_target_groups_;
+  MutexGroup null_call_target_group_;
+  DenseMap<const BasicBlock *, MutexGroup> fallback_branch_groups_;
+
+  mutable std::mutex sat_mutex_;
+  mutable std::unique_ptr<SatState> sat_state_;
+  mutable DenseMap<uint32_t, uint8_t> aig_sat_cache_;
+
+  uint32_t allocVar();
+  uint32_t mkBounded(uint32_t var, uint32_t low, uint32_t high);
+  uint32_t bddAndBounded(uint32_t u, uint32_t v, unsigned &steps);
+  uint32_t tryBddAnd(uint32_t u, uint32_t v);
+  bool isAigGate(uint32_t id) const {
+    return id > 1U && aig_nodes_[id >> 1].lhs != aig_nodes_[id >> 1].rhs;
+  }
+  uint32_t aigVar(uint32_t var) const { return var_to_aig_[var]; }
+  uint32_t aigAnd(uint32_t a, uint32_t b);
+  uint32_t aigOr(uint32_t a, uint32_t b) {
+    return aigNot(aigAnd(aigNot(a), aigNot(b)));
+  }
+  FormulaIds makeVarIds(uint32_t var);
+  FormulaIds encodeMutexMember(MutexGroup &group, const void *member_key);
+  uint32_t getValueVar(const Value *value);
+
+public:
+  PathCondBddManager();
+  ~PathCondBddManager();
+  PathCondBddManager(const PathCondBddManager &) = delete;
+  PathCondBddManager &operator=(const PathCondBddManager &) = delete;
+
+  static uint32_t bddNot(uint32_t id) { return id ^ 1U; }
+  static uint32_t aigNot(uint32_t id) { return id ^ 1U; }
+
+  FormulaIds combineNot(FormulaIds x) const {
+    return FormulaIds{x.bdd == INVALID_ID ? INVALID_ID : bddNot(x.bdd),
+                      aigNot(x.aig)};
+  }
+  FormulaIds combineAnd(FormulaIds lhs, FormulaIds rhs);
+  FormulaIds combineOr(FormulaIds lhs, FormulaIds rhs) {
+    return combineNot(combineAnd(combineNot(lhs), combineNot(rhs)));
+  }
+
+  FormulaIds encodeValueAtom(const Value *value, bool sense);
+  FormulaIds encodeBranchAtom(const BasicBlock *block,
+                              const BasicBlock *successor, const Value *value,
+                              bool sense);
+  FormulaIds encodeSwitchAtom(const BasicBlock *block, const Value *value,
+                              const ConstantInt *case_value, bool is_default);
+  FormulaIds encodeInvokeAtom(const BasicBlock *block, bool is_normal);
+  FormulaIds encodeBlockAtom(const BasicBlock *block);
+  FormulaIds encodeCallTargetAtom(const Value *value, const Function *callee);
+  FormulaIds encodeImportedAtom(const PathCond *imported);
+
+  int getCachedAigSat(uint32_t aig_id) const;
+  bool isAigSatisfiable(uint32_t aig_id) const;
 };
 
 /*
@@ -247,7 +408,11 @@ protected:
   path_cond_t true_cond_;
   path_cond_t false_cond_;
   std::vector<std::unique_ptr<PathCond>> cond_nodes_;
-  std::map<PathCond::ConstraintSummary, path_cond_t> formula_cond_cache_;
+  PathCondBddManager bdd_mgr_;
+  DenseMap<uint32_t, path_cond_t> formula_cond_cache_;
+  DenseMap<uint32_t, path_cond_t> aig_cond_cache_;
+  DenseMap<const PathCond *, PathCondBddManager::FormulaIds>
+      foreign_formula_cache_;
   std::map<std::pair<Value *, bool>, path_cond_t> value_cond_cache_;
   std::map<BasicBlock *, path_cond_t, llvm_cmp> block_cond_cache_;
   std::map<std::pair<Value *, Function *>, path_cond_t> call_target_cond_cache_;
@@ -255,6 +420,8 @@ protected:
   std::map<path_cond_t, path_cond_t> not_cond_cache_;
   std::map<std::pair<path_cond_t, path_cond_t>, path_cond_t> and_cond_cache_;
   std::map<std::pair<path_cond_t, path_cond_t>, path_cond_t> or_cond_cache_;
+  DenseMap<BasicBlock *, unsigned> bb_rpo_order_;
+  DenseMap<BasicBlock *, SmallVector<BasicBlock *, 8>> idf_cache_;
   bool control_dep_ready_;
 
   struct GuardedPointsToSignature {
@@ -265,6 +432,14 @@ protected:
   };
   std::map<std::pair<PTResult *, int64_t>, GuardedPointsToSignature>
       guarded_points_to_signature_cache_;
+  struct MayAliasCacheEntry {
+    unsigned rev1 = 0;
+    unsigned rev2 = 0;
+    bool result = false;
+  };
+  std::map<std::tuple<PTResult *, int64_t, PTResult *, int64_t>,
+           MayAliasCacheEntry>
+      may_alias_cache_;
 
   // Constants
   static const int VALUE_SEQ_UNDEF;
@@ -312,7 +487,16 @@ protected:
   path_cond_t getCFGEdgeCond(BasicBlock *src_bb, BasicBlock *succ_bb);
   path_cond_t localizePathCond(path_cond_t cond);
   path_cond_t getComplementaryBranchCond(path_cond_t cond);
+  PathCondBddManager::FormulaIds getFormulaIds(path_cond_t cond);
+  PathCondBddManager::FormulaIds computeFormulaIds(const PathCond *cond);
+  path_cond_t lookupCachedCond(PathCondBddManager::FormulaIds ids) const;
+  path_cond_t internCondWithIds(PathCondBddManager::FormulaIds ids,
+                                std::unique_ptr<PathCond> cond);
   path_cond_t internCond(std::unique_ptr<PathCond> cond);
+  bool isKnownTrue(path_cond_t cond) const;
+  bool isKnownFalse(path_cond_t cond) const;
+  const SmallVector<BasicBlock *, 8> &
+  getIteratedDominanceFrontier(BasicBlock *bb);
   path_cond_t importPathCond(path_cond_t cond, Value *callsite,
                              Function *callee);
   const GuardedPointsToSignature &
@@ -341,6 +525,11 @@ public:
   /// points-to target are combined directly, as in Tuna's aliasCond.
   path_cond_t getAliasCondition(Value *ptr1, Value *ptr2,
                                 int64_t offset1 = 0, int64_t offset2 = 0);
+
+  /// Exact satisfiability check for getAliasCondition() with short-circuiting
+  /// and revision-aware memoization.
+  bool mayAlias(Value *ptr1, Value *ptr2, int64_t offset1 = 0,
+                int64_t offset2 = 0);
 
   /// Conservatively prove that two pointers have syntactically equivalent
   /// guarded points-to sets.  A compact fingerprint rejects the common

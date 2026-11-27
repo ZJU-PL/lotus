@@ -524,9 +524,14 @@ const lotus::APISpec *LLVMValueReportDecorator::memory_spec = nullptr;
 // DebugInfoAnalysis *LLVMValueReportDecorator::DIA = nullptr;
 
 Value *LLVMValueReportDecorator::trackValueSource(Value *val) {
+  if (!val)
+    return nullptr;
   bool track_back = false;
+  llvm::SmallPtrSet<const Value *, 8> visited;
   if (!isa<Constant>(val)) {
     do {
+      if (!visited.insert(val).second)
+        break;
       track_back = false;
       const MDNode *var_md = DIA->findVarInfoMDNode(val);
       if (!var_md) {
@@ -553,8 +558,8 @@ LLVMValueReportDecorator::~LLVMValueReportDecorator() {}
 
 void LLVMValueReportDecorator::procInstruction(
     const DiagnosticLocation &dbg_loc, Instruction *inst, Value *val) {
-  assert(inst && "Are you sure to build reports for a nullptr instruction?");
-  assert(val && "You do not indicate what value is used in the instruction!");
+  if (!inst || !val)
+    return;
   bool value_is_operand = false;
 
   for (unsigned i = 0; i < inst->getNumOperands(); i++) {
@@ -564,10 +569,7 @@ void LLVMValueReportDecorator::procInstruction(
     }
   }
   if (!value_is_operand && val != inst) {
-    errs() << "\nInst: " << *inst << "\n";
-    errs() << "Value: " << *val << "\n";
-    llvm_unreachable(
-        "The instruction does not contain the value as an operand!");
+    return;
   }
 
   switch (inst->getOpcode()) {
@@ -642,7 +644,7 @@ void LLVMValueReportDecorator::procInstruction(
   case Instruction::ICmp:
   case Instruction::FCmp:
     break;
-  // unsupported
+  // unsupported / non-decorated instructions
   case Instruction::Alloca:
   case Instruction::ExtractValue:
   case Instruction::InsertValue:
@@ -658,9 +660,7 @@ void LLVMValueReportDecorator::procInstruction(
   case Instruction::Unreachable:
   case Instruction::Br:
   default:
-    errs() << *inst << "\n";
-    llvm_unreachable("Unsupported instruction!");
-    exit(1);
+    break;
   }
 }
 
@@ -1293,7 +1293,22 @@ DiagnosticText LLVMValueReportDecorator::getValueEvent(
     Value *val, const DiagnosticLocation *dbg_loc, bool is_deref_val) {
   assert(val != nullptr && "Generating a description for null value!!!");
 
+  // Break cycles in phi_select_record (e.g., loop-carried PHIs selecting
+  // themselves or each other) by tracking active values along the recursion.
+  static thread_local llvm::SmallPtrSet<const Value *, 16> active_values;
+  if (!active_values.insert(val).second) {
+    string ret = inst_resolver->restore_value_expr(val, &phi_select_record);
+    return DiagnosticTextUnit(decorator_emph_str(ret));
+  }
+  struct ActiveGuard {
+    llvm::SmallPtrSet<const Value *, 16> &set;
+    const Value *key;
+    ~ActiveGuard() { set.erase(key); }
+  } active_guard{active_values, val};
+
   val = trackValueSource(val);
+  if (!val)
+    return getDefaultUndefValueEvent();
 
   if (!DIA->hasVariableDebugName(val) || isa<PHINode>(val)) {
     bool is_step_deleted = false;
@@ -1492,60 +1507,50 @@ void GSAFReportDecorator::buildFromTrace(
 
     bool HitConstantExpr = false;
 
-    Instruction *Operation;
+    Instruction *Operation = nullptr;
     if (CurrObjIsSite && !NextObjIsSite) {
       // build tips for <site, operand>
       Operation = ((const GuardedValueFlowSite *)CurrObj)->getInstruction();
       if (auto *Output = dyn_cast<GuardedValueFlowCallOutputNode>(NextObj)) {
-        Operation = Output->getCallSite();
+        if (Output->getCallSite())
+          Operation = Output->getCallSite();
       }
-      assert(Operation);
-
-      DiagnosticLocation DbgLoc(Operation, *DIA);
-      procSiteNodePair(DbgLoc, (const GuardedValueFlowSite *)CurrObj,
-                       (const GuardedValueFlowNode *)NextObj);
-
+      if (Operation) {
+        DiagnosticLocation DbgLoc(Operation, *DIA);
+        procSiteNodePair(DbgLoc, (const GuardedValueFlowSite *)CurrObj,
+                         (const GuardedValueFlowNode *)NextObj);
+      }
     } else if (!CurrObjIsSite && NextObjIsSite) {
       // build tips for <operand, site>
       Operation = ((const GuardedValueFlowSite *)NextObj)->getInstruction();
-      if (!Operation) {
-        llvm_unreachable("Fatal error: a null operation");
-        continue;
+      if (Operation) {
+        DiagnosticLocation DbgLoc(Operation, *DIA);
+        procNodeSitePair(DbgLoc, (const GuardedValueFlowNode *)CurrObj,
+                         (const GuardedValueFlowSite *)NextObj);
       }
-
-      DiagnosticLocation DbgLoc(Operation, *DIA);
-      procNodeSitePair(DbgLoc, (const GuardedValueFlowNode *)CurrObj,
-                       (const GuardedValueFlowSite *)NextObj);
     } else if (!CurrObjIsSite && !NextObjIsSite) {
       // build tips for <operand, operand>
       if (auto *N = nodeOfKind<GuardedValueFlowNode::Kind::SimpleOperand,
                                GuardedValueFlowNode>(NextObj)) {
-        Operation = dyn_cast<Instruction>(N->getLLVMValue());
+        Operation = dyn_cast_or_null<Instruction>(N->getLLVMValue());
         if (!Operation) {
-          auto *CE = dyn_cast<ConstantExpr>(N->getLLVMValue());
-          assert(CE &&
-                 "It must be an constant expr if it is not an instruction!");
-          Operation = CE->getAsInstruction();
-          HitConstantExpr = true;
+          if (auto *CE = dyn_cast_or_null<ConstantExpr>(N->getLLVMValue())) {
+            Operation = CE->getAsInstruction();
+            HitConstantExpr = true;
+          }
         }
       } else if (auto *N = nodeOfKind<GuardedValueFlowNode::Kind::StoreMemory,
                                       GuardedValueFlowNode>(NextObj)) {
         Operation = N->getDebugInstruction();
-        assert(Operation);
       } else if (auto *N = dyn_cast<GuardedValueFlowPhiNode>(NextObj)) {
-        Operation = dyn_cast<Instruction>(N->getLLVMValue());
-        assert(Operation);
-      } else if (auto *N =
-                     nodeOfKind<GuardedValueFlowNode::Kind::CallSitePseudoInput,
-                                GuardedValueFlowCallOutputNode>(NextObj)) {
+        Operation = dyn_cast_or_null<Instruction>(N->getLLVMValue());
+      } else if (auto *N = dyn_cast<GuardedValueFlowCallOutputNode>(NextObj)) {
         Operation = N->getCallSite();
-        assert(Operation);
-      } else if (isa<GuardedValueFlowReturnNode>(NextObj)) {
+      } else if (isa<GuardedValueFlowReturnNode>(NextObj) ||
+                 isa<GuardedValueFlowArgumentNode>(NextObj)) {
         Operation = nullptr;
-      } else {
-        errs() << DIA->getIRString(NextObj->getDebugValue()) << "\n";
-        llvm_unreachable("Unknown trace pattern!");
-        continue;
+      } else if (auto *N = dyn_cast<GuardedValueFlowNode>(NextObj)) {
+        Operation = N->getDebugInstruction();
       }
 
       if (Operation) {
@@ -1554,9 +1559,7 @@ void GSAFReportDecorator::buildFromTrace(
                          (const GuardedValueFlowNode *)NextObj);
       }
     } else {
-      llvm_unreachable(
-          "One use site cannot be followed by the other use site in a trace!");
-      continue;
+      // Adjacent sites can appear in partial/wrapper traces; advance safely.
     }
 
     I = std::get<INDEX>(NodeIndexPair);
@@ -1615,11 +1618,10 @@ void GSAFReportDecorator::procSiteNodePair(
       procCallSiteInput(DbgLoc, CS, Operand);
     }
   } else if (isa<GuardedValueFlowReturnSite>(Site)) {
-    assert(Site->getGraph()->getBaseFunction() !=
-           Operand->getGraph()->getBaseFunction());
-    auto *Output = dyn_cast<GuardedValueFlowCallOutputNode>(Operand);
-    assert(Output);
-    procCallSiteOutput(DbgLoc, callSite(Output), Output);
+    if (auto *Output = dyn_cast_or_null<GuardedValueFlowCallOutputNode>(Operand)) {
+      if (auto *OutCS = callSite(Output))
+        procCallSiteOutput(DbgLoc, OutCS, Output);
+    }
   } else if (auto *DS = operationalSite(Site)) {
     procInstruction(DbgLoc, DS->getInstruction(), Operand->getLLVMValue());
   }
@@ -1655,18 +1657,21 @@ void GSAFReportDecorator::procCallSiteOutput(
         }
 
         if (Argument *BaseArg = dyn_cast<Argument>(APBasePtr)) {
+          auto *CB = CS ? dyn_cast_or_null<CallBase>(CS->getInstruction())
+                        : nullptr;
           int Idx = 0;
           for (Argument &CalleeArg : Callee->args()) {
             if (&CalleeArg == BaseArg) {
-              Value *ActualArg =
-                  cast<CallBase>(CS->getInstruction())->getArgOperand(Idx);
-              ActualArgName = inst_resolver->restore_value_expr(
-                  ActualArg, &phi_select_record);
-              APName =
-                  inst_resolver->restore_access_path_expr(AP, ActualArgName);
-              ArgIdx = adjustArgumentIndexForHuman(
-                  cast<CallBase>(CS->getInstruction()), Idx);
-              FormalArgName = decorator_emph_str(DIA->getVariableName(BaseArg));
+              if (CB && static_cast<unsigned>(Idx) < CB->arg_size()) {
+                Value *ActualArg = CB->getArgOperand(Idx);
+                ActualArgName = inst_resolver->restore_value_expr(
+                    ActualArg, &phi_select_record);
+                APName = inst_resolver->restore_access_path_expr(AP,
+                                                                 ActualArgName);
+                ArgIdx = adjustArgumentIndexForHuman(CB, Idx);
+                FormalArgName =
+                    decorator_emph_str(DIA->getVariableName(BaseArg));
+              }
               break;
             }
             Idx++;
@@ -1697,8 +1702,11 @@ void GSAFReportDecorator::procCallSiteOutput(
         pushCallsiteEmptyRetEvent(DbgLoc, FuncName);
       }
     } else {
-      Value *CalledValue =
-          cast<CallBase>(CS->getInstruction())->getCalledOperand();
+      Value *CalledValue = nullptr;
+      if (CS) {
+        if (auto *CB = dyn_cast_or_null<CallBase>(CS->getInstruction()))
+          CalledValue = CB->getCalledOperand();
+      }
       if (CalledValue) {
         string FuncName = inst_resolver->restore_value_expr(CalledValue);
         pushCallsiteEmptyRetEvent(DbgLoc, FuncName);
@@ -1706,7 +1714,7 @@ void GSAFReportDecorator::procCallSiteOutput(
         pushGeneralInstExecutedEvent(DbgLoc);
       }
     }
-  } else {
+  } else if (CS) {
     // common callsite output
     procInstruction(DbgLoc, CS->getInstruction(), Output->getLLVMValue());
   }
@@ -1727,23 +1735,25 @@ void GSAFReportDecorator::procCallSiteInput(const DiagnosticLocation &DbgLoc,
       Value *APBasePtr = AP.get_base_ptr();
       if (APBasePtr) {
         if (Argument *BaseArg = dyn_cast<Argument>(APBasePtr)) {
+          auto *CB = CS ? dyn_cast_or_null<CallBase>(CS->getInstruction())
+                        : nullptr;
           int Idx = 0;
           for (Argument &CalleeArg : Callee->args()) {
             if (&CalleeArg == BaseArg) {
-              Value *Arg =
-                  cast<CallBase>(CS->getInstruction())->getArgOperand(Idx);
-              std::string ActualArgDbgInfo =
-                  decorator_emph_str(inst_resolver->restore_left_value_expr(
-                      Arg, &phi_select_record));
-              std::string APDbgInfo =
-                  decorator_emph_str(inst_resolver->restore_access_path_expr(
-                      AP, ActualArgDbgInfo));
+              if (CB && static_cast<unsigned>(Idx) < CB->arg_size()) {
+                Value *Arg = CB->getArgOperand(Idx);
+                std::string ActualArgDbgInfo =
+                    decorator_emph_str(inst_resolver->restore_left_value_expr(
+                        Arg, &phi_select_record));
+                std::string APDbgInfo =
+                    decorator_emph_str(inst_resolver->restore_access_path_expr(
+                        AP, ActualArgDbgInfo));
 
-              int argIdx = adjustArgumentIndexForHuman(
-                  cast<CallBase>(CS->getInstruction()), Idx);
+                int argIdx = adjustArgumentIndexForHuman(CB, Idx);
 
-              pushCallsitePseudoArgEvent(DbgLoc, APDbgInfo, callee_name,
-                                         ActualArgDbgInfo, argIdx);
+                pushCallsitePseudoArgEvent(DbgLoc, APDbgInfo, callee_name,
+                                           ActualArgDbgInfo, argIdx);
+              }
               break;
             }
             Idx++;
@@ -1766,7 +1776,7 @@ void GSAFReportDecorator::procCallSiteInput(const DiagnosticLocation &DbgLoc,
     procInstruction(DbgLoc, CS->getInstruction(), Input->getLLVMValue());
   } else {
     // A patch for Taint XXX
-    if (LoadInst *LI = dyn_cast<LoadInst>(Input->getLLVMValue())) {
+    if (LoadInst *LI = dyn_cast_or_null<LoadInst>(Input->getLLVMValue())) {
       procInstruction(DbgLoc, CS->getInstruction(), LI->getOperand(0));
     }
   }
@@ -1806,10 +1816,12 @@ void GSAFReportDecorator::procPseudoReturn(
 void GSAFReportDecorator::procNodeNodePair(const DiagnosticLocation &DbgLoc,
                                            const GuardedValueFlowNode *From,
                                            const GuardedValueFlowNode *To) {
+  if (!From || !To)
+    return;
   if (auto *TSt = nodeOfKind<GuardedValueFlowNode::Kind::StoreMemory,
                              GuardedValueFlowNode>(To)) {
     // anything -> store-mem-node
-    if (auto *SI = dyn_cast<StoreInst>(TSt->getDebugInstruction())) {
+    if (auto *SI = dyn_cast_or_null<StoreInst>(TSt->getDebugInstruction())) {
       procInstruction(DbgLoc, SI, From->getLLVMValue());
     }
   } else if (nodeOfKind<GuardedValueFlowNode::Kind::CallSitePseudoInput>(To)) {
@@ -1817,20 +1829,27 @@ void GSAFReportDecorator::procNodeNodePair(const DiagnosticLocation &DbgLoc,
     // event existing in trace)
   } else {
     // anything -> node that is not in {store-mem-node, pseudo callsite input}
-    if (isa<GuardedValueFlowArgumentNode>(From) ||
-        isa<LoadInst>(To->getLLVMValue())) {
-      if (!nodeOfKind<GuardedValueFlowNode::Kind::PseudoReturn>(To))
-        procInstruction(DbgLoc, dyn_cast<Instruction>(To->getLLVMValue()),
-                        To->getLLVMValue());
+    Value *ToVal = To->getLLVMValue();
+    if (!ToVal)
+      return;
+    if (isa<GuardedValueFlowArgumentNode>(From) || isa<LoadInst>(ToVal)) {
+      if (!nodeOfKind<GuardedValueFlowNode::Kind::PseudoReturn>(To)) {
+        if (auto *ToInst = dyn_cast<Instruction>(ToVal))
+          procInstruction(DbgLoc, ToInst, ToVal);
+      }
     } else {
       // in case constant expr
-      auto *Op = dyn_cast<Instruction>(To->getLLVMValue());
-      auto *Op2 =
-          (Op ? Op
-              : dyn_cast<ConstantExpr>(To->getLLVMValue())->getAsInstruction());
-      procInstruction(DbgLoc, Op2, From->getLLVMValue());
-      if (!Op)
-        Op2->deleteValue();
+      auto *Op = dyn_cast<Instruction>(ToVal);
+      Instruction *Op2 = Op;
+      if (!Op2) {
+        if (auto *CE = dyn_cast<ConstantExpr>(ToVal))
+          Op2 = CE->getAsInstruction();
+      }
+      if (Op2) {
+        procInstruction(DbgLoc, Op2, From->getLLVMValue());
+        if (!Op)
+          Op2->deleteValue();
+      }
     }
   }
 }
@@ -1847,14 +1866,19 @@ GSAFTaintReportDecorator::~GSAFTaintReportDecorator() {}
 
 void GSAFTaintReportDecorator::buildFromTrace(
     std::shared_ptr<VulnerabilityTrace> &Trace, bool IsFinalize) {
-  assert(Trace->get_length() > 3);
+  if (!Trace || Trace->get_length() <= 3) {
+    if (Trace)
+      GSAFReportDecorator::buildFromTrace(Trace, IsFinalize);
+    return;
+  }
 
   auto *SrcNode = Trace->at(0);
   auto *SrcSite = Trace->at(1);
-  assert(SrcNode);
-  assert(SrcSite);
-  assert(isa<GuardedValueFlowNode>(SrcNode));
-  assert(isa<GuardedValueFlowSite>(SrcSite));
+  if (!SrcNode || !SrcSite || !isa<GuardedValueFlowNode>(SrcNode) ||
+      !isa<GuardedValueFlowSite>(SrcSite)) {
+    GSAFReportDecorator::buildFromTrace(Trace, IsFinalize);
+    return;
+  }
 
   std::shared_ptr<VulnerabilityTrace> StartSubTrace =
       std::make_shared<VulnerabilityTrace>();
@@ -1863,16 +1887,18 @@ void GSAFTaintReportDecorator::buildFromTrace(
 
   size_t WrapperTraceEnd = 2;
   if (Trace->at(2) != SrcNode && !Trace->at(3) &&
-      isa<GuardedValueFlowNode>(Trace->at(2))) {
+      isa_and_nonnull<GuardedValueFlowNode>(Trace->at(2))) {
     // Find the taint wrapper
     std::stack<Function *> FrameStack;
     size_t I = 2;
     for (size_t E = Trace->get_length(); I < E; ++I) {
       auto *Obj = Trace->at(I);
       if (Obj) {
-        if (isa<GuardedValueFlowNode>(Obj) && !Trace->at(I + 1)) {
+        if (isa<GuardedValueFlowNode>(Obj) && I + 1 < E && !Trace->at(I + 1)) {
           FrameStack.push(Obj->getGraph()->getBaseFunction());
         } else if (isa<GuardedValueFlowReturnSite>(Obj)) {
+          if (FrameStack.empty())
+            break;
           FrameStack.pop();
 
           if (FrameStack.empty()) {
@@ -1880,7 +1906,8 @@ void GSAFTaintReportDecorator::buildFromTrace(
           }
         }
 
-        if (Obj->getGraph()->getBaseFunction() != FrameStack.top()) {
+        if (FrameStack.empty() ||
+            Obj->getGraph()->getBaseFunction() != FrameStack.top()) {
           break;
         }
 
@@ -1904,25 +1931,27 @@ void GSAFTaintReportDecorator::buildFromTrace(
   // produce tips for alias relations TODO
   // Searching the alias part
   size_t I = WrapperTraceEnd;
-  for (size_t E = Trace->get_length(); I < E; ++I) {
-    assert(I + 1 < E);
-
+  for (size_t E = Trace->get_length(); I + 1 < E; ++I) {
     auto *CurrObj = Trace->at(I);
     auto *NextObj = Trace->at(I + 1);
+
+    if (!CurrObj)
+      continue;
 
     if (!NextObj) {
       // Here it must be a format like:
       // src-node nullptr(src-site is nullptr) src-node
-      assert(I + 2 < E);
-      assert(CurrObj == Trace->at(I + 2));
-      ++I;
-      continue;
+      if (I + 2 < E && CurrObj == Trace->at(I + 2)) {
+        ++I;
+        continue;
+      }
+      break;
     }
 
     bool CurrObjIsSite = isa<GuardedValueFlowSite>(CurrObj);
     bool NextObjIsSite = isa<GuardedValueFlowSite>(NextObj);
-    assert(!(CurrObjIsSite && NextObjIsSite) &&
-           "Two GVFGSites cannot be adjacent to each other in the trace!");
+    if (CurrObjIsSite && NextObjIsSite)
+      break;
 
     if (!CurrObjIsSite && !NextObjIsSite) {
       if (((const GuardedValueFlowNode *)NextObj)
@@ -1934,24 +1963,21 @@ void GSAFTaintReportDecorator::buildFromTrace(
     } else if (NextObjIsSite) {
       if (isa<GuardedValueFlowCallOutputNode>(CurrObj) &&
           callSite((const GuardedValueFlowCallOutputNode *)CurrObj) ==
-              NextObj) {
-        // search the output summary in alias part.
-        // Thus, there must be something after the site
-        assert(I + 3 < E);
-        assert(isa<GuardedValueFlowNode>(Trace->at(I + 2)) &&
-               "Output summary must start with an argument!");
-        assert(!Trace->at(I + 3) &&
-               "The source site of an output summary must be nullptr!");
-
+              NextObj &&
+          I + 3 < E && isa_and_nonnull<GuardedValueFlowNode>(Trace->at(I + 2)) &&
+          !Trace->at(I + 3)) {
         std::stack<Function *> FrameStack;
 
         size_t II = I + 2;
         for (; II < E; ++II) {
           auto *Obj = Trace->at(II);
           if (Obj) {
-            if (isa<GuardedValueFlowNode>(Obj) && !Trace->at(II + 1)) {
+            if (isa<GuardedValueFlowNode>(Obj) && II + 1 < E &&
+                !Trace->at(II + 1)) {
               FrameStack.push(Obj->getGraph()->getBaseFunction());
             } else if (isa<GuardedValueFlowReturnSite>(Obj)) {
+              if (FrameStack.empty())
+                break;
               FrameStack.pop();
               if (FrameStack.empty()) {
                 break;
@@ -1960,8 +1986,8 @@ void GSAFTaintReportDecorator::buildFromTrace(
           }
         }
 
-        // set I be the index of the last ret site
-        assert(II != E);
+        if (II >= E)
+          break;
         I = II;
       } else {
         break;

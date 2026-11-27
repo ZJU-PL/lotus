@@ -38,7 +38,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <tuple>
@@ -154,6 +156,11 @@ public:
     Or,
   };
 
+  static constexpr uint32_t INVALID_BDD_ID =
+      std::numeric_limits<uint32_t>::max();
+  static constexpr uint32_t FALSE_BDD_ID = 0;
+  static constexpr uint32_t TRUE_BDD_ID = 1;
+
 private:
   Kind kind_;
   Value *value_;
@@ -166,7 +173,10 @@ private:
   bool sense_;
   PathCond *lhs_;
   PathCond *rhs_;
-  ConstraintSummary summary_;
+  uint32_t bdd_id_ = INVALID_BDD_ID;
+  uint32_t aig_id_ = INVALID_BDD_ID;
+  const void *bdd_owner_ = nullptr;
+  mutable std::unique_ptr<ConstraintSummary> summary_;
 
   explicit PathCond(Kind kind)
       : kind_(kind), value_(nullptr), block_(nullptr), successor_(nullptr),
@@ -647,16 +657,24 @@ private:
     return result;
   }
 
-  void initializeAtomicSummary() {
+  void computeConstraintSummary(ConstraintSummary &out) const {
+    if (bdd_id_ == TRUE_BDD_ID) {
+      out = makeTrueSummary();
+      return;
+    }
+    if (bdd_id_ == FALSE_BDD_ID) {
+      out = makeFalseSummary();
+      return;
+    }
     switch (kind_) {
     case Kind::True:
-      summary_ = makeTrueSummary();
+      out = makeTrueSummary();
       break;
     case Kind::False:
-      summary_ = makeFalseSummary();
+      out = makeFalseSummary();
       break;
     case Kind::ValueAtom:
-      summary_ = makeAtomicSummary(makeBooleanLiteral(value_), sense_);
+      out = makeAtomicSummary(makeBooleanLiteral(value_), sense_);
       break;
     case Kind::BranchAtom:
       // Falcon's region solver reasons about the underlying branch predicate,
@@ -664,90 +682,87 @@ private:
       // Keep the edge metadata on the PathCond itself for provenance, but use
       // the boolean guard as the logical summary so complementary edges collapse
       // to true and impossible mixes become unsatisfiable.
-      summary_ = value_ ? makeAtomicSummary(makeBooleanLiteral(value_), sense_)
-                        : makeAtomicSummary(
-                              Literal(Literal::Kind::Branch, value_, block_,
-                                      successor_),
-                              true);
+      out = value_ ? makeAtomicSummary(makeBooleanLiteral(value_), sense_)
+                   : makeAtomicSummary(
+                         Literal(Literal::Kind::Branch, value_, block_,
+                                 successor_),
+                         true);
       break;
     case Kind::SwitchCaseAtom:
-      summary_ = makeAtomicSummary(
+      out = makeAtomicSummary(
           Literal(Literal::Kind::SwitchCase, value_, block_, successor_,
                   nullptr, case_value_),
           true);
       break;
     case Kind::SwitchDefaultAtom:
-      summary_ = makeAtomicSummary(
+      out = makeAtomicSummary(
           Literal(Literal::Kind::SwitchDefault, value_, block_, successor_),
           true);
       break;
     case Kind::InvokeNormalAtom:
-      summary_ = makeAtomicSummary(
+      out = makeAtomicSummary(
           Literal(Literal::Kind::InvokeNormal, nullptr, block_, successor_),
           true);
       break;
     case Kind::InvokeUnwindAtom:
-      summary_ = makeAtomicSummary(
+      out = makeAtomicSummary(
           Literal(Literal::Kind::InvokeUnwind, nullptr, block_, successor_),
           true);
       break;
     case Kind::BlockAtom:
-      summary_ = makeAtomicSummary(
+      out = makeAtomicSummary(
           Literal(Literal::Kind::Block, nullptr, block_), true);
       break;
     case Kind::CallTargetAtom:
-      summary_ = makeAtomicSummary(
+      out = makeAtomicSummary(
           Literal(Literal::Kind::CallTarget, value_, nullptr, nullptr, callee_),
           true);
       break;
     case Kind::ImportedAtom:
-      summary_ = makeAtomicSummary(
+      out = makeAtomicSummary(
           Literal(Literal::Kind::Imported, nullptr, nullptr, nullptr, nullptr,
                   nullptr, imported_),
           true);
       break;
     case Kind::Not:
+      if (lhs_)
+        out = negateSummary(lhs_->getConstraintSummary());
+      else
+        out = makeFalseSummary();
+      break;
     case Kind::And:
+      if (lhs_ && rhs_)
+        out = andSummaries(lhs_->getConstraintSummary(),
+                           rhs_->getConstraintSummary());
+      else
+        out = makeFalseSummary();
+      break;
     case Kind::Or:
+      if (lhs_ && rhs_)
+        out = orSummaries(lhs_->getConstraintSummary(),
+                          rhs_->getConstraintSummary());
+      else
+        out = makeFalseSummary();
       break;
     }
-  }
-
-  void initializeNotSummary() {
-    if (!lhs_)
-      return;
-    summary_ = negateSummary(lhs_->getConstraintSummary());
-  }
-
-  void initializeAndSummary() {
-    if (!lhs_ || !rhs_)
-      return;
-    summary_ = andSummaries(lhs_->getConstraintSummary(),
-                            rhs_->getConstraintSummary());
-  }
-
-  void initializeOrSummary() {
-    if (!lhs_ || !rhs_)
-      return;
-    summary_ = orSummaries(lhs_->getConstraintSummary(),
-                           rhs_->getConstraintSummary());
   }
 
 public:
   static PathCond *createTrue() {
     PathCond *cond = new PathCond(Kind::True);
-    cond->initializeAtomicSummary();
+    cond->bdd_id_ = TRUE_BDD_ID;
+    cond->aig_id_ = TRUE_BDD_ID;
     return cond;
   }
   static PathCond *createFalse() {
     PathCond *cond = new PathCond(Kind::False);
-    cond->initializeAtomicSummary();
+    cond->bdd_id_ = FALSE_BDD_ID;
+    cond->aig_id_ = FALSE_BDD_ID;
     return cond;
   }
   static PathCond *createValueAtom(Value *value, bool sense) {
     PathCond *cond = new PathCond(value, sense);
     cond->owner_func_ = inferOwner(value);
-    cond->initializeAtomicSummary();
     return cond;
   }
   static PathCond *createBranchAtom(BasicBlock *block, BasicBlock *successor,
@@ -755,7 +770,6 @@ public:
     PathCond *cond =
         new PathCond(Kind::BranchAtom, block, successor, value, sense,
                      block ? block->getParent() : nullptr);
-    cond->initializeAtomicSummary();
     return cond;
   }
   static PathCond *createSwitchCaseAtom(BasicBlock *block, BasicBlock *successor,
@@ -763,7 +777,6 @@ public:
     PathCond *cond =
         new PathCond(Kind::SwitchCaseAtom, block, successor, value, true,
                      block ? block->getParent() : nullptr, case_value);
-    cond->initializeAtomicSummary();
     return cond;
   }
   static PathCond *createSwitchDefaultAtom(BasicBlock *block,
@@ -772,7 +785,6 @@ public:
     PathCond *cond =
         new PathCond(Kind::SwitchDefaultAtom, block, successor, value, true,
                      block ? block->getParent() : nullptr);
-    cond->initializeAtomicSummary();
     return cond;
   }
   static PathCond *createInvokeNormalAtom(BasicBlock *block,
@@ -780,7 +792,6 @@ public:
     PathCond *cond =
         new PathCond(Kind::InvokeNormalAtom, block, successor, nullptr, true,
                      block ? block->getParent() : nullptr);
-    cond->initializeAtomicSummary();
     return cond;
   }
   static PathCond *createInvokeUnwindAtom(BasicBlock *block,
@@ -788,45 +799,35 @@ public:
     PathCond *cond =
         new PathCond(Kind::InvokeUnwindAtom, block, successor, nullptr, false,
                      block ? block->getParent() : nullptr);
-    cond->initializeAtomicSummary();
     return cond;
   }
   static PathCond *createBlockAtom(BasicBlock *block) {
-    PathCond *cond = new PathCond(block);
-    cond->initializeAtomicSummary();
-    return cond;
+    return new PathCond(block);
   }
   static PathCond *createCallTargetAtom(Value *value, Function *callee) {
     PathCond *cond = new PathCond(value, callee);
     cond->owner_func_ = inferOwner(value);
-    cond->initializeAtomicSummary();
     return cond;
   }
   static PathCond *createImportedAtom(Function *owner_func, PathCond *imported) {
-    PathCond *cond =
-        new PathCond(Kind::ImportedAtom, nullptr, nullptr, nullptr, true,
-                     owner_func, nullptr, imported, nullptr);
-    cond->initializeAtomicSummary();
-    return cond;
+    return new PathCond(Kind::ImportedAtom, nullptr, nullptr, nullptr, true,
+                        owner_func, nullptr, imported, nullptr);
   }
   static PathCond *createNot(PathCond *inner) {
     PathCond *cond = new PathCond(Kind::Not, inner, nullptr);
     cond->owner_func_ = inner ? inner->getOwnerFunc() : nullptr;
-    cond->initializeNotSummary();
     return cond;
   }
   static PathCond *createAnd(PathCond *lhs, PathCond *rhs) {
     PathCond *cond = new PathCond(Kind::And, lhs, rhs);
     if (lhs && rhs && lhs->getOwnerFunc() == rhs->getOwnerFunc())
       cond->owner_func_ = lhs->getOwnerFunc();
-    cond->initializeAndSummary();
     return cond;
   }
   static PathCond *createOr(PathCond *lhs, PathCond *rhs) {
     PathCond *cond = new PathCond(Kind::Or, lhs, rhs);
     if (lhs && rhs && lhs->getOwnerFunc() == rhs->getOwnerFunc())
       cond->owner_func_ = lhs->getOwnerFunc();
-    cond->initializeOrSummary();
     return cond;
   }
 
@@ -841,7 +842,21 @@ public:
   bool getSense() const { return sense_; }
   PathCond *getLhs() const { return lhs_; }
   PathCond *getRhs() const { return rhs_; }
-  const ConstraintSummary &getConstraintSummary() const { return summary_; }
+  uint32_t getBddId() const { return bdd_id_; }
+  uint32_t getAigId() const { return aig_id_; }
+  const void *getBddOwner() const { return bdd_owner_; }
+  void setIds(uint32_t bdd_id, uint32_t aig_id, const void *owner) {
+    bdd_id_ = bdd_id;
+    aig_id_ = aig_id;
+    bdd_owner_ = owner;
+  }
+  const ConstraintSummary &getConstraintSummary() const {
+    if (!summary_) {
+      summary_ = std::make_unique<ConstraintSummary>();
+      computeConstraintSummary(*summary_);
+    }
+    return *summary_;
+  }
   bool isCompound() const {
     return kind_ == Kind::Not || kind_ == Kind::And || kind_ == Kind::Or;
   }

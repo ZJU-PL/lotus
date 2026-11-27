@@ -11,6 +11,8 @@
 #include <tuple>
 #include <vector>
 
+#include <llvm/ADT/ScopeExit.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Type.h>
 
@@ -491,7 +493,10 @@ IRExpressionRenderer::generate_pointer_offset_expr(
     }
 
     if (phi_choice) {
+      SmallPtrSet<const Value *, 16> visited_phi;
       while (phi_choice->count(ptr) || isa<PHINode>(ptr)) {
+        if (!visited_phi.insert(ptr).second)
+          break;
         Value *phi_choice_val =
             phi_choice->count(ptr) ? (*phi_choice)[ptr] : nullptr;
 
@@ -708,6 +713,12 @@ string IRExpressionRenderer::restore_expr(Value *an_expr, int depth) {
     return "PseudoArg";
   }
 
+  if (!active_restore_expr_.insert(an_expr).second) {
+    return DIA->getVariableName(an_expr);
+  }
+  auto active_guard =
+      make_scope_exit([&] { active_restore_expr_.erase(an_expr); });
+
   string expr_str = "";
   Instruction *expr_inst = dyn_cast<Instruction>(an_expr);
 
@@ -856,8 +867,11 @@ string IRExpressionRenderer::restore_access_path_expr(
    */
   vector<tuple<APSectionType, bool, string>> ap_sections;
   bool is_straight_casts = true;
+  SmallPtrSet<const Value *, 16> visited_ptrs;
 
-  while (!DIA->hasVariableDebugName(ptr)) {
+  while (ptr && !DIA->hasVariableDebugName(ptr)) {
+    if (!visited_ptrs.insert(ptr).second)
+      break;
     tuple<Value *, int64_t, string> ptr_expr_pack =
         generate_pointer_offset_expr(ptr, phi_choice);
     Value *base_ptr = std::get<0>(ptr_expr_pack);
@@ -885,7 +899,7 @@ string IRExpressionRenderer::restore_access_path_expr(
       if (isa<StructType>(base_type)) {
         ap_type = APFieldExpr;
       } else {
-        if (pointer_offset == 0 && ap_expr[0] != '[' &&
+        if (pointer_offset == 0 && (ap_expr.empty() || ap_expr[0] != '[') &&
             !isa<ArrayType>(base_type) && !isa<VectorType>(base_type) &&
             !isa<Constant>(base_ptr)) {
           // Special printout for primitive type pointer dereference
@@ -1010,7 +1024,7 @@ string IRExpressionRenderer::restore_access_path_expr(
         full_ap = std::move(cast_expr);
       } else {
         if (ap_type == APFieldExpr) {
-          if (ap_expr[0] != '[')
+          if (ap_expr.empty() || ap_expr[0] != '[')
             full_ap += (base_is_pointer ? "->" : ".");
           full_ap += ap_expr;
         } else if (ap_type == APArrayExpr) {

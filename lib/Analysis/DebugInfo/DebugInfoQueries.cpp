@@ -11,6 +11,7 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/ModuleSlotTracker.h>
 #include <llvm/Support/raw_ostream.h>
 
 std::string
@@ -66,9 +67,33 @@ int DebugInfoAnalysis::getPhiOperandSourceLine(const llvm::PHINode *Phi,
 std::string DebugInfoAnalysis::getIRString(const llvm::Value *V) {
   if (!V)
     return {};
+  const llvm::Module *M = nullptr;
+  const llvm::Function *F = nullptr;
+  if (const auto *I = llvm::dyn_cast<llvm::Instruction>(V)) {
+    F = I->getFunction();
+    M = F ? F->getParent() : nullptr;
+  } else if (const auto *Arg = llvm::dyn_cast<llvm::Argument>(V)) {
+    F = Arg->getParent();
+    M = F ? F->getParent() : nullptr;
+  } else if (const auto *BB = llvm::dyn_cast<llvm::BasicBlock>(V)) {
+    F = BB->getParent();
+    M = F ? F->getParent() : nullptr;
+  } else if (const auto *GV = llvm::dyn_cast<llvm::GlobalValue>(V)) {
+    M = GV->getParent();
+  }
+
   std::string text;
   llvm::raw_string_ostream output(text);
-  V->print(output);
+  if (M) {
+    auto &tracker = moduleSlotTrackers[M];
+    if (!tracker)
+      tracker = std::make_unique<llvm::ModuleSlotTracker>(M, false);
+    if (F)
+      tracker->incorporateFunction(*F);
+    V->print(output, *tracker);
+  } else {
+    V->print(output);
+  }
   return output.str();
 }
 
@@ -113,7 +138,8 @@ void DebugInfoAnalysis::registerFieldName(llvm::Type *type, int64_t offset,
 
 std::string DebugInfoAnalysis::getFieldName(llvm::Type *type, int64_t offset,
                                             int recursiveDepth) {
-  auto found = fieldNameCache.find({type, offset});
+  const int64_t originalOffset = offset;
+  auto found = fieldNameCache.find({type, originalOffset});
   if (found != fieldNameCache.end())
     return found->second;
   auto *structure = llvm::dyn_cast<llvm::StructType>(type);
@@ -123,13 +149,17 @@ std::string DebugInfoAnalysis::getFieldName(llvm::Type *type, int64_t offset,
     return "!(opq)" + std::to_string(offset);
   if (structure->getNumElements() == 0)
     return "!(ob)" + std::to_string(offset);
-  lotus::PackedTypeLayout layout(
-      llvm::DataLayout("p:" + std::to_string(pointerWidth) + ":" +
-                       std::to_string(pointerWidth)));
+  if (offset < 0)
+    return "!" + std::to_string(offset / 8);
+  lotus::PackedTypeLayout layout(pointerWidth);
+  const uint64_t structSize = layout.getTypeSizeInBits(structure);
   unsigned index =
-      offset >= static_cast<int64_t>(layout.getTypeSizeInBits(structure))
+      static_cast<uint64_t>(offset) >= structSize
           ? structure->getNumElements() - 1
-          : layout.getElementContainingOffset(structure, offset);
+          : layout.getElementContainingOffset(structure,
+                                              static_cast<uint64_t>(offset));
+  if (index >= structure->getNumElements())
+    index = structure->getNumElements() - 1;
   std::string name;
   if (structure->hasName()) {
     llvm::StringRef typeName = structure->getName();
@@ -147,5 +177,7 @@ std::string DebugInfoAnalysis::getFieldName(llvm::Type *type, int64_t offset,
       structure->getElementType(index)->isStructTy())
     name += "." + getFieldName(structure->getElementType(index), offset,
                                recursiveDepth == -1 ? -1 : recursiveDepth - 1);
+  if (recursiveDepth == 0)
+    fieldNameCache.emplace(std::make_pair(type, originalOffset), name);
   return name;
 }

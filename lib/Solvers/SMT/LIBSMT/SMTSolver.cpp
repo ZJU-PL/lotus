@@ -356,6 +356,8 @@ void SMTSolver::add(SMTExpr E) {
 }
 
 void SMTSolver::addAll(SMTExprVec EVec) {
+  if (EVec.empty())
+    return;
   // TODO: more tactics
   // 1. Add one by one(the default tactic)
   // 2. Call toAnd(EVec), and add the returned formula
@@ -367,30 +369,22 @@ void SMTSolver::addAll(SMTExprVec EVec) {
     for (unsigned I = 0; I < EVec.size(); I++) {
       add(EVec[I]);
     }
+    break;
   case 1:
     add(EVec.toAndExpr());
+    break;
   case 2:
     add(EVec.toAndExpr().localSimplify());
+    break;
   case 3:
     add(EVec.toAndExpr().localSimplify().doConstantPropagation());
+    break;
   default:
     for (unsigned I = 0; I < EVec.size(); I++) {
       add(EVec[I]);
     }
+    break;
   }
-  /*
-   if (EnableLocalSimplify.getValue() == 1) {
-   add(EVec.toAndExpr());
-   //add(EVec.toAndExpr().localSimplify());
-   // Turn EVec to a single Expr, and call simplify()
-   //Solver.add(EVec.toAndExpr().Expr.simplify());
-   }
-   else {
-   for (unsigned I = 0; I < EVec.size(); I++) {
-   add(EVec[I]);
-   }
-   }
-   */
 }
 
 void SMTSolver::addAll(const std::vector<SMTExpr> &EVec) {

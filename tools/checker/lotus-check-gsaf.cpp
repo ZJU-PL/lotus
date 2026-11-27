@@ -7,6 +7,7 @@
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/InitializePasses.h>
+#include <llvm/Support/Signals.h>
 #include <llvm/Support/SourceMgr.h>
 
 using namespace llvm;
@@ -18,6 +19,7 @@ static cl::opt<std::string> InputFilename(cl::Positional,
                                           cl::sub(tooling::gsafSubCommand()));
 
 int runGSAFCheckerTool(const char *argv0) {
+  sys::PrintStackTraceOnErrorSignal(argv0);
   auto selected = tooling::resolveChecks(lotus::checker::EngineKind::GSAF);
   if (!selected) {
     logAllUnhandledErrors(selected.takeError(), errs(), "error: ");

@@ -11,6 +11,7 @@
 #include <set>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 namespace lotus::gsaf {
@@ -20,7 +21,8 @@ using namespace llvm;
 
 class FunctionAnalyzer : public GSAFFunctionWorker {
 private:
-  /// SMTFactory that manages symbolic expressions created in this function
+  /// Pooled SMTFactory acquired lazily when SMT solving is actually needed
+  GSAFChecker::PooledSMTFactory OwnedFactory;
   SMTFactory *Fctry = nullptr;
 
   /// the buggy traces to report in this function
@@ -41,7 +43,7 @@ private:
   /// This field collects constraints of data dependencies.
   /// It also used for checking if certain constraints
   /// are satisfiable.
-  GuardedValueFlowSolver *Solver;
+  GuardedValueFlowSolver *Solver = nullptr;
 
   /// This field collects constraints of ctrl dependencies
   PushPopVector<SMTExpr> CtrlConds;
@@ -119,6 +121,15 @@ private:
 
   /// The vulnerability instance
   std::shared_ptr<TaintStyleVulnerability> TSV;
+
+  /// Exact backward reachability sets of nodes that can reach a potentially
+  /// relevant use site along valueFlowParents() edges.
+  bool RelevantNodesBuilt = false;
+  std::unordered_set<const GuardedValueFlowNode *> CanReachCommonArgSite;
+  std::unordered_set<const GuardedValueFlowNode *> CanReachAnyRelevantSite;
+
+  void ensureSolver();
+  void buildRelevantNodes();
 
 public:
   FunctionAnalyzer(GSAFChecker *P, Function *F);

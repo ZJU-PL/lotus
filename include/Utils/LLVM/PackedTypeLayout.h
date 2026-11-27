@@ -11,6 +11,8 @@ class PackedTypeLayout {
   uint64_t pointer_width_;
 
 public:
+  explicit PackedTypeLayout(uint64_t pointer_width)
+      : pointer_width_(pointer_width) {}
   explicit PackedTypeLayout(const llvm::DataLayout &layout)
       : pointer_width_(layout.getPointerSizeInBits()) {}
 

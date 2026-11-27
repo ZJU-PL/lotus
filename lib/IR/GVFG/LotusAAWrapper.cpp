@@ -248,7 +248,10 @@ static bool setAdapterFailure(std::string &failure, const Twine &message) {
   return false;
 }
 
-static bool instructionReachesInstruction(const Instruction *src,
+using StorePointerIndex = DenseMap<const Value *, SmallVector<StoreInst *, 4>>;
+
+static bool instructionReachesInstruction(IntraLotusAA &pta,
+                                          const Instruction *src,
                                           const Instruction *dst) {
   if (!src || !dst)
     return false;
@@ -261,28 +264,12 @@ static bool instructionReachesInstruction(const Instruction *src,
   if (src_bb == dst_bb)
     return src != dst && src->comesBefore(dst);
 
-  SmallVector<const BasicBlock *, 16> worklist;
-  SmallPtrSet<const BasicBlock *, 16> visited;
-  for (const BasicBlock *succ : successors(src_bb)) {
-    if (visited.insert(succ).second)
-      worklist.push_back(succ);
-  }
-
-  while (!worklist.empty()) {
-    const BasicBlock *bb = worklist.pop_back_val();
-    if (bb == dst_bb)
-      return true;
-    for (const BasicBlock *succ : successors(bb)) {
-      if (visited.insert(succ).second)
-        worklist.push_back(succ);
-    }
-  }
-
-  return false;
+  return pta.blockReaches(src_bb, dst_bb);
 }
 
-static void collectExactPointerStoreFallbacks(Function &func, LoadInst *load,
-                                              mem_value_t &values) {
+static void collectExactPointerStoreFallbacks(
+    IntraLotusAA &pta, LoadInst *load, mem_value_t &values,
+    StorePointerIndex &stores_by_ptr, bool &stores_indexed) {
   if (!load)
     return;
 
@@ -290,11 +277,22 @@ static void collectExactPointerStoreFallbacks(Function &func, LoadInst *load,
   if (!load_ptr)
     return;
 
-  for (Instruction &inst : instructions(func)) {
-    auto *store = dyn_cast<StoreInst>(&inst);
-    if (!store || store->getPointerOperand() != load_ptr)
-      continue;
-    if (!instructionReachesInstruction(store, load))
+  if (!stores_indexed) {
+    stores_indexed = true;
+    for (Instruction &inst : instructions(*pta.getFunc())) {
+      if (auto *store = dyn_cast<StoreInst>(&inst)) {
+        if (Value *store_ptr = store->getPointerOperand())
+          stores_by_ptr[store_ptr].push_back(store);
+      }
+    }
+  }
+
+  auto it = stores_by_ptr.find(load_ptr);
+  if (it == stores_by_ptr.end())
+    return;
+
+  for (StoreInst *store : it->second) {
+    if (!instructionReachesInstruction(pta, store, load))
       continue;
     values.emplace_back(nullptr, store, store->getValueOperand(), 1.0f);
   }
@@ -755,14 +753,19 @@ translatePathCondToRegion(GuardedValueFlowGraphBuilderPass &builder,
                           BasicBlock *fallback_block) {
   if (!cond)
     return graph.getAlwaysTrueRegion();
+  if (auto *cached = graph.findTranslatedPathCond(cond))
+    return cached;
   if (auto *structural =
           translateLocalPathCondToRegion(builder, graph, cond, fallback_block)) {
+    graph.mapTranslatedPathCond(cond, structural);
     return structural;
   }
   // Fall back to a semantic/interface region when the path condition cannot be
   // reconstructed as a purely local structural guard.
-  return graph.findOrCreateSemanticRegion(
+  auto *semantic = graph.findOrCreateSemanticRegion(
       cond, fallback_block, resolveOriginConditionNode(builder, cond));
+  graph.mapTranslatedPathCond(cond, semantic);
+  return semantic;
 }
 
 static GuardedValueFlowNode *ensureStoreMemoryNode(
@@ -1014,6 +1017,8 @@ collectCallees(const GuardedValueFlowCallSite &site, CallBase &call,
 static void materializeLoadParity(GuardedValueFlowGraph &graph,
                                   IntraLotusAA &pta,
                                   GuardedValueFlowGraphBuilderPass &builder) {
+  StorePointerIndex stores_by_ptr;
+  bool stores_indexed = false;
   for (Instruction &inst : instructions(*pta.getFunc())) {
     auto *load = dyn_cast<LoadInst>(&inst);
     if (!load)
@@ -1031,7 +1036,8 @@ static void materializeLoadParity(GuardedValueFlowGraph &graph,
     mem_value_t load_values;
     pta.collectGuardedValueFlowLoadValues(load, load_values);
     if (load_values.empty())
-      collectExactPointerStoreFallbacks(*pta.getFunc(), load, load_values);
+      collectExactPointerStoreFallbacks(pta, load, load_values, stores_by_ptr,
+                                        stores_indexed);
     if (!load_values.empty()) {
       populateLoadMemoryNode(graph, load_mem_node, load_values,
                              load->getParent(), builder);

@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 
+#include <llvm/IR/ModuleSlotTracker.h>
 #include <llvm/Support/raw_ostream.h>
 
 using namespace llvm;
@@ -40,13 +41,17 @@ static std::string escapeDotLabel(const std::string &input) {
   return out;
 }
 
-static std::string renderValue(const Value *value) {
+static std::string renderValue(const Value *value,
+                               ModuleSlotTracker *slot_tracker = nullptr) {
   if (!value)
     return "<none>";
 
   std::string buffer;
   raw_string_ostream os(buffer);
-  value->printAsOperand(os, false);
+  if (slot_tracker)
+    value->printAsOperand(os, false, *slot_tracker);
+  else
+    value->printAsOperand(os, false);
   return os.str();
 }
 
@@ -60,17 +65,22 @@ static std::string renderType(const Type *type) {
   return os.str();
 }
 
-static std::string renderInstruction(const Instruction *inst) {
+static std::string renderInstruction(const Instruction *inst,
+                                     ModuleSlotTracker *slot_tracker = nullptr) {
   if (!inst)
     return "<none>";
 
   std::string buffer;
   raw_string_ostream os(buffer);
-  inst->print(os);
+  if (slot_tracker)
+    inst->print(os, *slot_tracker);
+  else
+    inst->print(os);
   return os.str();
 }
 
-static std::string renderBlockName(const BasicBlock *block) {
+static std::string renderBlockName(const BasicBlock *block,
+                                   ModuleSlotTracker *slot_tracker = nullptr) {
   if (!block)
     return "<none>";
   if (block->hasName())
@@ -78,7 +88,10 @@ static std::string renderBlockName(const BasicBlock *block) {
 
   std::string buffer;
   raw_string_ostream os(buffer);
-  block->printAsOperand(os, false);
+  if (slot_tracker)
+    block->printAsOperand(os, false, *slot_tracker);
+  else
+    block->printAsOperand(os, false);
   return os.str();
 }
 
@@ -174,12 +187,13 @@ diagnosticSeverityName(GuardedValueFlowGraph::Diagnostic::Severity severity) {
   return "warning";
 }
 
-static std::string renderAccessPath(const AccessPath &path) {
+static std::string renderAccessPath(const AccessPath &path,
+                                    ModuleSlotTracker *slot_tracker = nullptr) {
   if (path.empty())
     return "<none>";
 
   std::ostringstream os;
-  os << renderValue(path.getBase());
+  os << renderValue(path.getBase(), slot_tracker);
   for (int idx = 0; idx < path.getDepth(); ++idx)
     os << "." << path.getOffset(idx);
   if (path.isFromReturn())
@@ -213,6 +227,14 @@ static const char *dotShapeForNode(const GuardedValueFlowNode *node) {
 
 std::string
 GuardedValueFlowSerializer::toText(const GuardedValueFlowGraph &graph) {
+  std::unique_ptr<ModuleSlotTracker> slot_tracker;
+  if (Function *F = graph.getBaseFunction()) {
+    slot_tracker = std::make_unique<ModuleSlotTracker>(
+        F->getParent(), /*ShouldInitializeAllMetadata=*/false);
+    slot_tracker->incorporateFunction(*F);
+  }
+  ModuleSlotTracker *mst = slot_tracker.get();
+
   std::ostringstream out;
   out << "GVFG-TEXT-V1\n";
   out << "function "
@@ -225,8 +247,8 @@ GuardedValueFlowSerializer::toText(const GuardedValueFlowGraph &graph) {
     out << "diagnostic " << diagnosticOriginName(diagnostic.origin) << " "
         << diagnosticSeverityName(diagnostic.severity) << " "
         << std::quoted(diagnostic.message) << " "
-        << std::quoted(renderBlockName(diagnostic.block)) << " "
-        << std::quoted(renderInstruction(diagnostic.instruction)) << "\n";
+        << std::quoted(renderBlockName(diagnostic.block, mst)) << " "
+        << std::quoted(renderInstruction(diagnostic.instruction, mst)) << "\n";
   }
 
   out << "nodes " << graph.nodes().size() << "\n";
@@ -235,9 +257,9 @@ GuardedValueFlowSerializer::toText(const GuardedValueFlowGraph &graph) {
     out << "node " << node->getNodeId() << " " << nodeKindName(node->getKind())
         << " " << std::quoted(node->getDescription()) << " "
         << std::quoted(renderType(node->getType())) << " "
-        << std::quoted(renderBlockName(node->getParentBasicBlock())) << " "
-        << std::quoted(renderValue(node->getLLVMValue())) << " "
-        << std::quoted(renderAccessPath(node->getAccessPath())) << " "
+        << std::quoted(renderBlockName(node->getParentBasicBlock(), mst)) << " "
+        << std::quoted(renderValue(node->getLLVMValue(), mst)) << " "
+        << std::quoted(renderAccessPath(node->getAccessPath(), mst)) << " "
         << node->getIndex() << "\n";
   }
 
@@ -259,7 +281,7 @@ GuardedValueFlowSerializer::toText(const GuardedValueFlowGraph &graph) {
   for (size_t idx = 0; idx < graph.sites().size(); ++idx) {
     const auto *site = graph.sites()[idx].get();
     out << "site " << idx << " " << siteKindName(site->getKind()) << " "
-        << std::quoted(renderInstruction(site->getInstruction())) << "\n";
+        << std::quoted(renderInstruction(site->getInstruction(), mst)) << "\n";
   }
 
   return out.str();
@@ -267,6 +289,14 @@ GuardedValueFlowSerializer::toText(const GuardedValueFlowGraph &graph) {
 
 std::string
 GuardedValueFlowSerializer::toDot(const GuardedValueFlowGraph &graph) {
+  std::unique_ptr<ModuleSlotTracker> slot_tracker;
+  if (Function *F = graph.getBaseFunction()) {
+    slot_tracker = std::make_unique<ModuleSlotTracker>(
+        F->getParent(), /*ShouldInitializeAllMetadata=*/false);
+    slot_tracker->incorporateFunction(*F);
+  }
+  ModuleSlotTracker *mst = slot_tracker.get();
+
   std::ostringstream out;
   const std::string function_name =
       graph.getBaseFunction() ? graph.getBaseFunction()->getName().str()
@@ -286,7 +316,7 @@ GuardedValueFlowSerializer::toDot(const GuardedValueFlowGraph &graph) {
       label << "\\n" << escapeDotLabel(node->getDescription());
     if (node->getParentBasicBlock())
       label << "\\nBB="
-            << escapeDotLabel(renderBlockName(node->getParentBasicBlock()));
+            << escapeDotLabel(renderBlockName(node->getParentBasicBlock(), mst));
     out << "  n" << node->getNodeId() << " [shape=" << dotShapeForNode(node)
         << ", label=\"" << label.str() << "\"];\n";
   }
@@ -322,7 +352,7 @@ GuardedValueFlowSerializer::toDot(const GuardedValueFlowGraph &graph) {
     label << siteKindName(site->getKind());
     if (site->getInstruction())
       label << "\\n"
-            << escapeDotLabel(renderInstruction(site->getInstruction()));
+            << escapeDotLabel(renderInstruction(site->getInstruction(), mst));
     out << "  s" << site_id
         << " [shape=note, style=dashed, color=gray40, label=\"" << label.str()
         << "\"];\n";

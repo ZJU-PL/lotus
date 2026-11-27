@@ -367,8 +367,8 @@ static int64_t getLegacyStyleGepOffset(GEPOperator *gep,
 
 static std::pair<Value *, int64_t> trackPointerOffset(Value *ptr,
                                                       const DataLayout &DL) {
-  if (!ptr)
-    return {nullptr, 0};
+  if (!ptr || !ptr->getType()->isPtrOrPtrVectorTy())
+    return {ptr, 0};
 
   APInt ap_offset(DL.getIndexTypeSizeInBits(ptr->getType()), 0, true);
   if (const Value *base =
@@ -500,6 +500,8 @@ void IntraLotusAA::processStore(StoreInst *store) {
   if (store_value->getType()->isPointerTy()) {
     processBasePointer(store_value);
   }
+
+  indexStoreForStrongUpdates(store, res);
 }
 
 //===----------------------------------------------------------------------===//
@@ -697,7 +699,8 @@ PTResult *IntraLotusAA::processBasePointer(Value *base_ptr) {
   if (res)
     return res;
 
-  if (isa<GEPOperator>(base_ptr) || isa<BitCastInst>(base_ptr)) {
+  if ((isa<GEPOperator>(base_ptr) || isa<BitCastInst>(base_ptr)) &&
+      base_ptr->getType()->isPtrOrPtrVectorTy()) {
     res = processGepBitcast(base_ptr);
   } else if (CastInst *cast = dyn_cast<CastInst>(base_ptr)) {
     res = processCast(cast);
@@ -709,8 +712,9 @@ PTResult *IntraLotusAA::processBasePointer(Value *base_ptr) {
   } else if (GlobalValue *gv = dyn_cast<GlobalValue>(base_ptr)) {
     res = processGlobal(gv);
   } else if (ConstantExpr *ce = dyn_cast<ConstantExpr>(base_ptr)) {
-    if (ce->getOpcode() == Instruction::BitCast ||
-        ce->getOpcode() == Instruction::GetElementPtr)
+    if ((ce->getOpcode() == Instruction::BitCast ||
+         ce->getOpcode() == Instruction::GetElementPtr) &&
+        base_ptr->getType()->isPtrOrPtrVectorTy())
       res = processGepBitcast(base_ptr);
   } else if (!base_ptr->getType()->isPointerTy()) {
     res = processNonPointer(base_ptr);

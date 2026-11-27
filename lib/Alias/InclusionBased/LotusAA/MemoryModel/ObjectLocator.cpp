@@ -246,28 +246,22 @@ void ObjectLocator::placePhi(LocValue *loc_value, BasicBlock *bb_start) {
   if (!dom_tree)
     return;
 
-  // Use modern IDFCalculator (LLVM 14+) to compute iterated dominance frontier
-  // This replaces the old DominanceFrontierWrapperPass which was removed in
-  // LLVM 12+
-  SmallVector<BasicBlock *, 32> Frontier;
-  SmallPtrSet<BasicBlock *, 32> DefBlocks;
-  DefBlocks.insert(bb_start);
-
-  ForwardIDFCalculator IDF(*dom_tree);
-  IDF.setDefiningBlocks(DefBlocks);
-  IDF.calculate(Frontier);
+  const auto &Frontier = pt_graph->getIteratedDominanceFrontier(bb_start);
+  if (Frontier.empty())
+    return;
 
   // Apply depth limit
-  int num_blocks = Frontier.size();
+  int num_blocks = static_cast<int>(Frontier.size());
   if (lotus_memory_store_depth != -1 && num_blocks > lotus_memory_store_depth) {
     num_blocks = lotus_memory_store_depth;
   }
 
+  path_cond_t phi_cond = pt_graph->getUnitRegion(bb_start);
+  path_cond_t processing_cond =
+      pt_graph->findOrCreateAndRegion(loc_value->getCond(), phi_cond);
+
   for (int i = 0; i < num_blocks; i++) {
     BasicBlock *processing_bb = Frontier[i];
-    path_cond_t phi_cond = pt_graph->getUnitRegion(bb_start);
-    path_cond_t processing_cond =
-        pt_graph->findOrCreateAndRegion(loc_value->getCond(), phi_cond);
     LocValue *phi_lv = new LocValue(loc_value->getVal(), loc_value->getPos(),
                                     processing_cond, LocValue::WEAK);
     loc_values[processing_bb].push_back(phi_lv);
@@ -363,7 +357,7 @@ Argument *ObjectLocator::getValues(Instruction *from_loc, path_cond_t pre_cond,
           : nullptr;
 
   mem_value_t func_in_path;
-  if (func_call_cache) {
+  if (func_call_cache && IntraLotusAAConfig::lotus_enable_score_computation) {
     func_call_cache->getValues(from_loc, pre_cond, func_in_path, nullptr,
                                FUNC_LEVEL_UNDEFINED, false);
   }
@@ -409,19 +403,6 @@ Argument *ObjectLocator::getValues(Instruction *from_loc, path_cond_t pre_cond,
           continue;
       }
 
-      path_cond_t func_cond = mem_item.cond;
-      float func_exec_confidence = 1.0f;
-      if (!getPTG()->isAlwaysSatisfied(func_cond)) {
-        path_cond_t func_final_cond =
-            getPTG()->findOrCreateAndRegion(current_pre_cond, func_cond);
-        if (!getPTG()->isSatisfiable(func_final_cond)) {
-          func_exec_confidence = 0.0f;
-        } else {
-          func_exec_confidence =
-              llvm::LotusConfig::Heuristics::COND_SAT_PROBABILITY;
-        }
-      }
-
       int ap_depth = PTGraph::FUNC_OBJ_UNREACHABLE;
       if (CallInst *call_inst = dyn_cast<CallInst>(call)) {
         ap_depth = getPTG()->getObjectToCallApDepth(getObj(), call_inst);
@@ -433,6 +414,19 @@ Argument *ObjectLocator::getValues(Instruction *from_loc, path_cond_t pre_cond,
         if (PTGraph *callee_graph = getPTG()->getPtGraph(callee)) {
           if (callee_graph->getInlineApDepth() >= ap_depth)
             continue;
+        }
+      }
+
+      path_cond_t func_cond = mem_item.cond;
+      float func_exec_confidence = 1.0f;
+      if (!getPTG()->isAlwaysSatisfied(func_cond)) {
+        path_cond_t func_final_cond =
+            getPTG()->findOrCreateAndRegion(current_pre_cond, func_cond);
+        if (!getPTG()->isSatisfiable(func_final_cond)) {
+          func_exec_confidence = 0.0f;
+        } else {
+          func_exec_confidence =
+              llvm::LotusConfig::Heuristics::COND_SAT_PROBABILITY;
         }
       }
 
@@ -453,7 +447,7 @@ Argument *ObjectLocator::getValues(Instruction *from_loc, path_cond_t pre_cond,
     return result;
   };
 
-  path_cond_t curr_anti_cond = getPTG()->getEmptyCond();
+  path_cond_t remaining_cond = pre_cond;
   float curr_confidence = 1.0f;
 
   BasicBlock *bb = from_loc->getParent();
@@ -530,25 +524,24 @@ Argument *ObjectLocator::getValues(Instruction *from_loc, path_cond_t pre_cond,
         }
 
         path_cond_t cond = curr_lv->getCond();
-        path_cond_t mem_val_cond =
-            getPTG()->findOrCreateAndRegion(curr_anti_cond, cond);
         Value *val = curr_lv->getVal();
-        path_cond_t final_cond =
-            getPTG()->findOrCreateAndRegion(pre_cond, mem_val_cond);
+        if (val != LocValue::NO_VALUE) {
+          path_cond_t final_cond =
+              getPTG()->findOrCreateAndRegion(remaining_cond, cond);
+          if (getPTG()->isSatisfiable(final_cond)) {
+            float no_effect_confidence = 1.0f;
+            if (IntraLotusAAConfig::lotus_enable_score_computation) {
+              int val_seq = pos ? getPTG()->getSequenceNum(pos)
+                                : PTGraph::VALUE_SEQ_INFINITE;
+              no_effect_confidence = get_confidence_with_no_call_barrier(
+                  val_seq, final_cond, possible_updating_callsite);
+            }
 
-        if (getPTG()->isSatisfiable(final_cond) && val != LocValue::NO_VALUE) {
-          float no_effect_confidence = 1.0f;
-          if (IntraLotusAAConfig::lotus_enable_score_computation) {
-            int val_seq = pos ? getPTG()->getSequenceNum(pos)
-                              : PTGraph::VALUE_SEQ_INFINITE;
-            no_effect_confidence = get_confidence_with_no_call_barrier(
-                val_seq, final_cond, possible_updating_callsite);
+            curr_confidence *= no_effect_confidence;
+            res.push_back(
+                mem_value_item_t(final_cond, pos, val, curr_confidence));
+            value_loaded++;
           }
-
-          curr_confidence *= no_effect_confidence;
-          res.push_back(
-              mem_value_item_t(final_cond, pos, val, curr_confidence));
-          value_loaded++;
         }
 
         if (enable_strong_update) {
@@ -557,8 +550,11 @@ Argument *ObjectLocator::getValues(Instruction *from_loc, path_cond_t pre_cond,
             return nullptr;
           }
           path_cond_t anti_cond = getPTG()->findOrCreateNotRegion(cond);
-          curr_anti_cond =
-              getPTG()->findOrCreateAndRegion(curr_anti_cond, anti_cond);
+          remaining_cond =
+              getPTG()->findOrCreateAndRegion(remaining_cond, anti_cond);
+          if (getPTG()->isKnownFalse(remaining_cond)) {
+            return nullptr;
+          }
         }
       }
     }
@@ -574,8 +570,7 @@ Argument *ObjectLocator::getValues(Instruction *from_loc, path_cond_t pre_cond,
     bb_tracked++;
   }
 
-  path_cond_t default_cond =
-      getPTG()->findOrCreateAndRegion(curr_anti_cond, pre_cond);
+  path_cond_t default_cond = remaining_cond;
   if (!getPTG()->isSatisfiable(default_cond))
     return nullptr;
 

@@ -69,8 +69,32 @@ GSAFChecker::GSAFChecker(std::shared_ptr<VulnerabilityWrapper> vulnerabilities)
       ReportTasks(ThreadPool::get()->makeTaskGroup()) {}
 
 GSAFChecker::~GSAFChecker() {
+  FactoryPool.clear();
   for (auto &entry : FuncSmryMap)
     delete entry.second;
+}
+
+GSAFChecker::PooledSMTFactory GSAFChecker::acquireSMTFactory() {
+  std::lock_guard<std::mutex> lock(FactoryPoolMutex);
+  if (!FactoryPool.empty()) {
+    PooledSMTFactory entry = std::move(FactoryPool.back());
+    FactoryPool.pop_back();
+    if (entry.Factory && entry.Uses < 256)
+      return entry;
+  }
+  return PooledSMTFactory{std::make_unique<SMTFactory>(), 0};
+}
+
+void GSAFChecker::releaseSMTFactory(PooledSMTFactory &&entry) {
+  if (!entry.Factory)
+    return;
+  ++entry.Uses;
+  if (entry.Uses >= 256) {
+    entry.Factory.reset();
+    return;
+  }
+  std::lock_guard<std::mutex> lock(FactoryPoolMutex);
+  FactoryPool.push_back(std::move(entry));
 }
 
 void GSAFChecker::getAnalysisUsage(AnalysisUsage &usage) const {
@@ -154,6 +178,10 @@ bool GSAFChecker::runOnModule(llvm::Module &module) {
   });
   scheduler.run();
   ReportTasks.wait();
+  {
+    std::lock_guard<std::mutex> lock(FactoryPoolMutex);
+    FactoryPool.clear();
+  }
   if (!GSAFOptions::CollectGVFGData.empty())
     if (auto error = writeGraphStatistics(module, *GraphBuilder,
                                           GSAFOptions::CollectGVFGData))

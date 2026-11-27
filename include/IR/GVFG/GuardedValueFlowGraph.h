@@ -36,6 +36,10 @@
 #include <llvm/IR/Argument.h>
 #include <llvm/Pass.h>
 
+namespace llvm {
+class ModuleSlotTracker;
+} // namespace llvm
+
 namespace lotus {
 namespace gvfg {
 
@@ -105,6 +109,13 @@ public:
     raw->node_id_ = next_node_id_++;
     raw->object_id_ = next_object_id_++;
     nodes_.push_back(std::move(node));
+    if (raw->getKind() == GuardedValueFlowNode::Kind::CommonReturn) {
+      common_return_ = llvm::dyn_cast<GuardedValueFlowReturnNode>(raw);
+    } else if (raw->getKind() == GuardedValueFlowNode::Kind::CommonArgument) {
+      common_arguments_.push_back(raw);
+    } else if (raw->getKind() == GuardedValueFlowNode::Kind::VariableArgument) {
+      var_arguments_.push_back(raw);
+    }
     assignNodeRegion(raw);
     compat_caches_dirty_ = true;
     return raw;
@@ -163,6 +174,15 @@ public:
   GuardedValueFlowNode *findSemanticConditionNode(path_cond_t path_cond) const;
   void mapSemanticConditionNode(path_cond_t path_cond,
                                 GuardedValueFlowNode *node);
+  GuardedValueFlowRegionNode *findTranslatedPathCond(path_cond_t path_cond) const {
+    auto it = translated_path_conds_.find(path_cond);
+    return it == translated_path_conds_.end() ? nullptr : it->second;
+  }
+  void mapTranslatedPathCond(path_cond_t path_cond,
+                             GuardedValueFlowRegionNode *region) {
+    if (path_cond && region)
+      translated_path_conds_[path_cond] = region;
+  }
 
   void addBlockCondition(BasicBlock *block, BlockCondition condition);
   ArrayRef<BlockCondition> getBlockConditions(BasicBlock *block) const;
@@ -373,6 +393,10 @@ private:
   DenseMap<BasicBlock *, std::vector<BlockCondition>> block_conditions_;
   DenseMap<path_cond_t, GuardedValueFlowRegionNode *> semantic_regions_;
   DenseMap<path_cond_t, GuardedValueFlowNode *> semantic_condition_nodes_;
+  DenseMap<path_cond_t, GuardedValueFlowRegionNode *> translated_path_conds_;
+  GuardedValueFlowReturnNode *common_return_{nullptr};
+  std::vector<GuardedValueFlowNode *> common_arguments_;
+  std::vector<GuardedValueFlowNode *> var_arguments_;
   std::vector<GuardedValueFlowNode *> pseudo_arguments_;
   std::vector<GuardedValueFlowReturnNode *> pseudo_returns_;
   std::map<std::pair<unsigned, Value *>, GuardedValueFlowNode *>
@@ -438,7 +462,8 @@ public:
 private:
   DenseMap<const Function *, std::unique_ptr<GuardedValueFlowGraph>> graphs_;
 
-  std::unique_ptr<GuardedValueFlowGraph> buildGraph(Function &F);
+  std::unique_ptr<GuardedValueFlowGraph>
+  buildGraph(Function &F, llvm::ModuleSlotTracker &slot_tracker);
 };
 
 ModulePass *createGuardedValueFlowGraphBuilderPass();

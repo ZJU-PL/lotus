@@ -168,6 +168,8 @@ private:
   std::pair<SMTExprVec, SMTExprVec>
   _getPhiGated(const GuardedValueFlowPhiNode *phi_node,
                GuardedValueFlowPhiNode::Incoming incoming);
+  void collectDataDeps(const GuardedValueFlowNode *node, size_t depth,
+                       SMTExprVec &out);
   SMTExprVec _getDataDeps(const GuardedValueFlowNode *node, size_t depth = 0);
 };
 
@@ -179,6 +181,7 @@ private:
 
   std::unordered_map<BasicBlock *, std::pair<SMTExprVec, BasicBlock *>>
       CtrlCacheMap;
+  std::unordered_set<BasicBlock *> ActiveCtrlBlocks;
 
 public:
   DTGuardedValueFlowSolver(SMTFactory &factory, const DataLayout &dl,
@@ -211,6 +214,8 @@ private:
   _getPhiGated(const GuardedValueFlowPhiNode *phi_node,
                GuardedValueFlowPhiNode::Incoming incoming,
                BasicBlock *prev_block);
+  void collectDataDeps(const GuardedValueFlowNode *node, BasicBlock *prev_block,
+                       SMTExprVec &out);
   SMTExprVec _getDataDeps(const GuardedValueFlowNode *node,
                           BasicBlock *prev_block);
 };

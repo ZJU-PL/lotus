@@ -20,6 +20,7 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/ModuleSlotTracker.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/Support/Casting.h>
 #include <llvm/Support/FileSystem.h>
@@ -32,12 +33,14 @@ using namespace llvm;
 // Static cache for source file contents (guarded by a mutex for thread safety)
 std::map<std::string, std::vector<std::string>>
     DebugInfoAnalysis::sourceFileCache;
+static std::unordered_map<std::string, std::string> resolvedSourcePathCache;
 static std::mutex sourceFileCacheMutex;
 
 // Maximum cache size (number of files) to bound memory usage
 static constexpr size_t MAX_CACHE_FILES = 256;
 
 DebugInfoAnalysis::DebugInfoAnalysis() = default;
+DebugInfoAnalysis::~DebugInfoAnalysis() = default;
 
 //===----------------------------------------------------------------------===//
 // Helper Functions (inspired by Phasar)
@@ -276,18 +279,22 @@ std::string DebugInfoAnalysis::getSourceCodeStatement(const Instruction *I) {
     return "";
   }
 
-  // Try to find the actual file path
-  std::string actualPath = findSourceFile(filepath);
-  if (actualPath.empty()) {
-    actualPath = filepath; // Use original if not found
+  std::lock_guard<std::mutex> lock(sourceFileCacheMutex);
+
+  // Cache resolved paths (including negative "" misses) so missing source
+  // files do not repeatedly issue filesystem stat/access syscalls per step.
+  auto pathIt = resolvedSourcePathCache.find(filepath);
+  std::string actualPath;
+  if (pathIt != resolvedSourcePathCache.end()) {
+    actualPath = pathIt->second;
+  } else {
+    actualPath = findSourceFile(filepath);
+    resolvedSourcePathCache.emplace(filepath, actualPath);
   }
 
-  // Check if file exists and is not a directory
-  if (!sys::fs::exists(actualPath) || sys::fs::is_directory(actualPath)) {
+  if (actualPath.empty()) {
     return "";
   }
-
-  std::lock_guard<std::mutex> lock(sourceFileCacheMutex);
 
   // Check cache first
   auto it = sourceFileCache.find(actualPath);

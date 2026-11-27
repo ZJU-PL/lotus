@@ -46,5 +46,6 @@ target_link_libraries(LotusAA PUBLIC
   CanaryPlatform
   CanaryGSA
   CanaryParallel
+  ${Z3_LIBRARIES}
 )
 add_library(Lotus::LotusAA ALIAS LotusAA)

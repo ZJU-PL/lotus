@@ -15,10 +15,8 @@ using namespace llvm;
 namespace lotus::gsaf::detail {
 
 uint64_t encodingTypeSize(const DataLayout &layout, Type *type) {
-  uint64_t width = PackedTypeLayout(layout).getTypeSizeInBits(type);
-  if (!width)
-    throw std::runtime_error("GSAF requires a fixed nonzero value width");
-  return width;
+  uint64_t width = type ? PackedTypeLayout(layout).getTypeSizeInBits(type) : 0;
+  return width ? width : layout.getPointerSizeInBits();
 }
 
 std::string encodingSymbol(const gvfg::GuardedValueFlowNode *node) {

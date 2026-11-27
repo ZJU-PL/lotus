@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <llvm/IR/Constants.h>
@@ -81,6 +82,7 @@ private:
   std::unordered_map<Value *, std::pair<int64_t, int64_t>> gep_offs_cache;
 
   std::mutex gep_offs_cache_mtx;
+  std::unordered_set<const Value *> active_restore_expr_;
 
 public:
   IRExpressionRenderer(PackedTypeLayout &layout, DebugInfoAnalysis &debug);

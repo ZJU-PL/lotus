@@ -58,7 +58,8 @@ public:
       // now let's assume the taint will always be transferred to the result
       // operand of a binary operation there can be cases like x = y - y such
       // that x's value does not depend on y, which is tainted
-      TransferDsts.push_back(Graph->findNode(SiteInst));
+      if (auto *Dst = Graph->findNode(SiteInst))
+        TransferDsts.push_back(Dst);
       return;
     }
 
@@ -66,7 +67,8 @@ public:
     // for handling cases like pointer operations f = tainted -> field (f should
     // be tainted)
     if (isa<LoadInst>(SiteInst)) {
-      TransferDsts.push_back(Graph->findNode(SiteInst));
+      if (auto *Dst = Graph->findNode(SiteInst))
+        TransferDsts.push_back(Dst);
       return;
     }
 
@@ -80,7 +82,8 @@ public:
         (CS->getCalledFunction() == nullptr ||
          CS->getCalledFunction()->isDeclaration())) {
       // always transfer to ret
-      TransferDsts.push_back(Graph->findNode(SiteInst));
+      if (auto *Dst = Graph->findNode(SiteInst))
+        TransferDsts.push_back(Dst);
     }
 
     auto *GraphCS = Graph->findSite<GuardedValueFlowCallSite>(SiteInst);
@@ -99,8 +102,10 @@ public:
       case Intrinsic::memset:
       case Intrinsic::memmove:
       case Intrinsic::memcpy:
-        if (Arg == Graph->findNode(CS->getArgOperand(1))) {
-          TransferDsts.push_back(Graph->findNode(CS->getArgOperand(0)));
+        if (CS->arg_size() >= 2 &&
+            Arg == Graph->findNode(CS->getArgOperand(1))) {
+          if (auto *Dst = Graph->findNode(CS->getArgOperand(0)))
+            TransferDsts.push_back(Dst);
         }
       }
     }
@@ -118,6 +123,18 @@ public:
   virtual SiteType
   checkSite(const GuardedValueFlowSite *CurrSite,
             const VulnerabilityTraceBuilder &TraceHistory) override;
+  virtual bool
+  isPotentialSinkCallSite(const GuardedValueFlowCallSite *CS,
+                          const GuardedValueFlowNode *Node) const override {
+    Value *sValueCS = CS ? CS->getInstruction() : nullptr;
+    Value *sValueNode = Node ? Node->getLLVMValue() : nullptr;
+    return sValueCS && sValueNode && isSink(sValueCS, sValueNode);
+  }
+  virtual bool
+  isPotentialNonCallRelevantSite(const GuardedValueFlowSite *,
+                                 const GuardedValueFlowNode *) const override {
+    return false;
+  }
   virtual bool checkTrace(std::shared_ptr<VulnerabilityTrace> &Trace) override;
 
   virtual void getAnalysisUsage(AnalysisUsage &AU) override {
@@ -193,10 +210,58 @@ private:
 
 void TaintAnalysis::setSources(const GuardedValueFlowGraph *Graph,
                                std::vector<ValueSitePairType> &Sources) {
+  std::set<ValueSitePairType> SeenSources;
+  auto addSource = [&](const GuardedValueFlowNode *Node,
+                       const GuardedValueFlowSite *Site) {
+    if (!Node || !Site)
+      return;
+    ValueSitePairType Pair(Node, Site);
+    if (SeenSources.insert(Pair).second)
+      Sources.push_back(Pair);
+  };
+
+  auto collectCallSources = [&](const GuardedValueFlowCallSite *CS,
+                                Function *Callee) {
+    if (!CS || !Callee)
+      return;
+    if (TaintSpec->isFunctionRetAsSource(Callee)) {
+      if (auto *Output = CS->getCommonOutput())
+        addSource(Output, CS);
+    }
+    auto *TaintedArgs = TaintSpec->getTaintSourceArguments(Callee);
+    if (!TaintedArgs)
+      return;
+    for (int ArgIdx : *TaintedArgs) {
+      if (ArgIdx >= 0) {
+        if (static_cast<size_t>(ArgIdx) < CS->getCommonInputs().size()) {
+          addSource(CS->getCommonInput(ArgIdx), CS);
+        }
+      } else {
+        int AbsArgIdx = -ArgIdx;
+        for (int VarArgIdx = AbsArgIdx, End = CS->getCommonInputs().size();
+             VarArgIdx < End; VarArgIdx++) {
+          auto *TaintedPtr = CS->getCommonInput(VarArgIdx);
+          if (!TaintedPtr)
+            continue;
+          addSource(TaintedPtr, CS);
+          for (const GuardedValueFlowSite *UseSite : TaintedPtr->useSites()) {
+            Instruction *UseInst = UseSite ? UseSite->getInstruction() : nullptr;
+            if (UseInst && isa<LoadInst>(UseInst)) {
+              if (GuardedValueFlowNode *LoadTaintedPtr =
+                      Graph->findNode(UseInst)) {
+                addSource(LoadTaintedPtr, CS);
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+
   for (auto It = Graph->valueNodes().begin(), E = Graph->valueNodes().end();
        It != E; It++) {
     GuardedValueFlowNode *Node = It->second;
-    Value *sValue = Node->getLLVMValue();
+    Value *sValue = Node ? Node->getLLVMValue() : nullptr;
     if (!sValue)
       continue;
     GuardedValueFlowCallSite *CS = Graph->findSite<GuardedValueFlowCallSite>(
@@ -204,106 +269,20 @@ void TaintAnalysis::setSources(const GuardedValueFlowGraph *Graph,
     if (!CS)
       continue;
     Value *sValueCS = CS->getInstruction();
-    if (!sValueCS)
-      continue;
     if (!isa_and_nonnull<CallBase>(sValueCS))
       continue;
-    if ((calledFunction(sValueCS) != nullptr)) {
-      if (TaintSpec->isFunctionRetAsSource(calledFunction(sValueCS))) {
-        auto *Output = CS->getCommonOutput();
-        assert(Output);
-        Sources.push_back(
-            std::make_pair((const GuardedValueFlowNode *)Output, CS));
-      }
-      auto *TaintedArgs =
-          TaintSpec->getTaintSourceArguments(calledFunction(sValueCS));
-      if (!TaintedArgs)
-        continue;
-      for (auto It = TaintedArgs->begin(), End = TaintedArgs->end(); It != End;
-           ++It) {
-        int ArgIdx = *It;
-        if (ArgIdx >= 0) {
-          auto *TaintedArg = CS->getCommonInput(ArgIdx);
-          Sources.push_back(std::make_pair(TaintedArg, CS));
-        } else {
-          int AbsArgIdx = -ArgIdx;
-          for (int VarArgIdx = AbsArgIdx, End = CS->getCommonInputs().size();
-               VarArgIdx < End; VarArgIdx++) {
-            auto *TaintedPtr = CS->getCommonInput(VarArgIdx);
-            Sources.push_back(std::make_pair(TaintedPtr, CS));
-            for (auto UIt = TaintedPtr->useSites().begin(),
-                      UEnd = TaintedPtr->useSites().end();
-                 UIt != UEnd; UIt++) {
-              const GuardedValueFlowSite *UseSite = *UIt;
-              Value *sValueUS = UseSite->getInstruction();
-              if (sValueUS && isa_and_nonnull<LoadInst>(sValueUS)) {
-                GuardedValueFlowNode *LoadTaintedPtr =
-                    Graph->findNode(UseSite->getInstruction());
-                assert(isOperand(LoadTaintedPtr));
-                Sources.push_back(std::make_pair(
-                    (const GuardedValueFlowNode *)LoadTaintedPtr, CS));
-              }
-            }
-          }
-        }
-      }
-    }
+    collectCallSources(CS, calledFunction(sValueCS));
   }
 
   Function *BaseFunc = Graph->getBaseFunc();
   for (auto &B : *BaseFunc) {
     for (auto &I : B) {
       auto *CS = dyn_cast<CallBase>(&I);
-      if (!CS) {
+      if (!CS)
         continue;
-      }
-
       if (Function *Callee = CS->getCalledFunction()) {
-        const auto *GraphCS = Graph->findSite<GuardedValueFlowCallSite>(&I);
-        if (!GraphCS)
-          continue;
-
-        if (TaintSpec->isFunctionRetAsSource(Callee)) {
-          auto *Output = GraphCS->getCommonOutput();
-          assert(Output);
-          Sources.push_back(
-              std::make_pair((const GuardedValueFlowNode *)Output, GraphCS));
-        }
-
-        auto *TaintedArgs = TaintSpec->getTaintSourceArguments(Callee);
-        if (!TaintedArgs)
-          continue;
-        for (auto It = TaintedArgs->begin(), End = TaintedArgs->end();
-             It != End; ++It) {
-          int ArgIdx = *It;
-          if (ArgIdx >= 0) {
-            auto *TaintedArg = GraphCS->getCommonInput(ArgIdx);
-            Sources.push_back(std::make_pair(TaintedArg, GraphCS));
-          } else {
-            int AbsArgIdx = -ArgIdx;
-            for (int VarArgIdx = AbsArgIdx,
-                     End = GraphCS->getCommonInputs().size();
-                 VarArgIdx < End; VarArgIdx++) {
-              auto *TaintedPtr = GraphCS->getCommonInput(VarArgIdx);
-              Sources.push_back(std::make_pair(TaintedPtr, GraphCS));
-
-              // FIXME
-              for (auto UIt = TaintedPtr->useSites().begin(),
-                        UEnd = TaintedPtr->useSites().end();
-                   UIt != UEnd; UIt++) {
-                const GuardedValueFlowSite *UseSite = *UIt;
-                if (UseSite->getInstruction()->getOpcode() ==
-                    Instruction::Load) {
-                  GuardedValueFlowNode *LoadTaintedPtr =
-                      Graph->findNode(UseSite->getInstruction());
-                  assert(isOperand(LoadTaintedPtr));
-                  Sources.push_back(std::make_pair(
-                      (const GuardedValueFlowNode *)LoadTaintedPtr, GraphCS));
-                }
-              }
-            }
-          }
-        }
+        if (const auto *GraphCS = Graph->findSite<GuardedValueFlowCallSite>(&I))
+          collectCallSources(GraphCS, Callee);
       }
     }
   }
@@ -367,29 +346,35 @@ bool TaintAnalysis::checkTrace(std::shared_ptr<VulnerabilityTrace> &Trace) {
     return true;
   }
 
+  if (!Trace || Trace->get_length() < 2) {
+    return true;
+  }
+
   auto *SrcNode = Trace->at(0);
   auto *SrcSite = Trace->at(1);
-  assert(SrcNode);
-  assert(SrcSite);
-  assert(isOperand(SrcNode));
-  assert(isa<GuardedValueFlowSite>(SrcSite));
+  if (!SrcNode || !SrcSite) {
+    return true;
+  }
 
   std::shared_ptr<VulnerabilityTrace> StartSubTrace =
       std::make_shared<VulnerabilityTrace>();
   StartSubTrace->push(SrcNode);
   StartSubTrace->push(SrcSite);
 
-  if (Trace->at(2) != SrcNode && !Trace->at(3) &&
-      isa<GuardedValueFlowArgumentNode>(Trace->at(2))) {
+  if (Trace->get_length() > 3 && Trace->at(2) != SrcNode && !Trace->at(3) &&
+      isa_and_nonnull<GuardedValueFlowArgumentNode>(Trace->at(2))) {
     // Find the taint wrapper
     std::stack<Function *> FrameStack;
     size_t I = 2;
     for (size_t E = Trace->get_length(); I < E; ++I) {
       auto *Obj = Trace->at(I);
       if (Obj) {
-        if (isa<GuardedValueFlowArgumentNode>(Obj) && !Trace->at(I + 1)) {
+        if (isa<GuardedValueFlowArgumentNode>(Obj) && I + 1 < E &&
+            !Trace->at(I + 1)) {
           FrameStack.push(Obj->getGraph()->getBaseFunc());
         } else if (isa<GuardedValueFlowReturnSite>(Obj)) {
+          if (FrameStack.empty())
+            break;
           FrameStack.pop();
 
           if (FrameStack.empty()) {
@@ -397,7 +382,8 @@ bool TaintAnalysis::checkTrace(std::shared_ptr<VulnerabilityTrace> &Trace) {
           }
         }
 
-        if (Obj->getGraph()->getBaseFunc() != FrameStack.top()) {
+        if (FrameStack.empty() ||
+            Obj->getGraph()->getBaseFunc() != FrameStack.top()) {
           break;
         }
 
@@ -407,7 +393,7 @@ bool TaintAnalysis::checkTrace(std::shared_ptr<VulnerabilityTrace> &Trace) {
       }
     }
 
-    if (FrameStack.empty()) {
+    if (FrameStack.empty() || StartSubTrace->get_length() < 2) {
       StartSubTrace->clear();
       StartSubTrace->push(SrcNode);
       StartSubTrace->push(SrcSite);
@@ -418,6 +404,8 @@ bool TaintAnalysis::checkTrace(std::shared_ptr<VulnerabilityTrace> &Trace) {
                                 const GuardedValueFlowObject *Site) {
     Function *CalledFunction = nullptr;
     int Index = -1;
+    if (!Node || !Site)
+      return std::make_pair(CalledFunction, Index);
     if (auto *CS = dyn_cast<GuardedValueFlowCallSite>(Site)) {
       CalledFunction = CS->getCalledFunction();
       for (size_t I = 0; I < CS->getCommonInputs().size(); ++I) {

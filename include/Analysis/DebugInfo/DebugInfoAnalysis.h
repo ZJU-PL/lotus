@@ -5,6 +5,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -14,6 +15,8 @@ namespace llvm {
     class Instruction;
     class Value;
     class Function;
+    class Module;
+    class ModuleSlotTracker;
     class MDNode;
     class PHINode;
     class Type;
@@ -22,7 +25,7 @@ namespace llvm {
 class DebugInfoAnalysis {
 public:
     DebugInfoAnalysis();
-    ~DebugInfoAnalysis() = default;
+    ~DebugInfoAnalysis();
 
     // Get source location information (file:line:col)
     std::string getSourceLocation(const llvm::Instruction *I);
@@ -82,6 +85,9 @@ private:
     std::unordered_map<const llvm::Value*, std::string> varNameCache;
     std::map<std::pair<llvm::Type *, int64_t>, std::string> fieldNameCache;
     std::map<std::string, std::vector<std::string>> compositeFieldNames;
+    std::unordered_map<const llvm::Module *,
+                       std::unique_ptr<llvm::ModuleSlotTracker>>
+        moduleSlotTrackers;
     uint64_t pointerWidth = 64;
     void collectTypeMetadata(const llvm::Function *F);
 

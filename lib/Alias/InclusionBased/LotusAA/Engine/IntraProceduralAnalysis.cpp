@@ -114,6 +114,7 @@ bool IntraLotusAAConfig::lotus_use_full_phi_cond = false;
 bool IntraLotusAAConfig::lotus_enable_score_computation = false;
 bool IntraLotusAAConfig::lotus_enable_summary_value = false;
 bool IntraLotusAAConfig::lotus_enable_must_kill = true;
+bool IntraLotusAAConfig::lotus_enable_pathcond_smt = false;
 int IntraLotusAAConfig::lotus_restrict_output_pts = 10;
 int IntraLotusAAConfig::lotus_memory_max_passing_func = 50;
 int IntraLotusAAConfig::lotus_restrict_right_value_count = 100;
@@ -175,6 +176,13 @@ static cl::opt<bool> lotus_enable_must_kill_cl(
     cl::desc("Use Tuna-style must-kill forests for load-store matching"),
     cl::init(true), cl::Hidden);
 
+static cl::opt<bool> lotus_enable_pathcond_smt_cl(
+    "lotus-enable-pathcond-smt", cl::sub(*cl::AllSubCommands),
+    cl::desc("Use Z3 SAT fallback in LotusAA when ROBDD/BCP path-condition "
+             "reasoning is inconclusive (when false, soundly over-approximates "
+             "and defers exact solving to demand-driven GVFG/GSAF queries)"),
+    cl::init(false), cl::Hidden);
+
 static cl::opt<int> lotus_restrict_output_pts_cl(
     "lotus-restrict-output-pts",
     cl::desc("Restrict pseudo output points-to entries"), cl::init(10),
@@ -219,6 +227,8 @@ void IntraLotusAAConfig::setParam() {
     lotus_enable_summary_value = lotus_enable_summary_value_cl;
   if (lotus_enable_must_kill_cl.getNumOccurrences() > 0)
     lotus_enable_must_kill = lotus_enable_must_kill_cl;
+  if (lotus_enable_pathcond_smt_cl.getNumOccurrences() > 0)
+    lotus_enable_pathcond_smt = lotus_enable_pathcond_smt_cl;
   if (lotus_restrict_output_pts_cl.getNumOccurrences() > 0)
     lotus_restrict_output_pts = lotus_restrict_output_pts_cl;
   if (lotus_memory_max_passing_func_cl.getNumOccurrences() > 0)
@@ -326,6 +336,7 @@ void IntraLotusAA::computePTA() {
           processBasePointer(load->getPointerOperand());
           collectPathSensitiveLoadValues(load, tmp, true);
         }
+        indexLoadForStrongUpdates(load);
         break;
       }
 
@@ -352,7 +363,8 @@ void IntraLotusAA::computePTA() {
 
       case Instruction::BitCast:
       case Instruction::GetElementPtr:
-        processBasePointer(&inst);
+        if (inst.getType()->isPtrOrPtrVectorTy())
+          processBasePointer(&inst);
         break;
       }
     }
