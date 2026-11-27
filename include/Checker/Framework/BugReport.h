@@ -86,8 +86,12 @@ struct BugDiagStep {
   // Node ID: identifier for the CFG node (if available)
   int node_id = -1;
   uint64_t binary_addr = 0;
+  bool details_populated = false;
 
-  // Fill source and IR metadata through the shared debug-info analysis.
+  // Fill only source file/line/column for fast duplicate detection.
+  void populateLocationOnly(DebugInfoAnalysis &debugInfo);
+
+  // Fill full source, variable, type, and IR metadata through DebugInfoAnalysis.
   void populateDebugInfo(DebugInfoAnalysis &debugInfo);
 };
 
@@ -131,7 +135,11 @@ public:
   // This is the primary method - all checkers should use this
   void append_step(llvm::Value *inst, const std::string &tip,
                    int trace_level = 0, const std::vector<NodeTag> &tags = {},
-                   const std::string &access = "");
+                   const std::string &access = "", bool defer_details = false);
+
+  // Ensure deferred step debug metadata (IR string, source line text, names)
+  // has been populated. Safe and idempotent to call multiple times.
+  void ensureDetailsPopulated();
 
   // Get the bug type ID
   int get_bug_type_id() const { return bug_type_id; }

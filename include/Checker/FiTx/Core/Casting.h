@@ -6,7 +6,7 @@
 
 namespace fitx {
 template <class X, class Y> bool shared_isa(std::shared_ptr<Y> value) {
-  return llvm::isa<X>(*value);
+  return value && llvm::isa<X>(*value);
 }
 
 template <class X, class Y>

@@ -7,7 +7,7 @@
 
 namespace fitx {
 namespace CommandLineArgs {
-llvm::cl::opt<bool> ReportAllCandidates(
+inline llvm::cl::opt<bool> ReportAllCandidates(
     "fitx.report-all-candidates", llvm::cl::desc("Report all possible errors"),
     llvm::cl::sub(lotus::checker::tooling::fitxSubCommand()));
 } // namespace CommandLineArgs

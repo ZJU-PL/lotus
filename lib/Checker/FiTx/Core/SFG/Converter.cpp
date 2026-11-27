@@ -1,5 +1,7 @@
 #include "Checker/FiTx/Core/SFG/Converter.h"
 
+#include "llvm/ADT/Hashing.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -33,7 +35,10 @@ Converter::GetSignitureFromDefinition(llvm::Value *value) {
         return signature.fields.empty() ? new_fields : signature.fields;
       };
 
+  llvm::SmallPtrSet<llvm::Value *, 16> visited;
   while (auto *inst = llvm::dyn_cast<llvm::Instruction>(signature.value)) {
+    if (!visited.insert(inst).second)
+      break;
     switch (inst->getOpcode()) {
     case llvm::Instruction::Store:
       signature.value = llvm::cast<llvm::StoreInst>(inst)->getPointerOperand();
@@ -138,6 +143,8 @@ Converter::GetSignitureFromDefinition(llvm::Value *value) {
           }
         }
       }
+      finish_update = true;
+      break;
     }
     case llvm::Instruction::Call:
       /* break; */
@@ -155,28 +162,40 @@ Converter::GetSignitureFromDefinition(llvm::Value *value) {
   }
 
   if (auto *constant_expr =
-          llvm::dyn_cast<llvm::ConstantExpr>(signature.value)) {
-    if (auto *global_var = llvm::dyn_cast<llvm::GlobalVariable>(
-            constant_expr->getOperand(0))) {
-      signature.value = global_var;
+          llvm::dyn_cast_or_null<llvm::ConstantExpr>(signature.value)) {
+    if (constant_expr->getNumOperands() > 0) {
+      if (auto *global_var = llvm::dyn_cast<llvm::GlobalVariable>(
+              constant_expr->getOperand(0))) {
+        signature.value = global_var;
+      }
     }
   }
 
-  signature.fields = UpdateFields(
-      std::vector<Value::Fields>({Value::Fields(value->getType())}));
+  if (value) {
+    signature.fields = UpdateFields(
+        std::vector<Value::Fields>({Value::Fields(value->getType())}));
+  }
 
   return signature;
 }
 
 std::shared_ptr<fitx::Value> Converter::Convert(llvm::Value *llvm_value) {
+  auto cached = convert_cache_.find(llvm_value);
+  if (cached != convert_cache_.end())
+    return cached->second;
+
   auto signature = GetSignitureFromDefinition(llvm_value);
+  std::shared_ptr<fitx::Value> result;
   if (llvm::isa<llvm::Instruction>(signature.value))
-    return ConvertInstruction(signature);
-  return ConvertValue(signature);
+    result = ConvertInstruction(signature);
+  else
+    result = ConvertValue(signature);
+  convert_cache_[llvm_value] = result;
+  return result;
 }
 
 std::shared_ptr<fitx::Instruction>
-Converter::ConvertInstruction(ValueSignature signature) {
+Converter::ConvertInstruction(const ValueSignature &signature) {
   auto *llvm_instruction = llvm::cast<llvm::Instruction>(signature.value);
 
   if (auto managed_instruction =
@@ -196,7 +215,7 @@ Converter::ConvertInstruction(ValueSignature signature) {
 }
 
 std::shared_ptr<fitx::Value>
-Converter::ConvertValue(ValueSignature signature) {
+Converter::ConvertValue(const ValueSignature &signature) {
   /* add to signiture list */
   if (auto managed_value = getManagedValue(signature))
     return managed_value;
@@ -225,35 +244,50 @@ Converter::ConvertValue(ValueSignature signature) {
   return value;
 }
 
+uint64_t Converter::hashSignature(
+    llvm::Value *value, long array_element_num,
+    const std::vector<fitx::Value::Fields> &fields) {
+  llvm::hash_code hc =
+      llvm::hash_combine(value, array_element_num, fields.size());
+  for (const auto &f : fields) {
+    hc = llvm::hash_combine(hc, f.type, f.field);
+  }
+  uint64_t h = static_cast<uint64_t>(static_cast<size_t>(hc));
+  // Avoid llvm::DenseMapInfo<uint64_t> empty (~0ULL) and tombstone (~0ULL - 1).
+  if (h >= ~1ULL)
+    h ^= 0x5555555555555555ULL;
+  return h;
+}
+
 void Converter::manageValue(llvm::Value *value,
                             std::shared_ptr<fitx::Value> framework_value) {
   ManagedValues::GetInstance().addValue(framework_value);
-  managed_values_[value].push_back(framework_value);
+  const uint64_t h = hashSignature(value, framework_value->ArrayElementNum(),
+                                   framework_value->GetFields());
+  managed_values_[h].push_back(std::move(framework_value));
 }
 
 std::shared_ptr<fitx::Value>
 Converter::getManagedValue(llvm::Value *value, long array_element_num,
-                           std::vector<fitx::Value::Fields> fields) {
-  return getManagedValue(ValueSignature{value, array_element_num, fields});
+                           const std::vector<fitx::Value::Fields> &fields) {
+  const uint64_t h = hashSignature(value, array_element_num, fields);
+  auto managed = managed_values_.find(h);
+  if (managed == managed_values_.end())
+    return std::shared_ptr<fitx::Value>();
+  for (const std::shared_ptr<fitx::Value> &candidate : managed->second) {
+    if (candidate->rawLLVMValue() == value &&
+        candidate->ArrayElementNum() == array_element_num &&
+        candidate->GetFields() == fields) {
+      return candidate;
+    }
+  }
+  return std::shared_ptr<fitx::Value>();
 }
 
 std::shared_ptr<fitx::Value>
-Converter::getManagedValue(ValueSignature signature) {
-  auto managed = managed_values_.find(signature.value);
-  if (managed != managed_values_.end()) {
-    auto &values = managed->second;
-    auto found_value = std::find_if(
-        values.begin(), values.end(),
-        [&signature](std::shared_ptr<fitx::Value> value) {
-          return &value->getLLVMValue_() == signature.value &&
-                 value->ArrayElementNum() == signature.array_element_num &&
-                 value->GetFields() == signature.fields;
-        });
-    if (found_value != values.end())
-      return *found_value;
-  }
-
-  return std::shared_ptr<fitx::Value>();
+Converter::getManagedValue(const ValueSignature &signature) {
+  return getManagedValue(signature.value, signature.array_element_num,
+                         signature.fields);
 }
 
 } // namespace fitx

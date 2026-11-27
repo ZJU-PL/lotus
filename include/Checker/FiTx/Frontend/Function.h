@@ -1,59 +1,20 @@
 /// \file Function.h
 /// \brief FiTx per-function analysis state: per-block info, return-code
 /// mapping, value collection, and alias (paper §4.2, 4.3).
-///
-/// FunctionInformation is created when a function is first analyzed; it holds
-/// basic_block_info_ (per-block typestate and alias), return_info_ (return
-/// code -> blocks for return-code aware propagation), and value_collection_
-/// (all values in the function for getRelatedValues).
 #pragma once
-#include "llvm/ADT/APFloat.h"
-#include "llvm/Analysis/LoopInfo.h"
-#include "llvm/IR/Argument.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/CFG.h"
-#include "llvm/IR/Constant.h"
-#include "llvm/IR/DataLayout.h"
-#include "llvm/IR/DebugInfoMetadata.h"
-#include "llvm/IR/DebugLoc.h"
-#include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/Instruction.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/IR/Value.h"
-#include "llvm/IR/ValueSymbolTable.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
-
-// include STL
 #include "Checker/FiTx/Core/BasicBlock.h"
 #include "Checker/FiTx/Core/Function.h"
 #include "Checker/FiTx/Frontend/BasicBlock.h"
 
-#include <algorithm>
-#include <ctime>
-#include <iostream>
-#include <iterator>
 #include <map>
-#include <queue>
+#include <memory>
 #include <set>
-#include <stack>
-#include <string>
 #include <vector>
 
 #define NO_ERROR 0
 
 namespace fitx {
 
-/// Per-function analysis summary: per-block state, return_info_ (return code ->
-/// blocks), value_collection_, and alias_info_. Built during analyzeFunction();
-/// used for merge and call-site summary application (paper §4.3).
 class FunctionInformation {
 public:
   using WeakBasicBlockSet =
@@ -61,7 +22,6 @@ public:
                std::owner_less<std::weak_ptr<fitx::BasicBlock>>>;
 
   enum AnalysisStat { UNANALYZED, IN_PROGRESS, DIRTY, ANALYZED };
-  /// Linux convention: negative = error, 0 = success (paper §4.3).
   static constexpr int kErrorCode = -1;
   static constexpr int kSuccessCode = 0;
 
@@ -71,8 +31,7 @@ public:
                       AnalysisStat stat = AnalysisStat::UNANALYZED);
   void setAnalysisStat(AnalysisStat stat);
 
-  void
-  setAnayzingBasicBlock(std::shared_ptr<fitx::BasicBlock> basic_block);
+  void setAnayzingBasicBlock(std::shared_ptr<fitx::BasicBlock> basic_block);
 
   std::shared_ptr<fitx::BasicBlock> currentBasicBlock() {
     return current_basicblock_;
@@ -95,8 +54,7 @@ public:
   const ValueCollection &GetValueCollection() { return value_collection_; }
 
   bool basicBlockInfoExists(std::shared_ptr<fitx::BasicBlock> basic_block);
-  bool
-  basicBlockPrevInfoExists(std::shared_ptr<fitx::BasicBlock> basic_block);
+  bool basicBlockPrevInfoExists(std::shared_ptr<fitx::BasicBlock> basic_block);
 
   AnalysisStat Stat() { return stat_; }
 
@@ -110,24 +68,22 @@ public:
 
   const std::map<int64_t, WeakBasicBlockSet> &getReturnValueInfo() {
     return return_info_;
-  };
-
-  std::shared_ptr<fitx::Function> Function() {
-    return framework_function_;
   }
+
+  std::shared_ptr<fitx::Function> Function() { return framework_function_; }
 
   AliasValues &getAliasValues() { return alias_info_; }
 
   bool existsInRefcountFunctions(std::shared_ptr<fitx::Function> function);
   void addRefcountFunction(std::shared_ptr<fitx::Function> function);
 
-private:
-  struct BasicBlockInformationSet {
-    std::shared_ptr<BasicBlockInformation> prev_info;
-    std::shared_ptr<BasicBlockInformation> current_info;
-  };
+  /// Release per-block intra-procedural state once function analysis completes.
+  /// When `keep_summary` is true, keeps only the `arg_value_states_` on blocks
+  /// referenced in `return_info_` (plus `value_collection_`) for caller
+  /// summaries; otherwise releases all per-function state.
+  void releaseAnalysisMemory(bool keep_summary);
 
-  // Found call inst as return value
+private:
   std::shared_ptr<fitx::Function> framework_function_;
   AnalysisStat stat_;
 

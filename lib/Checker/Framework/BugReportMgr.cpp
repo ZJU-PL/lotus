@@ -177,6 +177,7 @@ bool BugReportMgr::insert_report(int ty_id, BugReport *report,
     return false;
   }
 
+  report->ensureDetailsPopulated();
   reports[ty_id].push_back(report);
 
   for (const BugDiagStep *step : report->get_steps()) {

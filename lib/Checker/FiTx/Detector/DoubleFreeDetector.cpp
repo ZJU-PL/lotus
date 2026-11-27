@@ -13,8 +13,9 @@ class OneshotCallConstraint : public fitx::StatefulConstraint {
   bool shouldPropagateOnCallInst(
       std::shared_ptr<fitx::CallInst> inst) override {
     std::shared_ptr<fitx::Function> called_func = inst->CalledFunction();
+    auto parent_bb = inst->Parent().lock();
     std::shared_ptr<fitx::Function> parent =
-        inst->Parent().lock()->Parent().lock();
+        parent_bb ? parent_bb->Parent().lock() : nullptr;
     if (!called_func || !parent) return true;
 
     // If "put"  is in the function name, it is most-likely reference counted
@@ -23,35 +24,8 @@ class OneshotCallConstraint : public fitx::StatefulConstraint {
       return false;
     }
 
-    if (visited_funcs_.find(parent) == visited_funcs_.end()) {
-      visited_funcs_[parent] =
-          std::map<std::shared_ptr<fitx::Function>,
-                   std::vector<std::shared_ptr<fitx::CallInst>>>();
-    }
-
-    if (visited_funcs_[parent].find(called_func) ==
-        visited_funcs_[parent].end()) {
-      visited_funcs_[parent][called_func] =
-          std::vector<std::shared_ptr<fitx::CallInst>>();
-    }
-
-    const auto& visited_insts = visited_funcs_[parent][called_func];
-    if (std::find_if(visited_insts.begin(), visited_insts.end(),
-                     [inst](auto stored) {
-                       return stored == inst;
-                     }) != visited_insts.end()) {
-      return false;
-    }
-
-    visited_funcs_[parent][called_func].push_back(inst);
     return true;
   }
-
- private:
-  std::map<std::shared_ptr<fitx::Function>,
-           std::map<std::shared_ptr<fitx::Function>,
-                    std::vector<std::shared_ptr<fitx::CallInst>>>>
-      visited_funcs_;
 };
 
 /// Define typestate FSM: init, free, DF (bug). Register transitions: call kfree

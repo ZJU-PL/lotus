@@ -117,9 +117,12 @@ BranchInst::Create(llvm::SwitchInst *switch_inst,
             auto function = fitx::Function::createManagedFunction(
                 switch_inst->getFunction());
             for (const auto &branch_case : switch_inst->cases()) {
+              const auto *case_val = branch_case.getCaseValue();
+              int64_t val = (case_val && case_val->getBitWidth() <= 64)
+                                ? case_val->getSExtValue()
+                                : 0;
               created->setTransitionNode(
-                  branch_case.getCaseValue()->getSExtValue(),
-                  function->getBasicBlock(branch_case.getCaseSuccessor()));
+                  val, function->getBasicBlock(branch_case.getCaseSuccessor()));
             }
             created->setTransitionNode(
                 BranchInst::kTrueTransition,
@@ -149,23 +152,15 @@ BranchInst::Create(llvm::BranchInst *branch_inst,
               std::shared_ptr<fitx::CompareInst> compare_inst =
                   fitx::CompareInst::Create(icmp_inst);
 
-              /* optional: unwrap __builtin_expect to get inner comparison */
-              /*     compare_inst->find_if( */
-              /*         [](const std::shared_ptr<fitx::Value>& value) { */
-              /*           auto call_inst = */
-              /*               shared_dyn_cast<fitx::CallInst>(value); */
-              /*           return call_inst && call_inst->CalledFunction() && */
-              /*                  fitx::Function::IsExpectFunction( */
-              /*                      call_inst->CalledFunction()); */
-              /*         }); */
-
-              llvm::Value *val = nullptr;
+              const llvm::Value *val = nullptr;
               for (const auto &operand : compare_inst->Operands()) {
                 auto call_inst = shared_dyn_cast<fitx::CallInst>(operand);
                 if (call_inst && call_inst->CalledFunction() &&
                     fitx::Function::IsExpectFunction(
-                        call_inst->CalledFunction())) {
-                  val = &call_inst->Arguments().front()->getLLVMValue_();
+                        call_inst->CalledFunction()) &&
+                    !call_inst->Arguments().empty() &&
+                    call_inst->Arguments().front()) {
+                  val = call_inst->Arguments().front()->rawLLVMValue();
                   break;
                 }
               }
@@ -173,9 +168,10 @@ BranchInst::Create(llvm::BranchInst *branch_inst,
               // Unwrap unary/binary ops (e.g. from __builtin_expect) to get the
               // real ICmp.
               while (val && !llvm::isa<llvm::ICmpInst>(val)) {
-                if (auto *new_val = llvm::dyn_cast<llvm::UnaryInstruction>(val))
+                if (const auto *new_val =
+                        llvm::dyn_cast<llvm::UnaryInstruction>(val))
                   val = new_val->getOperand(0);
-                else if (auto *new_val =
+                else if (const auto *new_val =
                              llvm::dyn_cast<llvm::BinaryOperator>(val))
                   val = new_val->getOperand(0);
                 else
@@ -184,7 +180,7 @@ BranchInst::Create(llvm::BranchInst *branch_inst,
 
               if (val)
                 compare_inst = fitx::CompareInst::Create(
-                    llvm::cast<llvm::ICmpInst>(val));
+                    llvm::cast<llvm::ICmpInst>(const_cast<llvm::Value *>(val)));
 
               created->setCondition(compare_inst);
             } else if (auto *call_inst =

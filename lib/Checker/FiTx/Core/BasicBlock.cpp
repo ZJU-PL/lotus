@@ -7,9 +7,11 @@
 
 namespace fitx {
 BasicBlock::BasicBlock(llvm::BasicBlock *basic_block)
-    : id_(kNoId), llvm_basic_block_(basic_block), line_(0) {
+    : id_(kNoId), llvm_basic_block_(basic_block), line_(0),
+      is_cleanup_block_(false) {
   name_ = basic_block->getName().str();
-  line_ = getLine(basic_block->getFirstNonPHIOrDbgOrLifetime());
+  if (llvm::Instruction *first = basic_block->getFirstNonPHIOrDbgOrLifetime())
+    line_ = getLine(first);
   parent_ =
       fitx::Function::createManagedFunction(basic_block->getParent());
 }
@@ -30,7 +32,8 @@ bool operator<(const std::weak_ptr<fitx::BasicBlock> source_block,
                const std::weak_ptr<fitx::BasicBlock> target_block) {
   auto source = source_block.lock();
   auto target = target_block.lock();
-
+  if (!source || !target)
+    return source_block.owner_before(target_block);
   return source->llvm_basic_block_ < target->llvm_basic_block_;
 }
 
@@ -82,7 +85,7 @@ bool BasicBlock::collectPassthroughBlock() {
 
       auto *compared_value =
           llvm::dyn_cast<llvm::ConstantInt>(icmp_inst->getOperand(1));
-      if (!compared_value)
+      if (!compared_value || compared_value->getBitWidth() > 64)
         return false;
 
       if (auto *phi_node =
@@ -90,7 +93,7 @@ bool BasicBlock::collectPassthroughBlock() {
         for (size_t i = 0; i < phi_node->getNumIncomingValues(); i++) {
           auto *const_int =
               llvm::dyn_cast<llvm::ConstantInt>(phi_node->getIncomingValue(i));
-          if (!const_int)
+          if (!const_int || const_int->getBitWidth() > 64)
             return false;
 
           long block_idx = match_block_index;
@@ -103,13 +106,10 @@ bool BasicBlock::collectPassthroughBlock() {
             auto succ_block =
                 function->getBasicBlock(branch_inst->getSuccessor(block_idx));
 
-            if (succ_to_preds.find(succ_block) == succ_to_preds.end())
-              succ_to_preds[succ_block] =
-                  std::vector<std::weak_ptr<fitx::BasicBlock>>();
             succ_to_preds[succ_block].push_back(pred_block);
           }
         }
-        pass_through_ = succ_to_preds;
+        pass_through_ = std::move(succ_to_preds);
         return true;
       }
     }
@@ -129,14 +129,10 @@ bool BasicBlock::collectPassthroughBlock() {
               function->getBasicBlock(case_value->getCaseSuccessor());
           auto pred_block =
               function->getBasicBlock(phi_node->getIncomingBlock(i));
-          if (succ_to_preds.find(succ_block) == succ_to_preds.end())
-            succ_to_preds[succ_block] =
-                std::vector<std::weak_ptr<fitx::BasicBlock>>();
-
           succ_to_preds[succ_block].push_back(pred_block);
         }
       }
-      pass_through_ = succ_to_preds;
+      pass_through_ = std::move(succ_to_preds);
       return true;
     } else if (auto *load_inst = llvm::dyn_cast<llvm::LoadInst>(
                    switch_inst->getCondition())) {
@@ -161,37 +157,28 @@ bool BasicBlock::collectPassthroughBlock() {
             auto succ_block =
                 function->getBasicBlock(case_value->getCaseSuccessor());
             auto pred_block = function->getBasicBlock(store_inst->getParent());
-            if (succ_to_preds.find(succ_block) == succ_to_preds.end())
-              succ_to_preds[succ_block] =
-                  std::vector<std::weak_ptr<fitx::BasicBlock>>();
-
             succ_to_preds[succ_block].push_back(pred_block);
           }
         }
       }
-      pass_through_ = succ_to_preds;
+      pass_through_ = std::move(succ_to_preds);
       return true;
     }
   }
   return false;
 }
 
-const std::vector<std::weak_ptr<fitx::BasicBlock>>
+const std::vector<std::weak_ptr<fitx::BasicBlock>> &
 BasicBlock::getPassthroughBlock(
     std::weak_ptr<fitx::BasicBlock> succ_block) {
+  static const std::vector<std::weak_ptr<fitx::BasicBlock>> kEmpty;
   auto prev_block = pass_through_.find(succ_block);
   if (prev_block != pass_through_.end())
     return prev_block->second;
-  return std::vector<std::weak_ptr<fitx::BasicBlock>>();
+  return kEmpty;
 }
 
 void BasicBlock::addDeadValue(std::shared_ptr<fitx::Value> value) {
   dead_values_.insert(value);
-}
-
-const std::set<std::shared_ptr<fitx::Value>>
-BasicBlock::DeadValues() const {
-  return std::set<std::shared_ptr<fitx::Value>>(dead_values_.begin(),
-                                                     dead_values_.end());
 }
 } // namespace fitx

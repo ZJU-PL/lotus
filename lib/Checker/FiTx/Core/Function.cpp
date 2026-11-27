@@ -7,17 +7,22 @@
 #include "Checker/FiTx/Core/Instructions.h"
 #include "Checker/FiTx/Core/Utils.h"
 
+#include <deque>
+
 namespace fitx {
 std::shared_ptr<fitx::Function>
 Function::createManagedFunction(llvm::Function *function,
                                 std::unique_ptr<llvm::LoopInfo> loop_info) {
-  if (created_functions_.find(function) == created_functions_.end())
-    created_functions_[function] =
-        std::make_shared<fitx::Function>(function, std::move(loop_info));
+  auto it = created_functions_.find(function);
+  if (it == created_functions_.end()) {
+    auto fn = std::make_shared<fitx::Function>(function, std::move(loop_info));
+    created_functions_[function] = fn;
+    return fn;
+  }
 
-  if (!created_functions_[function]->hasLoopInfo() && loop_info)
-    created_functions_[function]->setLoopInfo(std::move(loop_info));
-  return created_functions_[function];
+  if (!it->second->hasLoopInfo() && loop_info)
+    it->second->setLoopInfo(std::move(loop_info));
+  return it->second;
 }
 
 bool Function::IsDebugValueFunction(
@@ -61,52 +66,69 @@ Function::Function(llvm::Function *function,
 
 std::shared_ptr<fitx::BasicBlock>
 Function::getBasicBlock(llvm::BasicBlock *basic_block) {
-  auto block =
-      std::find(basic_blocks_.begin(), basic_blocks_.end(), basic_block);
-  if (block != basic_blocks_.end())
-    return *block;
+  auto it = block_map_.find(basic_block);
+  if (it != block_map_.end())
+    return it->second;
 
-  auto framework_block = std::make_shared<fitx::BasicBlock>(basic_block);
-  basic_blocks_.insert(framework_block);
+  auto getOrCreateShell = [&](llvm::BasicBlock *bb) {
+    auto found = block_map_.find(bb);
+    if (found != block_map_.end())
+      return std::make_pair(found->second, false);
+    auto fb = std::make_shared<fitx::BasicBlock>(bb);
+    block_map_.try_emplace(bb, fb);
+    basic_blocks_.insert(fb);
+    if (llvm_function_ && !llvm_function_->empty() &&
+        bb == &llvm_function_->getEntryBlock())
+      init_block_ = fb;
+    return std::make_pair(fb, true);
+  };
 
-  framework_block->collectPassthroughBlock();
+  auto root_pair = getOrCreateShell(basic_block);
+  std::deque<llvm::BasicBlock *> worklist;
+  if (root_pair.second)
+    worklist.push_back(basic_block);
 
-  if (basic_block == &llvm_function_->getEntryBlock())
-    init_block_ = framework_block;
+  while (!worklist.empty()) {
+    llvm::BasicBlock *curr = worklist.front();
+    worklist.pop_front();
+    auto framework_block = block_map_[curr];
 
-  llvm::Loop *loop =
-      loop_info_.get() ? loop_info_->getLoopFor(basic_block) : nullptr;
+    llvm::Loop *loop =
+        loop_info_.get() ? loop_info_->getLoopFor(curr) : nullptr;
 
-  if (auto *branch_inst =
-          llvm::dyn_cast<llvm::BranchInst>(basic_block->getTerminator())) {
-    framework_block->setBranchInst(fitx::BranchInst::Create(branch_inst));
-  } else if (auto *switch_inst = llvm::dyn_cast<llvm::SwitchInst>(
-                 basic_block->getTerminator())) {
-    framework_block->setBranchInst(fitx::BranchInst::Create(switch_inst));
+    for (auto *succ_bb : llvm::successors(curr)) {
+      auto sp = getOrCreateShell(succ_bb);
+      if (sp.second)
+        worklist.push_back(succ_bb);
+      framework_block->addSuccessor(sp.first);
+
+      if (sp.first->Line() <= framework_block->Line())
+        setLoopBackBlock(true);
+    }
+
+    for (auto *pred_bb : llvm::predecessors(curr)) {
+      if (loop && loop->getHeader() == curr &&
+          loop->getBlocksSet().find(pred_bb) != loop->getBlocksSet().end())
+        continue;
+
+      auto pp = getOrCreateShell(pred_bb);
+      if (pp.second)
+        worklist.push_back(pred_bb);
+      framework_block->addPredecessor(pp.first);
+    }
+
+    framework_block->collectPassthroughBlock();
+
+    if (auto *branch_inst =
+            llvm::dyn_cast_or_null<llvm::BranchInst>(curr->getTerminator())) {
+      framework_block->setBranchInst(fitx::BranchInst::Create(branch_inst));
+    } else if (auto *switch_inst = llvm::dyn_cast_or_null<llvm::SwitchInst>(
+                   curr->getTerminator())) {
+      framework_block->setBranchInst(fitx::BranchInst::Create(switch_inst));
+    }
   }
 
-  // Generate Predecessor Information
-  for (auto *block : llvm::successors(basic_block)) {
-    std::shared_ptr<fitx::BasicBlock> successor = getBasicBlock(block);
-    framework_block->addSuccessor(successor);
-
-    if (successor->Line() <= framework_block->Line())
-      setLoopBackBlock(true);
-  }
-
-  // Generate Succesor Information
-  for (auto *block : llvm::predecessors(basic_block)) {
-    // If we are see a loop header, remove any incoming blocks from the loop
-    // itself. This prevents "revisiting the loop blocks" and causing lots of
-    // FPs.
-    if (loop && loop->getHeader() == basic_block &&
-        loop->getBlocksSet().find(block) != loop->getBlocksSet().end())
-      continue;
-
-    framework_block->addPredecessor(getBasicBlock(block));
-  }
-
-  return framework_block;
+  return root_pair.first;
 }
 
 bool Function::isLoopBlock(std::shared_ptr<fitx::BasicBlock> block) {
@@ -158,4 +180,13 @@ bool Function::ContainsLoopBackBlock() { return contains_loop_back_blocks_; }
 
 std::map<llvm::Function *, std::shared_ptr<fitx::Function>>
     fitx::Function::created_functions_;
+
+void Function::eraseModuleFunctions(const llvm::Module *M) {
+  for (auto it = created_functions_.begin(); it != created_functions_.end();) {
+    if (!M || (it->first && it->first->getParent() == M))
+      it = created_functions_.erase(it);
+    else
+      ++it;
+  }
+}
 } // namespace fitx

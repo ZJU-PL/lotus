@@ -25,16 +25,19 @@ bool IRGenerator::runOnFunction(llvm::Function &F) {
   auto &loop_info = getAnalysis<llvm::LoopInfoWrapperPass>().getLoopInfo();
 
   analyzer.analyze(F, loop_info);
-  framework_ir_[F.getParent()].insert(analyzer.FrameworkFunction());
+  auto fn = analyzer.FrameworkFunction();
+  if (seen_functions_.insert(fn.get()).second) {
+    framework_ir_[F.getParent()].push_back(std::move(fn));
+  }
   return false;
 }
 
 }; // namespace ir_generator
 
-std::map<llvm::Module *, std::set<std::shared_ptr<fitx::Function>>>
+std::map<llvm::Module *, std::vector<std::shared_ptr<fitx::Function>>>
     ir_generator::IRGenerator::framework_ir_ =
         std::map<llvm::Module *,
-                 std::set<std::shared_ptr<fitx::Function>>>();
+                 std::vector<std::shared_ptr<fitx::Function>>>();
 
 char ir_generator::IRGenerator::ID = 1;
 

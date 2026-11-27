@@ -1,29 +1,12 @@
 #include "llvm/IR/Value.h"
 
-#include "llvm/ADT/APFloat.h"
-#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Argument.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constant.h"
-#include "llvm/IR/DataLayout.h"
-#include "llvm/IR/DebugInfoMetadata.h"
-#include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/IR/ValueSymbolTable.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
-// include STL
 #include "Checker/FiTx/Core/AnalysisHelper.h"
 #include "Checker/FiTx/Core/Casting.h"
 #include "Checker/FiTx/Core/Instructions.h"
@@ -32,29 +15,25 @@
 #include "Checker/FiTx/Core/Value.h"
 
 #include <algorithm>
-#include <ctime>
-#include <iostream>
-#include <iterator>
 #include <map>
-#include <queue>
 #include <set>
-#include <stack>
 #include <string>
 #include <vector>
 
 namespace fitx {
 Value::Value(llvm::Value *value, std::vector<Fields> fields,
              long array_element_num)
-    : value_(value), value_type_(value->getValueID()),
+    : value_(value), value_type_(value ? value->getValueID() : 0),
       array_element_num_(array_element_num),
-      is_global_var_(llvm::isa<llvm::GlobalValue>(value)), fields_(fields) {}
+      is_global_var_(value ? llvm::isa<llvm::GlobalValue>(value) : false),
+      is_return_value_(false), fields_(std::move(fields)) {}
 
-Value::Value(std::shared_ptr<fitx::Value> value,
-             std::vector<Fields> fields, long array_element_num)
+Value::Value(std::shared_ptr<fitx::Value> value, std::vector<Fields> fields,
+             long array_element_num)
     : value_(value->value_), value_type_(value->getValueID()),
       array_element_num_(array_element_num),
       is_global_var_(value->isGlobalVar()),
-      is_return_value_(value->is_return_value_), fields_(fields) {}
+      is_return_value_(value->is_return_value_), fields_(std::move(fields)) {}
 
 Value::Value(const Value &value)
     : value_(value.value_), value_type_(value.getValueID()),
@@ -75,19 +54,26 @@ std::shared_ptr<Value> Value::CreateFromDefinition(llvm::Value *value) {
   return fitx::Converter::GetInstance().Convert(value);
 }
 
-std::shared_ptr<Value> Value ::CreateAppend(std::shared_ptr<Value> src,
-                                            std::shared_ptr<Value> target) {
-  auto source_back = src->GetFields().end() - 1;
-  auto target_front = target->GetFields().begin();
+std::shared_ptr<Value> Value::CreateAppend(std::shared_ptr<Value> src,
+                                           std::shared_ptr<Value> target) {
+  if (!src)
+    return target;
+  if (!target)
+    return src;
 
-  if (!src->GetFields().empty() && !target->GetFields().empty()) {
+  const auto &src_fields = src->GetFields();
+  const auto &tgt_fields = target->GetFields();
+  auto src_end = src_fields.end();
+  auto target_front = tgt_fields.begin();
+
+  if (!src_fields.empty() && !tgt_fields.empty()) {
+    auto source_back = src_fields.end() - 1;
     llvm::Type *type = nullptr;
     if (source_back->FieldType() == target_front->ElementType() &&
         !target_front->FieldType()) {
       target_front++;
     }
-    while (source_back >= src->GetFields().begin() &&
-           target_front < target->GetFields().end() &&
+    while (target_front < tgt_fields.end() &&
            source_back->ElementType() == target_front->ElementType() &&
            source_back->FieldType() != target_front->type) {
       if (type && type->isPointerTy() &&
@@ -95,25 +81,29 @@ std::shared_ptr<Value> Value ::CreateAppend(std::shared_ptr<Value> src,
           type->getPointerElementType() == target_front->type) {
         target_front++;
       }
-      type = (source_back--)->type;
+      type = source_back->type;
+      if (source_back == src_fields.begin()) {
+        src_end = src_fields.begin();
+        break;
+      }
+      --source_back;
+      src_end = source_back + 1;
     }
   }
 
-  auto new_fields =
-      std::vector<Fields>(src->GetFields().begin(), source_back + 1);
-  new_fields.insert(new_fields.end(), target_front, target->GetFields().end());
+  auto new_fields = std::vector<Fields>(src_fields.begin(), src_end);
+  new_fields.insert(new_fields.end(), target_front, tgt_fields.end());
 
-  int array_element_num =
+  long array_element_num =
       std::max(target->ArrayElementNum(), src->ArrayElementNum());
 
   if (auto managed = Converter::GetInstance().getManagedValue(
-          &src->getLLVMValue_(), array_element_num, new_fields)) {
+          src->rawLLVMValue(), array_element_num, new_fields)) {
     return managed;
   }
 
   if (auto call_inst = shared_dyn_cast<fitx::CallInst>(src))
-    return fitx::CallInst::Create(call_inst, new_fields,
-                                       array_element_num);
+    return fitx::CallInst::Create(call_inst, new_fields, array_element_num);
 
   if (auto inst = shared_dyn_cast<fitx::Instruction>(src))
     return fitx::Instruction::Create(inst, new_fields, array_element_num);
@@ -134,11 +124,10 @@ std::shared_ptr<Value> Value ::CreateAppend(std::shared_ptr<Value> src,
         array_element_num);
     break;
   default:
-    value =
-        std::make_shared<fitx::Value>(src, new_fields, array_element_num);
+    value = std::make_shared<fitx::Value>(src, new_fields, array_element_num);
   }
 
-  Converter::GetInstance().manageValue(&src->getLLVMValue_(), value);
+  Converter::GetInstance().manageValue(src->rawLLVMValue(), value);
   return value;
 }
 
@@ -186,16 +175,20 @@ llvm::Value &Value::getLLVMValue_() const { return *value_; }
 
 llvm::Type &Value::getLLVMType_() const {
   const Fields &field = fields_.back();
-  if (field.field >= 0 && field.type->isStructTy())
-    return *field.type->getStructElementType(field.field);
+  if (field.field >= 0 && field.type && field.type->isStructTy() &&
+      static_cast<unsigned>(field.field) < field.type->getStructNumElements())
+    return *field.type->getStructElementType(
+        static_cast<unsigned>(field.field));
   return *field.type;
 }
 
-long Value::Field() const { return fields_.back().field; }
+long Value::Field() const {
+  return fields_.empty() ? kNonFieldVariable : fields_.back().field;
+}
 
 const std::vector<Value::Fields> &Value::GetFields() const { return fields_; };
 
-bool Value::isArgument() { return llvm::isa<llvm::Argument>(value_); }
+bool Value::isArgument() { return value_ && llvm::isa<llvm::Argument>(value_); }
 
 bool Value::isGlobalVar() { return is_global_var_; }
 
@@ -207,7 +200,12 @@ void Value::setReturnValue(bool is_return_value) {
 long Value::ArrayElementNum() { return array_element_num_; }
 
 ConstValue::ConstValue(llvm::ConstantInt *value)
-    : Value(value), const_value_(value->getSExtValue()) {}
+    : Value(value),
+      const_value_(
+          value && value->getBitWidth() <= 64
+              ? value->getSExtValue()
+              : (value ? static_cast<int64_t>(value->getValue().getLimitedValue())
+                       : 0)) {}
 
 ConstValue::ConstValue(int64_t const_value)
     : Value(llvm::Value::ConstantIntVal), const_value_(const_value) {}
@@ -216,17 +214,16 @@ ConstValue::ConstValue(std::shared_ptr<ConstValue> value)
     : Value(value), const_value_(value->getConstValue()) {}
 
 NullValue::NullValue(llvm::ConstantPointerNull *value) : Value(value) {}
-NullValue::NullValue(std::shared_ptr<fitx::NullValue> value)
-    : Value(value) {}
+NullValue::NullValue(std::shared_ptr<fitx::NullValue> value) : Value(value) {}
 
 Argument::Argument(llvm::Argument *argument, std::vector<Value::Fields> fields,
                    long array_element_num)
-    : Value(argument, fields, array_element_num),
+    : Value(argument, std::move(fields), array_element_num),
       arg_num_(argument->getArgNo()) {}
 
 Argument::Argument(std::shared_ptr<Argument> argument,
                    std::vector<Value::Fields> fields, long array_element_num)
-    : Value(&argument->getLLVMValue_(), fields, array_element_num),
+    : Value(argument->rawLLVMValue(), std::move(fields), array_element_num),
       arg_num_(argument->ArgNum()) {}
 
 /* Value Collection Class*/
@@ -239,10 +236,11 @@ ValueCollection ValueCollection::createFromIntersection(
   for (auto collection = collections.begin() + 1;
        collection != collections.end(); collection++) {
     ValueCollection tmp;
-    set_intersection(result.Values().begin(), result.Values().end(),
-                     collection->values_.begin(), collection->values_.end(),
-                     inserter(tmp.values_, tmp.values_.end()));
-    result = tmp;
+    for (const auto &v : result.Values()) {
+      if (collection->values_.find(v) != collection->values_.end())
+        tmp.add(v);
+    }
+    result = std::move(tmp);
   }
   return result;
 }
@@ -255,55 +253,53 @@ ValueCollection ValueCollection::createFromUnion(
   ValueCollection result = *collections.begin();
   for (auto collection = collections.begin() + 1;
        collection != collections.end(); collection++) {
-    ValueCollection tmp;
-    set_union(result.Values().begin(), result.Values().end(),
-              collection->values_.begin(), collection->values_.end(),
-              inserter(tmp.values_, tmp.values_.end()));
-    result = tmp;
+    result.add(*collection);
   }
   return result;
 }
 
 bool ValueCollection::add(std::shared_ptr<Value> value) {
-  return values_.insert(value).second;
+  if (!value)
+    return false;
+  if (!values_.insert(value).second)
+    return false;
+  by_llvm_value_[value->rawLLVMValue()].push_back(value);
+  return true;
 }
 
 void ValueCollection::add(const ValueCollection &value_collection) {
-  auto &values = value_collection.Values();
-  std::merge(values_.begin(), values_.end(), values.begin(), values.end(),
-             std::inserter(values_, values_.end()));
+  for (const auto &v : value_collection.Values()) {
+    add(v);
+  }
 }
 
 void ValueCollection::remove(std::shared_ptr<Value> value) {
-  values_.erase(value);
+  if (!value || !values_.erase(value))
+    return;
+  auto it = by_llvm_value_.find(value->rawLLVMValue());
+  if (it != by_llvm_value_.end()) {
+    auto &vec = it->second;
+    vec.erase(std::remove(vec.begin(), vec.end(), value), vec.end());
+    if (vec.empty())
+      by_llvm_value_.erase(it);
+  }
 }
 
-void ValueCollection::clear() { values_.clear(); }
+void ValueCollection::clear() {
+  values_.clear();
+  by_llvm_value_.clear();
+}
 
 bool ValueCollection::exists(fitx::Value value) {
-  auto found_value =
-      std::find_if(values_.begin(), values_.end(),
-                   [&value](std::shared_ptr<Value> compared_value) {
-                     return *compared_value == value;
-                   });
-  return found_value != values_.end();
+  auto it = by_llvm_value_.find(value.rawLLVMValue());
+  if (it == by_llvm_value_.end())
+    return false;
+  for (const auto &compared_value : it->second) {
+    if (*compared_value == value)
+      return true;
+  }
+  return false;
 }
-
-/* std::shared_ptr<Value> ValueCollection::get(llvm::Value* value) { */
-/*   auto framework_value = fitx::Value::CreateFromDefinition(value); */
-
-/*   auto found_value = */
-/*       std::find_if(values_.begin(), values_.end(), */
-/*                    [framework_value](std::shared_ptr<Value> compared_value) {
- */
-/*                      return *compared_value == *framework_value; */
-/*                    }); */
-/*   if (found_value != values_.end()) */
-/*     return *found_value; */
-
-/*   add(framework_value); */
-/*   return framework_value; */
-/* } */
 
 bool ValueCollection::exists(std::shared_ptr<Value> value) {
   return values_.find(value) != values_.end();
@@ -314,39 +310,58 @@ bool ValueCollection::exists(std::shared_ptr<Value> value) {
 std::set<std::shared_ptr<Value>>
 ValueCollection::getRelatedValues(std::shared_ptr<Value> value) const {
   std::set<std::shared_ptr<Value>> related_values;
-  std::copy_if(
-      values_.begin(), values_.end(),
-      inserter(related_values, related_values.end()),
-      [&value](std::shared_ptr<fitx::Value> new_value) {
-        /* auto value_fields = value->GetFields(); */
-        /* const std::vector<fitx::Value::Fields> sub_value_fields( */
-        /*     value_fields.begin(), */
-        /*     value_fields.begin() + */
-        /*         std::min(value_fields.size(),
-         * new_value->GetFields().size())); */
-
-        return *new_value == &value->getLLVMValue_() &&
-               new_value->GetFields().size() >= value->GetFields().size() &&
-               (value->GetFields().empty() ||
-                value->GetFields().back().field == Value::kNonFieldVariable ||
-                value->GetFields().back().field ==
-                    new_value->GetFields()[value->GetFields().size() - 1]
-                        .field);
-      });
+  llvm::SmallVector<std::shared_ptr<Value>, 8> buf;
+  collectRelatedValues(value, buf);
+  related_values.insert(buf.begin(), buf.end());
   return related_values;
+}
+
+void ValueCollection::collectRelatedValues(
+    const std::shared_ptr<Value> &value,
+    llvm::SmallVectorImpl<std::shared_ptr<Value>> &out) const {
+  if (!value)
+    return;
+  auto it = by_llvm_value_.find(value->rawLLVMValue());
+  if (it == by_llvm_value_.end())
+    return;
+
+  const auto &val_fields = value->GetFields();
+  const size_t val_field_size = val_fields.size();
+  for (const auto &new_value : it->second) {
+    const auto &new_fields = new_value->GetFields();
+    if (new_fields.size() >= val_field_size &&
+        (val_fields.empty() ||
+         val_fields.back().field == Value::kNonFieldVariable ||
+         val_fields.back().field == new_fields[val_field_size - 1].field)) {
+      out.push_back(new_value);
+    }
+  }
 }
 
 std::set<std::shared_ptr<Value>>
 ValueCollection::getParentValues(std::shared_ptr<Value> value) const {
   std::set<std::shared_ptr<Value>> related_values;
-  std::copy_if(values_.begin(), values_.end(),
-               inserter(related_values, related_values.end()),
-               [&value](std::shared_ptr<fitx::Value> new_value) {
-                 return *new_value == &value->getLLVMValue_() &&
-                        new_value->GetFields().size() <=
-                            value->GetFields().size();
-               });
+  llvm::SmallVector<std::shared_ptr<Value>, 8> buf;
+  collectParentValues(value, buf);
+  related_values.insert(buf.begin(), buf.end());
   return related_values;
+}
+
+void ValueCollection::collectParentValues(
+    const std::shared_ptr<Value> &value,
+    llvm::SmallVectorImpl<std::shared_ptr<Value>> &out) const {
+  if (!value)
+    return;
+  auto it = by_llvm_value_.find(value->rawLLVMValue());
+  if (it == by_llvm_value_.end())
+    return;
+
+  const size_t val_field_size = value->GetFields().size();
+  for (const auto &new_value : it->second) {
+    if (new_value->GetFields().size() <= val_field_size) {
+      out.push_back(new_value);
+    }
+  }
 }
 
 AliasValues::AliasValues() : alias_size_(0) {}
@@ -374,9 +389,10 @@ void AliasValues::addAlias(AliasValues &collection) {
 
   if (!updated.empty()) {
     for (auto value : updated) {
-      // We know that getAliasInfo will return a valid pointer since it is added
-      alias_info_[value].add(*collection.getAliasInfo(value));
-      alias_size_ += alias_info_[value].size();
+      if (const auto *info = collection.getAliasInfo(value)) {
+        alias_info_[value].add(*info);
+        alias_size_ += alias_info_[value].size();
+      }
     }
     return;
   }
@@ -389,8 +405,9 @@ void AliasValues::addAlias(AliasValues &collection) {
 
 const ValueCollection *
 AliasValues::getAliasInfo(std::shared_ptr<fitx::Value> value) {
-  if (alias_info_.find(value) != alias_info_.end())
-    return &alias_info_[value];
+  auto it = alias_info_.find(value);
+  if (it != alias_info_.end())
+    return &it->second;
   return nullptr;
 }
 
@@ -402,7 +419,7 @@ ManagedValues &ManagedValues::GetInstance() {
 ManagedValues::ManagedValues() { managed_values_.reserve(kReserveSize); }
 
 std::shared_ptr<fitx::Value> ManagedValues::getValueFromID(size_t id) {
-  if (id > Size())
+  if (id >= Size())
     return nullptr;
   return managed_values_[id];
 }
@@ -413,19 +430,23 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &ostream,
   ostream << "ValueType: " << value.value_type_ << " ";
   ostream << "Array Element: " << value.array_element_num_ << " ";
   ostream << "(";
-  for (auto field : value.fields_) {
+  for (const auto &field : value.fields_) {
     ostream << "{Type: ";
-    if (field.type->isStructTy())
-      ostream << field.type->getStructName();
-    else
+    if (!field.type) {
+      ostream << "<null>";
+    } else if (auto *struct_ty = llvm::dyn_cast<llvm::StructType>(field.type)) {
+      if (!struct_ty->isLiteral())
+        ostream << struct_ty->getName();
+      else
+        ostream << *struct_ty;
+    } else {
       ostream << *field.type;
+    }
     ostream << " Field: " << field.field << "}, ";
   }
   ostream << ")";
 
   return ostream;
 }
-
-/* std::vector<std::shared_ptr<fitx::Value>> Value::managed_values_; */
 
 }; // namespace fitx

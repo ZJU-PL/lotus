@@ -5,8 +5,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-// Provide pipe2 only on macOS (not in older SDKs); Linux/glibc has it in
-// unistd.h
 #if defined(__APPLE__)
 static int pipe2(int fd[2], int flags) {
   if (pipe(fd) < 0)
@@ -27,6 +25,13 @@ struct EndPoints EndPoint::createEndPointPair() {
   }
 
   return EndPoints{ReadEndPoint(fd[0]), WriteEndPoint(fd[1])};
+}
+
+void EndPoint::closeFd() {
+  if (valid()) {
+    close(fd_);
+    fd_ = kInvalidEndpoint;
+  }
 }
 
 ReadEndPoint::ReadEndPoint() : EndPoint() {}
@@ -51,31 +56,27 @@ void WriteEndPoint::write_log(const std::string &log) {
   return;
 }
 
-LoggingClient::LoggingClient() {
-  end_points_ = EndPoint::createEndPointPair();
-  buffer_.reserve(ReadEndPoint::kBufferSize * 10);
+LoggingClient::LoggingClient() = default;
+LoggingClient::~LoggingClient() {
+  end_points_.read.closeFd();
+  end_points_.write.closeFd();
 }
 
 void LoggingClient::log(const std::string &log) { buffer_.append(log); }
 
-void LoggingClient::flush() {
-  WriteEndPoint &write_point = end_points_.write;
-  if (write_point.valid())
-    write_point.write_log(buffer_);
-  else
-    llvm::errs() << buffer_;
-  buffer_.clear();
-}
+void LoggingClient::flush() {}
 
 void LoggingClient::printLog() {
-  if (end_points_.read.valid())
-    llvm::errs() << end_points_.read.readLog();
+  if (!buffer_.empty()) {
+    llvm::errs() << buffer_;
+    buffer_.clear();
+  }
 }
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &ostream,
                               fitx::LoggingClient &client) {
-  if (client.end_points_.read.valid())
-    ostream << client.end_points_.read.readLog();
+  if (!client.buffer_.empty())
+    ostream << client.buffer_;
 
   return ostream;
 }

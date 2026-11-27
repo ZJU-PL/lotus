@@ -2,6 +2,7 @@
 /// FiTx framework IR builder: builds CFG and collects return values per block
 /// for function summaries and return-code aware propagation (paper §4.3).
 #pragma once
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
@@ -30,9 +31,9 @@ public:
     return framework_function_;
   }
 
-  bool
-  collectPossibleReturnValues(llvm::Value *v,
-                              std::vector<llvm::Instruction *> &visited_inst);
+  bool collectPossibleReturnValues(
+      llvm::Value *v, llvm::SmallPtrSetImpl<llvm::Instruction *> &visited_inst,
+      llvm::Instruction *last_inst);
 
 private:
   std::shared_ptr<fitx::Function> framework_function_;

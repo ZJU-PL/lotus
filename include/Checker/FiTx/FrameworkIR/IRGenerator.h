@@ -15,6 +15,8 @@
 
 #include "Checker/FiTx/FrameworkIR/Analyzer.h"
 
+#include <unordered_set>
+
 namespace ir_generator {
 /// LLVM FunctionPass that builds framework IR (fitx::Function with blocks
 /// and instructions) for each LLVM function. Required by FrameworkPass.
@@ -27,10 +29,12 @@ public:
 
   static char ID;
   static std::map<llvm::Module *,
-                  std::set<std::shared_ptr<fitx::Function>>>
+                  std::vector<std::shared_ptr<fitx::Function>>>
       framework_ir_;
+  static void clearModule(llvm::Module *M) { framework_ir_.erase(M); }
 
 private:
   Analyzer analyzer;
+  std::unordered_set<const fitx::Function *> seen_functions_;
 }; // end of struct
 } // namespace ir_generator

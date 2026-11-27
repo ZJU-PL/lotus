@@ -1,76 +1,18 @@
 // FiTx framework pass: typestate-based daily development-friendly bug checkers.
 // Based on: Suzuki et al., "Balancing Analysis Time and Bug Detection: Daily
 // Development-friendly Bug Detection in Linux", USENIX ATC 2024 (Section 4, 5).
-#include "llvm/ADT/APFloat.h"
-#include "llvm/Analysis/LoopInfo.h"
-#include "llvm/IR/Argument.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/CFG.h"
-#include "llvm/IR/Constant.h"
-#include "llvm/IR/DataLayout.h"
-#include "llvm/IR/DebugInfoMetadata.h"
-#include "llvm/IR/DebugLoc.h"
-#include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/Instruction.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/IR/Value.h"
-#include "llvm/IR/ValueSymbolTable.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
+#include "Checker/FiTx/Frontend/Framework.h"
 
-// include STL
 #include "Checker/FiTx/Core/BasicBlock.h"
 #include "Checker/FiTx/Core/Function.h"
 #include "Checker/FiTx/Core/Logs.h"
+#include "Checker/FiTx/Core/SFG/Converter.h"
 #include "Checker/FiTx/Core/Value.h"
-#include "Checker/FiTx/Core/ValueTypeAlias.h"
 #include "Checker/FiTx/FrameworkIR/IRGenerator.h"
 #include "Checker/FiTx/Frontend/Analyzer.h"
-#include "Checker/FiTx/Frontend/Framework.h"
 #include "Checker/FiTx/Frontend/State.h"
-#include "Checker/FiTx/Frontend/StateTransition.h"
-#include "Checker/FiTx/Frontend/Utils.h"
-
-#include <algorithm>
-#include <chrono>
-#include <ctime>
-#include <iostream>
-#include <iterator>
-#include <map>
-#include <queue>
-#include <set>
-#include <stack>
-#include <string>
-#include <thread>
-#include <vector>
-
-#include <sys/wait.h>
-#include <unistd.h>
 
 namespace fitx {
-
-struct AnalyzerInfo {
-  Analyzer *inner_analyzer;
-  pid_t process_id;
-
-  AnalyzerInfo(Analyzer *analyzer) : inner_analyzer(analyzer) {}
-
-  void start_analyzer_process() {
-    process_id = fork();
-    if (process_id == 0) {
-      run_analyzer();
-      exit(0);
-    }
-  }
-
-  void run_analyzer() { inner_analyzer->analyze(); }
-};
 
 FrameworkPass::FrameworkPass() : ModulePass(ID) {}
 
@@ -80,31 +22,25 @@ void FrameworkPass::getAnalysisUsage(llvm::AnalysisUsage &AU) const {
 }
 
 // Entry: each subclass overrides defineStates() to register StateManagers;
-// we create one Analyzer per manager and run analyze() (CFG, typestate,
-// summaries).
+// run one Analyzer at a time in a local scope so per-checker state is released
+// immediately between checkers instead of accumulating across all detectors.
 bool FrameworkPass::runOnModule(llvm::Module &M) {
-  std::chrono::system_clock::time_point start, end;
-  LoggingServer server;
+  manager_.clear();
+  defineStates();
 
-  start = std::chrono::system_clock::now();
-  defineStates(); // Detectors (UAF, Leak, etc.) add StateManagers here.
-
-  // Create analyzers. Execution stays in-process so structured bug reports are
-  // preserved in BugReportMgr.
-  std::vector<AnalyzerInfo> analyzers;
   for (fitx::StateManager &manager : manager_) {
-    LoggingClient *client = new LoggingClient();
-    AnalyzerInfo info = AnalyzerInfo(new fitx::Analyzer(M, manager, *client));
-    analyzers.push_back(info);
-    server.addClient(client);
+    fitx::LoggingClient client;
+    fitx::Analyzer analyzer(M, manager, client);
+    analyzer.analyze();
+    client.printLog();
   }
 
-  for (AnalyzerInfo &analyzer : analyzers) {
-    analyzer.run_analyzer();
-  }
-
-  end = std::chrono::system_clock::now();
-  server.printClientLogs();
+  // Release cached module IR and value registries so repeated runs in the same
+  // process (e.g. unit tests) never retain dangling LLVM pointers or leak RAM.
+  ir_generator::IRGenerator::clearModule(&M);
+  fitx::Function::clearManagedFunctions();
+  fitx::Converter::GetInstance().clear();
+  fitx::ManagedValues::GetInstance().clear();
 
   return false;
 }

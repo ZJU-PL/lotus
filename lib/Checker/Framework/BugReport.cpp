@@ -129,7 +129,20 @@ static std::vector<NodeTag> inferNodeTags(Instruction *I) {
   return tags;
 }
 
+void BugDiagStep::populateLocationOnly(DebugInfoAnalysis &debugInfo) {
+  if (auto *I = dyn_cast_or_null<Instruction>(inst)) {
+    src_file = debugInfo.getSourceFile(I);
+    src_line = debugInfo.getSourceLine(I);
+    src_column = debugInfo.getSourceColumn(I);
+  }
+}
+
 void BugDiagStep::populateDebugInfo(DebugInfoAnalysis &debugInfo) {
+  if (details_populated) {
+    return;
+  }
+  details_populated = true;
+
   // Extract LLVM IR representation
   if (inst) {
     llvm_ir = debugInfo.getIRString(inst);
@@ -144,9 +157,11 @@ void BugDiagStep::populateDebugInfo(DebugInfoAnalysis &debugInfo) {
   // Extract debug information if available
   if (auto *I = dyn_cast_or_null<Instruction>(inst)) {
     // Get source location components using DebugInfoAnalysis
-    src_file = debugInfo.getSourceFile(I);
-    src_line = debugInfo.getSourceLine(I);
-    src_column = debugInfo.getSourceColumn(I);
+    if (src_file.empty()) {
+      src_file = debugInfo.getSourceFile(I);
+      src_line = debugInfo.getSourceLine(I);
+      src_column = debugInfo.getSourceColumn(I);
+    }
 
     // Get function name using DebugInfoAnalysis (includes demangling)
     func_name = debugInfo.getFunctionName(I);
@@ -165,7 +180,7 @@ void BugDiagStep::populateDebugInfo(DebugInfoAnalysis &debugInfo) {
 
 void BugReport::append_step(Value *inst, const std::string &tip,
                             int trace_level, const std::vector<NodeTag> &tags,
-                            const std::string &access) {
+                            const std::string &access, bool defer_details) {
   BugDiagStep *step = new BugDiagStep();
   step->inst = inst;
   step->tip = tip;
@@ -173,9 +188,21 @@ void BugReport::append_step(Value *inst, const std::string &tip,
   step->node_tags = tags;
   step->access = access;
 
-  step->populateDebugInfo(debugInfo);
+  if (defer_details) {
+    step->populateLocationOnly(debugInfo);
+  } else {
+    step->populateDebugInfo(debugInfo);
+  }
 
   trigger_steps.push_back(step);
+}
+
+void BugReport::ensureDetailsPopulated() {
+  for (BugDiagStep *step : trigger_steps) {
+    if (step && !step->details_populated) {
+      step->populateDebugInfo(debugInfo);
+    }
+  }
 }
 
 void BugReport::set_suggestion(const std::string &suggestion) {
@@ -266,6 +293,7 @@ std::string BugReport::render_step_message(const BugDiagStep &step) const {
 }
 
 std::string BugReport::render_primary_message() const {
+  const_cast<BugReport *>(this)->ensureDetailsPopulated();
   const BugDiagStep *fallback = nullptr;
 
   for (auto it = trigger_steps.rbegin(); it != trigger_steps.rend(); ++it) {
@@ -315,6 +343,7 @@ size_t BugReport::compute_hash(bool use_trace) const {
 }
 
 cJSON *BugReport::toJson() const {
+  const_cast<BugReport *>(this)->ensureDetailsPopulated();
   cJSON *report = cJSON_CreateObject();
   if (!report) {
     return nullptr;

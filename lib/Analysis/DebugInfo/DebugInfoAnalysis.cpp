@@ -34,10 +34,12 @@ using namespace llvm;
 std::map<std::string, std::vector<std::string>>
     DebugInfoAnalysis::sourceFileCache;
 static std::unordered_map<std::string, std::string> resolvedSourcePathCache;
+static std::unordered_set<std::string> missingSourceDirCache;
 static std::mutex sourceFileCacheMutex;
 
 // Maximum cache size (number of files) to bound memory usage
 static constexpr size_t MAX_CACHE_FILES = 256;
+static constexpr size_t MAX_MISSING_DIR_CACHE = 8192;
 
 DebugInfoAnalysis::DebugInfoAnalysis() = default;
 DebugInfoAnalysis::~DebugInfoAnalysis() = default;
@@ -224,8 +226,52 @@ std::string DebugInfoAnalysis::findSourceFile(const std::string &filename) {
     return "";
   }
 
+  auto pathExistsFast = [](StringRef path) -> bool {
+    // Check if any ancestor directory is already known to be missing.
+    StringRef parent = sys::path::parent_path(path);
+    while (!parent.empty()) {
+      if (missingSourceDirCache.count(parent.str())) {
+        return false;
+      }
+      StringRef nextParent = sys::path::parent_path(parent);
+      if (nextParent == parent) {
+        break;
+      }
+      parent = nextParent;
+    }
+
+    if (sys::fs::exists(path)) {
+      return !sys::fs::is_directory(path);
+    }
+
+    // Negative-cache missing parent directories for absolute paths so hundreds
+    // of build-machine paths under the same missing root incur O(1) syscalls.
+    if (sys::path::has_root_directory(path)) {
+      StringRef dir = sys::path::parent_path(path);
+      while (!dir.empty() && dir != sys::path::root_path(path)) {
+        std::string dirStr = dir.str();
+        if (missingSourceDirCache.count(dirStr)) {
+          break;
+        }
+        if (sys::fs::exists(dir)) {
+          break;
+        }
+        if (missingSourceDirCache.size() >= MAX_MISSING_DIR_CACHE) {
+          missingSourceDirCache.clear();
+        }
+        missingSourceDirCache.insert(std::move(dirStr));
+        StringRef nextDir = sys::path::parent_path(dir);
+        if (nextDir == dir) {
+          break;
+        }
+        dir = nextDir;
+      }
+    }
+    return false;
+  };
+
   // Use LLVM's file system utilities for better path handling
-  if (sys::fs::exists(filename) && !sys::fs::is_directory(filename)) {
+  if (pathExistsFast(filename)) {
     return filename;
   }
 
@@ -260,7 +306,7 @@ std::string DebugInfoAnalysis::findSourceFile(const std::string &filename) {
   makeCandidate({cwdStr, "..", "benchmarks", filename});
 
   for (const auto &path : candidates) {
-    if (sys::fs::exists(path) && !sys::fs::is_directory(path)) {
+    if (pathExistsFast(path)) {
       return path.str().str();
     }
   }
@@ -463,6 +509,11 @@ std::string DebugInfoAnalysis::getFunctionName(const Instruction *I) {
   if (!F)
     return "unknown_function";
 
+  auto it = funcNameCache.find(F);
+  if (it != funcNameCache.end()) {
+    return it->second;
+  }
+
   std::string funcName;
 
   // Try to get name from debug info first (real source name)
@@ -473,7 +524,9 @@ std::string DebugInfoAnalysis::getFunctionName(const Instruction *I) {
   }
 
   // Demangle C++ and Rust function names for better readability
-  return DemangleUtils::demangleWithCleanup(funcName);
+  std::string demangled = DemangleUtils::demangleWithCleanup(funcName);
+  funcNameCache.emplace(F, demangled);
+  return demangled;
 }
 
 std::string DebugInfoAnalysis::getVariableName(const Value *V,
@@ -503,35 +556,34 @@ std::string DebugInfoAnalysis::getVariableName(const Value *V,
     varName = GlobVar->getName().str();
   }
 
-  // Fallback: scan function for dbg intrinsics (for cases where
-  // getDILocalVariable fails)
+  // Fallback: lazily scan the enclosing function ONCE for dbg intrinsics (for
+  // cases where getDILocalVariable fails), avoiding repeated O(|F|) scans.
   if (varName.empty()) {
     if (auto *I = dyn_cast<Instruction>(V)) {
       const Function *F = I->getParent() ? I->getFunction() : nullptr;
       if (F) {
-        for (const auto &BB : *F) {
-          for (const auto &Inst : BB) {
-            // Check dbg.declare
-            if (auto *DbgDeclare = dyn_cast<DbgDeclareInst>(&Inst)) {
-              if (DbgDeclare->getAddress() == V) {
-                if (auto *Var = DbgDeclare->getVariable()) {
-                  varName = Var->getName().str();
-                  break;
+        if (scannedDbgVarFunctions.insert(F).second) {
+          for (const auto &BB : *F) {
+            for (const auto &Inst : BB) {
+              if (auto *DbgDeclare = dyn_cast<DbgDeclareInst>(&Inst)) {
+                if (auto *Addr = DbgDeclare->getAddress()) {
+                  if (auto *Var = DbgDeclare->getVariable()) {
+                    fallbackDbgVarNameCache.emplace(Addr, Var->getName().str());
+                  }
                 }
-              }
-            }
-            // Check dbg.value
-            else if (auto *DbgValue = dyn_cast<DbgValueInst>(&Inst)) {
-              if (DbgValue->getValue() == V) {
-                if (auto *Var = DbgValue->getVariable()) {
-                  varName = Var->getName().str();
-                  break;
+              } else if (auto *DbgValue = dyn_cast<DbgValueInst>(&Inst)) {
+                if (auto *Val = DbgValue->getValue()) {
+                  if (auto *Var = DbgValue->getVariable()) {
+                    fallbackDbgVarNameCache.emplace(Val, Var->getName().str());
+                  }
                 }
               }
             }
           }
-          if (!varName.empty())
-            break;
+        }
+        auto fbIt = fallbackDbgVarNameCache.find(V);
+        if (fbIt != fallbackDbgVarNameCache.end()) {
+          varName = fbIt->second;
         }
       }
     }
@@ -600,10 +652,17 @@ std::string DebugInfoAnalysis::getTypeName(const Value *V) {
   if (!Ty)
     return "unknown_type";
 
+  auto it = typeNameCache.find(Ty);
+  if (it != typeNameCache.end()) {
+    return it->second;
+  }
+
   std::string TypeStr;
   raw_string_ostream RSO(TypeStr);
   Ty->print(RSO);
-  return RSO.str();
+  std::string rendered = RSO.str();
+  typeNameCache.emplace(Ty, rendered);
+  return rendered;
 }
 
 //===----------------------------------------------------------------------===//

@@ -26,8 +26,12 @@ Instruction::Instruction()
       column_(0), line_(0) {}
 
 Instruction::Instruction(llvm::Instruction *instruction)
-    : Value(instruction), llvm_instruction_(instruction) {
-  module_ = llvm_instruction_->getFunction()->getParent();
+    : Value(instruction), llvm_instruction_(instruction), module_(nullptr),
+      opcode_(0), column_(0), line_(0) {
+  if (!llvm_instruction_)
+    return;
+  if (auto *fn = llvm_instruction_->getFunction())
+    module_ = fn->getParent();
   opcode_ = llvm_instruction_->getOpcode();
   if (const llvm::DebugLoc &Loc = llvm_instruction_->getDebugLoc()) {
     debug_loc_ = Loc;
@@ -37,8 +41,12 @@ Instruction::Instruction(llvm::Instruction *instruction)
 }
 
 Instruction::Instruction(unsigned int opcode, llvm::Instruction *instruction)
-    : Value(instruction), llvm_instruction_(instruction), opcode_(opcode) {
-  module_ = llvm_instruction_->getFunction()->getParent();
+    : Value(instruction), llvm_instruction_(instruction), module_(nullptr),
+      opcode_(opcode), column_(0), line_(0) {
+  if (!llvm_instruction_)
+    return;
+  if (auto *fn = llvm_instruction_->getFunction())
+    module_ = fn->getParent();
   if (const llvm::DebugLoc &Loc = llvm_instruction_->getDebugLoc()) {
     debug_loc_ = Loc;
     line_ = Loc.getLine();
@@ -49,13 +57,18 @@ Instruction::Instruction(unsigned int opcode, llvm::Instruction *instruction)
 Instruction::Instruction(llvm::Instruction *instruction,
                          std::vector<Fields> fields, long array_element_num)
     : Value(instruction, fields, array_element_num),
-      llvm_instruction_(instruction) {
-  module_ = llvm_instruction_->getFunction()->getParent();
+      llvm_instruction_(instruction), module_(nullptr), opcode_(0), column_(0),
+      line_(0) {
+  if (!llvm_instruction_)
+    return;
+  if (auto *fn = llvm_instruction_->getFunction())
+    module_ = fn->getParent();
   opcode_ = llvm_instruction_->getOpcode();
 
-  llvm::BasicBlock *block = llvm_instruction_->getParent();
-  parent_ = fitx::Function::createManagedFunction(block->getParent())
-                ->getBasicBlock(block);
+  if (llvm::BasicBlock *block = llvm_instruction_->getParent()) {
+    if (auto *fn = block->getParent())
+      parent_ = fitx::Function::createManagedFunction(fn)->getBasicBlock(block);
+  }
 
   if (const llvm::DebugLoc &Loc = llvm_instruction_->getDebugLoc()) {
     debug_loc_ = Loc;
@@ -86,16 +99,20 @@ bool Instruction::operator<=(const fitx::Instruction &instruction) const {
 }
 
 bool Instruction::operator<(llvm::Instruction *instruction) const {
-  if (const llvm::DebugLoc &Loc = llvm_instruction_->getDebugLoc()) {
-    if (module_ != instruction->getFunction()->getParent())
-      return module_ < instruction->getFunction()->getParent();
+  if (!instruction)
+    return false;
+  llvm::Module *other_module =
+      instruction->getFunction() ? instruction->getFunction()->getParent()
+                                 : nullptr;
+  if (module_ != other_module)
+    return module_ < other_module;
 
+  if (const llvm::DebugLoc &Loc = instruction->getDebugLoc()) {
     if (line_ != Loc.getLine())
       return line_ < Loc.getLine();
-
-    return opcode_ < instruction->getOpcode();
   }
-  return true;
+
+  return opcode_ < instruction->getOpcode();
 }
 
 bool Instruction::operator<(const fitx::Instruction &instruction) const {
@@ -111,10 +128,15 @@ bool Instruction::operator<(const fitx::Instruction &instruction) const {
 bool Instruction::operator==(llvm::Instruction *instruction) const {
   if (llvm_instruction_ == instruction)
     return true;
+  if (!instruction)
+    return false;
 
-  if (const llvm::DebugLoc &Loc = llvm_instruction_->getDebugLoc())
-    return module_ == instruction->getFunction()->getParent() &&
-           line_ == Loc.getLine() && opcode_ == instruction->getOpcode();
+  llvm::Module *other_module =
+      instruction->getFunction() ? instruction->getFunction()->getParent()
+                                 : nullptr;
+  if (const llvm::DebugLoc &Loc = instruction->getDebugLoc())
+    return module_ == other_module && line_ == Loc.getLine() &&
+           opcode_ == instruction->getOpcode();
 
   return false;
 }
@@ -132,7 +154,9 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &ostream,
   ostream << "[fitx::Instruction] ";
   ostream << llvm::Instruction::getOpcodeName(instruction.opcode_);
   ostream << " (" << instruction.opcode_ << ") ";
-  ostream << "in " << instruction.module_->getName();
+  ostream << "in "
+          << (instruction.module_ ? instruction.module_->getName()
+                                  : llvm::StringRef("<unknown>"));
   ostream << ":" << instruction.line_ << "\n";
 
   return ostream;

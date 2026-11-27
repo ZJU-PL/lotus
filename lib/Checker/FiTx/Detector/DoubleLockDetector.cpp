@@ -8,8 +8,9 @@ virtual ~TryLockConstraint() = default;
   bool shouldPropagateOnCallInst(
       std::shared_ptr<fitx::CallInst> inst) override {
     std::shared_ptr<fitx::Function> called_func = inst->CalledFunction();
+    auto parent_bb = inst->Parent().lock();
     std::shared_ptr<fitx::Function> parent =
-        inst->Parent().lock()->Parent().lock();
+        parent_bb ? parent_bb->Parent().lock() : nullptr;
     if (!called_func || !parent) return true;
 
     return called_func->Name().find("_trylock") == std::string::npos;

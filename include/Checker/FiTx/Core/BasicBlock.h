@@ -11,7 +11,6 @@
 #include <vector>
 
 namespace fitx {
-// TODO: remove this prototype from here
 class Function;
 class BranchInst;
 class BasicBlock {
@@ -45,7 +44,7 @@ public:
   }
 
   void addInstruction(std::shared_ptr<fitx::Instruction> inst);
-  const std::vector<std::shared_ptr<fitx::Instruction>> Instructions() {
+  const std::vector<std::shared_ptr<fitx::Instruction>> &Instructions() const {
     return instructions_;
   }
 
@@ -56,7 +55,7 @@ public:
 
   bool isCleanupBlock() { return !pass_through_.empty(); };
   bool collectPassthroughBlock();
-  const std::vector<std::weak_ptr<fitx::BasicBlock>>
+  const std::vector<std::weak_ptr<fitx::BasicBlock>> &
   getPassthroughBlock(std::weak_ptr<fitx::BasicBlock> succ_block);
 
   void addDeadValue(std::shared_ptr<fitx::Value> value);
@@ -68,7 +67,8 @@ public:
       return a.get() < b.get();
     }
   };
-  const std::set<std::shared_ptr<fitx::Value>> DeadValues() const;
+  using ValueSet = std::set<std::shared_ptr<fitx::Value>, ValuePtrCompare>;
+  const ValueSet &DeadValues() const { return dead_values_; }
 
   void setBranchInst(std::shared_ptr<fitx::BranchInst> branch_inst) {
     branch_inst_ = branch_inst;
@@ -84,13 +84,11 @@ public:
   long Id() { return id_; }
 
 private:
-  // BasicBlockInfo
   long id_;
   llvm::BasicBlock *llvm_basic_block_;
   std::string name_;
   unsigned int line_;
 
-  // Contained Instructions
   std::vector<std::shared_ptr<fitx::Instruction>> instructions_;
   std::weak_ptr<fitx::Function> parent_;
 
@@ -103,10 +101,8 @@ private:
            std::owner_less<std::weak_ptr<fitx::BasicBlock>>>
       pass_through_;
 
-  // Values to be dead by the end of this BB
   std::set<std::shared_ptr<fitx::Value>, ValuePtrCompare> dead_values_;
 
-  // Interactions
   std::set<std::weak_ptr<fitx::BasicBlock>> predecessors_;
   std::set<std::weak_ptr<fitx::BasicBlock>> successors_;
 };

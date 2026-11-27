@@ -48,6 +48,7 @@ namespace fitx {
 class StatefulConstraint {
 public:
   StatefulConstraint() = default;
+  virtual ~StatefulConstraint() = default;
   virtual bool
   shouldPropagateOnCallInst(std::shared_ptr<fitx::CallInst> inst) {
     return true;

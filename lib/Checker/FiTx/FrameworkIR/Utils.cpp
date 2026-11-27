@@ -8,7 +8,7 @@ namespace ir_generator {
 int getPointerDereferenceNum(llvm::Type *type) {
   int dereference_num = 0;
 
-  while (type->isPointerTy()) {
+  while (type && type->isPointerTy()) {
     type = type->getPointerElementType();
     dereference_num++;
   }

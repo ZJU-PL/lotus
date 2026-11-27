@@ -88,7 +88,9 @@ public:
 
   /* const std::vector<std::string>& FunctionNames() { return function_names_;
    * }; */
-  const std::vector<FunctionArg> &FunctionArgs() { return function_args_; };
+  const std::vector<FunctionArg> &FunctionArgs() const {
+    return function_args_;
+  };
 
 private:
   std::vector<FunctionArg> function_args_;

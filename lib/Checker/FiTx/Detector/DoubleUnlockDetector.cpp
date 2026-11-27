@@ -6,8 +6,9 @@ class LockInUnlockConstraint : public fitx::StatefulConstraint {
   bool shouldPropagateOnCallInst(
       std::shared_ptr<fitx::CallInst> inst) override {
     std::shared_ptr<fitx::Function> called_func = inst->CalledFunction();
+    auto parent_bb = inst->Parent().lock();
     std::shared_ptr<fitx::Function> parent =
-        inst->Parent().lock()->Parent().lock();
+        parent_bb ? parent_bb->Parent().lock() : nullptr;
     if (!called_func || !parent) return true;
 
     if (called_func->Name().find("_unlock") == std::string::npos) return true;

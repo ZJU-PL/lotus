@@ -18,11 +18,12 @@ public:
   static struct EndPoints createEndPointPair();
   EndPoint() : fd_(kInvalidEndpoint) {}
 
-  bool valid() { return fd_ != kInvalidEndpoint; }
+  bool valid() const { return fd_ != kInvalidEndpoint; }
+  void closeFd();
 
 protected:
   EndPoint(int fd) : fd_(fd) {}
-  int Fd() { return fd_; };
+  int Fd() const { return fd_; };
 
 private:
   int fd_;
@@ -52,6 +53,7 @@ struct EndPoints {
 class LoggingClient {
 public:
   LoggingClient();
+  ~LoggingClient();
 
   void log(const std::string &log);
   void flush();

@@ -17,7 +17,6 @@ namespace fitx {
 std::vector<fitx::Value::Fields>
 decodeGetElementPtrInst(llvm::GetElementPtrInst *get_element_ptr_inst) {
   llvm::Type *Ty = get_element_ptr_inst->getPointerOperandType();
-  /* llvm::Type *Ty = get_element_ptr_inst->getSourceElementType(); */
   std::vector<long> indice = getValueIndices(get_element_ptr_inst);
   std::vector<fitx::Value::Fields> decoded;
 
@@ -25,19 +24,28 @@ decodeGetElementPtrInst(llvm::GetElementPtrInst *get_element_ptr_inst) {
     long index = ind;
     if (Ty && index != Value::kNonFieldVariable) {
       if (Ty->isIntegerTy()) {
-        if (Ty && getRootElementType(Ty)->isStructTy()) {
-          index = getMemberIndiceFromByte(
-              get_element_ptr_inst,
-              llvm::cast<llvm::StructType>(getRootElementType(Ty)), index);
+        if (auto *rootSt =
+                llvm::dyn_cast<llvm::StructType>(getRootElementType(Ty))) {
+          if (index >= 0) {
+            index = getMemberIndiceFromByte(get_element_ptr_inst, rootSt,
+                                            static_cast<uint64_t>(index));
+          } else {
+            index = Value::kNonFieldVariable;
+          }
         }
       }
+      if (index == Value::kNonFieldVariable)
+        continue;
       decoded.push_back(fitx::Value::Fields(Ty, index));
-      if (auto *StTy = llvm::dyn_cast<llvm::StructType>(getRootElementType(Ty)))
-        Ty = StTy->getElementType(index);
-      /* if (auto StTy = llvm::dyn_cast<llvm::StructType>(Ty)) */
-      /*   Ty = StTy->getElementType(index); */
-    } else {
-      // decoded.push_back(std::pair<llvm::Type *, long>(NULL, ROOT_INDEX));
+      if (auto *StTy =
+              llvm::dyn_cast<llvm::StructType>(getRootElementType(Ty))) {
+        if (index >= 0 &&
+            static_cast<unsigned>(index) < StTy->getNumElements()) {
+          Ty = StTy->getElementType(static_cast<unsigned>(index));
+        } else {
+          Ty = nullptr;
+        }
+      }
     }
   }
 
@@ -50,10 +58,9 @@ long arrayElementNum(llvm::GetElementPtrInst *get_element_ptr_inst) {
     return fitx::Value::kArbitaryArrayElement;
 
   if (get_element_ptr_inst->getSourceElementType()->isArrayTy()) {
-    // Use the last index (array element index); idx_end() is past-the-end.
     llvm::Value *last_idx_val = get_element_ptr_inst->getOperand(num_ops - 1);
     if (auto *const_int = llvm::dyn_cast<llvm::ConstantInt>(last_idx_val)) {
-      if (const_int->getBitWidth() > 0)
+      if (const_int->getBitWidth() > 0 && const_int->getBitWidth() <= 64)
         return const_int->getSExtValue();
     }
     return fitx::Value::kArbitaryArrayElement;
@@ -61,7 +68,7 @@ long arrayElementNum(llvm::GetElementPtrInst *get_element_ptr_inst) {
 
   llvm::Value *first_idx_val = get_element_ptr_inst->getOperand(1);
   if (auto *const_int = llvm::dyn_cast<llvm::ConstantInt>(first_idx_val)) {
-    if (const_int->getBitWidth() == 0)
+    if (const_int->getBitWidth() == 0 || const_int->getBitWidth() > 64)
       return fitx::Value::kArbitaryArrayElement;
     if (const_int->isZero())
       return fitx::Value::kNonArrayElement;
@@ -75,7 +82,8 @@ std::vector<long> getValueIndices(llvm::GetElementPtrInst *inst) {
 
   llvm::Type *Ty = inst->getSourceElementType();
   auto *idx_itr = inst->idx_begin();
-  if (llvm::isa<llvm::ConstantInt>(idx_itr->get())) {
+  if (idx_itr != inst->idx_end() &&
+      llvm::isa<llvm::ConstantInt>(idx_itr->get())) {
     if (!Ty->isIntegerTy())
       idx_itr++;
   }
@@ -83,8 +91,10 @@ std::vector<long> getValueIndices(llvm::GetElementPtrInst *inst) {
   for (; idx_itr != inst->idx_end(); idx_itr++) {
     long indice = Value::kNonFieldVariable;
     if (llvm::ConstantInt *cint =
-            llvm::dyn_cast<llvm::ConstantInt>(idx_itr->get()))
-      indice = cint->getSExtValue();
+            llvm::dyn_cast<llvm::ConstantInt>(idx_itr->get())) {
+      if (cint->getBitWidth() > 0 && cint->getBitWidth() <= 64)
+        indice = cint->getSExtValue();
+    }
     indices.push_back(indice);
   }
 
@@ -93,8 +103,10 @@ std::vector<long> getValueIndices(llvm::GetElementPtrInst *inst) {
 
 long getMemberIndiceFromByte(llvm::Instruction *instruction,
                              llvm::StructType *STy, uint64_t byte) {
+  if (!STy || STy->isOpaque())
+    return Value::kNonFieldVariable;
   const llvm::StructLayout *sl = getStructLayout(instruction, STy);
-  if (sl != NULL)
+  if (sl != NULL && byte < sl->getSizeInBytes())
     return sl->getElementContainingOffset(byte);
   return Value::kNonFieldVariable;
 }

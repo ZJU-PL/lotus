@@ -9,6 +9,7 @@
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/ModuleSlotTracker.h>
@@ -102,7 +103,43 @@ std::string DebugInfoAnalysis::getIRString(const llvm::Value *V) {
       tracker = std::make_unique<llvm::ModuleSlotTracker>(M, false);
     if (F)
       tracker->incorporateFunction(*F);
-    V->print(output, *tracker);
+    if (const auto *I = llvm::dyn_cast<llvm::Instruction>(V)) {
+      // Format instructions directly using the incorporated ModuleSlotTracker
+      // rather than V->print(), which constructs llvm::AssemblyWriter and
+      // scans every GlobalObject / Comdat / StructType in M on every call.
+      output << "  ";
+      if (!I->getType()->isVoidTy()) {
+        I->printAsOperand(output, false, *tracker);
+        output << " = ";
+      }
+      output << I->getOpcodeName();
+      if (const auto *ICmp = llvm::dyn_cast<llvm::ICmpInst>(I)) {
+        output << ' ' << llvm::CmpInst::getPredicateName(ICmp->getPredicate());
+      } else if (const auto *FCmp = llvm::dyn_cast<llvm::FCmpInst>(I)) {
+        output << ' ' << llvm::CmpInst::getPredicateName(FCmp->getPredicate());
+      }
+      output << ' ';
+      I->getType()->print(output);
+      for (unsigned i = 0, e = I->getNumOperands(); i < e; ++i) {
+        output << (i == 0 ? " " : ", ");
+        const llvm::Value *Op = I->getOperand(i);
+        if (!Op) {
+          output << "<null>";
+          continue;
+        }
+        Op->getType()->print(output);
+        output << ' ';
+        if (llvm::isa<llvm::Constant>(Op) ||
+            llvm::isa<llvm::MetadataAsValue>(Op)) {
+          Op->printAsOperand(output, false,
+                             static_cast<const llvm::Module *>(nullptr));
+        } else {
+          Op->printAsOperand(output, false, *tracker);
+        }
+      }
+    } else {
+      V->print(output, *tracker);
+    }
   } else {
     V->print(output);
   }

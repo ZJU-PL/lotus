@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace llvm {
@@ -81,8 +82,12 @@ private:
     // Helper: Find the actual path to a source file
     static std::string findSourceFile(const std::string& filename);
 
-    // Cache for variable names and rendered IR strings (per-instance, keyed by Value*)
+    // Cache for variable names, function names, type names, and rendered IR strings
     std::unordered_map<const llvm::Value*, std::string> varNameCache;
+    std::unordered_map<const llvm::Value*, std::string> fallbackDbgVarNameCache;
+    std::unordered_set<const llvm::Function*> scannedDbgVarFunctions;
+    std::unordered_map<const llvm::Function*, std::string> funcNameCache;
+    std::unordered_map<const llvm::Type*, std::string> typeNameCache;
     std::unordered_map<const llvm::Value*, std::string> irStringCache;
     std::map<std::pair<llvm::Type *, int64_t>, std::string> fieldNameCache;
     std::map<std::string, std::vector<std::string>> compositeFieldNames;

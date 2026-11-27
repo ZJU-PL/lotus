@@ -7,6 +7,8 @@
 #include "Checker/FiTx/Core/Instruction.h"
 #include "Checker/FiTx/Core/Logs.h"
 #include "Checker/FiTx/Core/Value.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Value.h"
 
@@ -20,7 +22,6 @@ class Converter {
     std::vector<fitx::Value::Fields> fields;
   };
 
-  // factory
   static Converter& GetInstance();
 
   struct ValueSignature GetSignitureFromDefinition(llvm::Value* value);
@@ -28,8 +29,8 @@ class Converter {
   std::shared_ptr<fitx::Value> Convert(llvm::Value* llvm_value);
 
   std::shared_ptr<fitx::Instruction> ConvertInstruction(
-      ValueSignature signature);
-  std::shared_ptr<fitx::Value> ConvertValue(ValueSignature signature);
+      const ValueSignature& signature);
+  std::shared_ptr<fitx::Value> ConvertValue(const ValueSignature& signature);
 
   void manageValue(llvm::Value* value,
                    std::shared_ptr<fitx::Value> framework_value);
@@ -80,10 +81,9 @@ class Converter {
   template <class FrameworkClass>
   std::shared_ptr<FrameworkClass> getManagedInst(
       llvm::Instruction* inst, long array_element_num = Value::kNonArrayElement,
-      std::vector<fitx::Value::Fields> fields =
+      const std::vector<fitx::Value::Fields>& fields =
           std::vector<fitx::Value::Fields>()) {
-    auto managed =
-        getManagedValue(ValueSignature{inst, array_element_num, fields});
+    auto managed = getManagedValue(inst, array_element_num, fields);
 
     if (managed && fitx::shared_isa<FrameworkClass>(managed))
       return fitx::shared_dyn_cast<FrameworkClass>(managed);
@@ -92,7 +92,8 @@ class Converter {
   }
 
   template <class FrameworkClass>
-  std::shared_ptr<FrameworkClass> getManagedInst(ValueSignature signature) {
+  std::shared_ptr<FrameworkClass> getManagedInst(
+      const ValueSignature& signature) {
     auto managed = getManagedValue(signature);
 
     if (managed && fitx::shared_isa<FrameworkClass>(managed))
@@ -103,14 +104,24 @@ class Converter {
 
   std::shared_ptr<fitx::Value> getManagedValue(
       llvm::Value* value, long array_element_num = Value::kNonArrayElement,
-      std::vector<fitx::Value::Fields> fields =
+      const std::vector<fitx::Value::Fields>& fields =
           std::vector<fitx::Value::Fields>());
-  std::shared_ptr<fitx::Value> getManagedValue(ValueSignature signature);
+  std::shared_ptr<fitx::Value> getManagedValue(const ValueSignature& signature);
+
+  void clear() {
+    managed_values_.clear();
+    convert_cache_.clear();
+  }
 
  private:
   Converter() = default;
 
-  std::map<llvm::Value*, std::vector<std::shared_ptr<fitx::Value>>>
+  static uint64_t hashSignature(
+      llvm::Value* value, long array_element_num,
+      const std::vector<fitx::Value::Fields>& fields);
+
+  llvm::DenseMap<uint64_t, llvm::SmallVector<std::shared_ptr<fitx::Value>, 1>>
       managed_values_;
+  llvm::DenseMap<llvm::Value*, std::shared_ptr<fitx::Value>> convert_cache_;
 };
 }  // namespace fitx

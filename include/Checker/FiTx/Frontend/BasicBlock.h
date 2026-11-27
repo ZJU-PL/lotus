@@ -1,112 +1,97 @@
 /// \file BasicBlock.h
 /// \brief FiTx per-block analysis state: value typestates, arg summaries,
 /// pending (return-code aware) propagation, and may-alias (paper §4.2, 4.3).
-///
-/// BasicBlockInformation holds value_states_ (value -> TransitionLogs),
-/// arg_value_states_ (per-arg summaries for callee application),
-/// pending_values_ per successor (for return-code aware merge), and alias_info_
-/// (store-based may-alias; not merged across predecessors).
 #pragma once
-#include "llvm/ADT/APFloat.h"
-#include "llvm/Analysis/LoopInfo.h"
-#include "llvm/IR/Argument.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/CFG.h"
-#include "llvm/IR/Constant.h"
-#include "llvm/IR/DataLayout.h"
-#include "llvm/IR/DebugInfoMetadata.h"
-#include "llvm/IR/DebugLoc.h"
-#include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/Instruction.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/IR/Value.h"
-#include "llvm/IR/ValueSymbolTable.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
-
-#include "Checker/FiTx/Core/Instruction.h"
-
-// include STL
 #include "Checker/FiTx/Core/BasicBlock.h"
 #include "Checker/FiTx/Core/Function.h"
+#include "Checker/FiTx/Core/Instruction.h"
 #include "Checker/FiTx/Core/Instructions.h"
 #include "Checker/FiTx/Core/Value.h"
 #include "Checker/FiTx/Frontend/State.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <algorithm>
-#include <ctime>
-#include <iostream>
-#include <iterator>
 #include <map>
-#include <queue>
+#include <memory>
 #include <set>
-#include <stack>
-#include <string>
 #include <vector>
 
 namespace fitx {
 
-/// Per-state transition history for one value at one argument index; used to
-/// build and apply callee summaries (paper §4.3).
-/// Tracks which transitions were applied so we can propagate the right state to
-/// callers.
+/// Lazy per-state transition history for one value at one argument index;
+/// stores only states that have actually taken at least one transition in a
+/// compact sorted SmallVector (typical size 1-2, zero heap nodes).
 class ArgTransitions {
 public:
+  using Entry = std::pair<fitx::State, TransitionLogs>;
+  using Storage = llvm::SmallVector<Entry, 1>;
+
   ArgTransitions();
-  ArgTransitions(std::set<fitx::State> states);
+  explicit ArgTransitions(const std::set<fitx::State> &states);
   ArgTransitions(const ArgTransitions &arg_transitions);
+  ArgTransitions(ArgTransitions &&arg_transitions) noexcept = default;
   ArgTransitions &operator=(const ArgTransitions &) = default;
+  ArgTransitions &operator=(ArgTransitions &&) noexcept = default;
 
   bool operator==(const ArgTransitions &arg_transitions) const;
 
+  bool wouldChangeFrom(const ArgTransitions &arg_transitions) const;
   void addArgTransitions(const ArgTransitions &arg_transitions);
-  bool addTransition(std::vector<Transition> &transitions,
-                     std::shared_ptr<fitx::Instruction> inst);
+  bool wouldChange(llvm::ArrayRef<Transition> transitions) const;
+  bool addTransition(llvm::ArrayRef<Transition> transitions,
+                     const std::shared_ptr<fitx::Instruction> &inst);
+  void collectReducedTransitions(llvm::SmallVectorImpl<Transition> &out) const;
   TransitionLogs getTransitionLog(State state);
-  std::map<fitx::State, TransitionLogs> &TransitionPerState() {
-    return transition_per_state_;
-  }
+  Storage &TransitionPerState() { return transition_per_state_; }
+  const Storage &TransitionPerState() const { return transition_per_state_; }
+  bool empty() const { return transition_per_state_.empty(); }
 
 private:
-  std::map<fitx::State, TransitionLogs> transition_per_state_;
+  Storage::iterator findEntry(const fitx::State &state);
+  Storage::const_iterator findEntry(const fitx::State &state) const;
+
+  Storage transition_per_state_;
 };
 
-/// Per-argument typestate summary: for each arg index, value -> ArgTransitions
-/// (state -> TransitionLogs). Used to apply callee summary at call sites
-/// (paper §4.3) and for return-code aware propagation.
+/// Per-argument typestate summary: for each arg index, value -> ArgTransitions.
+/// Uses per-argument copy-on-write sharing so identical predecessor summaries
+/// propagate in O(1) without deep-copying std::map trees.
 class ArgValueStates {
 public:
+  using ArgEntry = std::pair<std::shared_ptr<fitx::Value>, ArgTransitions>;
+  using ArgMap = std::vector<ArgEntry>;
+
   ArgValueStates();
   ArgValueStates(uint64_t arg_num, const std::set<State> &states);
-  ArgValueStates(const ArgValueStates &arg_value_states);
+  ArgValueStates(const ArgValueStates &arg_value_states) = default;
+  ArgValueStates(ArgValueStates &&arg_value_states) noexcept = default;
 
-  bool operator==(const ArgValueStates &states);
-  ArgValueStates &operator=(const ArgValueStates &arg_value_states);
+  bool operator==(const ArgValueStates &states) const;
+  ArgValueStates &operator=(const ArgValueStates &arg_value_states) = default;
+  ArgValueStates &operator=(ArgValueStates &&arg_value_states) noexcept = default;
 
-  bool transitionState(std::vector<Transition> &transitions,
-                       std::shared_ptr<fitx::Value> value,
-                       std::shared_ptr<fitx::Instruction> instruction);
+  bool transitionState(llvm::ArrayRef<Transition> transitions,
+                       const std::shared_ptr<fitx::Value> &value,
+                       const std::shared_ptr<fitx::Instruction> &instruction);
 
   void addArgValueState(const ArgValueStates &states);
-  uint64_t Size() const { return value_states_.size(); }
-  bool ValueExistsInArg(uint64_t arg, std::shared_ptr<Value>);
+  uint64_t Size() const { return arg_num_; }
+  bool empty() const {
+    if (value_states_.empty())
+      return true;
+    for (const auto &arg_map : value_states_) {
+      if (arg_map && !arg_map->empty())
+        return false;
+    }
+    return true;
+  }
+  bool ValueExistsInArg(uint64_t arg, const std::shared_ptr<Value> &value) const;
 
-  const std::map<std::shared_ptr<fitx::Value>, std::vector<Transition>>
+  std::map<std::shared_ptr<fitx::Value>, std::vector<Transition>>
   getValueStateForArg(uint64_t index) const;
 
-  /* const std::map<std::shared_ptr<fitx::Value>,
-   * std::vector<TransitionLogs>> */
-  /* getValueTransitionLogsForArg(int64_t index) const; */
-
-  const std::map<std::shared_ptr<fitx::Value>, ArgTransitions>
-  getArgTransitions(uint64_t index) const;
+  const ArgMap &getArgTransitions(uint64_t index) const;
 
   std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>>
   getValueTransitionStates(const fitx::State &state);
@@ -114,40 +99,56 @@ public:
   void print();
 
 private:
-  /* std::vector< */
-  /*     std::map<std::shared_ptr<fitx::Value>,
-   * std::vector<TransitionLogs>>> */
-  /*     value_states_; */
+  void ensureSlots() {
+    if (value_states_.empty() && arg_num_ > 0)
+      value_states_.resize(arg_num_);
+  }
 
-  std::vector<std::map<std::shared_ptr<fitx::Value>, ArgTransitions>>
-      value_states_;
+  ArgMap &ensureMutableArg(uint64_t index) {
+    ensureSlots();
+    auto &slot = value_states_[index];
+    if (!slot)
+      slot = std::make_shared<ArgMap>();
+    else if (slot.use_count() > 1)
+      slot = std::make_shared<ArgMap>(*slot);
+    return *slot;
+  }
 
-  const std::set<State> states_;
+  uint64_t arg_num_ = 0;
+  std::vector<std::shared_ptr<ArgMap>> value_states_;
 };
 
 /// Per-block map: value -> TransitionLogs (current typestate + transition
-/// history). Merged from predecessors in createBasicBlockInfo; updated when
-/// applying transitions (paper §4.2).
+/// history). Copy-on-write shared across unchanged predecessor->successor edges.
 class BasicBlockValueStates {
 public:
+  using ValueMap = std::map<std::shared_ptr<fitx::Value>, TransitionLogs>;
+
   BasicBlockValueStates() = default;
-  BasicBlockValueStates(const BasicBlockValueStates &states);
-  bool operator==(const BasicBlockValueStates &states);
+  BasicBlockValueStates(const BasicBlockValueStates &states) = default;
+  BasicBlockValueStates(BasicBlockValueStates &&states) noexcept = default;
+  BasicBlockValueStates &operator=(const BasicBlockValueStates &) = default;
+  BasicBlockValueStates &operator=(BasicBlockValueStates &&) noexcept = default;
+  bool operator==(const BasicBlockValueStates &states) const;
 
-  bool valueExists(std::shared_ptr<fitx::Value> value);
+  bool valueExists(const std::shared_ptr<fitx::Value> &value) const;
   void updateReturnValue(std::shared_ptr<fitx::BasicBlock> block);
-  bool transitionState(std::vector<Transition> &transitions,
-                       std::shared_ptr<fitx::Value> value,
-                       std::shared_ptr<fitx::Instruction> instruction);
+  bool transitionState(llvm::ArrayRef<Transition> transitions,
+                       const std::shared_ptr<fitx::Value> &value,
+                       const std::shared_ptr<fitx::Instruction> &instruction);
 
-  void setValueState(std::shared_ptr<fitx::Value> value,
-                     fitx::Transition &states,
-                     std::shared_ptr<fitx::Instruction> instruction);
+  void setValueState(const std::shared_ptr<fitx::Value> &value,
+                     const fitx::Transition &states,
+                     const std::shared_ptr<fitx::Instruction> &instruction);
 
-  void setValueState(std::shared_ptr<fitx::Value> value,
-                     fitx::TransitionLogs &logs);
+  void setValueState(const std::shared_ptr<fitx::Value> &value,
+                     const fitx::TransitionLogs &logs);
 
-  TransitionLogs &getTransitionLog(std::shared_ptr<fitx::Value> value);
+  void mergeFrom(const BasicBlockValueStates &pred);
+
+  TransitionLogs &getTransitionLog(const std::shared_ptr<fitx::Value> &value);
+  const TransitionLogs &
+  getTransitionLog(const std::shared_ptr<fitx::Value> &value) const;
 
   std::vector<std::shared_ptr<fitx::Value>>
   getStateValues(const fitx::State &state);
@@ -155,25 +156,30 @@ public:
   std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>>
   getValueTransitionStates(const fitx::State &state);
 
-  const State &getState(std::shared_ptr<fitx::Value> value) {
-    return value_states_[value].CurrentState();
-  };
+  const State &getState(const std::shared_ptr<fitx::Value> &value) const {
+    return value_states_->at(value).CurrentState();
+  }
 
-  const std::map<std::shared_ptr<fitx::Value>, TransitionLogs>
-  ValueStates() {
-    return value_states_;
-  };
+  const ValueMap &ValueStates() const {
+    static const ValueMap kEmpty;
+    return value_states_ ? *value_states_ : kEmpty;
+  }
 
+  void clear() { value_states_.reset(); }
   void print();
 
 private:
-  std::map<std::shared_ptr<fitx::Value>, TransitionLogs> value_states_;
+  ValueMap &ensureMutable() {
+    if (!value_states_)
+      value_states_ = std::make_shared<ValueMap>();
+    else if (value_states_.use_count() > 1)
+      value_states_ = std::make_shared<ValueMap>(*value_states_);
+    return *value_states_;
+  }
+
+  std::shared_ptr<ValueMap> value_states_;
 };
 
-/// All analysis state for one basic block: value_states_ (typestate per value),
-/// arg_value_states_ (per-arg summary), pending_values_ (per successor for
-/// return-code aware propagation), return_values_, and alias_info_ (store-based
-/// may-alias; recorded and used during analysis, not merged across preds).
 class BasicBlockInformation {
 public:
   constexpr static int kMaxTimeToLive = 5;
@@ -184,18 +190,32 @@ public:
                         const std::set<State> &states);
   BasicBlockInformation(const BasicBlockInformation &info);
 
-  bool changeValueState(std::vector<Transition> &transitions,
-                        std::shared_ptr<fitx::Value> value,
-                        std::shared_ptr<fitx::Instruction> instruction);
-  bool valueHasState(std::shared_ptr<fitx::Value> value);
-  void
-  removeValueFromState(std::shared_ptr<fitx::Value> value,
-                       std::shared_ptr<fitx::Instruction> instruction);
+  bool changeValueState(llvm::ArrayRef<Transition> transitions,
+                        const std::shared_ptr<fitx::Value> &value,
+                        const std::shared_ptr<fitx::Instruction> &instruction);
+  bool valueHasState(const std::shared_ptr<fitx::Value> &value) const;
+  void removeValueFromState(const std::shared_ptr<fitx::Value> &value,
+                            const std::shared_ptr<fitx::Instruction> &instruction);
 
-  void resetValueState(std::shared_ptr<fitx::Value> value,
-                       std::shared_ptr<fitx::Instruction> instruction);
+  void resetValueState(const std::shared_ptr<fitx::Value> &value,
+                       const std::shared_ptr<fitx::Instruction> &instruction);
 
-  fitx::BasicBlockValueStates &ValueStates() { return value_states_; };
+  fitx::BasicBlockValueStates &ValueStates() { return value_states_; }
+  const fitx::BasicBlockValueStates &ValueStates() const {
+    return value_states_;
+  }
+
+  bool hasPendingArgStatesFor(
+      const std::shared_ptr<fitx::BasicBlock> &successor) const {
+    auto it = pending_values_.find(successor);
+    return it != pending_values_.end() && !it->second.arg_states.empty();
+  }
+
+  bool hasPendingReturnValuesFor(
+      const std::shared_ptr<fitx::BasicBlock> &successor) const {
+    auto it = pending_values_.find(successor);
+    return it != pending_values_.end() && !it->second.return_values.empty();
+  }
 
   std::pair<fitx::BasicBlockValueStates, fitx::ArgValueStates>
   ValueStatesForSuccessor(std::shared_ptr<fitx::BasicBlock> successor);
@@ -203,9 +223,12 @@ public:
   std::set<std::shared_ptr<fitx::Value>>
   ReturnCodeForSuccessor(std::shared_ptr<fitx::BasicBlock> successor);
 
-  fitx::ArgValueStates &getArgValueStates() { return arg_value_states_; };
+  fitx::ArgValueStates &getArgValueStates() { return arg_value_states_; }
+  const fitx::ArgValueStates &getArgValueStates() const {
+    return arg_value_states_;
+  }
   void setPendingValueStates(std::weak_ptr<fitx::BasicBlock>,
-                             fitx::ArgValueStates arg_value_state);
+                             const fitx::ArgValueStates &arg_value_state);
 
   std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>>
   getValueTransitionStates(const State &state);
@@ -213,14 +236,12 @@ public:
   void setPendingReturnValues(std::weak_ptr<fitx::BasicBlock>,
                               std::shared_ptr<fitx::ConstValue>);
 
-  bool operator==(const fitx::BasicBlockInformation &prev_block_info);
+  bool operator==(const fitx::BasicBlockInformation &prev_block_info) const;
 
-  // TODO: TTL should be removed once worklist alogrithm is implemented
-  // correctly
   void setTimeToLive(int ttl) { time_to_live_ = ttl; }
-  int TimeToLive() { return time_to_live_; }
+  int TimeToLive() const { return time_to_live_; }
 
-  const std::set<std::shared_ptr<fitx::Value>> &ReturnValues() {
+  const std::set<std::shared_ptr<fitx::Value>> &ReturnValues() const {
     return return_values_;
   }
 
@@ -232,20 +253,19 @@ public:
 
   void removeReturnvalue(int value);
 
-  std::shared_ptr<fitx::BasicBlock> BasicBlock() { return basic_block_; };
+  std::shared_ptr<fitx::BasicBlock> BasicBlock() { return basic_block_; }
 
   void setPartialStates(bool partial_states);
-  bool PartialStates() { return is_partial_states_; };
+  bool PartialStates() const { return is_partial_states_; }
 
   void setPredecessorPartial(bool partial_states) {
     predecessor_partial_ = partial_states;
-  };
+  }
 
-  bool PredecessorPartial() { return predecessor_partial_; };
+  bool PredecessorPartial() const { return predecessor_partial_; }
 
   bool IsInSamelinePredecessor(std::shared_ptr<fitx::BasicBlock> block);
   void addSameLinePredecessor(std::shared_ptr<fitx::BasicBlock> block);
-
   void addSameLinePredecessor(
       std::vector<std::weak_ptr<fitx::BasicBlock>> blocks);
 
@@ -261,32 +281,31 @@ public:
     if (status_ != NUTRAL)
       status_ = status;
   }
-  BlockStatus getBlockStatus() { return status_; }
+  BlockStatus getBlockStatus() const { return status_; }
+
+  /// Release intra-procedural data while retaining `arg_value_states_` needed
+  /// by callers that read this exit block's summary.
+  void clearNonSummaryData() {
+    value_states_.clear();
+    alias_info_.clear();
+    pending_values_.clear();
+    return_values_.clear();
+    same_line_predecessors_.clear();
+  }
 
 private:
   std::shared_ptr<fitx::BasicBlock> basic_block_;
-  /// Return-code aware: for each successor block (branch target), store the
-  /// callee arg states and return value to propagate when we enter that
-  /// successor.
   struct PendingValues {
     fitx::ArgValueStates arg_states;
     std::set<std::shared_ptr<fitx::ConstValue>> return_values;
   };
 
-  struct ValueStates {
-    fitx::ArgValueStates arg_value_states_;
-    fitx::BasicBlockValueStates value_states_;
-  };
-
-  // TODO: remove for quasi worklist algorithm
   int time_to_live_ = kMaxTimeToLive;
   bool is_partial_states_;
   bool predecessor_partial_;
 
   std::vector<std::weak_ptr<fitx::BasicBlock>> same_line_predecessors_;
-
   std::set<std::shared_ptr<fitx::Value>> return_values_;
-
   AliasValues alias_info_;
 
   std::map<std::weak_ptr<fitx::BasicBlock>, struct PendingValues,
@@ -296,9 +315,7 @@ private:
   fitx::ArgValueStates arg_value_states_;
   fitx::BasicBlockValueStates value_states_;
 
-  std::set<State> states_;
-
-  struct ValueStates refcounted_states_;
+  const std::set<State> *states_ = nullptr;
   BlockStatus status_;
 };
 

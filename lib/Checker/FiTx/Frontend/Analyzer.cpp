@@ -1,64 +1,44 @@
 // FiTx CFG-based typestate analysis: path-insensitive, inter-procedural,
 // return-code aware state propagation (Suzuki et al., USENIX ATC 2024,
-// ยง4.2, 4.3).
-#include "llvm/ADT/APFloat.h"
-#include "llvm/Analysis/LoopInfo.h"
-#include "llvm/IR/Argument.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/CFG.h"
-#include "llvm/IR/Constant.h"
-#include "llvm/IR/DataLayout.h"
-#include "llvm/IR/DebugInfoMetadata.h"
-#include "llvm/IR/DebugLoc.h"
-#include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/Instruction.h"
+// §4.2, 4.3).
+#include "Checker/FiTx/Frontend/Analyzer.h"
+
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/IR/Value.h"
-#include "llvm/IR/ValueSymbolTable.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
 #include "Checker/FiTx/Core/BasicBlock.h"
-#include "Checker/FiTx/Core/Instruction.h"
-#include "Checker/FiTx/Core/Instructions/BranchInstruction.h"
-#include "Checker/FiTx/Core/Value.h"
-#include "Checker/FiTx/Frontend/StateTransition.h"
-
-// include STL
 #include "Checker/FiTx/Core/Casting.h"
+#include "Checker/FiTx/Core/Instruction.h"
 #include "Checker/FiTx/Core/Instructions.h"
+#include "Checker/FiTx/Core/Instructions/BranchInstruction.h"
 #include "Checker/FiTx/Core/Utils.h"
+#include "Checker/FiTx/Core/Value.h"
 #include "Checker/FiTx/FrameworkIR/IRGenerator.h"
-#include "Checker/FiTx/Frontend/Analyzer.h"
 #include "Checker/FiTx/Frontend/CommandlineArgs.h"
 #include "Checker/FiTx/Frontend/Function.h"
 #include "Checker/FiTx/Frontend/PropagationConstraint.h"
+#include "Checker/FiTx/Frontend/StateTransition.h"
 #include "Checker/Framework/BugReport.h"
 #include "Checker/Framework/BugReportMgr.h"
 
 #include <algorithm>
-#include <ctime>
-#include <iostream>
-#include <iterator>
+#include <deque>
 #include <map>
 #include <memory>
 #include <queue>
 #include <set>
-#include <stack>
 #include <string>
 #include <vector>
 
-#include <llvm/IR/Instructions.h>
-#include <llvm/Support/raw_ostream.h>
-
 namespace {
+void appendUniqueValue(llvm::SmallVectorImpl<std::shared_ptr<fitx::Value>> &out,
+                       const std::shared_ptr<fitx::Value> &val) {
+  if (val && std::find(out.begin(), out.end(), val) == out.end())
+    out.push_back(val);
+}
+
 struct FiTxBugSpec {
   const char *bug_name;
   BugDescription::BugImportance importance;
@@ -128,19 +108,10 @@ FiTxBugSpec getFiTxBugSpec(llvm::StringRef state_name) {
 }
 
 int getOrRegisterFiTxBugType(const fitx::State &state) {
-  static std::map<std::string, int> bug_type_ids;
-
-  auto found = bug_type_ids.find(state.Name());
-  if (found != bug_type_ids.end()) {
-    return found->second;
-  }
-
   const FiTxBugSpec spec = getFiTxBugSpec(state.Name());
   BugReportMgr &mgr = BugReportMgr::get_instance();
-  int bug_type_id = mgr.register_bug_type(
-      spec.bug_name, spec.importance, spec.classification, spec.description);
-  bug_type_ids.emplace(state.Name(), bug_type_id);
-  return bug_type_id;
+  return mgr.register_bug_type(spec.bug_name, spec.importance,
+                               spec.classification, spec.description);
 }
 
 std::string renderFiTxValue(const std::shared_ptr<fitx::Value> &value) {
@@ -182,7 +153,7 @@ std::string renderTransitionTip(const fitx::TransitionLogs::TraceEntry &entry) {
 
 std::string renderPrimaryTip(const fitx::State &state,
                              const std::shared_ptr<fitx::Value> &value) {
-  const std::string state_name = state.Name();
+  const std::string &state_name = state.Name();
   (void)value;
 
   if (state_name == "UBI") {
@@ -240,14 +211,14 @@ void appendFiTxReport(const fitx::State &state,
   for (const fitx::TransitionLogs::TraceEntry &entry : logs.getTraceEntries()) {
     llvm::Instruction *llvm_inst =
         entry.instruction ? entry.instruction->LLVMInstruction() : nullptr;
-    report->append_step(llvm_inst, renderTransitionTip(entry));
+    report->append_step(llvm_inst, renderTransitionTip(entry), 0, {}, "", true);
   }
 
   llvm::Instruction *bug_inst =
       logs.CurrentInstruction() ? logs.CurrentInstruction()->LLVMInstruction()
                                 : nullptr;
   report->append_step(bug_inst, renderPrimaryTip(state, value), 0,
-                      {NodeTag::NONE});
+                      {NodeTag::NONE}, "", true);
   report->set_conf_score(inferConfidenceScore(state, value));
   report->set_suggestion(spec.suggestion);
   report->add_metadata("fitx_state", state.Name());
@@ -267,50 +238,45 @@ Analyzer::Analyzer(llvm::Module &llvm_module, fitx::StateManager &state_manager,
                    fitx::LoggingClient &client)
     : llvm_module_(llvm_module), state_manager_(state_manager), log_(client) {}
 
-// --- Top-level: analyze all functions in this module ---
-// framework_ir_ maps each LLVM Module to a list of fitx::Function (our
-// CFG + IR). We analyze one compilation unit at a time (paper: single-TU
-// scope).
 void Analyzer::analyze() {
-  auto &framework_ir = ir_generator::IRGenerator::framework_ir_;
-  if (framework_ir.find(&llvm_module_) == framework_ir.end())
+  if (!state_manager_.TransitionManager()->canTriggerFromInit(llvm_module_)) {
+    log_.flush();
     return;
-  for (auto function : framework_ir[&llvm_module_]) {
+  }
+
+  auto &framework_ir = ir_generator::IRGenerator::framework_ir_;
+  auto mod_it = framework_ir.find(&llvm_module_);
+  if (mod_it == framework_ir.end())
+    return;
+  for (const auto &function : mod_it->second) {
     analyzeFunction(function);
   }
   log_.flush();
 }
 
 void Analyzer::analyzeFunction(std::shared_ptr<fitx::Function> function) {
-  // Bottom-up summary-based analysis (paper ยง4.3): each function analyzed
-  // once; states summarized per return code for caller propagation.
-  if (!functionInformationExists(function))
-    function_info_[function] =
-        std::make_shared<fitx::FunctionInformation>(function);
+  auto &func_info = function_info_[function];
+  if (!func_info)
+    func_info = std::make_shared<fitx::FunctionInformation>(function);
 
-  auto func_info = function_info_[function];
   if (func_info->Stat() != FunctionInformation::UNANALYZED)
     return;
   func_info->setAnalysisStat(
       fitx::FunctionInformation::AnalysisStat::IN_PROGRESS);
 
   analyzing_function_.push(function);
-  // Process blocks in order; createBasicBlockInfo merges states from all
-  // predecessors (paper ยง4.2: "collect the state from the predecessor").
-  auto target_blocks = function->OrderedBasicBlocks();
+  const auto &target_blocks = function->OrderedBasicBlocks();
   std::queue<std::shared_ptr<fitx::BasicBlock>> block_queue(
       std::deque<std::shared_ptr<fitx::BasicBlock>>(target_blocks.begin(),
                                                     target_blocks.end()));
 
   while (!block_queue.empty()) {
     auto block = block_queue.front();
-    // Per-block state: value -> TransitionLogs (current state + history).
     bb_info_ =
         func_info->createBasicBlockInfo(block, state_manager_.getStates());
     func_info->setAnayzingBasicBlock(block);
-    // Apply branch-dependent transitions (e.g. ptr==NULL on true path).
     analyzePrevBlockBranch(block);
-    for (auto inst : block->Instructions()) {
+    for (const auto &inst : block->Instructions()) {
       switch (inst->Opcode()) {
       case llvm::Instruction::Call:
         analyzeCallInst(inst);
@@ -327,25 +293,20 @@ void Analyzer::analyzeFunction(std::shared_ptr<fitx::Function> function) {
     }
     block_queue.pop();
 
-    // Worklist: if any value state changed (e.g. from callee summary),
-    // re-analyze.
     if (func_info->basicBlockInfoChanged(block)) {
       block_queue.push(block);
       continue;
     }
 
-    // Bug-checking hooks (paper Table 6): IMMEDIATE = after transition;
-    // END_OF_LIFE = end of variable lifetime.
     generateError(BugNotificationTiming::IMMEDIATE);
-    generateError(BugNotificationTiming::END_OF_LIFE, block->DeadValues());
+    if (!block->DeadValues().empty())
+      generateError(BugNotificationTiming::END_OF_LIFE, &block->DeadValues());
   }
 
   analyzeReturnValue(function);
 
   bb_info_ = func_info->getBasicBlockInformation(function->ReturnBlock());
   if (bb_info_) {
-    // FUNCTION_END = end of function; MODULE_END = no in-unit callers (paper
-    // Table 6).
     generateError(BugNotificationTiming::FUNCTION_END);
 
     if (function->CallerFunctions().empty())
@@ -354,33 +315,31 @@ void Analyzer::analyzeFunction(std::shared_ptr<fitx::Function> function) {
 
   analyzing_function_.pop();
   func_info->setAnalysisStat(fitx::FunctionInformation::AnalysisStat::ANALYZED);
+
+  // Release intra-procedural per-block state immediately after analyzing this
+  // function; only compact exit arg summaries are retained for callers.
+  bb_info_.reset();
+  func_info->releaseAnalysisMemory(!function->CallerFunctions().empty());
 }
 
-// --- Predecessor merge & branch-dependent transitions ---
-// For each predecessor that has a branch (e.g. if (ptr == NULL)), we determine
-// whether the current block is on the "null" or "non-null" path and apply the
-// corresponding store transitions (e.g. "ptr is null" -> transition to init).
-// Also used for return-code aware propagation: branch on return value selects
-// which callee return codes we propagate (paper ยง4.3).
 void Analyzer::analyzePrevBlockBranch(std::shared_ptr<fitx::BasicBlock> block) {
-  for (auto pred_reference : block->Predecessors()) {
+  auto tm = state_manager_.TransitionManager();
+  const auto &null_branch_null = tm->getStoreArgTransitions(
+      fitx::StoreValueTransitionRule::NULL_BRANCH_CONSIDERED_NULL);
+  const auto &null_branch_non_null = tm->getStoreArgTransitions(
+      fitx::StoreValueTransitionRule::NULL_BRANCH_CONSIDERED_NON_NULL);
+  const auto &null_branch_any = tm->getStoreArgTransitions(
+      fitx::StoreValueTransitionRule::NULL_BRANCH_CONSIDERED_ANY);
+
+  for (const auto &pred_reference : block->Predecessors()) {
     auto preds = pred_reference.lock();
-    if (!preds ||
-        !currentFunctionInformation()->getBasicBlockInformation(preds))
+    if (!preds)
       continue;
-    /* passthrough_blocks (unused): could refine which pred we use */
-    /*     std::vector<std::shared_ptr<fitx::BasicBlock>>(); */
+    auto pred_bb_info =
+        currentFunctionInformation()->getBasicBlockInformation(preds);
+    if (!pred_bb_info)
+      continue;
 
-    /* auto weak_blocks = preds->getPassthroughBlock(block); */
-    /* std::transform(weak_blocks.begin(), weak_blocks.end(), */
-    /*                std::back_inserter(passthrough_blocks), */
-    /*                [](const std::weak_ptr<fitx::BasicBlock> block) {
-     */
-    /*                  return block.lock(); */
-    /*                }); */
-    /* if (!passthrough_blocks.size()) passthrough_blocks.push_back(preds); */
-
-    /* for (auto passed_block : passthrough_blocks) { */
     auto branch_inst = preds->getBranchInst();
     if (!branch_inst || !branch_inst->Condition())
       continue;
@@ -390,10 +349,9 @@ void Analyzer::analyzePrevBlockBranch(std::shared_ptr<fitx::BasicBlock> block) {
     if (!condition_inst)
       continue;
 
-    // Identify the compared value and whether the condition involves NULL.
     bool null_exists = false;
     std::shared_ptr<fitx::Value> comp_value = nullptr;
-    for (auto operand : condition_inst->Operands()) {
+    for (const auto &operand : condition_inst->Operands()) {
       if (shared_isa<fitx::NullValue>(operand)) {
         null_exists = true;
         continue;
@@ -408,90 +366,75 @@ void Analyzer::analyzePrevBlockBranch(std::shared_ptr<fitx::BasicBlock> block) {
     auto call_inst = shared_dyn_cast<CallInst>(comp_value);
     if (call_inst && call_inst->CalledFunction() &&
         Function::IsExpectFunction(call_inst->CalledFunction())) {
-      for (auto args : call_inst->Arguments())
+      for (const auto &args : call_inst->Arguments())
         generateWarning(call_inst.get(), args.get());
     }
 
     if (!null_exists)
       continue;
-    // Which successor set is "null": true branch for (ptr == NULL), false for
-    // (ptr != NULL).
-    BranchInst::TransitionNodes null_nodes =
+
+    const BranchInst::TransitionNodes &null_nodes =
         condition_inst->GetPredicate() == llvm::CmpInst::ICMP_EQ
             ? branch_inst->TruePathNodes()
             : branch_inst->FalsePathNodes();
-    // If current block is on the null path, use NULL_BRANCH_CONSIDERED_NULL
-    // transitions.
-    StoreValueTransitionRule::StoreValueType type =
+    bool is_null_path =
         std::find_if(null_nodes.begin(), null_nodes.end(),
-                     [&block](auto node) { return node.lock() == block; }) !=
-                null_nodes.end()
-            ? StoreValueTransitionRule::NULL_BRANCH_CONSIDERED_NULL
-            : StoreValueTransitionRule::NULL_BRANCH_CONSIDERED_NON_NULL;
+                     [&block](const auto &node) {
+                       return node.lock() == block;
+                     }) != null_nodes.end();
 
-    // Apply branch-specific transitions plus ANY (for typestates that don't
-    // care).
-    auto possible_transitions =
-        state_manager_.TransitionManager()->getStoreArgTransitions(type);
+    const auto &possible_transitions =
+        is_null_path ? null_branch_null : null_branch_non_null;
 
-    auto transitions =
-        state_manager_.TransitionManager()->getStoreArgTransitions(
-            fitx::StoreValueTransitionRule::NULL_BRANCH_CONSIDERED_ANY);
+    if (!possible_transitions.empty() || !null_branch_any.empty()) {
+      llvm::SmallVector<fitx::Transition, 4> combined;
+      llvm::ArrayRef<fitx::Transition> active = possible_transitions;
+      if (possible_transitions.empty()) {
+        active = null_branch_any;
+      } else if (!null_branch_any.empty()) {
+        combined.reserve(null_branch_any.size() + possible_transitions.size());
+        combined.append(null_branch_any.begin(), null_branch_any.end());
+        combined.append(possible_transitions.begin(),
+                        possible_transitions.end());
+        active = combined;
+      }
 
-    transitions.insert(transitions.end(), possible_transitions.begin(),
-                       possible_transitions.end());
+      llvm::SmallVector<std::shared_ptr<fitx::Value>, 8> related_values;
+      const auto &vc = currentFunctionInformation()->GetValueCollection();
+      vc.collectRelatedValues(comp_value, related_values);
+      appendUniqueValue(related_values, comp_value);
+      if (const auto *aliased =
+              pred_bb_info->getAliasValues().getAliasInfo(comp_value)) {
+        for (const auto &av : aliased->Values())
+          appendUniqueValue(related_values, av);
+      }
 
-    // Apply to comp_value and all values that may alias it (intra-procedural
-    // alias; paper ยง3).
-    std::set<std::shared_ptr<fitx::Value>> related_values =
-        currentFunctionInformation()->GetValueCollection().getRelatedValues(
-            comp_value);
-    related_values.insert(comp_value);
-    if (const auto *aliased = currentFunctionInformation()
-                                  ->getBasicBlockInformation(preds)
-                                  ->getAliasValues()
-                                  .getAliasInfo(comp_value)) {
-      related_values.insert(aliased->Values().begin(), aliased->Values().end());
+      generateWarning(branch_inst.get(), "Branch Inst Transition");
+      for (const auto &value : related_values) {
+        changeValueState(active, value, branch_inst);
+      }
+      generateWarning(branch_inst.get(), "Branch Inst Transition Done");
     }
 
-    generateWarning(branch_inst.get(), "Branch Inst Transition");
-    for (auto value : related_values) {
-      changeValueState(transitions, value, branch_inst);
-    }
-    generateWarning(branch_inst.get(), "Branch Inst Transition Done");
-
-    // For return-code summary: don't treat this path as returning the other
-    // branch's code.
-    int remove_ret_val =
-        type == fitx::StoreValueTransitionRule::NULL_VAL ? 0 : -1;
+    int remove_ret_val = is_null_path ? 0 : -1;
     bb_info_->removeReturnvalue(remove_ret_val);
-    /* } */
   }
 }
 
-// --- Call instruction: apply function-arg transitions, then callee summary ---
-// 1) Apply "Fun Arg" transitions (paper Table 5): e.g. kfree(ptr) -> ptr goes
-// to free. 2) If indirect call: stop tracking args (paper: no indirect calls).
-// 3) If callee is defined in this TU: analyze callee (bottom-up), then
-// copyFunctionValues
-//    to apply its summary (arg/return states) to the caller.
 void Analyzer::analyzeCallInst(std::shared_ptr<fitx::Instruction> I) {
   auto call_inst = std::static_pointer_cast<fitx::CallInst>(I);
 
-  // Apply typestate transitions triggered by "call F with arg i" (e.g. kfree,
-  // malloc).
   if (analyzeFunctionCall(call_inst))
     return;
 
   auto function = call_inst->CalledFunction();
   if (!function) {
-    // Indirect call: paper does not consider indirect calls (FiT analysis).
-    for (auto value : call_inst->Arguments()) {
-      std::set<std::shared_ptr<fitx::Value>> related_values =
-          currentFunctionInformation()->GetValueCollection().getRelatedValues(
-              value);
-      related_values.insert(value);
-      for (auto &related : related_values) {
+    const auto &vc = currentFunctionInformation()->GetValueCollection();
+    for (const auto &value : call_inst->Arguments()) {
+      llvm::SmallVector<std::shared_ptr<fitx::Value>, 8> related_values;
+      vc.collectRelatedValues(value, related_values);
+      appendUniqueValue(related_values, value);
+      for (const auto &related : related_values) {
         bb_info_->removeValueFromState(related, I);
       }
     }
@@ -499,61 +442,41 @@ void Analyzer::analyzeCallInst(std::shared_ptr<fitx::Instruction> I) {
   }
 
   if (fitx::Function::IsDebugDeclareFunction(function)) {
-    bb_info_->resetValueState(call_inst->Arguments()[0], I);
+    if (!call_inst->Arguments().empty())
+      bb_info_->resetValueState(call_inst->Arguments()[0], I);
     return;
   }
 
   if (function->isDebugFunction())
     return;
 
-  // Special Case where memset is called. This is semantically the same as
-  // storing something to the target value, so we collect for such info..
   if (Function::IsMemSetFunction(function) && !call_inst->Arguments().empty()) {
-    std::vector<fitx::Transition> transitions;
-    /* auto target_value = */
-    /*     shared_dyn_cast<fitx::ConstValue>(call_inst->Arguments()[1]); */
-    /* if (target_value && target_value->getConstValue() == 0) { */
-    /*   auto possible_transitions = */
-    /*       state_manager_.TransitionManager()->getStoreArgTransitions( */
-    /*           fitx::StoreValueTransitionRule::NULL_VAL); */
-
-    /*   transitions.insert(transitions.end(), possible_transitions.begin(), */
-    /*                      possible_transitions.end()); */
-    /* } */
-
-    auto possible_transitions =
+    const auto &transitions =
         state_manager_.TransitionManager()->getStoreArgTransitions(
             fitx::StoreValueTransitionRule::ANY);
-
-    transitions.insert(transitions.end(), possible_transitions.begin(),
-                       possible_transitions.end());
-
-    std::set<std::shared_ptr<fitx::Value>> related_values =
-        currentFunctionInformation()->GetValueCollection().getRelatedValues(
-            call_inst->Arguments()[0]);
-    related_values.insert(call_inst->Arguments()[0]);
-
-    for (auto value : related_values) {
-      changeValueState(transitions, value, I);
+    if (!transitions.empty()) {
+      llvm::SmallVector<std::shared_ptr<fitx::Value>, 8> related_values;
+      currentFunctionInformation()->GetValueCollection().collectRelatedValues(
+          call_inst->Arguments()[0], related_values);
+      appendUniqueValue(related_values, call_inst->Arguments()[0]);
+      for (const auto &value : related_values) {
+        changeValueState(transitions, value, I);
+      }
     }
     return;
   }
 
-  // External/declaration: we don't have a summary; stop tracking state for args
-  // (conservative).
   if (function->isDeclaration()) {
-    for (auto value : call_inst->Arguments()) {
-      std::set<std::shared_ptr<fitx::Value>> related_values =
-          currentFunctionInformation()->GetValueCollection().getRelatedValues(
-              value);
-      related_values.insert(value);
-      for (auto &related : related_values) {
+    const auto &vc = currentFunctionInformation()->GetValueCollection();
+    for (const auto &value : call_inst->Arguments()) {
+      llvm::SmallVector<std::shared_ptr<fitx::Value>, 8> related_values;
+      vc.collectRelatedValues(value, related_values);
+      appendUniqueValue(related_values, value);
+      for (const auto &related : related_values) {
         bb_info_->removeValueFromState(related, I);
       }
     }
   } else {
-    // Callee defined in this TU: analyze it (bottom-up), then apply its
-    // summary.
     if (state_manager_.getStatefulConstraint() &&
         !state_manager_.getStatefulConstraint()->shouldPropagateOnCallInst(
             call_inst)) {
@@ -562,119 +485,114 @@ void Analyzer::analyzeCallInst(std::shared_ptr<fitx::Instruction> I) {
     analyzeFunction(function);
     bb_info_ = function_info_[analyzing_function_.top()]
                    ->getCurrentBasicBlockInformation();
-    copyFunctionValues(function, call_inst); // Apply callee summary to caller.
+    copyFunctionValues(function, call_inst);
   }
 }
 
-// --- Store: apply store transitions to the pointer operand (and aliases) ---
-// Transitions depend on what is stored: NULL (Store NULL), non-null (Store
-// NON), result of a specific call (Store Const / CALL_FUNC, e.g. malloc), or
-// any (Store ANY). Paper Table 5: Store NULL/NON/Const/ANY trigger typestate
-// updates on the stored-to location.
 void Analyzer::analyzeStoreInst(std::shared_ptr<fitx::Instruction> I) {
   auto store_inst = std::static_pointer_cast<fitx::StoreInst>(I);
-  std::vector<fitx::Transition> transitions;
-
+  auto tm = state_manager_.TransitionManager();
   auto value_operand = store_inst->ValueOperand();
-  if (fitx::shared_isa<fitx::NullValue>(value_operand)) {
-    auto possible_transitions =
-        state_manager_.TransitionManager()->getStoreArgTransitions(
-            fitx::StoreValueTransitionRule::NULL_VAL);
-    transitions.insert(transitions.end(), possible_transitions.begin(),
-                       possible_transitions.end());
-  } else {
-    auto possible_transitions =
-        state_manager_.TransitionManager()->getStoreArgTransitions(
-            fitx::StoreValueTransitionRule::NON_NULL_VAL);
-    transitions.insert(transitions.end(), possible_transitions.begin(),
-                       possible_transitions.end());
-  }
 
-  // If storing result of a known function (e.g. kmalloc), add CALL_FUNC
-  // transitions.
+  const auto &val_transitions = tm->getStoreArgTransitions(
+      fitx::shared_isa<fitx::NullValue>(value_operand)
+          ? fitx::StoreValueTransitionRule::NULL_VAL
+          : fitx::StoreValueTransitionRule::NON_NULL_VAL);
+
+  static const std::vector<fitx::Transition> kEmptyTransitions;
+  const std::vector<fitx::Transition> *call_transitions = &kEmptyTransitions;
   if (auto call_inst = fitx::shared_dyn_cast<fitx::CallInst>(value_operand)) {
-    auto called_func = call_inst->CalledFunction();
-    if (called_func) {
-      auto possible_transitions =
-          state_manager_.TransitionManager()->getStoreArgTransitions(
-              fitx::StoreValueTransitionRule::CALL_FUNC, called_func->Name());
-      transitions.insert(transitions.end(), possible_transitions.begin(),
-                         possible_transitions.end());
+    if (auto called_func = call_inst->CalledFunction()) {
+      call_transitions = &tm->getStoreArgTransitions(
+          fitx::StoreValueTransitionRule::CALL_FUNC, called_func->Name());
     }
   }
 
-  auto possible_transitions =
-      state_manager_.TransitionManager()->getStoreArgTransitions(
-          fitx::StoreValueTransitionRule::ANY);
-  transitions.insert(transitions.end(), possible_transitions.begin(),
-                     possible_transitions.end());
+  const auto &any_transitions =
+      tm->getStoreArgTransitions(fitx::StoreValueTransitionRule::ANY);
 
-  // Apply to the stored-to pointer and related (e.g. same base) values.
-  std::set<std::shared_ptr<fitx::Value>> related_values =
-      currentFunctionInformation()->GetValueCollection().getRelatedValues(
-          store_inst->PointerOperand());
-  related_values.insert(store_inst->PointerOperand());
-  for (auto value : related_values) {
-    changeValueState(transitions, value, I);
+  const unsigned non_empty_count = (!val_transitions.empty() ? 1u : 0u) +
+                                   (!call_transitions->empty() ? 1u : 0u) +
+                                   (!any_transitions.empty() ? 1u : 0u);
+
+  if (non_empty_count > 0) {
+    llvm::SmallVector<fitx::Transition, 4> combined;
+    llvm::ArrayRef<fitx::Transition> active;
+    if (non_empty_count == 1) {
+      if (!val_transitions.empty())
+        active = val_transitions;
+      else if (!call_transitions->empty())
+        active = *call_transitions;
+      else
+        active = any_transitions;
+    } else {
+      combined.reserve(val_transitions.size() + call_transitions->size() +
+                       any_transitions.size());
+      combined.append(val_transitions.begin(), val_transitions.end());
+      combined.append(call_transitions->begin(), call_transitions->end());
+      combined.append(any_transitions.begin(), any_transitions.end());
+      active = combined;
+    }
+
+    llvm::SmallVector<std::shared_ptr<fitx::Value>, 8> related_values;
+    currentFunctionInformation()->GetValueCollection().collectRelatedValues(
+        store_inst->PointerOperand(), related_values);
+    appendUniqueValue(related_values, store_inst->PointerOperand());
+    for (const auto &value : related_values) {
+      changeValueState(active, value, I);
+    }
   }
 
-  checkAlias(
-      store_inst); // Record ptr = value_operand and apply alias transitions.
+  checkAlias(store_inst);
 }
 
-// Record may-alias (pointer_operand = value_operand) in current block's
-// AliasValues, then apply alias transitions to pointer + related + aliased
-// values. Alias is intra-procedural and built during analysis (paper ยง3).
 void Analyzer::checkAlias(std::shared_ptr<fitx::StoreInst> store_inst) {
   auto value_operand = store_inst->ValueOperand();
+  auto &alias_vals = bb_info_->getAliasValues();
 
-  const ValueCollection *aliased = currentFunctionInformation()
-                                       ->getCurrentBasicBlockInformation()
-                                       ->getAliasValues()
-                                       .getAliasInfo(value_operand);
+  const ValueCollection *aliased = alias_vals.getAliasInfo(value_operand);
 
-  currentFunctionInformation()
-      ->getCurrentBasicBlockInformation()
-      ->getAliasValues()
-      .addAlias(store_inst->PointerOperand(), store_inst->ValueOperand());
+  alias_vals.addAlias(store_inst->PointerOperand(), value_operand);
+
+  const auto &possible_transitions =
+      state_manager_.TransitionManager()->getAliasTransitions();
+  if (possible_transitions.empty())
+    return;
 
   if (shared_isa<fitx::ConstValue>(value_operand) ||
       shared_isa<fitx::NullValue>(value_operand) ||
       (shared_isa<fitx::CallInst>(value_operand) && !aliased))
     return;
 
-  std::set<std::shared_ptr<fitx::Value>> related_values =
-      currentFunctionInformation()->GetValueCollection().getRelatedValues(
-          store_inst->PointerOperand());
-  related_values.insert(store_inst->PointerOperand());
+  const auto &vc = currentFunctionInformation()->GetValueCollection();
+  llvm::SmallVector<std::shared_ptr<fitx::Value>, 8> related_values;
+  vc.collectRelatedValues(store_inst->PointerOperand(), related_values);
+  appendUniqueValue(related_values, store_inst->PointerOperand());
 
   if (!shared_isa<fitx::CallInst>(value_operand)) {
-    auto value_related =
-        currentFunctionInformation()->GetValueCollection().getRelatedValues(
-            value_operand);
-
-    related_values.insert(value_related.begin(), value_related.end());
-    related_values.insert(value_operand);
+    llvm::SmallVector<std::shared_ptr<fitx::Value>, 8> value_related;
+    vc.collectRelatedValues(value_operand, value_related);
+    for (const auto &vr : value_related)
+      appendUniqueValue(related_values, vr);
+    appendUniqueValue(related_values, value_operand);
   }
 
   if (aliased) {
-    auto values = aliased->Values();
-    related_values.insert(values.begin(), values.end());
+    for (const auto &av : aliased->Values())
+      appendUniqueValue(related_values, av);
   }
 
-  auto possible_transitions =
-      state_manager_.TransitionManager()->getAliasTransitions();
-  for (auto value : related_values) {
+  for (const auto &value : related_values) {
     changeValueState(possible_transitions, value, store_inst);
   }
 }
 
-// --- Load: apply "Use" transitions (paper Table 5: Use load loadee) ---
-// e.g. for UAF typestate, using a freed pointer triggers the bug state.
 void Analyzer::analyzeLoadInst(std::shared_ptr<fitx::Instruction> I) {
-  auto load_inst = std::static_pointer_cast<fitx::LoadInst>(I);
-  auto transitions =
+  const auto &transitions =
       state_manager_.TransitionManager()->getUseValueTransitions();
+  if (transitions.empty())
+    return;
+  auto load_inst = std::static_pointer_cast<fitx::LoadInst>(I);
   changeValueState(transitions, load_inst->LoadValue(), I);
 }
 
@@ -683,43 +601,34 @@ bool Analyzer::functionInformationExists(
   return function_info_.find(function) != function_info_.end();
 }
 
-// Apply a list of transitions to a value in the current block's state.
-// changeValueState in BasicBlockInformation tries each transition (source state
-// must match); if one applies, the value's state is updated and we record for
-// worklist.
-void Analyzer::changeValueState(std::vector<Transition> transitions,
-                                std::shared_ptr<Value> value,
-                                std::shared_ptr<fitx::Instruction> inst) {
-  if (value->isGlobalVar() || transitions.empty())
+void Analyzer::changeValueState(
+    llvm::ArrayRef<Transition> transitions,
+    const std::shared_ptr<Value> &value,
+    const std::shared_ptr<fitx::Instruction> &inst) {
+  if (!value || value->isGlobalVar() || transitions.empty())
     return;
-  if (currentFunctionInformation()
-          ->getCurrentBasicBlockInformation()
-          ->changeValueState(transitions, value, inst)) {
+  if (bb_info_->changeValueState(transitions, value, inst)) {
     currentFunctionInformation()->addValue(value);
     fitx::generateWarning(inst.get(), "[Value Change] Change Value State: ");
     fitx::generateWarning(inst.get(), value.get());
   }
 }
 
-// Emit a bug report for every value that is in a bug state at this hook.
-// We only report if LeastSignificantSource is init: reduces false positives by
-// requiring the value to have reached the bug state from a "real" init (paper
-// ยง4.2: priority/distance to bug state used when merging predecessors).
 void Analyzer::generateError(
     BugNotificationTiming timing,
-    const std::set<std::shared_ptr<fitx::Value>> values) {
-  for (auto state : state_manager_.getBugStates()) {
+    const std::set<std::shared_ptr<fitx::Value>, BasicBlock::ValuePtrCompare>
+        *values) {
+  for (const auto &state : state_manager_.getBugStates()) {
     if (state.NotificationTiming() != timing)
       continue;
-    for (auto value : bb_info_->getValueTransitionStates(state)) {
-      if (!values.empty() && values.find(value.first) == values.end())
+    for (auto &value : bb_info_->getValueTransitionStates(state)) {
+      if (values && !values->empty() &&
+          values->find(value.first) == values->end())
         continue;
       if (value.second->CurrentState() != state)
         continue;
       if (!value.second->LeastSignificantSource().isInitState())
         continue;
-      /* if (!value.second->ReducedTransition().Source().isInitState())
-       * continue; */
 
       if (state.getTriggerConstraint() == TriggerConstraint::NON_RETURN &&
           value.first ==
@@ -736,12 +645,6 @@ void Analyzer::generateError(
   }
 }
 
-// Apply callee summary to caller: map callee arg states to caller's call-site
-// operands. If the return value is used in a branch, addPendingFunctionValues
-// already set pending states per (successor block, return code); we only reach
-// here when we don't have that (e.g. return value not checked). Then we merge
-// states from all "success" blocks of the callee and apply to caller (paper
-// ยง4.3).
 void Analyzer::copyFunctionValues(std::shared_ptr<fitx::Function> called_func,
                                   std::shared_ptr<fitx::CallInst> call_inst) {
   if (!functionInformationExists(called_func))
@@ -750,69 +653,89 @@ void Analyzer::copyFunctionValues(std::shared_ptr<fitx::Function> called_func,
 
   if (called_func->ProtectedRefcountValue() &&
       called_func->lastRefcountInstruction() != call_inst) {
-    return; // Refcount special-case: skip if not the last refcount call.
+    return;
   }
 
-  // If caller branches on return value, we already set pending states per
-  // branch.
   if (addPendingFunctionValues(called_func, call_inst))
     return;
 
-  // No return-code branch: merge states from all callee exit blocks and apply.
-  auto success_blocks = called_func_info->getSuccessBlock();
+  const auto &success_blocks = called_func_info->getSuccessBlock();
   if (success_blocks.empty())
     return;
 
-  auto operands = call_inst->Arguments();
-  ArgValueStates pending_states(operands.size(), state_manager_.getStates());
-  for (auto success_block_ref : success_blocks) {
+  const auto &operands = call_inst->Arguments();
+  if (operands.empty())
+    return;
+
+  // Fast path: when there is <= 1 non-empty exit block summary, read directly
+  // without allocating/merging a temporary ArgValueStates object.
+  const ArgValueStates *direct_states = nullptr;
+  ArgValueStates merged_states;
+  bool use_merged = false;
+  for (const auto &success_block_ref : success_blocks) {
     auto success_block = success_block_ref.lock();
     if (!success_block)
       continue;
     auto basic_block_info =
         called_func_info->getBasicBlockInformation(success_block);
-
-    if (!basic_block_info)
+    if (!basic_block_info || basic_block_info->getArgValueStates().empty())
       continue;
-    pending_states.addArgValueState(basic_block_info->getArgValueStates());
-
-    /* llvm::errs() << "=== :(\n"; */
-    /* auto operands = call_inst->Arguments(); */
-    /* for (int i = 0; i < operands.size(); i++) { */
-    /*   auto operand = operands[i]; */
-    /*   for (auto value : */
-    /*        basic_block_info->getArgValueStates().getValueStateForArg(i)) { */
-    /*     llvm::errs() << "=== " << i << "\n"; */
-    /*     llvm::errs() << value.first; */
-    /*     for (auto trans : value.second) { */
-    /*       llvm::errs() << trans << " (Transitions)\n"; */
-    /*     } */
-    /* auto new_value = Value::CreateAppend(operand, value.first); */
-    /* changeValueState(value.second, new_value, call_inst); */
-    /* } */
-    /* } */
-    /* llvm::errs() << "=== :)\n"; */
+    const auto &block_arg_states = basic_block_info->getArgValueStates();
+    if (!direct_states && !use_merged) {
+      direct_states = &block_arg_states;
+    } else {
+      if (!use_merged) {
+        merged_states = ArgValueStates(operands.size(), state_manager_.getStates());
+        merged_states.addArgValueState(*direct_states);
+        direct_states = nullptr;
+        use_merged = true;
+      }
+      merged_states.addArgValueState(block_arg_states);
+    }
   }
 
-  // Map callee arg i (value.first) + its transitions (value.second) to caller
-  // operand: new_value = operand (caller) extended with value.first (callee
-  // arg).
+  const ArgValueStates *active_states =
+      use_merged ? &merged_states : direct_states;
+  if (!active_states || active_states->empty())
+    return;
+
   generateWarning(call_inst.get(), "Call Inst Here");
+  const bool block_values_empty = bb_info_->ValueStates().ValueStates().empty();
+  const bool protect_refcount = called_func->ProtectedRefcountValue() != nullptr;
   for (size_t i = 0; i < operands.size(); i++) {
-    auto operand = operands[i];
-    for (auto value : pending_states.getValueStateForArg(i)) {
-      auto new_value = Value::CreateAppend(operand, value.first);
-      if (called_func->ProtectedRefcountValue() &&
-          fitx::shared_isa<fitx::Argument>(new_value))
+    const auto &arg_transitions = active_states->getArgTransitions(i);
+    if (arg_transitions.empty())
+      continue;
+    const auto &operand = operands[i];
+    if (operand && operand->isGlobalVar())
+      continue;
+    const bool non_arg_empty_block =
+        operand && !fitx::shared_isa<fitx::Argument>(operand) &&
+        block_values_empty;
+    for (const auto &value : arg_transitions) {
+      llvm::SmallVector<Transition, 4> reduced;
+      value.second.collectReducedTransitions(reduced);
+      if (reduced.empty())
         continue;
-      changeValueState(value.second, new_value, call_inst);
+      if (non_arg_empty_block) {
+        bool has_init = false;
+        for (const auto &t : reduced) {
+          if (t.Source().isInitState()) {
+            has_init = true;
+            break;
+          }
+        }
+        if (!has_init)
+          continue;
+      }
+      auto new_value = Value::CreateAppend(operand, value.first);
+      if (protect_refcount && fitx::shared_isa<fitx::Argument>(new_value))
+        continue;
+      changeValueState(reduced, new_value, call_inst);
     }
   }
 }
 
-// Return-code aware state propagation (paper ยง4.3): if the return value is
-// used in a branch (e.g. if (err)), propagate only the states for the return
-// codes that satisfy that branch (e.g. error path gets error-return states).
 bool Analyzer::addPendingFunctionValues(
     std::shared_ptr<fitx::Function> called_func,
     std::shared_ptr<fitx::CallInst> call_inst) {
@@ -823,7 +746,7 @@ bool Analyzer::addPendingFunctionValues(
 
   generateWarning(call_inst.get(), "Found BranchInst");
 
-  int compared_value = fitx::FunctionInformation::kSuccessCode;
+  int64_t compared_value = fitx::FunctionInformation::kSuccessCode;
   llvm::CmpInst::Predicate predicate = llvm::CmpInst::Predicate::ICMP_NE;
   bool is_null_value = false;
 
@@ -838,7 +761,7 @@ bool Analyzer::addPendingFunctionValues(
 
     auto operand = std::find_if(
         compare_inst->Operands().begin(), compare_inst->Operands().end(),
-        [call_inst](auto operand) { return operand != call_inst; });
+        [&call_inst](const auto &op) { return op != call_inst; });
 
     if (operand == compare_inst->Operands().end())
       return false;
@@ -852,6 +775,8 @@ bool Analyzer::addPendingFunctionValues(
     if (call_inst != branch_inst->Condition())
       return false;
     generateWarning(call_inst.get(), "Found Call Inst instead");
+  } else {
+    return false;
   }
 
   if (!functionInformationExists(called_func))
@@ -859,56 +784,52 @@ bool Analyzer::addPendingFunctionValues(
   auto called_func_info = function_info_[called_func];
   generateWarning(call_inst.get(), "Found called func info");
 
-  // For each (return_code, blocks) in callee summary, decide if this branch
-  // takes the "false" path for that code (e.g. if (err) and ret.first == 0 ->
-  // false path).
   auto basic_block_info =
       currentFunctionInformation()->getCurrentBasicBlockInformation();
-  for (auto ret : called_func_info->getReturnValueInfo()) {
-    bool is_false_path = false;
+  for (const auto &ret : called_func_info->getReturnValueInfo()) {
+    bool is_true_path = false;
     switch (predicate) {
     case llvm::CmpInst::Predicate::ICMP_EQ:
-      is_false_path = ret.first == compared_value;
+      is_true_path = ret.first == compared_value;
       break;
     case llvm::CmpInst::Predicate::ICMP_NE:
-      is_false_path = ret.first != compared_value;
+      is_true_path = ret.first != compared_value;
       if (is_null_value)
-        is_false_path = !is_false_path;
+        is_true_path = !is_true_path;
       break;
     case llvm::CmpInst::Predicate::ICMP_SLE:
     case llvm::CmpInst::Predicate::ICMP_ULE:
-      is_false_path = ret.first >= compared_value;
+      is_true_path = ret.first <= compared_value;
       break;
     case llvm::CmpInst::Predicate::ICMP_SGE:
     case llvm::CmpInst::Predicate::ICMP_UGE:
-      is_false_path = ret.first <= compared_value;
+      is_true_path = ret.first >= compared_value;
       break;
     case llvm::CmpInst::Predicate::ICMP_SLT:
     case llvm::CmpInst::Predicate::ICMP_ULT:
-      is_false_path = ret.first < compared_value;
+      is_true_path = ret.first < compared_value;
       break;
     case llvm::CmpInst::Predicate::ICMP_SGT:
     case llvm::CmpInst::Predicate::ICMP_UGT:
-      is_false_path = ret.first > compared_value;
+      is_true_path = ret.first > compared_value;
       break;
     default:
       break;
-      // TODO
     }
     generateWarning(call_inst.get(),
                     std::to_string(ret.first) + " Called Func");
     generateWarning(call_inst.get(),
-                    is_false_path ? "True Path" : "False Path");
+                    is_true_path ? "True Path" : "False Path");
 
-    // For each caller successor block on the chosen path, record pending arg
-    // states from the callee blocks that return this return code.
-    BranchInst::TransitionNodes nodes = is_false_path
-                                            ? branch_inst->TruePathNodes()
-                                            : branch_inst->FalsePathNodes();
-    for (auto successor_node : nodes) {
-      auto ret_value = std::make_shared<fitx::ConstValue>(ret.first);
+    const BranchInst::TransitionNodes &nodes =
+        is_true_path ? branch_inst->TruePathNodes()
+                     : branch_inst->FalsePathNodes();
+    for (const auto &successor_node : nodes) {
       auto locked = successor_node.lock();
-      for (auto success_block_ref : ret.second) {
+      if (!locked)
+        continue;
+      auto ret_value = std::make_shared<fitx::ConstValue>(ret.first);
+      for (const auto &success_block_ref : ret.second) {
         auto success_block = success_block_ref.lock();
         if (!success_block)
           continue;
@@ -938,41 +859,35 @@ bool Analyzer::addPendingFunctionValues(
   return true;
 }
 
-// Apply "Fun Arg" transition rules (paper Table 5: Fun Arg call arg arg num).
-// For each argument index, look up transitions (e.g. kfree(ptr) -> ptr:
-// initโ��free) and apply to the argument value (and optionally parent/related
-// values).
 bool Analyzer::analyzeFunctionCall(std::shared_ptr<fitx::CallInst> call_inst) {
   auto function = call_inst->CalledFunction();
   if (!function || call_inst->Arguments().empty())
     return false;
 
+  auto tm = state_manager_.TransitionManager();
   bool changed = false;
-  for (unsigned int arg = 0; arg < call_inst->Arguments().size(); arg++) {
-    const std::pair<FunctionArgTransitionRule::FunctionArg,
-                    std::vector<fitx::Transition>>
-        transitions =
-            state_manager_.TransitionManager()->getFunctionArgTransitions(
-                function->Name(), arg);
-    changed = changed || !transitions.second.empty();
+  const auto &call_args = call_inst->Arguments();
+  for (unsigned int arg = 0; arg < call_args.size(); arg++) {
+    const auto *found = tm->findFunctionArgTransitions(function->Name(), arg);
+    if (!found || found->second.empty())
+      continue;
+    changed = true;
 
-    std::set<std::shared_ptr<fitx::Value>> args;
-    if (transitions.first.consider_parent) {
-      args = currentFunctionInformation()->GetValueCollection().getParentValues(
-          call_inst->Arguments()[arg]);
-    }
-    args.insert(call_inst->Arguments()[arg]);
-
-    for (auto &value : args) {
-      changeValueState(transitions.second, value, call_inst);
+    if (found->first.consider_parent) {
+      llvm::SmallVector<std::shared_ptr<fitx::Value>, 8> args;
+      currentFunctionInformation()->GetValueCollection().collectParentValues(
+          call_args[arg], args);
+      appendUniqueValue(args, call_args[arg]);
+      for (const auto &value : args) {
+        changeValueState(found->second, value, call_inst);
+      }
+    } else {
+      changeValueState(found->second, call_args[arg], call_inst);
     }
   }
   return changed;
 }
 
-// Collect possible return codes per predecessor block for function summary
-// (paper ยง4.3). Constant return values (e.g. 0, -ENOMEM) are used to key
-// summarized states so callers can propagate the right state per branch.
 void Analyzer::analyzeReturnValue(std::shared_ptr<fitx::Function> function) {
   auto return_block = function->ReturnBlock();
   auto func_info = getFunctionInformation(function);
@@ -993,10 +908,7 @@ void Analyzer::analyzeReturnValue(std::shared_ptr<fitx::Function> function) {
     pred_block.insert(return_block);
   }
 
-  // Build function summary: for each predecessor of the return block, collect
-  // which constant return values it may produce; record (return_code, pred) in
-  // func_info so callers can propagate by return code (paper ยง4.3).
-  for (auto pred_reference : pred_block) {
+  for (const auto &pred_reference : pred_block) {
     if (auto pred = pred_reference.lock()) {
       if (!pred->Instructions().empty()) {
         generateWarning(pred->Instructions().front().get(),
@@ -1012,17 +924,15 @@ void Analyzer::analyzeReturnValue(std::shared_ptr<fitx::Function> function) {
         continue;
       }
 
-      for (auto return_value : block_info->ReturnValues()) {
+      for (const auto &return_value : block_info->ReturnValues()) {
         if (auto const_int =
                 fitx::shared_dyn_cast<fitx::ConstValue>(return_value)) {
           auto value = const_int->getConstValue();
           generateWarning(std::to_string(value));
           if (block_info->ReturnValueSatisfiable(value))
             func_info->addReturnValueInfo(value, pred);
-        } else if (auto const_null =
-                       fitx::shared_dyn_cast<fitx::NullValue>(return_value)) {
+        } else if (fitx::shared_isa<fitx::NullValue>(return_value)) {
           func_info->addReturnValueInfo(FunctionInformation::kErrorCode, pred);
-          // Add the value to the list
         } else if (auto call_inst =
                        fitx::shared_dyn_cast<fitx::CallInst>(return_value)) {
           auto called_function = call_inst->CalledFunction();
@@ -1034,24 +944,15 @@ void Analyzer::analyzeReturnValue(std::shared_ptr<fitx::Function> function) {
             }
 
             auto called_func_info = getFunctionInformation(called_function);
-            if (!called_func_info) {
-              /* func_info->addReturnValueInfo(FunctionInformation::kErrorCode,
-               */
-              /*                               pred); */
-              /* func_info->addReturnValueInfo(FunctionInformation::kSuccessCode,
-               */
-              /*                               pred); */
+            if (!called_func_info)
               continue;
-            }
 
-            for (auto return_value : called_func_info->getReturnValueInfo()) {
-              /* func_info->addReturnValueInfo(return_value.first, */
-              /*                               return_value.second); */
-              if (block_info->ReturnValueSatisfiable(return_value.first))
-                func_info->addReturnValueInfo(return_value.first, pred);
+            for (const auto &callee_ret :
+                 called_func_info->getReturnValueInfo()) {
+              if (block_info->ReturnValueSatisfiable(callee_ret.first))
+                func_info->addReturnValueInfo(callee_ret.first, pred);
             }
           }
-          // Decode the call_inst by chaning
         } else {
           if (return_value->getValueID() > 0) {
             func_info->addReturnValueInfo(FunctionInformation::kSuccessCode,
@@ -1059,7 +960,6 @@ void Analyzer::analyzeReturnValue(std::shared_ptr<fitx::Function> function) {
             func_info->addReturnValueInfo(FunctionInformation::kErrorCode,
                                           pred);
           }
-          // is success block
         }
       }
     }

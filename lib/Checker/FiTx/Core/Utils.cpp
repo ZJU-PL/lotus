@@ -81,6 +81,8 @@ void generateError(llvm::Instruction *Inst, std::string warn) {
 }
 
 std::string getDebugInfo(llvm::Instruction *inst) {
+  if (!inst)
+    return std::string();
   if (const llvm::DebugLoc &Loc = inst->getDebugLoc()) {
     unsigned line = Loc.getLine();
     unsigned col = Loc.getCol();
@@ -91,12 +93,16 @@ std::string getDebugInfo(llvm::Instruction *inst) {
 }
 
 std::string getFileName(llvm::Instruction *instruction) {
+  if (!instruction)
+    return std::string();
   if (const llvm::DebugLoc &Loc = instruction->getDebugLoc())
     return std::string(Loc->getFilename());
   return std::string();
 }
 
 int getLine(llvm::Instruction *instruction) {
+  if (!instruction)
+    return 0;
   if (const llvm::DebugLoc &Loc = instruction->getDebugLoc())
     return Loc.getLine();
   return 0;
@@ -109,7 +115,7 @@ bool findFunctionName(const std::string &function_name,
 
 llvm::Type *getRootElementType(llvm::Type *type) {
   llvm::Type *tmp_type = type;
-  while (tmp_type->isPointerTy())
+  while (tmp_type && tmp_type->isPointerTy())
     tmp_type = tmp_type->getPointerElementType();
   return tmp_type;
 }
@@ -170,6 +176,8 @@ void generateLog(llvm::raw_ostream &stream, fitx::Instruction *Inst,
 }
 
 std::string getDebugInfo(fitx::Instruction *inst) {
+  if (!inst)
+    return std::string();
   if (const llvm::DebugLoc &Loc = inst->getDebugLoc()) {
     unsigned line = Loc.getLine();
     unsigned col = Loc.getCol();

@@ -1,65 +1,30 @@
-// #include "llvm/IR/BasicBlock.h"
-
-#include "llvm/ADT/APFloat.h"
-#include "llvm/Analysis/LoopInfo.h"
-// #include "llvm/IR/Argument.h"
-// #include "llvm/IR/CFG.h"
-// #include "llvm/IR/Constant.h"
-// #include "llvm/IR/DataLayout.h"
-// #include "llvm/IR/DebugInfoMetadata.h"
-#include "llvm/IR/DebugLoc.h"
-// #include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/IR/Function.h"
-// #include "llvm/IR/InstrTypes.h"
-// #include "llvm/IR/Instruction.h"
-// #include "llvm/IR/Instructions.h"
-// #include "llvm/IR/LegacyPassManager.h"
-// #include "llvm/IR/PassManager.h"
-#include "llvm/IR/Value.h"
-// #include "llvm/IR/ValueSymbolTable.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
-// #include "llvm/Transforms/IPO/PassManagerBuilder.h"
-
-#include "Checker/FiTx/Core/BasicBlock.h"
-#include "Checker/FiTx/Core/Instructions/BranchInstruction.h"
-#include "Checker/FiTx/Core/Value.h"
-// #include "Checker/FiTx/Frontend/Utils.h"
-
-// include STL
-#include "Checker/FiTx/Core/Casting.h"
-// #include "Checker/FiTx/Core/Function.h"
 #include "Checker/FiTx/Frontend/BasicBlock.h"
 
-#include <algorithm>
-#include <ctime>
-#include <iostream>
-#include <iterator>
-#include <map>
-#include <queue>
-#include <set>
-#include <stack>
-#include <string>
-#include <vector>
+#include "Checker/FiTx/Core/BasicBlock.h"
+#include "Checker/FiTx/Core/Casting.h"
+#include "Checker/FiTx/Core/Instructions/BranchInstruction.h"
+#include "Checker/FiTx/Core/Value.h"
 
-#include <llvm/IR/Instructions.h>
+#include <algorithm>
+#include <map>
+#include <set>
+#include <vector>
 
 namespace fitx {
 BasicBlockInformation::BasicBlockInformation(
     std::shared_ptr<fitx::BasicBlock> basic_block,
     const std::set<State> &states)
-    : basic_block_(basic_block), is_partial_states_(false),
-      predecessor_partial_(false), arg_value_states_(0, states),
-      states_(states), status_(NONE) {
+    : basic_block_(std::move(basic_block)), is_partial_states_(false),
+      predecessor_partial_(false), arg_value_states_(),
+      states_(&states), status_(NONE) {
   uint64_t arg_size = 0;
   if (auto function = basic_block_->Parent().lock()) {
     arg_size = function->ArgSize();
 
-    auto return_assignment = function->getReturnAssignments();
-    if (return_assignment.find(basic_block_) != return_assignment.end()) {
-      return_values_.insert(return_assignment[basic_block_]);
+    const auto &return_assignment = function->getReturnAssignments();
+    auto it = return_assignment.find(basic_block_);
+    if (it != return_assignment.end()) {
+      return_values_.insert(it->second);
     }
   }
   arg_value_states_ = ArgValueStates(arg_size, states);
@@ -76,58 +41,46 @@ BasicBlockInformation::BasicBlockInformation(const BasicBlockInformation &info)
       value_states_(info.value_states_), states_(info.states_),
       status_(info.status_) {}
 
-// Apply transitions to value (and optionally its alias set). Caller (Analyzer)
-// already expands to related + aliased values before calling; here we only
-// apply to the single value (per-block alias expansion is done in Analyzer).
 bool BasicBlockInformation::changeValueState(
-    std::vector<Transition> &transitions,
-    std::shared_ptr<fitx::Value> value,
-    std::shared_ptr<fitx::Instruction> instruction) {
-  bool changed = false;
-  std::vector<std::shared_ptr<fitx::Value>> aliased_value;
-  aliased_value.push_back(value);
+    llvm::ArrayRef<Transition> transitions,
+    const std::shared_ptr<fitx::Value> &value,
+    const std::shared_ptr<fitx::Instruction> &instruction) {
+  if (!value || transitions.empty())
+    return false;
 
-  /* if (auto collection = getAliasInfoForValue(value)) */
-  /*   aliased_value.insert(aliased_value.end(), collection->Values().begin(),
-   */
-  /*                        collection->Values().end()); */
-
-  for (auto alias : aliased_value) {
-    if (fitx::shared_isa<Argument>(alias)) {
-      bool pending_changed = false;
-      if (!pending_values_.empty()) {
-        for (auto &pending_values : pending_values_) {
-          pending_changed |= pending_values.second.arg_states.transitionState(
-              transitions, alias, instruction);
-        }
+  if (fitx::shared_isa<Argument>(value)) {
+    bool pending_changed = false;
+    if (!pending_values_.empty()) {
+      for (auto &pending_values : pending_values_) {
+        pending_changed |= pending_values.second.arg_states.transitionState(
+            transitions, value, instruction);
       }
-      changed |= pending_changed || arg_value_states_.transitionState(
-                                        transitions, alias, instruction);
-    } else
-      changed |= value_states_.transitionState(transitions, alias, instruction);
+    }
+    return pending_changed || arg_value_states_.transitionState(
+                                  transitions, value, instruction);
   }
-  return changed;
+  return value_states_.transitionState(transitions, value, instruction);
 }
 
-bool BasicBlockInformation::valueHasState(std::shared_ptr<Value> value) {
+bool BasicBlockInformation::valueHasState(
+    const std::shared_ptr<Value> &value) const {
   return value_states_.valueExists(value);
 }
 
 void BasicBlockInformation::removeValueFromState(
-    std::shared_ptr<Value> value,
-    std::shared_ptr<fitx::Instruction> instruction) {
+    const std::shared_ptr<Value> &value,
+    const std::shared_ptr<fitx::Instruction> &instruction) {
   if (!value_states_.valueExists(value))
     return;
 
   auto null_transition =
-      Transition(const_cast<State &>(value_states_.getState(value)),
-                 NullState::GetInstance());
+      Transition(value_states_.getState(value), NullState::GetInstance());
   value_states_.setValueState(value, null_transition, instruction);
 }
 
 void BasicBlockInformation::resetValueState(
-    std::shared_ptr<Value> value,
-    std::shared_ptr<fitx::Instruction> instruction) {
+    const std::shared_ptr<Value> &value,
+    const std::shared_ptr<fitx::Instruction> &instruction) {
   if (!value_states_.valueExists(value))
     return;
   Transition log = value_states_.getTransitionLog(value).ReducedTransition();
@@ -138,12 +91,21 @@ void BasicBlockInformation::resetValueState(
 
 void BasicBlockInformation::setPendingValueStates(
     std::weak_ptr<fitx::BasicBlock> basic_block,
-    fitx::ArgValueStates arg_value_state) {
-  if (pending_values_.find(basic_block) == pending_values_.end()) {
-    pending_values_[basic_block] = {
-        ArgValueStates(arg_value_state.Size(), states_), {}};
+    const fitx::ArgValueStates &arg_value_state) {
+  if (arg_value_state.empty())
+    return;
+  auto it = pending_values_.find(basic_block);
+  if (it == pending_values_.end()) {
+    static const std::set<State> kEmptyStates;
+    it = pending_values_
+             .emplace(basic_block,
+                      PendingValues{
+                          ArgValueStates(arg_value_state.Size(),
+                                         states_ ? *states_ : kEmptyStates),
+                          {}})
+             .first;
   }
-  pending_values_[basic_block].arg_states.addArgValueState(arg_value_state);
+  it->second.arg_states.addArgValueState(arg_value_state);
 }
 
 std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>>
@@ -163,7 +125,7 @@ BasicBlockInformation::getValueTransitionStates(const State &state) {
 void BasicBlockInformation::setPendingReturnValues(
     std::weak_ptr<fitx::BasicBlock> basic_block,
     std::shared_ptr<fitx::ConstValue> arg_value_state) {
-  pending_values_[basic_block].return_values.insert(arg_value_state);
+  pending_values_[basic_block].return_values.insert(std::move(arg_value_state));
 }
 
 std::pair<fitx::BasicBlockValueStates, fitx::ArgValueStates>
@@ -172,19 +134,23 @@ BasicBlockInformation::ValueStatesForSuccessor(
   std::pair<fitx::BasicBlockValueStates, fitx::ArgValueStates> states(
       value_states_, arg_value_states_);
 
-  if (pending_values_.find(successor) == pending_values_.end()) {
+  auto pend_it = pending_values_.find(successor);
+  if (pend_it == pending_values_.end()) {
     return states;
   }
 
-  std::shared_ptr<fitx::CallInst> call_inst =
-      fitx::shared_dyn_cast<fitx::CallInst>(
-          basic_block_->getBranchInst()->Condition());
+  auto branch_inst = basic_block_->getBranchInst();
+  if (!branch_inst || !branch_inst->Condition())
+    return states;
 
-  if (auto compare_inst = fitx::shared_dyn_cast<fitx::CompareInst>(
-          basic_block_->getBranchInst()->Condition())) {
+  std::shared_ptr<fitx::CallInst> call_inst =
+      fitx::shared_dyn_cast<fitx::CallInst>(branch_inst->Condition());
+
+  if (auto compare_inst =
+          fitx::shared_dyn_cast<fitx::CompareInst>(branch_inst->Condition())) {
     auto operand = std::find_if(
         compare_inst->Operands().begin(), compare_inst->Operands().end(),
-        [](auto operand) { return fitx::shared_isa<CallInst>(operand); });
+        [](const auto &op) { return fitx::shared_isa<CallInst>(op); });
     if (operand == compare_inst->Operands().end())
       return states;
     call_inst = fitx::shared_dyn_cast<CallInst>(*operand);
@@ -193,16 +159,23 @@ BasicBlockInformation::ValueStatesForSuccessor(
   if (!call_inst)
     return states;
 
-  auto operands = call_inst->Arguments();
+  const auto &operands = call_inst->Arguments();
   for (size_t i = 0; i < operands.size(); i++) {
-    auto operand = operands[i];
-    for (auto value :
-         pending_values_[successor].arg_states.getValueStateForArg(i)) {
+    const auto &arg_transitions =
+        pend_it->second.arg_states.getArgTransitions(i);
+    if (arg_transitions.empty())
+      continue;
+    const auto &operand = operands[i];
+    for (const auto &value : arg_transitions) {
+      llvm::SmallVector<Transition, 4> reduced;
+      value.second.collectReducedTransitions(reduced);
+      if (reduced.empty())
+        continue;
       auto new_value = Value::CreateAppend(operand, value.first);
       if (!fitx::shared_isa<Argument>(new_value))
-        states.first.transitionState(value.second, new_value, call_inst);
+        states.first.transitionState(reduced, new_value, call_inst);
       else
-        states.second.transitionState(value.second, new_value, call_inst);
+        states.second.transitionState(reduced, new_value, call_inst);
     }
   }
 
@@ -217,225 +190,391 @@ BasicBlockInformation::ReturnCodeForSuccessor(
   if (!branch_inst || !branch_inst->Condition())
     return return_values;
 
-  auto compare_inst = fitx::shared_dyn_cast<fitx::CompareInst>(
-      branch_inst->Condition());
+  auto compare_inst =
+      fitx::shared_dyn_cast<fitx::CompareInst>(branch_inst->Condition());
   if (!compare_inst)
     return return_values;
-  if (pending_values_.find(successor) != pending_values_.end()) {
-    return_values.insert(pending_values_[successor].return_values.begin(),
-                         pending_values_[successor].return_values.end());
+  auto pend_it = pending_values_.find(successor);
+  if (pend_it != pending_values_.end()) {
+    return_values.insert(pend_it->second.return_values.begin(),
+                         pend_it->second.return_values.end());
 
     auto operand = std::find_if(
         compare_inst->Operands().begin(), compare_inst->Operands().end(),
-        [](auto operand) { return fitx::shared_isa<CallInst>(operand); });
+        [](const auto &op) { return fitx::shared_isa<CallInst>(op); });
 
     if (operand != compare_inst->Operands().end())
       return_values.erase(*operand);
   }
 
-  /* for (auto return_value : return_values) { */
-  /*   generateWarning(compare_inst.get(), "Return Value"); */
-  /*   if (auto const_int =
-   * shared_dyn_cast<fitx::ConstValue>(return_value)) */
-  /*     llvm::errs() << const_int->getConstValue() << "(From Pred)\n"; */
-  /* } */
   return return_values;
 }
 
-BasicBlockValueStates::BasicBlockValueStates(
-    const BasicBlockValueStates &states)
-    : value_states_(states.value_states_) {}
-
-bool BasicBlockValueStates::operator==(const BasicBlockValueStates &states) {
-  return value_states_ == states.value_states_;
+bool BasicBlockValueStates::operator==(
+    const BasicBlockValueStates &states) const {
+  if (value_states_ == states.value_states_)
+    return true;
+  const bool lhs_empty = !value_states_ || value_states_->empty();
+  const bool rhs_empty = !states.value_states_ || states.value_states_->empty();
+  if (lhs_empty && rhs_empty)
+    return true;
+  if (lhs_empty || rhs_empty)
+    return false;
+  return *value_states_ == *states.value_states_;
 }
 
 bool BasicBlockValueStates::valueExists(
-    std::shared_ptr<fitx::Value> value) {
-  return value_states_.find(value) != value_states_.end();
+    const std::shared_ptr<fitx::Value> &value) const {
+  return value_states_ && value_states_->find(value) != value_states_->end();
 }
 
 void BasicBlockValueStates::setValueState(
-    std::shared_ptr<fitx::Value> value, fitx::Transition &transition,
-    std::shared_ptr<fitx::Instruction> instruction) {
-  value_states_[value].addTransition(transition, instruction);
+    const std::shared_ptr<fitx::Value> &value, const fitx::Transition &transition,
+    const std::shared_ptr<fitx::Instruction> &instruction) {
+  ensureMutable()[value].addTransition(transition, instruction);
 }
 
 void BasicBlockValueStates::setValueState(
-    std::shared_ptr<fitx::Value> value, fitx::TransitionLogs &logs) {
-  value_states_[value] = logs;
+    const std::shared_ptr<fitx::Value> &value, const fitx::TransitionLogs &logs) {
+  ensureMutable()[value] = logs;
+}
+
+void BasicBlockValueStates::mergeFrom(const BasicBlockValueStates &pred) {
+  if (!pred.value_states_ || pred.value_states_->empty())
+    return;
+  if (value_states_ == pred.value_states_)
+    return;
+  if (!value_states_ || value_states_->empty()) {
+    value_states_ = pred.value_states_;
+    return;
+  }
+
+  // Read-only subsumption check: preserve CoW sharing when `pred` adds no new
+  // keys and improves no existing CurrentState.
+  bool any_change = false;
+  for (const auto &val_entry : *pred.value_states_) {
+    auto cur_it = value_states_->find(val_entry.first);
+    if (cur_it == value_states_->end() ||
+        val_entry.second.CurrentState() < cur_it->second.CurrentState()) {
+      any_change = true;
+      break;
+    }
+  }
+  if (!any_change)
+    return;
+
+  ValueMap &dest = ensureMutable();
+  for (const auto &val_entry : *pred.value_states_) {
+    auto res = dest.try_emplace(val_entry.first, val_entry.second);
+    if (!res.second &&
+        val_entry.second.CurrentState() < res.first->second.CurrentState()) {
+      res.first->second = val_entry.second;
+    }
+  }
 }
 
 TransitionLogs &BasicBlockValueStates::getTransitionLog(
-    std::shared_ptr<fitx::Value> value) {
-  return value_states_[value];
+    const std::shared_ptr<fitx::Value> &value) {
+  return ensureMutable()[value];
+}
+
+const TransitionLogs &BasicBlockValueStates::getTransitionLog(
+    const std::shared_ptr<fitx::Value> &value) const {
+  static const ValueMap kEmpty;
+  return (value_states_ ? *value_states_ : kEmpty).at(value);
 }
 
 std::vector<std::shared_ptr<fitx::Value>>
 BasicBlockValueStates::getStateValues(const fitx::State &state) {
   std::vector<std::shared_ptr<fitx::Value>> values;
-  for (auto value = value_states_.begin(); value != value_states_.end();
-       value++) {
-    if (value->second.CurrentState() == state)
-      values.push_back(value->first);
+  if (!value_states_)
+    return values;
+  for (const auto &entry : *value_states_) {
+    if (entry.second.CurrentState() == state)
+      values.push_back(entry.first);
   }
   return values;
 }
 
 std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>>
 BasicBlockValueStates::getValueTransitionStates(const fitx::State &state) {
-  std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>>
-      values;
-  for (auto value = value_states_.begin(); value != value_states_.end();
-       value++) {
-    if (value->second.CurrentState() == state)
-      values.push_back(std::make_pair(value->first, &(value->second)));
+  std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>> values;
+  if (!value_states_ || value_states_->empty())
+    return values;
+  bool any_match = false;
+  for (const auto &entry : *value_states_) {
+    if (entry.second.CurrentState() == state) {
+      any_match = true;
+      break;
+    }
+  }
+  if (!any_match)
+    return values;
+
+  ValueMap &dest = ensureMutable();
+  for (auto &entry : dest) {
+    if (entry.second.CurrentState() == state)
+      values.emplace_back(entry.first, &entry.second);
   }
   return values;
 }
 
 bool BasicBlockValueStates::transitionState(
-    std::vector<Transition> &transitions,
-    std::shared_ptr<fitx::Value> value,
-    std::shared_ptr<fitx::Instruction> instruction) {
+    llvm::ArrayRef<Transition> transitions,
+    const std::shared_ptr<fitx::Value> &value,
+    const std::shared_ptr<fitx::Instruction> &instruction) {
   generateWarning(instruction.get(), "Transition State Called");
-  if (valueExists(value)) {
-    generateWarning(instruction.get(), "value exists");
-    const State &current_state = getState(value);
-    const TransitionLogs &current_transitions = value_states_[value];
+  if (value_states_) {
+    auto existing = value_states_->find(value);
+    if (existing != value_states_->end()) {
+      generateWarning(instruction.get(), "value exists");
+      const TransitionLogs &current_transitions = existing->second;
+      const State &current_state = current_transitions.CurrentState();
 
-    // Search for possible transitions
-    auto next_transition =
-        std::find_if(transitions.begin(), transitions.end(),
-                     [&current_state](Transition transition) {
-                       return transition.Source() == current_state;
-                     });
+      auto next_transition =
+          std::find_if(transitions.begin(), transitions.end(),
+                       [&current_state](const Transition &transition) {
+                         return transition.Source() == current_state;
+                       });
 
-    if (next_transition != transitions.end() &&
-        current_transitions.CurrentInstruction() != instruction &&
-        *current_transitions.CurrentInstruction() <= *instruction) {
-      setValueState(value, *next_transition, instruction);
-      return true;
+      if (next_transition != transitions.end() &&
+          current_transitions.CurrentInstruction() != instruction &&
+          *current_transitions.CurrentInstruction() <= *instruction) {
+        ValueMap &dest = ensureMutable();
+        dest.find(value)->second.addTransition(*next_transition, instruction);
+        return true;
+      }
+      return false;
     }
-    return false;
   }
 
-  fitx::Transition *transition = nullptr;
-  auto init_transition = transitions.begin();
-
-  while (init_transition != transitions.end()) {
-    if (init_transition->Source().isInitState() &&
-        (!transition || init_transition->Target() < transition->Target()))
-      transition = &(*init_transition);
-    init_transition = std::find_if(init_transition + 1, transitions.end(),
-                                   [](Transition transition) {
-                                     return transition.Source().isInitState();
-                                   });
+  const fitx::Transition *transition = nullptr;
+  for (const auto &cand : transitions) {
+    if (cand.Source().isInitState() &&
+        (!transition || cand.Target() < transition->Target())) {
+      transition = &cand;
+    }
   }
 
   if (transition) {
-    setValueState(value, *transition, instruction);
+    ensureMutable()[value].addTransition(*transition, instruction);
     return true;
   }
   return false;
 }
 
 void BasicBlockValueStates::print() {
-  for (auto states : value_states_) {
+  if (!value_states_)
+    return;
+  for (const auto &states : *value_states_) {
     llvm::errs() << states.first << " " << states.second.ReducedTransition()
                  << "\n";
   }
 }
 
-/* ArgTransitions Class */
+/* ArgTransitions Class (lazy sorted SmallVector: only non-dummy states) */
 ArgTransitions::ArgTransitions() : transition_per_state_() {}
 
-ArgTransitions::ArgTransitions(std::set<fitx::State> states) {
-  for (auto state : states)
-    transition_per_state_[state] = TransitionLogs();
+ArgTransitions::ArgTransitions(const std::set<fitx::State> &states) {
+  (void)states;
 }
 
 ArgTransitions::ArgTransitions(const ArgTransitions &arg_transitions)
     : transition_per_state_(arg_transitions.transition_per_state_) {}
 
+ArgTransitions::Storage::iterator
+ArgTransitions::findEntry(const fitx::State &state) {
+  for (auto it = transition_per_state_.begin();
+       it != transition_per_state_.end(); ++it) {
+    if (it->first == state)
+      return it;
+    if (state < it->first)
+      return transition_per_state_.end();
+  }
+  return transition_per_state_.end();
+}
+
+ArgTransitions::Storage::const_iterator
+ArgTransitions::findEntry(const fitx::State &state) const {
+  for (auto it = transition_per_state_.begin();
+       it != transition_per_state_.end(); ++it) {
+    if (it->first == state)
+      return it;
+    if (state < it->first)
+      return transition_per_state_.end();
+  }
+  return transition_per_state_.end();
+}
+
 bool ArgTransitions::operator==(const ArgTransitions &arg_transitions) const {
   return transition_per_state_ == arg_transitions.transition_per_state_;
 }
 
+bool ArgTransitions::wouldChangeFrom(
+    const ArgTransitions &arg_transitions) const {
+  if (arg_transitions.transition_per_state_.empty())
+    return false;
+  if (transition_per_state_.empty()) {
+    for (const auto &state : arg_transitions.transition_per_state_) {
+      if (!state.second.isDummy())
+        return true;
+    }
+    return false;
+  }
+  auto it_a = transition_per_state_.begin();
+  auto end_a = transition_per_state_.end();
+  for (const auto &state : arg_transitions.transition_per_state_) {
+    if (state.second.isDummy())
+      continue;
+    while (it_a != end_a && it_a->first < state.first)
+      ++it_a;
+    if (it_a == end_a || it_a->first != state.first)
+      return true;
+    if (it_a->second.isDummy() ||
+        state.second.CurrentState() < it_a->second.CurrentState())
+      return true;
+  }
+  return false;
+}
+
 void ArgTransitions::addArgTransitions(const ArgTransitions &arg_transitions) {
-  for (auto state : arg_transitions.transition_per_state_) {
+  if (arg_transitions.transition_per_state_.empty())
+    return;
+  if (transition_per_state_.empty()) {
+    transition_per_state_ = arg_transitions.transition_per_state_;
+    return;
+  }
+  for (const auto &state : arg_transitions.transition_per_state_) {
     if (state.second.isDummy())
       continue;
 
-    TransitionLogs &current_logs = transition_per_state_[state.first];
-    if (current_logs.isDummy() ||
-        state.second.CurrentState() < current_logs.CurrentState()) {
-      transition_per_state_[state.first] = state.second;
+    auto pos = std::lower_bound(
+        transition_per_state_.begin(), transition_per_state_.end(), state.first,
+        [](const Entry &e, const fitx::State &s) { return e.first < s; });
+    if (pos == transition_per_state_.end() || pos->first != state.first) {
+      transition_per_state_.insert(pos, state);
+    } else if (pos->second.isDummy() ||
+               state.second.CurrentState() < pos->second.CurrentState()) {
+      pos->second = state.second;
     }
   }
 }
 
 bool ArgTransitions::addTransition(
-    std::vector<Transition> &transitions,
-    std::shared_ptr<fitx::Instruction> inst) {
-  bool changed = false;
-  for (auto &state : transition_per_state_) {
-    State current_state = state.first;
-    if (!state.second.isDummy())
-      current_state = state.second.CurrentState();
+    llvm::ArrayRef<Transition> transitions,
+    const std::shared_ptr<fitx::Instruction> &inst) {
+  if (transitions.empty())
+    return false;
 
-    // Search for possible transitions
+  bool changed = false;
+
+  // 1. Collect transitions starting from states that do not yet have an entry
+  //    in `transition_per_state_` (mathematically equivalent to the dummy
+  //    entries in an eagerly populated map, selecting the first matching rule
+  //    per source state).
+  llvm::SmallVector<const Transition *, 4> to_insert;
+  for (const auto &t : transitions) {
+    if (findEntry(t.Source()) != transition_per_state_.end())
+      continue;
+    bool already_queued = false;
+    for (const auto *queued : to_insert) {
+      if (queued->Source() == t.Source()) {
+        already_queued = true;
+        break;
+      }
+    }
+    if (!already_queued)
+      to_insert.push_back(&t);
+  }
+
+  // 2. Advance already-materialized state entries first so newly inserted
+  //    entries are not advanced twice on the same instruction.
+  for (auto &entry : transition_per_state_) {
+    const State &current_state =
+        entry.second.isDummy() ? entry.first : entry.second.CurrentState();
     auto next_transition =
         std::find_if(transitions.begin(), transitions.end(),
-                     [&current_state](Transition transition) {
+                     [&current_state](const Transition &transition) {
                        return transition.Source() == current_state;
                      });
-
     if (next_transition != transitions.end()) {
-      state.second.addTransition(*next_transition, inst);
+      entry.second.addTransition(*next_transition, inst);
       changed = true;
     }
   }
+
+  // 3. Materialize newly triggered source states in sorted order.
+  for (const auto *t : to_insert) {
+    auto pos = std::lower_bound(
+        transition_per_state_.begin(), transition_per_state_.end(), t->Source(),
+        [](const Entry &e, const fitx::State &s) { return e.first < s; });
+    auto inserted =
+        transition_per_state_.insert(pos, Entry(t->Source(), TransitionLogs()));
+    inserted->second.addTransition(*t, inst);
+    changed = true;
+  }
+
   return changed;
 }
 
-TransitionLogs ArgTransitions::getTransitionLog(State state) {
-  return transition_per_state_[state];
+bool ArgTransitions::wouldChange(
+    llvm::ArrayRef<Transition> transitions) const {
+  if (transitions.empty())
+    return false;
+  for (const auto &t : transitions) {
+    if (findEntry(t.Source()) == transition_per_state_.end())
+      return true;
+  }
+  for (const auto &entry : transition_per_state_) {
+    const State &current_state =
+        entry.second.isDummy() ? entry.first : entry.second.CurrentState();
+    for (const auto &t : transitions) {
+      if (t.Source() == current_state)
+        return true;
+    }
+  }
+  return false;
 }
 
-TransitionLogs getTransitionLog(State state);
+void ArgTransitions::collectReducedTransitions(
+    llvm::SmallVectorImpl<Transition> &out) const {
+  for (const auto &transition_log : transition_per_state_) {
+    if (!transition_log.second.isDummy()) {
+      Transition reduced = transition_log.second.ReducedTransition();
+      if (reduced.Source() != reduced.Target())
+        out.push_back(std::move(reduced));
+    }
+  }
+}
+
+TransitionLogs ArgTransitions::getTransitionLog(State state) {
+  auto it = findEntry(state);
+  if (it != transition_per_state_.end())
+    return it->second;
+  return TransitionLogs();
+}
 
 // ArgValueStates Class
-ArgValueStates::ArgValueStates() : value_states_(0) {}
-/* ArgValueStates::ArgValueStates(uint64_t arg_num) : value_states_(arg_num) {}
- */
+ArgValueStates::ArgValueStates() : arg_num_(0) {}
+
 ArgValueStates::ArgValueStates(uint64_t arg_num, const std::set<State> &states)
-    : value_states_(arg_num), states_(states) {}
-
-ArgValueStates::ArgValueStates(const ArgValueStates &arg_value_states)
-    : states_(arg_value_states.states_) {
-  value_states_ = arg_value_states.value_states_;
+    : arg_num_(arg_num) {
+  (void)states;
 }
 
-ArgValueStates &
-ArgValueStates::operator=(const ArgValueStates &arg_value_states) {
-  value_states_ = arg_value_states.value_states_;
-  return *this;
-}
-
-const std::map<std::shared_ptr<fitx::Value>, std::vector<Transition>>
+std::map<std::shared_ptr<fitx::Value>, std::vector<Transition>>
 ArgValueStates::getValueStateForArg(uint64_t index) const {
   std::map<std::shared_ptr<fitx::Value>, std::vector<Transition>> new_map;
 
-  if (value_states_.size() <= index)
+  if (value_states_.size() <= index || !value_states_[index])
     return new_map;
-  for (auto value : value_states_[index]) {
-    for (auto &transition_log : value.second.TransitionPerState()) {
-      if (!transition_log.second.isDummy() &&
-          transition_log.second.ReducedTransition().Source() !=
-              transition_log.second.ReducedTransition().Target()) {
-        new_map[value.first].push_back(
-            transition_log.second.ReducedTransition());
+  for (const auto &value : *value_states_[index]) {
+    for (const auto &transition_log : value.second.TransitionPerState()) {
+      if (!transition_log.second.isDummy()) {
+        Transition reduced = transition_log.second.ReducedTransition();
+        if (reduced.Source() != reduced.Target()) {
+          new_map[value.first].push_back(std::move(reduced));
+        }
       }
     }
   }
@@ -443,163 +582,217 @@ ArgValueStates::getValueStateForArg(uint64_t index) const {
   return new_map;
 }
 
-/* const std::map<std::shared_ptr<fitx::Value>,
- * std::vector<TransitionLogs>> */
-/* ArgValueStates::getValueTransitionLogsForArg(int64_t index) const { */
-/*   if (value_states_.size() <= index) */
-/*     return std::map<std::shared_ptr<fitx::Value>, */
-/*                     std::vector<TransitionLogs>>(); */
-
-/*   return value_states_[index]; */
-/* } */
-
-const std::map<std::shared_ptr<fitx::Value>, ArgTransitions>
+const ArgValueStates::ArgMap &
 ArgValueStates::getArgTransitions(uint64_t index) const {
-  if (value_states_.size() <= index)
-    return std::map<std::shared_ptr<fitx::Value>, ArgTransitions>();
-  return value_states_[index];
+  static const ArgMap kEmpty;
+  if (value_states_.size() <= index || !value_states_[index])
+    return kEmpty;
+  return *value_states_[index];
 }
 
 std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>>
 ArgValueStates::getValueTransitionStates(const fitx::State &state) {
-  std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>>
-      values;
-  for (auto &value_states : value_states_) {
-    for (auto value = value_states.begin(); value != value_states.end();
-         value++) {
-      auto &transition_per_state = value->second.TransitionPerState();
-      for (auto &transition_logs : transition_per_state) {
+  std::vector<std::pair<std::shared_ptr<fitx::Value>, TransitionLogs *>> values;
+  for (size_t arg_idx = 0; arg_idx < value_states_.size(); ++arg_idx) {
+    const auto &arg_map = value_states_[arg_idx];
+    if (!arg_map || arg_map->empty())
+      continue;
+    bool any_match = false;
+    for (const auto &value : *arg_map) {
+      for (const auto &transition_logs : value.second.TransitionPerState()) {
         if (transition_logs.second.isDummy())
           continue;
-        if (transition_logs.second.LeastSignificantSource().isInitState()) {
-          if (transition_logs.second.MostSignificantTarget() == state) {
-            values.push_back(
-                std::make_pair(value->first, &(transition_logs.second)));
-          }
+        if (transition_logs.second.LeastSignificantSource().isInitState() &&
+            transition_logs.second.MostSignificantTarget() == state) {
+          any_match = true;
+          break;
         }
       }
-      /* std::vector<TransitionLogs*> new_logs; */
-      /* for (fitx::TransitionLogs& log : value->second) { */
-      /*   if (log.LeastSignificantSource().isInitState()) { */
-      /*     if (log.MostSignificantTarget() == state) { */
-      /*       new_logs.push_back(&log); */
-      /*     } */
-      /*   } */
-      /* } */
+      if (any_match)
+        break;
+    }
+    if (!any_match)
+      continue;
 
-      /* for (auto log : new_logs) */
-      /*   values.push_back(std::make_pair(value->first, log)); */
+    ArgMap &mutable_map = ensureMutableArg(arg_idx);
+    for (auto &value : mutable_map) {
+      for (auto &transition_logs : value.second.TransitionPerState()) {
+        if (transition_logs.second.isDummy())
+          continue;
+        if (transition_logs.second.LeastSignificantSource().isInitState() &&
+            transition_logs.second.MostSignificantTarget() == state) {
+          values.emplace_back(value.first, &transition_logs.second);
+        }
+      }
     }
   }
   return values;
 }
 
-bool ArgValueStates::ValueExistsInArg(uint64_t arg,
-                                      std::shared_ptr<Value> value) {
-  if (value_states_.size() <= arg)
-    return false;
-  return value_states_[arg].find(value) != value_states_[arg].end();
+namespace {
+ArgValueStates::ArgMap::const_iterator
+findArgEntry(const ArgValueStates::ArgMap &map,
+             const std::shared_ptr<fitx::Value> &key) {
+  const fitx::Value *raw = key.get();
+  auto it = std::lower_bound(map.begin(), map.end(), raw,
+                             [](const ArgValueStates::ArgEntry &entry,
+                                const fitx::Value *k) {
+                               return entry.first.get() < k;
+                             });
+  if (it != map.end() && it->first.get() == raw)
+    return it;
+  return map.end();
 }
 
-void ArgValueStates::addArgValueState(const ArgValueStates &states) {
-  for (size_t arg_idx = 0;
-       arg_idx < std::min(value_states_.size(),
-                          static_cast<size_t>(states.Size()));
-       arg_idx++) {
-    for (auto &value_transitions : states.getArgTransitions(arg_idx)) {
-      const std::shared_ptr<Value> value = value_transitions.first;
-      ArgTransitions arg_transitions = value_transitions.second;
-
-      if (ValueExistsInArg(arg_idx, value))
-        value_states_[arg_idx][value].addArgTransitions(arg_transitions);
-      else
-        value_states_[arg_idx][value] = ArgTransitions(arg_transitions);
-
-      /* for (auto trans: value_states_[arg_idx][value].TransitionPerState()) {
-       */
-      /*   if (trans.second.isDummy()) */
-      /*     continue; */
-      /*   llvm::errs() << trans.first.Name() << " (First State)\n"; */
-      /*   llvm::errs() << trans.second.ReducedTransition() << "(Transition)\n";
-       */
-      /* } */
+bool isArgMapSubsumed(const ArgValueStates::ArgMap &dest,
+                      const ArgValueStates::ArgMap &incoming) {
+  size_t i = 0;
+  size_t j = 0;
+  const size_t n = dest.size();
+  const size_t m = incoming.size();
+  while (i < n && j < m) {
+    const fitx::Value *kd = dest[i].first.get();
+    const fitx::Value *ki = incoming[j].first.get();
+    if (kd < ki) {
+      ++i;
+    } else if (ki < kd) {
+      if (!incoming[j].second.empty())
+        return false;
+      ++j;
+    } else {
+      if (dest[i].second.wouldChangeFrom(incoming[j].second))
+        return false;
+      ++i;
+      ++j;
     }
-    /* for (auto value_transitions : */
-    /*      states.getValueTransitionLogsForArg(arg_idx)) { */
-    /*   auto& transition_logs = value_transitions.second; */
-    /*   auto& current_transitions = */
-    /*       value_states_[arg_idx][value_transitions.first]; */
-
-    /*   for (auto transition_log : transition_logs) { */
-    /*     auto found_transition = */
-    /*         std::find_if(current_transitions.begin(),
-     * current_transitions.end(), */
-    /*                      [transition_log](auto current_log) { */
-    /*                        return current_log.ReducedTransition().Source() ==
-     */
-    /*                               transition_log.ReducedTransition().Source();
-     */
-    /*                      }); */
-
-    /*     if (found_transition == current_transitions.end()) { */
-    /*       current_transitions.push_back(transition_log); */
-    /*     } else if (transition_log.CurrentState() < */
-    /*                found_transition->CurrentState()) { */
-    /*       int ind = found_transition - current_transitions.begin(); */
-    /*       current_transitions[ind] = transition_log; */
-    /*     } */
-    /*   } */
-    /* } */
   }
-}
-
-bool ArgValueStates::transitionState(
-    std::vector<Transition> &transitions,
-    std::shared_ptr<fitx::Value> value,
-    std::shared_ptr<fitx::Instruction> instruction) {
-  if (auto argument = fitx::shared_dyn_cast<fitx::Argument>(value)) {
-    uint64_t arg_index = argument->ArgNum();
-    if (value_states_.size() <= arg_index)
+  while (j < m) {
+    if (!incoming[j].second.empty())
       return false;
-
-    if (!ValueExistsInArg(arg_index, value))
-      value_states_[arg_index][value] = ArgTransitions(states_);
-
-    return value_states_[arg_index][value].addTransition(transitions,
-                                                         instruction);
-
-    /* std::set<int> updated_logs; */
-    /* std::vector<TransitionLogs> new_logs; */
-    /* auto& states = value_states_[arg_index][value]; */
-    /* for (auto transition : transitions) { */
-    /*   bool source_exists = false; */
-    /*   for (int i = 0; i < states.size(); i++) { */
-    /*     if (updated_logs.find(i) != updated_logs.end()) continue; */
-    /*     if (states[i].CurrentState() == transition.Source()) { */
-    /*       states[i].addTransition(transition, instruction); */
-    /*       updated_logs.insert(i); */
-    /*     } */
-
-    /*     if (states[i].ReducedTransition().Source() == transition.Source()) {
-     */
-    /*       source_exists = true; */
-    /*     } */
-    /*   } */
-
-    /*   if (!source_exists) */
-    /*     new_logs.push_back(TransitionLogs(transition, instruction)); */
-    /* } */
-
-    /* states.insert(states.end(), new_logs.begin(), new_logs.end()); */
+    ++j;
   }
   return true;
 }
 
+ArgValueStates::ArgMap mergeArgMapsTwoPointer(
+    const ArgValueStates::ArgMap &dest,
+    const ArgValueStates::ArgMap &incoming) {
+  ArgValueStates::ArgMap merged;
+  merged.reserve(dest.size() + incoming.size());
+  size_t i = 0;
+  size_t j = 0;
+  const size_t n = dest.size();
+  const size_t m = incoming.size();
+  while (i < n && j < m) {
+    const fitx::Value *kd = dest[i].first.get();
+    const fitx::Value *ki = incoming[j].first.get();
+    if (kd < ki) {
+      merged.push_back(dest[i++]);
+    } else if (ki < kd) {
+      if (!incoming[j].second.empty())
+        merged.push_back(incoming[j]);
+      ++j;
+    } else {
+      merged.push_back(dest[i]);
+      if (!incoming[j].second.empty())
+        merged.back().second.addArgTransitions(incoming[j].second);
+      ++i;
+      ++j;
+    }
+  }
+  while (i < n)
+    merged.push_back(dest[i++]);
+  while (j < m) {
+    if (!incoming[j].second.empty())
+      merged.push_back(incoming[j]);
+    ++j;
+  }
+  return merged;
+}
+} // namespace
+
+bool ArgValueStates::ValueExistsInArg(
+    uint64_t arg, const std::shared_ptr<Value> &value) const {
+  if (value_states_.size() <= arg || !value_states_[arg])
+    return false;
+  return findArgEntry(*value_states_[arg], value) != value_states_[arg]->end();
+}
+
+void ArgValueStates::addArgValueState(const ArgValueStates &states) {
+  if (states.empty())
+    return;
+  if (value_states_.empty() && arg_num_ == states.arg_num_) {
+    value_states_ = states.value_states_;
+    return;
+  }
+  const size_t limit = std::min(static_cast<size_t>(arg_num_),
+                                states.value_states_.size());
+  if (limit == 0)
+    return;
+  ensureSlots();
+  for (size_t arg_idx = 0; arg_idx < limit; arg_idx++) {
+    const auto &incoming_ptr = states.value_states_[arg_idx];
+    if (!incoming_ptr || incoming_ptr->empty())
+      continue;
+    auto &dest_ptr = value_states_[arg_idx];
+    if (dest_ptr == incoming_ptr)
+      continue;
+    if (!dest_ptr || dest_ptr->empty()) {
+      dest_ptr = incoming_ptr;
+      continue;
+    }
+    if (isArgMapSubsumed(*dest_ptr, *incoming_ptr))
+      continue;
+
+    ArgMap merged = mergeArgMapsTwoPointer(*dest_ptr, *incoming_ptr);
+    if (dest_ptr.use_count() == 1)
+      *dest_ptr = std::move(merged);
+    else
+      dest_ptr = std::make_shared<ArgMap>(std::move(merged));
+  }
+}
+
+bool ArgValueStates::transitionState(
+    llvm::ArrayRef<Transition> transitions,
+    const std::shared_ptr<fitx::Value> &value,
+    const std::shared_ptr<fitx::Instruction> &instruction) {
+  if (auto argument = fitx::shared_dyn_cast<fitx::Argument>(value)) {
+    uint64_t arg_index = argument->ArgNum();
+    if (arg_num_ <= arg_index || transitions.empty())
+      return false;
+
+    if (arg_index < value_states_.size() && value_states_[arg_index]) {
+      const auto &ro_map = *value_states_[arg_index];
+      auto ro_it = findArgEntry(ro_map, value);
+      if (ro_it != ro_map.end() && !ro_it->second.wouldChange(transitions))
+        return false;
+    }
+
+    ArgMap &arg_map = ensureMutableArg(arg_index);
+    const fitx::Value *raw = value.get();
+    auto pos = std::lower_bound(arg_map.begin(), arg_map.end(), raw,
+                                [](const ArgEntry &entry, const fitx::Value *k) {
+                                  return entry.first.get() < k;
+                                });
+    if (pos == arg_map.end() || pos->first.get() != raw) {
+      ArgTransitions tmp;
+      if (!tmp.addTransition(transitions, instruction))
+        return false;
+      arg_map.emplace(pos, value, std::move(tmp));
+      return true;
+    }
+    return pos->second.addTransition(transitions, instruction);
+  }
+  return false;
+}
+
 void ArgValueStates::print() {
-  for (auto arg : value_states_) {
-    for (auto value : arg) {
+  for (const auto &arg : value_states_) {
+    if (!arg)
+      continue;
+    for (const auto &value : *arg) {
       llvm::errs() << value.first << "\n";
-      for (auto states : value.second.TransitionPerState()) {
+      for (const auto &states : value.second.TransitionPerState()) {
         if (!states.second.isDummy())
           llvm::errs() << states.second.ReducedTransition() << "\n";
       }
@@ -607,12 +800,34 @@ void ArgValueStates::print() {
   }
 }
 
-bool ArgValueStates::operator==(const ArgValueStates &states) {
-  return value_states_ == states.value_states_;
+bool ArgValueStates::operator==(const ArgValueStates &states) const {
+  if (arg_num_ != states.arg_num_)
+    return false;
+  if (value_states_.empty() && states.value_states_.empty())
+    return true;
+  if (value_states_.empty())
+    return states.empty();
+  if (states.value_states_.empty())
+    return empty();
+  for (size_t i = 0; i < value_states_.size(); ++i) {
+    const auto &lhs = value_states_[i];
+    const auto &rhs = states.value_states_[i];
+    if (lhs == rhs)
+      continue;
+    const bool lhs_empty = !lhs || lhs->empty();
+    const bool rhs_empty = !rhs || rhs->empty();
+    if (lhs_empty && rhs_empty)
+      continue;
+    if (lhs_empty || rhs_empty)
+      return false;
+    if (*lhs != *rhs)
+      return false;
+  }
+  return true;
 }
 
 bool BasicBlockInformation::operator==(
-    const fitx::BasicBlockInformation &prev_block_info) {
+    const fitx::BasicBlockInformation &prev_block_info) const {
   return value_states_ == prev_block_info.value_states_ &&
          arg_value_states_ == prev_block_info.arg_value_states_ &&
          return_values_ == prev_block_info.return_values_;
@@ -623,9 +838,8 @@ void BasicBlockInformation::addReturnValues(
   return_values_.insert(return_values.begin(), return_values.end());
 }
 
-void BasicBlockInformation::addReturnValue(
-    std::shared_ptr<fitx::Value> value) {
-  return_values_.insert(value);
+void BasicBlockInformation::addReturnValue(std::shared_ptr<fitx::Value> value) {
+  return_values_.insert(std::move(value));
 }
 
 bool BasicBlockInformation::ReturnValueSatisfiable(long value) {
@@ -662,14 +876,14 @@ void BasicBlockInformation::setPartialStates(bool partial_states) {
 bool BasicBlockInformation::IsInSamelinePredecessor(
     std::shared_ptr<fitx::BasicBlock> block) {
   return std::find_if(same_line_predecessors_.begin(),
-                      same_line_predecessors_.end(), [block](auto predecessor) {
+                      same_line_predecessors_.end(), [&block](auto predecessor) {
                         return block == predecessor.lock();
                       }) != same_line_predecessors_.end();
 }
 
 void BasicBlockInformation::addSameLinePredecessor(
     std::shared_ptr<fitx::BasicBlock> block) {
-  same_line_predecessors_.push_back(block);
+  same_line_predecessors_.push_back(std::move(block));
 }
 
 void BasicBlockInformation::addSameLinePredecessor(

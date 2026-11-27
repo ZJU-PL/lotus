@@ -1,31 +1,8 @@
 /// \file Value.h
 /// \brief FiTx value representation with field-sensitive tracking.
-///
-/// This file defines the core value abstraction for the FiTx typestate analysis
-/// framework. Values represent program objects that can be tracked through
-/// their lifecycle states (e.g., allocated, freed, locked).
-///
-/// **Field Sensitivity** (paper §3):
-/// - Tracks static field offsets for struct fields and constant array indices
-/// - Does NOT compute runtime field offsets (keeps analysis tractable)
-/// - Each Value has: (base LLVM value, field access chain, array element index)
-///
-/// **Value Hierarchy**:
-/// ```
-/// Value (base)
-///   ├── ConstValue    - Integer constants (e.g., return codes)
-///   ├── NullValue     - Null pointer constants
-///   └── Argument      - Function arguments (for inter-procedural analysis)
-/// ```
-///
-/// **Related Classes**:
-/// - ValueCollection: Set of values with set operations
-/// - AliasValues: May-alias map (value -> set of aliased values)
-/// - ManagedValues: Singleton registry of all created values
-///
-/// \see Suzuki et al., "Balancing Analysis Time and Bug Detection", USENIX ATC
-/// 2024
 #pragma once
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Value.h"
 
@@ -59,15 +36,17 @@ public:
       return type != value.type;
     }
     llvm::Type *ElementType() const {
+      if (!type)
+        return nullptr;
       return type->isPointerTy() ? type->getPointerElementType() : type;
     }
 
     llvm::Type *FieldType() const {
       llvm::Type *element = ElementType();
-      if (field == kNonFieldVariable || !element->isStructTy() ||
-          element->getStructNumElements() < field)
+      if (field < 0 || !element || !element->isStructTy() ||
+          static_cast<unsigned>(field) >= element->getStructNumElements())
         return nullptr;
-      return element->getStructElementType(field);
+      return element->getStructElementType(static_cast<unsigned>(field));
     }
   };
   using FieldList = std::vector<Fields>;
@@ -91,9 +70,9 @@ public:
         is_return_value_(false), fields_(std::vector<Fields>()) {}
 
   Value(llvm::Value *value)
-      : value_(value), value_type_(value->getValueID()),
+      : value_(value), value_type_(value ? value->getValueID() : 0),
         array_element_num_(kNonArrayElement),
-        is_global_var_(llvm::isa<llvm::GlobalValue>(value)),
+        is_global_var_(value ? llvm::isa<llvm::GlobalValue>(value) : false),
         is_return_value_(false), fields_(std::vector<Fields>()) {}
 
   Value(std::shared_ptr<Value> value);
@@ -105,6 +84,7 @@ public:
                                        const fitx::Value &value);
 
   llvm::Value &getLLVMValue_() const;
+  llvm::Value *rawLLVMValue() const { return value_; }
   llvm::Type &getLLVMType_() const;
 
   bool isArgument();
@@ -120,17 +100,11 @@ public:
   long Field() const;
   const std::vector<Fields> &GetFields() const;
 
-  // TODO: This function returns the type of the value defined in the LLVM.
-  // The function name is left as getValueID to be compatible with LLVM,
-  // but should be renamed tr o getValueType(), as it is very confusing
-  // with the actual ID of this value.
   unsigned getValueID() const { return value_type_; }
 
   bool isRoot() const { return fields_.empty(); }
 
-  void addUser(std::shared_ptr<fitx::Value> user) {
-    users_.push_back(user);
-  }
+  void addUser(std::shared_ptr<fitx::Value> user) { users_.push_back(user); }
 
   std::vector<std::weak_ptr<fitx::Value>> Users() { return users_; }
 
@@ -138,7 +112,7 @@ public:
   size_t ManagedId() { return managed_id_; }
 
 private:
-  size_t managed_id_;
+  size_t managed_id_ = 0;
 
   llvm::Value *value_;
 
@@ -160,7 +134,6 @@ public:
   int64_t getConstValue() { return const_value_; }
 
   static bool classof(const fitx::Value *value) {
-    // Methods for support type inquiry through isa, cast, and dyn_cast:
     return value->getValueID() == llvm::Value::ConstantIntVal;
   }
 
@@ -174,7 +147,6 @@ public:
   NullValue(std::shared_ptr<NullValue> value);
 
   static bool classof(const fitx::Value *value) {
-    // Methods for support type inquiry through isa, cast, and dyn_cast:
     return value->getValueID() == llvm::Value::ConstantPointerNullVal;
   }
 };
@@ -190,7 +162,6 @@ public:
   uint64_t ArgNum() const { return arg_num_; }
 
   static bool classof(const fitx::Value *value) {
-    // Methods for support type inquiry through isa, cast, and dyn_cast:
     return value->getValueID() == llvm::Value::ArgumentVal;
   }
 
@@ -198,15 +169,11 @@ private:
   uint64_t arg_num_;
 };
 
-/// Set of framework values with set operations and SSA/field "related" lookup.
-/// getRelatedValues() returns values that share the same base LLVM value and
-/// compatible field path (same or more specific); used to propagate typestate
-/// to all SSA/field variants of a pointer (paper §3).
+/// Set of framework values with O(1)-indexed SSA/field "related" lookup.
 class ValueCollection {
 public:
   ValueCollection() = default;
 
-  // factories
   static ValueCollection
   createFromIntersection(const std::vector<ValueCollection> &collections);
   static ValueCollection
@@ -223,24 +190,28 @@ public:
   void remove(std::shared_ptr<Value> val);
   void clear();
 
-  /// Values with same base LLVM value and compatible field path (SSA/field
-  /// "related"); not alias—used to broaden store/branch transition targets.
   std::set<std::shared_ptr<Value>>
   getRelatedValues(std::shared_ptr<Value> value) const;
+
+  void collectRelatedValues(
+      const std::shared_ptr<Value> &value,
+      llvm::SmallVectorImpl<std::shared_ptr<Value>> &out) const;
 
   std::set<std::shared_ptr<Value>>
   getParentValues(std::shared_ptr<Value> value) const;
 
-  size_t size() { return values_.size(); }
+  void collectParentValues(
+      const std::shared_ptr<Value> &value,
+      llvm::SmallVectorImpl<std::shared_ptr<Value>> &out) const;
+
+  size_t size() const { return values_.size(); }
 
 private:
   std::set<std::shared_ptr<Value>> values_;
+  llvm::DenseMap<const llvm::Value *, std::vector<std::shared_ptr<Value>>>
+      by_llvm_value_;
 };
 
-/// May-alias sets for typestate propagation (paper §3: intra-procedural only).
-/// Recorded on stores (ptr = value_operand); used when applying store/alias
-/// transitions so all possibly-aliased values get updated. Not merged across
-/// CFG predecessors (inter-block merge is commented out in Function.cpp).
 class AliasValues {
 public:
   AliasValues();
@@ -250,19 +221,23 @@ public:
 
   void addAlias(AliasValues &collection);
 
-  /// Returns the set of values that may alias \p value, or nullptr if none.
   const ValueCollection *getAliasInfo(std::shared_ptr<fitx::Value> value);
 
   const std::vector<std::shared_ptr<fitx::Value>> &UpdatedValues() {
     return updated_values_;
   };
 
-  const std::map<std::shared_ptr<fitx::Value>, ValueCollection> &
-  AliasInfo() {
+  const std::map<std::shared_ptr<fitx::Value>, ValueCollection> &AliasInfo() {
     return alias_info_;
   };
 
   size_t Size() { return alias_size_; }
+
+  void clear() {
+    alias_info_.clear();
+    updated_values_.clear();
+    alias_size_ = 0;
+  }
 
 private:
   std::map<std::shared_ptr<fitx::Value>, ValueCollection> alias_info_;
@@ -271,7 +246,6 @@ private:
   size_t alias_size_;
 };
 
-/// Singleton registry of all framework values (for stable IDs / serialization).
 class ManagedValues {
 public:
   static ManagedValues &GetInstance();
@@ -285,6 +259,7 @@ public:
   }
 
   std::shared_ptr<fitx::Value> getValueFromID(size_t id);
+  void clear() { managed_values_.clear(); }
 
 private:
   ManagedValues();
