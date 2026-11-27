@@ -349,9 +349,12 @@ void FunctionAnalyzer::initSourceWrapperSummary(
   }
 }
 
-void FunctionAnalyzer::matchFormalActual(
+bool FunctionAnalyzer::matchFormalActual(
     SummaryBase *Smry, const GuardedValueFlowCallSite *GraphCS,
     const std::string &RenameSuffix) {
+  bool OnlyFreshEqualities = !UsedRenamingCallSites.contains(GraphCS);
+  UsedRenamingCallSites.add(GraphCS);
+
   // mapping actual to formal
   auto *CalleeGraph = Parent->getGraph(Smry->getFunction());
   for (auto *Formal : Smry->getInputs()) {
@@ -362,6 +365,7 @@ void FunctionAnalyzer::matchFormalActual(
                                  Formal->getType()));
     if (nodeOfKind<GuardedValueFlowNode::Kind::VariableArgument,
                    GuardedValueFlowNode>(Formal)) {
+      OnlyFreshEqualities = false;
       unsigned VarActualArgStart = CalleeGraph->getNumCommonArgument();
       unsigned VarActualArgEnd = GraphCS->getCommonInputs().size();
       if (VarActualArgStart < VarActualArgEnd) {
@@ -406,14 +410,19 @@ void FunctionAnalyzer::matchFormalActual(
       SMTExpr Mapping = (FormalExpr == ActualExpr);
       Solver->add(Mapping);
 
-      Solver->addAll(Solver->getDataDeps(ActualNode));
+      auto ActualDeps = Solver->getDataDeps(ActualNode);
+      if (!ActualDeps.empty())
+        OnlyFreshEqualities = false;
+      Solver->addAll(ActualDeps);
     }
   }
+  return OnlyFreshEqualities;
 }
 
 // Helper to check if a call site has relevant summaries to inline.
 bool FunctionAnalyzer::hasSummary(const GuardedValueFlowCallSite *GraphCS,
-                                  const GuardedValueFlowNode *Node) {
+                                  const GuardedValueFlowNode *Node,
+                                  bool IsCommonArgSrc) {
   assert(GraphCS);
   Function *Callee = GraphCS->getCalledFunction();
   if (Callee == F) {
@@ -426,9 +435,11 @@ bool FunctionAnalyzer::hasSummary(const GuardedValueFlowCallSite *GraphCS,
     return true;
   }
 
-  auto InSmryIt = InputSmryMap.find(std::make_pair(Node, GraphCS));
-  if (InSmryIt != InputSmryMap.end() && !InSmryIt->second.empty()) {
-    return true;
+  if (!IsCommonArgSrc || CommonArgCanInlineInputSmry) {
+    auto InSmryIt = InputSmryMap.find(std::make_pair(Node, GraphCS));
+    if (InSmryIt != InputSmryMap.end() && !InSmryIt->second.empty()) {
+      return true;
+    }
   }
 
   auto SourceWrapperIt = SourceWrapperSmryMap.find(GraphCS);
@@ -439,6 +450,8 @@ bool FunctionAnalyzer::hasSummary(const GuardedValueFlowCallSite *GraphCS,
     }
   }
 
+  const auto &ReachSet =
+      IsCommonArgSrc ? CanReachCommonArgSite : CanReachAnyRelevantSite;
   for (auto CalleeIt = GraphCS->getCallees().begin(),
             CalleeEnd = GraphCS->getCallees().end();
        CalleeIt != CalleeEnd; ++CalleeIt) {
@@ -446,6 +459,9 @@ bool FunctionAnalyzer::hasSummary(const GuardedValueFlowCallSite *GraphCS,
     auto NativeRange4 = callOutputs(GraphCS, Callee);
     for (auto It = NativeRange4.begin(), E = NativeRange4.end(); It != E;
          ++It) {
+      if (RelevantNodesBuilt && !ReachSet.count(*It)) {
+        continue;
+      }
       auto OutSmryIt = OutputSmryMap.find(std::make_tuple(Node, *It, Callee));
 
       if (OutSmryIt != OutputSmryMap.end() && !OutSmryIt->second.empty()) {
@@ -690,6 +706,20 @@ void FunctionAnalyzer::buildReturnSymbolicSummary() {
   }
 }
 
+static std::vector<Z3_ast> canonicalExprAsts(const SMTExprVec &Vec) {
+  std::vector<Z3_ast> Asts;
+  Asts.reserve(Vec.size());
+  for (unsigned I = 0; I < Vec.size(); ++I) {
+    SMTExpr E = Vec[I];
+    if (E.isApp() && E.isTrue())
+      continue;
+    Asts.push_back(static_cast<Z3_ast>(E.getZ3Expr()));
+  }
+  std::sort(Asts.begin(), Asts.end());
+  Asts.erase(std::unique(Asts.begin(), Asts.end()), Asts.end());
+  return Asts;
+}
+
 // Inlines input summaries.
 // Case 0: Normal input summary (backward propagation).
 // Case 1: Continue forward search after inlining (used when searching from
@@ -697,11 +727,32 @@ void FunctionAnalyzer::buildReturnSymbolicSummary() {
 void FunctionAnalyzer::inlineCalleeInSummary(
     const GuardedValueFlowCallSite *CS, InputSummary *CalleeInSmry,
     Vulnerability::ValueSitePairType Src,
-    const GuardedValueFlowNode *ActualNode, unsigned Depth, int Case) {
+    const GuardedValueFlowNode *ActualNode, unsigned Depth, int Case,
+    InSummaryCheckCache *CheckCache,
+    const std::vector<Z3_ast> *VerifiedPrereqAsts) {
   TimeChecker->check();
 
   if (Case != 1 && CalleeInSmry->getInlineDepth() >= GSAFOptions::InlineDepth) {
     return;
+  }
+
+  InSummaryCheckKey CacheKey;
+  bool HasCachedResult = false;
+  SMTSolver::SMTResultType Result = SMTSolver::SMTRT_Uncheck;
+  if (CheckCache) {
+    CacheKey.first = CalleeInSmry->getFunction();
+    const auto &Inputs = CalleeInSmry->getInputs();
+    CacheKey.second.assign(Inputs.begin(), Inputs.end());
+    std::sort(CacheKey.second.begin(), CacheKey.second.end());
+    auto It = CheckCache->find(CacheKey);
+    if (It != CheckCache->end()) {
+      HasCachedResult = true;
+      Result = It->second;
+      if (Result != SMTSolver::SMTRT_Sat) {
+        DEBUG_TRACE(dbgs() << "\t Inlining input summary leads unsat (cached)!\n");
+        return;
+      }
+    }
   }
 
   // translating, pruning, and mapping
@@ -720,19 +771,28 @@ void FunctionAnalyzer::inlineCalleeInSummary(
         item.constraints, item.suffix + RenamingSuffix, item.depth + 1));
 
   // mapping actual to formal
-  matchFormalActual(CalleeInSmry, CS, RenamingSuffix);
+  bool OnlyFreshEqualities = matchFormalActual(CalleeInSmry, CS, RenamingSuffix);
 
-  inlineReturnSymbolicSummary(Src);
+  bool InlinedRetSym = inlineReturnSymbolicSummary(Src);
 
-  SMTSolver::SMTResultType Result = SMTSolver::SMTRT_Uncheck;
   Solver->push();
   Solver->addAll(CtrlConds.getCacheVector());
+  SMTExprVec Prereq = Solver->getSMTFactory().createEmptySMTExprVec();
   if (ActualNode) {
-    SMTExprVec Prereq = Solver->getSMTFactory().createEmptySMTExprVec();
     TSV->setPrerequisites(Solver, CS, TraceBuilder, Prereq);
     Solver->addAll(Prereq);
   }
-  Result = Solver->check();
+  if (!HasCachedResult) {
+    if (VerifiedPrereqAsts && OnlyFreshEqualities && !InlinedRetSym &&
+        CtrlConds.empty() &&
+        canonicalExprAsts(Prereq) == *VerifiedPrereqAsts) {
+      Result = SMTSolver::SMTRT_Sat;
+    } else {
+      Result = Solver->check();
+    }
+    if (CheckCache)
+      (*CheckCache)[CacheKey] = Result;
+  }
 
   if (Result == SMTSolver::SMTRT_Sat && canReport(Src) && Case == 0) {
     TraceBuilder.push();

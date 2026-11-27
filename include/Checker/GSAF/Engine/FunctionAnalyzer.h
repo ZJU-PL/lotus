@@ -71,6 +71,17 @@ private:
   /// a function, the symbolic summary of the functions'
   /// return value is not necessary to be inlined.
   PushPopCache<const GuardedValueFlowCallOutputNode *> CallSiteOutputCache;
+  PushPopCache<const GuardedValueFlowCallSite *> UsedRenamingCallSites;
+
+  struct BlockCheckEntry {
+    SMTSolver::SMTResultType Result = SMTSolver::SMTRT_Uncheck;
+    bool HasPrereqAsts = false;
+    std::vector<Z3_ast> PrereqAsts;
+  };
+  using InSummaryCheckKey =
+      std::pair<Function *, std::vector<const GuardedValueFlowNode *>>;
+  using InSummaryCheckCache =
+      std::map<InSummaryCheckKey, SMTSolver::SMTResultType>;
 
   /// APIs for push/pop/reset states
   /// NOTE: the states does NOT contain TraceBuilder and Solver, please
@@ -123,8 +134,9 @@ private:
   std::shared_ptr<TaintStyleVulnerability> TSV;
 
   /// Exact backward reachability sets of nodes that can reach a potentially
-  /// relevant use site along valueFlowParents() edges.
+  /// relevant use site along valueFlowParents() and OutputSummary edges.
   bool RelevantNodesBuilt = false;
+  bool CommonArgCanInlineInputSmry = false;
   std::unordered_set<const GuardedValueFlowNode *> CanReachCommonArgSite;
   std::unordered_set<const GuardedValueFlowNode *> CanReachAnyRelevantSite;
 
@@ -175,10 +187,11 @@ private:
                                 const GuardedValueFlowNode *Actual,
                                 std::size_t ActualIndex, bool NotPseudo);
 
-  /// Check if there is some summary at this call site \p CS, using the node
-  /// \p Node as an actual.
+  /// Check if there is some relevant summary at this call site \p CS, using the
+  /// node \p Node as an actual.
   bool hasSummary(const GuardedValueFlowCallSite *CS,
-                  const GuardedValueFlowNode *Node);
+                  const GuardedValueFlowNode *Node,
+                  bool IsCommonArgSrc = false);
 
   /// Search the Graph from every possible source (\p Src). \p CurrentNode is
   /// the node that is visiting, and \p PreviousNode is the node visited before.
@@ -196,8 +209,10 @@ private:
 
   void finalizeSummary();
 
-  /// Add constraints: "formal == actual"
-  void matchFormalActual(SummaryBase *Smry, const GuardedValueFlowCallSite *CS,
+  /// Add constraints: "formal == actual". Returns true iff all added
+  /// constraints were definitional equalities for fresh formal symbols with no
+  /// new data dependencies.
+  bool matchFormalActual(SummaryBase *Smry, const GuardedValueFlowCallSite *CS,
                          const std::string &RenameSuffix);
 
   /// Inline the symbolic summary of \p Symbol, which should be a
@@ -218,11 +233,12 @@ private:
   /// function. \p Case = 2: Searching from an argument and reaching a call site
   /// that is a taint source (or source wrapper),
   ///              thereby producing a source wrapper summary.
-  void inlineCalleeInSummary(const GuardedValueFlowCallSite *CS,
-                             InputSummary *Smry,
-                             Vulnerability::ValueSitePairType Src,
-                             const GuardedValueFlowNode *ActualNode,
-                             unsigned InlineDepth, int Case = 0);
+  void inlineCalleeInSummary(
+      const GuardedValueFlowCallSite *CS, InputSummary *Smry,
+      Vulnerability::ValueSitePairType Src,
+      const GuardedValueFlowNode *ActualNode, unsigned InlineDepth,
+      int Case = 0, InSummaryCheckCache *CheckCache = nullptr,
+      const std::vector<Z3_ast> *VerifiedPrereqAsts = nullptr);
 
   /// Inline the output summary \p Smry at call site \p CS. The source of
   /// current trace is \p Src. The current inline depth is \p InlineDepth. \p
@@ -241,14 +257,16 @@ private:
   /// type.
   int checkUseSite(
       const GuardedValueFlowNode *Node, const GuardedValueFlowSite *UseSite,
-      std::unordered_map<const BasicBlock *, SMTSolver::SMTResultType> &,
-      bool UpdateCache);
+      std::unordered_map<const BasicBlock *, BlockCheckEntry> &,
+      bool UpdateCache,
+      const std::vector<Z3_ast> **VerifiedPrereqAsts = nullptr);
 
   /// It processes use sites according to the type of use sites
   void processUseSite(Vulnerability::ValueSitePairType Src,
                       const GuardedValueFlowNode *Node,
                       const GuardedValueFlowSite *UseSite,
-                      Vulnerability::SiteType USTy, unsigned InlineDepth);
+                      Vulnerability::SiteType USTy, unsigned InlineDepth,
+                      const std::vector<Z3_ast> *VerifiedPrereqAsts = nullptr);
 
   /// Create input summary
   InputSummary *createInputSummary(

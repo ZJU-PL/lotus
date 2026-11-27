@@ -1094,8 +1094,19 @@ uint32_t PathCondBddManager::tryBddAnd(uint32_t u, uint32_t v) {
     return u;
   if (u == (v ^ 1U))
     return FALSE_ID;
+  if (u > v)
+    std::swap(u, v);
+  uint64_t key = (static_cast<uint64_t>(u) << 32) | static_cast<uint64_t>(v);
+  auto it = and_cache_.find(key);
+  if (it != and_cache_.end())
+    return it->second;
+  if (nodes_.size() >= MAX_BDD_NODES)
+    return INVALID_ID;
   unsigned steps = 0;
-  return bddAndBounded(u, v, steps);
+  uint32_t res = bddAndBounded(u, v, steps);
+  if (res == INVALID_ID)
+    and_cache_[key] = INVALID_ID;
+  return res;
 }
 
 uint32_t PathCondBddManager::aigAnd(uint32_t a, uint32_t b) {
@@ -1821,7 +1832,7 @@ path_cond_t PTGraph::getValueCond(Value *value, bool sense) {
     return (is_true == sense) ? getEmptyCond() : getFalseCond();
   }
 
-  auto key = make_pair(value, sense);
+  auto key = make_pair(value, sense ? 1 : 0);
   auto it = value_cond_cache_.find(key);
   if (it != value_cond_cache_.end())
     return it->second;
@@ -2179,25 +2190,43 @@ path_cond_t PTGraph::findOrCreateBBRegion(BasicBlock *src_bb,
   if (src_bb == target_bb)
     return getEmptyCond();
 
-  auto src_it = bb_region_cache.find(src_bb);
-  if (src_it != bb_region_cache.end()) {
-    auto target_it = src_it->second.find(target_bb);
-    if (target_it != src_it->second.end())
-      return target_it->second;
-  }
+  auto cache_key = std::make_pair(src_bb, target_bb);
+  auto cached = bb_region_cache.find(cache_key);
+  if (cached != bb_region_cache.end())
+    return cached->second;
 
   if (dom_tree && !dom_tree->dominates(src_bb, target_bb)) {
-    bb_region_cache[src_bb][target_bb] = getFalseCond();
+    bb_region_cache[cache_key] = getFalseCond();
     return getFalseCond();
   }
 
   buildControlDependenceInfo();
 
+  if (!bb_region_active_.insert(cache_key).second)
+    return getEmptyCond();
+
   path_cond_t result = getEmptyCond();
   bool has_dep = false;
   auto dep_it = control_dep_cache_.find(target_bb);
   if (dep_it != control_dep_cache_.end()) {
-    for (auto &dep_item : dep_it->second) {
+    SmallVector<std::pair<BasicBlock *, path_cond_t>, 8> deps(
+        dep_it->second.begin(), dep_it->second.end());
+    if (deps.size() > 1) {
+      std::sort(deps.begin(), deps.end(),
+                [this](const std::pair<BasicBlock *, path_cond_t> &lhs,
+                       const std::pair<BasicBlock *, path_cond_t> &rhs) {
+                  auto lit = bb_rpo_order_.find(lhs.first);
+                  auto rit = bb_rpo_order_.find(rhs.first);
+                  unsigned lo = lit != bb_rpo_order_.end()
+                                    ? lit->second
+                                    : std::numeric_limits<unsigned>::max();
+                  unsigned ro = rit != bb_rpo_order_.end()
+                                    ? rit->second
+                                    : std::numeric_limits<unsigned>::max();
+                  return lo < ro;
+                });
+    }
+    for (auto &dep_item : deps) {
       BasicBlock *dep_bb = dep_item.first;
       if (dep_bb != src_bb && dom_tree && !dom_tree->dominates(src_bb, dep_bb))
         continue;
@@ -2211,7 +2240,8 @@ path_cond_t PTGraph::findOrCreateBBRegion(BasicBlock *src_bb,
     }
   }
 
-  bb_region_cache[src_bb][target_bb] = result;
+  bb_region_active_.erase(cache_key);
+  bb_region_cache[cache_key] = result;
   return result;
 }
 
@@ -2377,12 +2407,10 @@ path_cond_t PTGraph::findOrCreateNotRegion(path_cond_t cond) {
 
 path_cond_t PTGraph::findOrCreateUnitPhiRegion(BasicBlock *cur_bb,
                                                BasicBlock *incoming_bb) {
-  auto cache_it = phi_region_cache.find(cur_bb);
-  if (cache_it != phi_region_cache.end()) {
-    auto cond_it = cache_it->second.find(incoming_bb);
-    if (cond_it != cache_it->second.end())
-      return cond_it->second;
-  }
+  auto cache_key = std::make_pair(cur_bb, incoming_bb);
+  auto cache_it = phi_region_cache.find(cache_key);
+  if (cache_it != phi_region_cache.end())
+    return cache_it->second;
 
   path_cond_t cond = getEmptyCond();
   if (incoming_bb) {
@@ -2406,6 +2434,6 @@ path_cond_t PTGraph::findOrCreateUnitPhiRegion(BasicBlock *cur_bb,
         cond = findOrCreateAndRegion(cond, getCFGEdgeCond(incoming_bb, cur_bb));
     }
   }
-  phi_region_cache[cur_bb][incoming_bb] = cond;
+  phi_region_cache[cache_key] = cond;
   return cond;
 }

@@ -562,4 +562,187 @@ TEST_F(GuardedValueFlowSolverTest, ExcludesSummarySentinelChainsFromDTSolver) {
   EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Sat);
 }
 
+TEST_F(GuardedValueFlowSolverTest,
+       EncodesAggregateUndefAndEmptyStructConcatWithoutCrash) {
+  const char *source = R"(
+    %empty = type {}
+    define { %empty, i32 } @test(i32 %x) {
+    entry:
+      %agg = insertvalue { %empty, i32 } undef, i32 %x, 1
+      ret { %empty, i32 } %agg
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+  Function *F = module->getFunction("test");
+  ASSERT_NE(F, nullptr);
+  auto pipeline = runBuilder(*module);
+  GuardedValueFlowGraph &graph = pipeline.builder->getGraph(*F);
+  auto *agg_inst = &F->getEntryBlock().front();
+  auto *agg_node = graph.findNode(agg_inst);
+  ASSERT_NE(agg_node, nullptr);
+
+  SMTFactory factory;
+  GuardedValueFlowSolver solver(factory, module->getDataLayout());
+  solver.addAll(solver.getDataDeps(agg_node));
+  EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Sat);
+}
+
+TEST_F(GuardedValueFlowSolverTest,
+       TerminatesOnCyclicSingleChildLoadMemoryChain) {
+  auto module = parseModule("define void @test() { entry: ret void }");
+  ASSERT_NE(module, nullptr);
+  Function *F = module->getFunction("test");
+  ASSERT_NE(F, nullptr);
+  auto *ret_inst = cast<ReturnInst>(F->getEntryBlock().getTerminator());
+
+  GuardedValueFlowGraph graph(F);
+  auto *load_mem = graph.createNode<GuardedValueFlowNode>(
+      GuardedValueFlowNode::Kind::LoadMemory, Type::getInt32Ty(context), &graph,
+      &F->getEntryBlock(), nullptr, ret_inst);
+  auto *store_mem = graph.createAnonymousStoreMemoryNode(
+      Type::getInt32Ty(context), &F->getEntryBlock(), ret_inst, "cyclic.store");
+  load_mem->addChild(store_mem);
+  store_mem->addChild(load_mem);
+  load_mem->addMatchingRegion(store_mem, graph.getAlwaysTrueRegion());
+
+  SMTFactory factory;
+  GuardedValueFlowSolver solver(factory, module->getDataLayout());
+  solver.addAll(solver.getDataDeps(load_mem));
+  EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Sat);
+}
+
+TEST_F(GuardedValueFlowSolverTest,
+       GetDepsPairEncodesOnlySelectedPhiIncomingEdge) {
+  const char *source = R"(
+    define i32 @test(i1 %cond, i32 %a, i32 %b) {
+    entry:
+      br i1 %cond, label %then, label %else
+    then:
+      %inc = add i32 %a, 1
+      br label %merge
+    else:
+      %dec = sub i32 %b, 1
+      br label %merge
+    merge:
+      %phi = phi i32 [ %inc, %then ], [ %dec, %else ]
+      ret i32 %phi
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+  Function *F = module->getFunction("test");
+  ASSERT_NE(F, nullptr);
+  auto pipeline = runBuilder(*module);
+  GuardedValueFlowGraph &graph = pipeline.builder->getGraph(*F);
+
+  Instruction *inc_inst = nullptr;
+  Instruction *dec_inst = nullptr;
+  PHINode *phi_inst = nullptr;
+  for (Instruction &I : instructions(*F)) {
+    if (I.getName() == "inc")
+      inc_inst = &I;
+    else if (I.getName() == "dec")
+      dec_inst = &I;
+    else if (auto *P = dyn_cast<PHINode>(&I))
+      phi_inst = P;
+  }
+  ASSERT_NE(inc_inst, nullptr);
+  ASSERT_NE(dec_inst, nullptr);
+  ASSERT_NE(phi_inst, nullptr);
+
+  auto *phi_node = graph.findNode(phi_inst);
+  auto *inc_node = graph.findNode(inc_inst);
+  auto *dec_node = graph.findNode(dec_inst);
+  auto *cond_node = graph.findNode(F->getArg(0));
+  ASSERT_NE(phi_node, nullptr);
+  ASSERT_NE(inc_node, nullptr);
+  ASSERT_NE(dec_node, nullptr);
+
+  // Both base and DT solvers should encode phi == inc and cond == 1 without
+  // pulling in the unrelated %dec branch. For DTGuardedValueFlowSolver,
+  // visiting %inc first establishes %then's control dependencies (just as
+  // FunctionAnalyzer does during traversal).
+  auto check_solver = [&](GuardedValueFlowSolver &solver, bool seed_child_ctrl) {
+    if (seed_child_ctrl)
+      solver.addAll(solver.getCtrlDeps(inc_node));
+    auto pair = solver.getDepsPair(phi_node, inc_node);
+    solver.addAll(pair.first);
+    solver.addAll(pair.second);
+
+    std::string text;
+    ASSERT_TRUE(solver.assertions().SMTExprVecToStream(text));
+    EXPECT_EQ(text.find(solverSymbolForNode(dec_node)), std::string::npos);
+
+    solver.push();
+    solver.add(solver.getOrInsertExpr(phi_node) !=
+               solver.getOrInsertExpr(inc_node));
+    EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Unsat);
+    solver.pop();
+
+    solver.push();
+    solver.add(solver.getOrInsertExpr(cond_node) == 0);
+    EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Unsat);
+    solver.pop();
+  };
+
+  {
+    SMTFactory factory;
+    GuardedValueFlowSolver solver(factory, module->getDataLayout());
+    check_solver(solver, false);
+  }
+  {
+    DominatorTree dt(*F);
+    SMTFactory factory;
+    DTGuardedValueFlowSolver solver(factory, module->getDataLayout(), &dt);
+    check_solver(solver, true);
+  }
+}
+
+TEST_F(GuardedValueFlowSolverTest,
+       DTSolverHandlesNullQueryContextAndUnreachableBlock) {
+  const char *source = R"(
+    define i32 @test(i1 %cond, i32 %x) {
+    entry:
+      br i1 %cond, label %then, label %else
+    then:
+      ret i32 %x
+    else:
+      ret i32 0
+    unreachable_bb:
+      %u = add i32 %x, 1
+      ret i32 %u
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+  Function *F = module->getFunction("test");
+  ASSERT_NE(F, nullptr);
+  auto pipeline = runBuilder(*module);
+  GuardedValueFlowGraph &graph = pipeline.builder->getGraph(*F);
+
+  BasicBlock *unreachable_bb = nullptr;
+  Instruction *u_inst = nullptr;
+  for (BasicBlock &BB : *F) {
+    if (BB.getName() == "unreachable_bb") {
+      unreachable_bb = &BB;
+      u_inst = &BB.front();
+    }
+  }
+  ASSERT_NE(unreachable_bb, nullptr);
+  ASSERT_NE(u_inst, nullptr);
+  auto *u_node = graph.findNode(u_inst);
+  ASSERT_NE(u_node, nullptr);
+
+  DominatorTree dt(*F);
+  SMTFactory factory;
+  DTGuardedValueFlowSolver solver(factory, module->getDataLayout(), &dt);
+  solver.addAll(solver.getCtrlDeps(unreachable_bb, &graph, nullptr));
+  solver.addAll(solver.getDataDeps(u_node, nullptr));
+  EXPECT_EQ(solver.check(), GuardedValueFlowSolver::SMTRT_Sat);
+}
+
 } // namespace

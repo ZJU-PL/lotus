@@ -73,20 +73,73 @@ SMTSolver::SMTSolver(SMTFactory *F, z3::solver &Z3Solver, z3::model &Z3Model)
   }
 }
 
-SMTSolver::SMTSolver(const SMTSolver &Solver)
-    : SMTObject(Solver), Solver(Solver.Solver) {}
+SMTSolver::SMTSolver(const SMTSolver &Other)
+    : SMTObject(Other), Solver(Other.Solver), checkCount(Other.checkCount),
+      PendingAssertions(Other.PendingAssertions),
+      ScopeAssertionMarks(Other.ScopeAssertionMarks),
+      SyncedCounts(Other.SyncedCounts), ActiveAsts(Other.ActiveAsts),
+      FalseCount(Other.FalseCount), HasCachedResult(Other.HasCachedResult),
+      CachedResult(Other.CachedResult), Z3ModelValid(Other.Z3ModelValid) {}
 
-SMTSolver &SMTSolver::operator=(const SMTSolver &Solver) {
-  SMTObject::operator=(Solver);
-  if (this != &Solver) {
-    this->Solver = Solver.Solver;
+SMTSolver &SMTSolver::operator=(const SMTSolver &Other) {
+  SMTObject::operator=(Other);
+  if (this != &Other) {
+    this->Solver = Other.Solver;
+    this->checkCount = Other.checkCount;
+    this->PendingAssertions = Other.PendingAssertions;
+    this->ScopeAssertionMarks = Other.ScopeAssertionMarks;
+    this->SyncedCounts = Other.SyncedCounts;
+    this->ActiveAsts = Other.ActiveAsts;
+    this->FalseCount = Other.FalseCount;
+    this->HasCachedResult = Other.HasCachedResult;
+    this->CachedResult = Other.CachedResult;
+    this->Z3ModelValid = Other.Z3ModelValid;
   }
   return *this;
 }
 
 SMTSolver::~SMTSolver() {}
 
+void SMTSolver::flushToZ3() {
+  size_t synced_scopes = SyncedCounts.size() - 1;
+  size_t synced_asserts = SyncedCounts.back();
+  const size_t target_scopes = ScopeAssertionMarks.size();
+
+  size_t next_boundary = (synced_scopes < target_scopes)
+                             ? ScopeAssertionMarks[synced_scopes]
+                             : PendingAssertions.size();
+  for (; synced_asserts < next_boundary; ++synced_asserts) {
+    Solver.add(PendingAssertions[synced_asserts].Expr);
+  }
+  SyncedCounts.back() = synced_asserts;
+
+  while (synced_scopes < target_scopes) {
+    Solver.push();
+    ++synced_scopes;
+    size_t end = (synced_scopes < target_scopes)
+                     ? ScopeAssertionMarks[synced_scopes]
+                     : PendingAssertions.size();
+    for (; synced_asserts < end; ++synced_asserts) {
+      Solver.add(PendingAssertions[synced_asserts].Expr);
+    }
+    SyncedCounts.push_back(synced_asserts);
+  }
+}
+
 SMTSolver::SMTResultType SMTSolver::check(unsigned Timeout) {
+  if (FalseCount > 0) {
+    return SMTResultType::SMTRT_Unsat;
+  }
+  if (PendingAssertions.empty()) {
+    return SMTResultType::SMTRT_Sat;
+  }
+  if (HasCachedResult && Timeout == 0 &&
+      CachedResult != SMTResultType::SMTRT_Unknown &&
+      !DumpingConstraintsTimeout.getNumOccurrences() &&
+      !UsingSimplify.getNumOccurrences()) {
+    return CachedResult;
+  }
+
   if (Timeout > 0) {
     this->setTimeout(Timeout);
   }
@@ -109,15 +162,6 @@ SMTSolver::SMTResultType SMTSolver::check(unsigned Timeout) {
         Z3Solver4Sim.add(Whole.localSimplify().Expr);
       } else if (UsingSimplify.getValue() == "dillig") {
         SMTExpr SimplifiedForm = Whole.dilligSimplify();
-        // if (SimplifiedForm.equals(z3_solver.ctx().bool_val(false))) {
-        //		return SMTResult::UNSAT;
-        // } else {
-        //		if (debug_bug_report) {
-        //			// check so that get_model is valid
-        //			z3_solver.check();
-        //		}
-        //		return SMTResult::SAT;
-        // }
         Z3Solver4Sim.add(SimplifiedForm.Expr);
       } else {
         Z3Solver4Sim.add(Whole.Expr);
@@ -125,7 +169,9 @@ SMTSolver::SMTResultType SMTSolver::check(unsigned Timeout) {
 
       Result = Z3Solver4Sim.check();
     } else {
+      flushToZ3();
       Result = Solver.check();
+      ++checkCount;
     }
 
     if (DumpingConstraintsTimeout.getNumOccurrences()) {
@@ -179,6 +225,14 @@ SMTSolver::SMTResultType SMTSolver::check(unsigned Timeout) {
     if (SMTSolver::GlobalTimeout > 0) {
       this->setTimeout((unsigned)SMTSolver::GlobalTimeout);
     }
+  }
+  if (RetVal != SMTResultType::SMTRT_Unknown &&
+      !UsingSimplify.getNumOccurrences()) {
+    HasCachedResult = true;
+    CachedResult = RetVal;
+    Z3ModelValid = (RetVal == SMTResultType::SMTRT_Sat);
+  } else if (!UsingSimplify.getNumOccurrences()) {
+    Z3ModelValid = false;
   }
   return RetVal;
 }
@@ -319,40 +373,65 @@ void SMTSolver::setTimeout(unsigned Timeout) {
 }
 
 void SMTSolver::push() {
-  try {
-    Solver.push();
-  } catch (z3::exception &Ex) {
-    std::cerr << __FILE__ << " : " << __LINE__ << " : " << Ex << "\n";
-    exit(1);
-  }
+  ScopeAssertionMarks.push_back(PendingAssertions.size());
 }
 
 void SMTSolver::pop(unsigned N) {
-  try {
-    Solver.pop(N);
-  } catch (z3::exception &Ex) {
-    std::cerr << __FILE__ << " : " << __LINE__ << " : " << Ex << "\n";
-    exit(1);
+  if (N == 0)
+    return;
+  if (N > ScopeAssertionMarks.size())
+    N = static_cast<unsigned>(ScopeAssertionMarks.size());
+  if (N == 0)
+    return;
+
+  const size_t target_depth = ScopeAssertionMarks.size() - N;
+  const size_t new_size = ScopeAssertionMarks[target_depth];
+  ScopeAssertionMarks.resize(target_depth);
+
+  if (new_size < PendingAssertions.size()) {
+    for (size_t i = new_size; i < PendingAssertions.size(); ++i) {
+      if (PendingAssertions[i].isApp() && PendingAssertions[i].isFalse())
+        --FalseCount;
+      ActiveAsts.erase(static_cast<Z3_ast>(PendingAssertions[i].Expr));
+    }
+    PendingAssertions.erase(
+        PendingAssertions.begin() + static_cast<std::ptrdiff_t>(new_size),
+        PendingAssertions.end());
+    HasCachedResult = false;
+    Z3ModelValid = false;
+  }
+
+  const size_t synced_scopes = SyncedCounts.size() - 1;
+  if (synced_scopes > target_depth) {
+    try {
+      Solver.pop(static_cast<unsigned>(synced_scopes - target_depth));
+    } catch (z3::exception &Ex) {
+      std::cerr << __FILE__ << " : " << __LINE__ << " : " << Ex << "\n";
+      exit(1);
+    }
+    SyncedCounts.resize(target_depth + 1);
+    Z3ModelValid = false;
   }
 }
 
 unsigned SMTSolver::getNumScopes() {
-  return Z3_solver_get_num_scopes(Solver.ctx(), Solver);
+  return static_cast<unsigned>(ScopeAssertionMarks.size());
 }
 
 void SMTSolver::add(SMTExpr E) {
-  if (E.isTrue()) {
+  if (E.isApp() && E.isTrue()) {
     return;
   }
-
-  try {
-    // FIXME In some cases (ar._bfd_elf_parse_eh_frame.bc),
-    // simplify() will seriously affect the performance.
-    Solver.add(E.Expr /*.simplify()*/);
-  } catch (z3::exception &Ex) {
-    std::cerr << __FILE__ << " : " << __LINE__ << " : " << Ex << "\n";
-    exit(1);
+  Z3_ast ast = static_cast<Z3_ast>(E.Expr);
+  if (!ActiveAsts.insert(ast).second) {
+    return;
   }
+  if (E.isApp() && E.isFalse()) {
+    ++FalseCount;
+  }
+  PendingAssertions.push_back(std::move(E));
+  HasCachedResult = false;
+  Z3ModelValid = false;
 }
 
 void SMTSolver::addAll(SMTExprVec EVec) {
@@ -395,12 +474,27 @@ void SMTSolver::addAll(const std::vector<SMTExpr> &EVec) {
 }
 
 SMTExprVec SMTSolver::assertions() {
-  std::shared_ptr<z3::expr_vector> Vec =
-      std::make_shared<z3::expr_vector>(Solver.assertions());
+  if (PendingAssertions.empty())
+    return getSMTFactory().createEmptySMTExprVec();
+  auto Vec = std::make_shared<z3::expr_vector>(Solver.ctx());
+  for (const auto &E : PendingAssertions)
+    Vec->push_back(E.Expr);
   return SMTExprVec(&getSMTFactory(), Vec);
 }
 
-void SMTSolver::reset() { Solver.reset(); }
+void SMTSolver::reset() {
+  if (SyncedCounts.size() > 1 || SyncedCounts[0] > 0)
+    Solver.reset();
+  PendingAssertions.clear();
+  ScopeAssertionMarks.clear();
+  SyncedCounts.assign(1, 0);
+  ActiveAsts.clear();
+  FalseCount = 0;
+  HasCachedResult = false;
+  CachedResult = SMTRT_Uncheck;
+  Z3ModelValid = false;
+  checkCount = 0;
+}
 
 bool SMTSolver::operator<(const SMTSolver &Solver) const {
   return ((Z3_solver)this->Solver) < ((Z3_solver)Solver.Solver);
@@ -408,6 +502,14 @@ bool SMTSolver::operator<(const SMTSolver &Solver) const {
 
 SMTModel SMTSolver::getSMTModel() {
   try {
+    if (!Z3ModelValid ||
+        SyncedCounts.size() - 1 < ScopeAssertionMarks.size() ||
+        SyncedCounts.back() < PendingAssertions.size()) {
+      flushToZ3();
+      if (Solver.check() == z3::sat)
+        Z3ModelValid = true;
+      ++checkCount;
+    }
     return SMTModel(&getSMTFactory(), Solver.get_model());
   } catch (z3::exception &e) {
     std::cerr << __FILE__ << " : " << __LINE__ << " : " << e << "\n";

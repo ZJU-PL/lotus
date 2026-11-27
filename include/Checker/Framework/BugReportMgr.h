@@ -170,8 +170,8 @@ private:
   llvm::StringMap<int> src_file_ids;
   std::vector<std::string> src_files;
 
-  // Deduplication tracking (maps hash to report)
-  std::unordered_map<size_t, BugReport *> report_hashes;
+  // Deduplication tracking (maps trace hash to reports with that hash)
+  std::unordered_map<size_t, std::vector<BugReport *>> report_hashes;
 
   int get_src_file_id(llvm::StringRef src_file);
 

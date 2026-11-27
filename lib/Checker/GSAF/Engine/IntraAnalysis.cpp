@@ -104,6 +104,18 @@ void FunctionAnalyzer::buildRelevantNodes() {
     return;
   RelevantNodesBuilt = true;
 
+  CommonArgCanInlineInputSmry = false;
+  auto TaintV = std::static_pointer_cast<TaintExtras>(TSV);
+  for (auto ArgIt = Graph->arg_begin(), E = Graph->arg_end(); ArgIt != E;
+       ++ArgIt) {
+    if (nodeOfKind<GuardedValueFlowNode::Kind::CommonArgument,
+                   GuardedValueFlowNode>(*ArgIt) &&
+        !TaintV->isSinkFunction(Graph, *ArgIt)) {
+      CommonArgCanInlineInputSmry = true;
+      break;
+    }
+  }
+
   std::unordered_map<const GuardedValueFlowNode *,
                      std::vector<const GuardedValueFlowNode *>>
       RevParents;
@@ -127,14 +139,47 @@ void FunctionAnalyzer::buildRelevantNodes() {
       if (isa<GuardedValueFlowReturnSite>(Site)) {
         IsCommonArgRelevant = true;
         IsAnyRelevant = true;
-        break;
+        continue;
       }
       if (auto *CS = dyn_cast<GuardedValueFlowCallSite>(Site)) {
-        if (hasSummary(CS, Node) ||
-            TSV->isPotentialCommonArgSinkCallSite(CS, Node)) {
+        if (CS->getCalledFunction() != F) {
+          auto SrcIt = Sources.find(CS);
+          if (SrcIt != Sources.end() && SrcIt->second.count(Node)) {
+            IsCommonArgRelevant = true;
+            IsAnyRelevant = true;
+          }
+          auto SWIt = SourceWrapperSmryMap.find(CS);
+          if (SWIt != SourceWrapperSmryMap.end()) {
+            auto NodeIt = SWIt->second.find(Node);
+            if (NodeIt != SWIt->second.end() && !NodeIt->second.empty()) {
+              IsCommonArgRelevant = true;
+              IsAnyRelevant = true;
+            }
+          }
+          auto InIt = InputSmryMap.find(std::make_pair(Node, CS));
+          if (InIt != InputSmryMap.end() && !InIt->second.empty()) {
+            IsAnyRelevant = true;
+            if (CommonArgCanInlineInputSmry)
+              IsCommonArgRelevant = true;
+          }
+          // Output summaries transfer value flow from actual Node to OutputNode;
+          // model them as graph edges rather than terminal relevant sites so
+          // dead call-output chains (e.g., unused raw_ostream::operator<<) are
+          // pruned exactly.
+          for (Function *Callee : CS->getCallees()) {
+            for (const GuardedValueFlowCallOutputNode *OutputNode :
+                 callOutputs(CS, Callee)) {
+              auto OutIt =
+                  OutputSmryMap.find(std::make_tuple(Node, OutputNode, Callee));
+              if (OutIt != OutputSmryMap.end() && !OutIt->second.empty()) {
+                RevParents[OutputNode].push_back(Node);
+              }
+            }
+          }
+        }
+        if (TSV->isPotentialCommonArgSinkCallSite(CS, Node)) {
           IsCommonArgRelevant = true;
           IsAnyRelevant = true;
-          break;
         }
         if (TSV->isPotentialSinkCallSite(CS, Node)) {
           IsAnyRelevant = true;
@@ -143,7 +188,6 @@ void FunctionAnalyzer::buildRelevantNodes() {
         if (TSV->isPotentialCommonArgNonCallSite(Site, Node)) {
           IsCommonArgRelevant = true;
           IsAnyRelevant = true;
-          break;
         }
         if (TSV->isPotentialNonCallRelevantSite(Site, Node)) {
           IsAnyRelevant = true;
@@ -191,18 +235,21 @@ void FunctionAnalyzer::pushState() {
   NonSymDepsCache.push();
   SymbDepsCache.push();
   CallSiteOutputCache.push();
+  UsedRenamingCallSites.push();
 }
 
 void FunctionAnalyzer::resetState() {
   NonSymDepsCache.reset();
   SymbDepsCache.reset();
   CallSiteOutputCache.reset();
+  UsedRenamingCallSites.reset();
 }
 
 void FunctionAnalyzer::popState() {
   NonSymDepsCache.pop();
   SymbDepsCache.pop();
   CallSiteOutputCache.pop();
+  UsedRenamingCallSites.pop();
 }
 
 // Main entry point for taint analysis.
@@ -319,9 +366,11 @@ void FunctionAnalyzer::run() {
       TraceBuilder.add(SrcNode);
 
       auto &SmrySet = SrcNoteIt.second;
+      InSummaryCheckCache CheckCache;
       for (InputSummary *Smry : SmrySet) {
         inlineCalleeInSummary(SrcSite, Smry, std::make_pair(SrcNode, SrcSite),
-                              (const GuardedValueFlowNode *)SrcNode, 0, 1);
+                              (const GuardedValueFlowNode *)SrcNode, 0, 1,
+                              &CheckCache, nullptr);
       }
 
       Solver->pop();
@@ -569,8 +618,7 @@ void FunctionAnalyzer::bottomUpDepthFirstSearch(
     TraceBuilder.add(Node);
   }
 
-  std::unordered_map<const BasicBlock *, SMTSolver::SMTResultType>
-      BlockResultMap;
+  std::unordered_map<const BasicBlock *, BlockCheckEntry> BlockResultMap;
   for (auto UIt = Node->useSites().begin(), UE = Node->useSites().end();
        UIt != UE; ++UIt) {
     auto *UseSite = *UIt;
@@ -599,7 +647,8 @@ void FunctionAnalyzer::bottomUpDepthFirstSearch(
     }
 
     if (UTy == Vulnerability::ST_Call &&
-        !hasSummary(dyn_cast<GuardedValueFlowCallSite>(UseSite), Node)) {
+        !hasSummary(dyn_cast<GuardedValueFlowCallSite>(UseSite), Node,
+                    IsCommonArgSrc)) {
       DEBUG_TRACE(dbgs() << "\t\t\t >No summary! \n");
       continue;
     }
@@ -617,8 +666,9 @@ void FunctionAnalyzer::bottomUpDepthFirstSearch(
     // inline sym summary, all callee rets should be replaced (map ret/args)
     inlineReturnSymbolicSummary(Src);
 
+    const std::vector<Z3_ast> *VerifiedPrereqAsts = nullptr;
     int PostUTyMask = checkUseSite((const GuardedValueFlowNode *)Node, UseSite,
-                                   BlockResultMap, true);
+                                   BlockResultMap, true, &VerifiedPrereqAsts);
 
     Solver->push();
 
@@ -637,7 +687,7 @@ void FunctionAnalyzer::bottomUpDepthFirstSearch(
 
       if (PostUTyMask) {
         processUseSite(Src, (const GuardedValueFlowNode *)Node, UseSite, UTy,
-                       InlineDepth);
+                       InlineDepth, VerifiedPrereqAsts);
       } else {
         DEBUG_TRACE(dbgs() << "\t\t\t >Checking unsat!\n");
         if (Node->getParentBasicBlock() == UseSite->getParentBasicBlock()) {
@@ -675,7 +725,7 @@ void FunctionAnalyzer::bottomUpDepthFirstSearch(
 
     auto ResIt = BlockResultMap.find(ParentNode->getParentBasicBlock());
     if (ResIt != BlockResultMap.end() &&
-        ResIt->second != SMTSolver::SMTRT_Sat) {
+        ResIt->second.Result != SMTSolver::SMTRT_Sat) {
       DEBUG_TRACE(dbgs() << "\t " << SKIP_STR << *ParentNode
                          << " by cached results...\n");
       continue;
@@ -704,19 +754,36 @@ void FunctionAnalyzer::bottomUpDepthFirstSearch(
   return;
 }
 
+static std::vector<Z3_ast> canonicalExprAsts(const SMTExprVec &Vec) {
+  std::vector<Z3_ast> Asts;
+  Asts.reserve(Vec.size());
+  for (unsigned I = 0; I < Vec.size(); ++I) {
+    SMTExpr E = Vec[I];
+    if (E.isApp() && E.isTrue())
+      continue;
+    Asts.push_back(static_cast<Z3_ast>(E.getZ3Expr()));
+  }
+  std::sort(Asts.begin(), Asts.end());
+  Asts.erase(std::unique(Asts.begin(), Asts.end()), Asts.end());
+  return Asts;
+}
+
 int FunctionAnalyzer::checkUseSite(
     const GuardedValueFlowNode *Node, const GuardedValueFlowSite *UseSite,
-    std::unordered_map<const BasicBlock *, SMTSolver::SMTResultType>
-        &BlockResultMap,
-    bool UseCache) {
+    std::unordered_map<const BasicBlock *, BlockCheckEntry> &BlockResultMap,
+    bool UseCache, const std::vector<Z3_ast> **VerifiedPrereqAsts) {
+  if (VerifiedPrereqAsts)
+    *VerifiedPrereqAsts = nullptr;
   BasicBlock *UseSiteBlock = UseSite->getParentBasicBlock();
 
   auto Result = SMTSolver::SMTRT_Uncheck;
+  BlockCheckEntry *CachedEntry = nullptr;
 
   if (UseCache) {
     auto ResultIt = BlockResultMap.find(UseSiteBlock);
     if (ResultIt != BlockResultMap.end()) {
-      Result = ResultIt->second;
+      CachedEntry = &ResultIt->second;
+      Result = CachedEntry->Result;
     }
   }
 
@@ -729,13 +796,20 @@ int FunctionAnalyzer::checkUseSite(
     SMTExprVec Prereq = Solver->getSMTFactory().createEmptySMTExprVec();
     TSV->setPrerequisites(Solver, UseSite, TraceBuilder, Prereq);
     Solver->addAll(Prereq);
-    auto Result = Solver->check();
+    auto CheckRes = Solver->check();
 
-    BlockResultMap[UseSiteBlock] =
-        (Result == SMTSolver::SMTRT_Sat ? SMTSolver::SMTRT_Sat
-                                        : SMTSolver::SMTRT_Unsat);
-
-    if (Result != SMTSolver::SMTRT_Sat) {
+    auto &Entry = BlockResultMap[UseSiteBlock];
+    Entry.Result =
+        (CheckRes == SMTSolver::SMTRT_Sat ? SMTSolver::SMTRT_Sat
+                                          : SMTSolver::SMTRT_Unsat);
+    if (CheckRes == SMTSolver::SMTRT_Sat) {
+      Entry.HasPrereqAsts = true;
+      Entry.PrereqAsts = canonicalExprAsts(Prereq);
+      if (VerifiedPrereqAsts)
+        *VerifiedPrereqAsts = &Entry.PrereqAsts;
+    } else {
+      Entry.HasPrereqAsts = false;
+      Entry.PrereqAsts.clear();
       SiteCanReach = 0;
     }
 
@@ -743,22 +817,30 @@ int FunctionAnalyzer::checkUseSite(
       auto DominanceRange5 = properlyDominatedBlocks(PDT, UseSiteBlock);
       for (auto I = DominanceRange5.begin(), E = DominanceRange5.end(); I != E;
            I++) {
-        BlockResultMap[*I] =
-            (Result == SMTSolver::SMTRT_Sat ? SMTSolver::SMTRT_Sat
-                                            : SMTSolver::SMTRT_Unsat);
+        auto &DomEntry = BlockResultMap[*I];
+        DomEntry.Result =
+            (CheckRes == SMTSolver::SMTRT_Sat ? SMTSolver::SMTRT_Sat
+                                              : SMTSolver::SMTRT_Unsat);
+        DomEntry.HasPrereqAsts = false;
+        DomEntry.PrereqAsts.clear();
       }
     }
 
-    if (Result != SMTSolver::SMTRT_Sat) {
+    if (CheckRes != SMTSolver::SMTRT_Sat) {
       auto DominanceRange6 = properDominators(DT, UseSiteBlock);
       for (auto I = DominanceRange6.begin(), E = DominanceRange6.end(); I != E;
            I++) {
-        BlockResultMap[*I] = (SMTSolver::SMTRT_Unsat);
+        auto &DomEntry = BlockResultMap[*I];
+        DomEntry.Result = SMTSolver::SMTRT_Unsat;
+        DomEntry.HasPrereqAsts = false;
+        DomEntry.PrereqAsts.clear();
       }
     }
     Solver->pop();
   } break;
   case SMTSolver::SMTRT_Sat:
+    if (VerifiedPrereqAsts && CachedEntry && CachedEntry->HasPrereqAsts)
+      *VerifiedPrereqAsts = &CachedEntry->PrereqAsts;
     break;
   case SMTSolver::SMTRT_Unsat:
   case SMTSolver::SMTRT_Unknown:
@@ -768,11 +850,10 @@ int FunctionAnalyzer::checkUseSite(
   return SiteCanReach;
 }
 
-void FunctionAnalyzer::processUseSite(Vulnerability::ValueSitePairType Src,
-                                      const GuardedValueFlowNode *Node,
-                                      const GuardedValueFlowSite *UseSite,
-                                      Vulnerability::SiteType USTy,
-                                      unsigned InlineDepth) {
+void FunctionAnalyzer::processUseSite(
+    Vulnerability::ValueSitePairType Src, const GuardedValueFlowNode *Node,
+    const GuardedValueFlowSite *UseSite, Vulnerability::SiteType USTy,
+    unsigned InlineDepth, const std::vector<Z3_ast> *VerifiedPrereqAsts) {
   auto *SrcNode = Src.first;
   auto *SrcSite = Src.second;
 
@@ -838,11 +919,13 @@ void FunctionAnalyzer::processUseSite(Vulnerability::ValueSitePairType Src,
         auto InSmryIt = InputSmryMap.find(std::make_pair(Node, GraphCS));
         if (InSmryIt != InputSmryMap.end()) {
           auto &InSmryVec = InSmryIt->second;
+          InSummaryCheckCache CheckCache;
           for (auto *CalleeInSmry : InSmryVec) {
             inlineCalleeInSummary(
                 GraphCS, CalleeInSmry, Src, (const GuardedValueFlowNode *)Node,
                 std::max<unsigned>(CalleeInSmry->getInlineDepth() + 1,
-                                   InlineDepth));
+                                   InlineDepth),
+                0, &CheckCache, VerifiedPrereqAsts);
           }
         }
         DEBUG_TRACE(
@@ -857,13 +940,14 @@ void FunctionAnalyzer::processUseSite(Vulnerability::ValueSitePairType Src,
         auto SmryIt = SourceWrapperIt->second.find(Node);
         if (SmryIt != SourceWrapperIt->second.end()) {
           auto &InSmryVec = SmryIt->second;
+          InSummaryCheckCache CheckCache;
           for (auto *CalleeInSmry : InSmryVec) {
             DEBUG_TRACE(dbgs() << "\t\t " << TAINT_WRAPPER_STR << "[A]\n");
             inlineCalleeInSummary(
                 GraphCS, CalleeInSmry, Src, (const GuardedValueFlowNode *)Node,
                 std::max<unsigned>(CalleeInSmry->getInlineDepth() + 1,
                                    InlineDepth),
-                2);
+                2, &CheckCache, VerifiedPrereqAsts);
           }
         }
       }
@@ -890,6 +974,11 @@ void FunctionAnalyzer::processUseSite(Vulnerability::ValueSitePairType Src,
     }
 
     // output summary of the instruction from Node
+    const bool IsCommonArgSrc =
+        !Src.second && nodeOfKind<GuardedValueFlowNode::Kind::CommonArgument,
+                                  GuardedValueFlowNode>(Src.first);
+    const auto &ReachSet =
+        IsCommonArgSrc ? CanReachCommonArgSite : CanReachAnyRelevantSite;
     for (auto CalleeIt = GraphCS->getCallees().begin(),
               CalleeEnd = GraphCS->getCallees().end();
          CalleeIt != CalleeEnd; ++CalleeIt) {
@@ -898,6 +987,9 @@ void FunctionAnalyzer::processUseSite(Vulnerability::ValueSitePairType Src,
       for (auto OutputIt = NativeRange1.begin(), E = NativeRange1.end();
            OutputIt != E; ++OutputIt) {
         auto *OutputNode = *OutputIt;
+        if (RelevantNodesBuilt && !ReachSet.count(OutputNode)) {
+          continue;
+        }
 
         auto OutSmryIt =
             OutputSmryMap.find(std::make_tuple(Node, OutputNode, Callee));
@@ -945,7 +1037,7 @@ void FunctionAnalyzer::tryReport(std::shared_ptr<VulnerabilityTrace> Trace) {
   }
 
   SMTFactory *F = new SMTFactory;
-  SMTSolver *S = new SMTSolver(F->createSMTSolver());
+  SMTSolver *S = new SMTSolver(F->createSMTSolverWithTactic("qfbv"));
 
   SMTAdvisor4Inlining *SMTAdviser = &Parent->SMTAdvisor;
 

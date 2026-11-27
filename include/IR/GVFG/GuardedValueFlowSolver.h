@@ -189,6 +189,9 @@ public:
       : GuardedValueFlowSolver(factory, dl), DT(dt) {}
   virtual SMTExprVec getDeps(const GuardedValueFlowNode *node,
                              const GuardedValueFlowNode *child) override;
+  virtual std::pair<SMTExprVec, SMTExprVec>
+  getDepsPair(const GuardedValueFlowNode *node,
+              const GuardedValueFlowNode *child) override;
 
   virtual void reset() override;
 

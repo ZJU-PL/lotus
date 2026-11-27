@@ -384,4 +384,90 @@ TEST_F(GSAFTest, SolverKeepsPseudoInputsOutOfTheCallOutputCache) {
   EXPECT_EQ(outputs.first, outputs.second);
 }
 
+TEST_F(GSAFTest, SolverHandlesOpaqueStructWithoutZeroWidthBitVector) {
+  auto module = parseModule(R"(
+    %opaque = type opaque
+    define void @test(%opaque* %p) { ret void }
+  )");
+  ASSERT_NE(module, nullptr);
+  auto pipeline = build(*module);
+  auto &graph = pipeline.builder->getGraph(*module->getFunction("test"));
+  auto *opaque_ty = StructType::getTypeByName(context, "opaque");
+  ASSERT_NE(opaque_ty, nullptr);
+  auto *opaque_node = graph.createNode<GuardedValueFlowNode>(
+      GuardedValueFlowNode::Kind::SimpleOperand, opaque_ty, &graph,
+      &graph.getBaseFunction()->front(), nullptr);
+
+  SMTFactory factory;
+  GSAFSolver solver(factory, module->getDataLayout());
+  auto expr = solver.getOrInsertExpr(opaque_node);
+  EXPECT_EQ(expr.getBitVecSize(),
+            module->getDataLayout().getPointerSizeInBits());
+  solver.add(expr != 0);
+  EXPECT_EQ(solver.check(), SMTSolver::SMTRT_Sat);
+}
+
+TEST_F(GSAFTest, DeadOutputSummaryChainTerminatesQuicklyWithoutExplosion) {
+  auto module = parseModule(R"(
+    define i8* @id_two_paths(i8* %p, i1 %c) {
+    entry:
+      br i1 %c, label %then, label %else
+    then:
+      br label %merge
+    else:
+      br label %merge
+    merge:
+      %r = phi i8* [ %p, %then ], [ %p, %else ]
+      ret i8* %r
+    }
+
+    define void @caller(i8* %p, i1 %c) {
+    entry:
+      %c0 = call i8* @id_two_paths(i8* %p, i1 %c)
+      %c1 = call i8* @id_two_paths(i8* %c0, i1 %c)
+      %c2 = call i8* @id_two_paths(i8* %c1, i1 %c)
+      %c3 = call i8* @id_two_paths(i8* %c2, i1 %c)
+      %c4 = call i8* @id_two_paths(i8* %c3, i1 %c)
+      %c5 = call i8* @id_two_paths(i8* %c4, i1 %c)
+      %c6 = call i8* @id_two_paths(i8* %c5, i1 %c)
+      %c7 = call i8* @id_two_paths(i8* %c6, i1 %c)
+      %c8 = call i8* @id_two_paths(i8* %c7, i1 %c)
+      %c9 = call i8* @id_two_paths(i8* %c8, i1 %c)
+      %c10 = call i8* @id_two_paths(i8* %c9, i1 %c)
+      %c11 = call i8* @id_two_paths(i8* %c10, i1 %c)
+      %c12 = call i8* @id_two_paths(i8* %c11, i1 %c)
+      %c13 = call i8* @id_two_paths(i8* %c12, i1 %c)
+      %c14 = call i8* @id_two_paths(i8* %c13, i1 %c)
+      %c15 = call i8* @id_two_paths(i8* %c14, i1 %c)
+      %c16 = call i8* @id_two_paths(i8* %c15, i1 %c)
+      %c17 = call i8* @id_two_paths(i8* %c16, i1 %c)
+      %c18 = call i8* @id_two_paths(i8* %c17, i1 %c)
+      %c19 = call i8* @id_two_paths(i8* %c18, i1 %c)
+      ret void
+    }
+
+    define void @root(i8* %p, i1 %c) {
+    entry:
+      call void @caller(i8* %p, i1 %c)
+      ret void
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  initializeBuiltinVulnerabilities();
+  for (const char *id : {"gsaf.taint", "gsaf.use-after-free"}) {
+    std::shared_ptr<Vulnerability> vulnerability;
+    for (auto *info : registeredVulnerabilities())
+      if (info->id() == id)
+        vulnerability = info->getVulnerability();
+    ASSERT_NE(vulnerability, nullptr);
+    auto wrapper = std::make_shared<VulnerabilityWrapper>();
+    wrapper->addVulnerability(vulnerability);
+    legacy::PassManager pm;
+    auto *checker = new GSAFChecker(wrapper);
+    pm.add(checker);
+    pm.run(*module);
+    EXPECT_TRUE(checker->traces(vulnerability).empty());
+  }
+}
+
 } // namespace

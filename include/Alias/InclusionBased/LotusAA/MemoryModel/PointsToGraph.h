@@ -51,7 +51,9 @@
 #include <vector>
 
 #include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/Hashing.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Analysis/PostDominators.h>
 #include <llvm/IR/DataLayout.h>
@@ -392,18 +394,15 @@ protected:
   std::map<Value *, std::set<MemObject *, mem_obj_cmp>, llvm_cmp>
       object_call_ap_depth_frontier;
 
-  std::map<BasicBlock *,
-           std::map<BasicBlock *, path_cond_t, llvm_cmp>, llvm_cmp>
+  DenseMap<std::pair<BasicBlock *, BasicBlock *>, path_cond_t>
       phi_region_cache;
-  std::map<BasicBlock *,
-           std::map<BasicBlock *, path_cond_t, llvm_cmp>, llvm_cmp>
-      bb_region_cache;
-  std::map<BasicBlock *, path_cond_t, llvm_cmp> unit_region_cache_;
-  std::set<BasicBlock *, llvm_cmp> visited;
-  std::map<BasicBlock *,
-           std::map<BasicBlock *, path_cond_t, llvm_cmp>, llvm_cmp>
+  DenseMap<std::pair<BasicBlock *, BasicBlock *>, path_cond_t> bb_region_cache;
+  DenseSet<std::pair<BasicBlock *, BasicBlock *>> bb_region_active_;
+  DenseMap<BasicBlock *, path_cond_t> unit_region_cache_;
+  SmallPtrSet<BasicBlock *, 16> visited;
+  DenseMap<BasicBlock *, DenseMap<BasicBlock *, path_cond_t>>
       control_dep_cache_;
-  std::map<std::pair<BasicBlock *, BasicBlock *>, path_cond_t> edge_cond_cache_;
+  DenseMap<std::pair<BasicBlock *, BasicBlock *>, path_cond_t> edge_cond_cache_;
 
   path_cond_t true_cond_;
   path_cond_t false_cond_;
@@ -413,13 +412,12 @@ protected:
   DenseMap<uint32_t, path_cond_t> aig_cond_cache_;
   DenseMap<const PathCond *, PathCondBddManager::FormulaIds>
       foreign_formula_cache_;
-  std::map<std::pair<Value *, bool>, path_cond_t> value_cond_cache_;
-  std::map<BasicBlock *, path_cond_t, llvm_cmp> block_cond_cache_;
-  std::map<std::pair<Value *, Function *>, path_cond_t> call_target_cond_cache_;
-  std::map<path_cond_t, path_cond_t> imported_cond_cache_;
-  std::map<path_cond_t, path_cond_t> not_cond_cache_;
-  std::map<std::pair<path_cond_t, path_cond_t>, path_cond_t> and_cond_cache_;
-  std::map<std::pair<path_cond_t, path_cond_t>, path_cond_t> or_cond_cache_;
+  DenseMap<std::pair<Value *, int>, path_cond_t> value_cond_cache_;
+  DenseMap<std::pair<Value *, Function *>, path_cond_t> call_target_cond_cache_;
+  DenseMap<path_cond_t, path_cond_t> imported_cond_cache_;
+  DenseMap<path_cond_t, path_cond_t> not_cond_cache_;
+  DenseMap<std::pair<path_cond_t, path_cond_t>, path_cond_t> and_cond_cache_;
+  DenseMap<std::pair<path_cond_t, path_cond_t>, path_cond_t> or_cond_cache_;
   DenseMap<BasicBlock *, unsigned> bb_rpo_order_;
   DenseMap<BasicBlock *, SmallVector<BasicBlock *, 8>> idf_cache_;
   bool control_dep_ready_;

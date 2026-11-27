@@ -1,8 +1,10 @@
 #pragma once
 
+#include "Solvers/SMT/LIBSMT/SMTExpr.h"
 #include "Solvers/SMT/LIBSMT/SMTObject.h"
 #include "z3++.h"
 
+#include <unordered_set>
 #include <vector>
 
 class SMTFactory;
@@ -25,6 +27,19 @@ private:
   // and the ModelCache may fail
   unsigned checkCount;
   // unsigned missCount;
+
+  // Deferred scope & assertion stack so push()/add()/pop() never trigger eager
+  // Z3_solver_push() internalization unless check()/getSMTModel() actually runs.
+  std::vector<SMTExpr> PendingAssertions;
+  std::vector<size_t> ScopeAssertionMarks;
+  std::vector<size_t> SyncedCounts{0};
+  std::unordered_set<Z3_ast> ActiveAsts;
+  unsigned FalseCount = 0;
+  bool HasCachedResult = false;
+  SMTResultType CachedResult = SMTRT_Uncheck;
+  bool Z3ModelValid = false;
+
+  void flushToZ3();
 
   SMTSolver(SMTFactory *F, z3::solver &Z3Solver, z3::model &Z3Model);
 
@@ -100,6 +115,7 @@ public:
   static void setDefaultGlobalTimeout(int NewTimeout);
 
   friend std::ostream &operator<<(std::ostream &O, SMTSolver &Solver) {
+    Solver.flushToZ3();
     O << Solver.Solver.to_smt2() << "\n";
     return O;
   }

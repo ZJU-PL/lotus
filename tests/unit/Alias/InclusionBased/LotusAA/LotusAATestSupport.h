@@ -213,6 +213,7 @@ struct LotusConfigScope {
       IntraLotusAAConfig::lotus_enable_score_computation;
   bool enable_summary_value = IntraLotusAAConfig::lotus_enable_summary_value;
   bool enable_must_kill = IntraLotusAAConfig::lotus_enable_must_kill;
+  bool enable_pathcond_smt = IntraLotusAAConfig::lotus_enable_pathcond_smt;
   int restrict_output_pts = IntraLotusAAConfig::lotus_restrict_output_pts;
   int max_passing_func = IntraLotusAAConfig::lotus_memory_max_passing_func;
   int right_value_count = IntraLotusAAConfig::lotus_restrict_right_value_count;
@@ -232,6 +233,7 @@ struct LotusConfigScope {
         enable_score_computation;
     IntraLotusAAConfig::lotus_enable_summary_value = enable_summary_value;
     IntraLotusAAConfig::lotus_enable_must_kill = enable_must_kill;
+    IntraLotusAAConfig::lotus_enable_pathcond_smt = enable_pathcond_smt;
     IntraLotusAAConfig::lotus_restrict_output_pts = restrict_output_pts;
     IntraLotusAAConfig::lotus_memory_max_passing_func = max_passing_func;
     IntraLotusAAConfig::lotus_restrict_right_value_count = right_value_count;

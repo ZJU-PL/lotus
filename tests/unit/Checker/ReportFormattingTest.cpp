@@ -280,4 +280,32 @@ TEST(ReportFormattingTest, SuppressionRebuildsDeduplicationIndex) {
   EXPECT_EQ(mgr.get_total_reports(), 1);
 }
 
+TEST(ReportFormattingTest, HashBucketDedupPreservesDistinctAndRejectsDuplicates) {
+  BugReportMgr mgr;
+  int bugTypeA = mgr.register_bug_type("Type A");
+  int bugTypeB = mgr.register_bug_type("Type B");
+
+  for (int i = 0; i < 64; ++i) {
+    auto *r = new BugReport(bugTypeA);
+    r->append_step(makeStep("bucket.c", i + 1, "step"));
+    EXPECT_TRUE(mgr.insert_report(bugTypeA, r, true));
+  }
+  auto *dup = new BugReport(bugTypeA);
+  dup->append_step(makeStep("bucket.c", 17, "step"));
+  EXPECT_FALSE(mgr.insert_report(bugTypeA, dup, true));
+
+  // Same trace under a different bug type must remain distinct.
+  auto *otherType = new BugReport(bugTypeB);
+  otherType->append_step(makeStep("bucket.c", 17, "step"));
+  EXPECT_TRUE(mgr.insert_report(bugTypeB, otherType, true));
+  EXPECT_EQ(mgr.get_total_reports(), 65);
+
+  mgr.clear_reports_for_types({bugTypeA});
+  EXPECT_EQ(mgr.get_total_reports(), 1);
+  auto *reinsert = new BugReport(bugTypeA);
+  reinsert->append_step(makeStep("bucket.c", 17, "step"));
+  EXPECT_TRUE(mgr.insert_report(bugTypeA, reinsert, true));
+  EXPECT_EQ(mgr.get_total_reports(), 2);
+}
+
 } // namespace

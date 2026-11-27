@@ -150,7 +150,7 @@ void BugReportMgr::clear_reports_for_types(const std::vector<int> &ty_ids) {
       if (!report) {
         continue;
       }
-      report_hashes[report->compute_hash(true)] = report;
+      report_hashes[report->compute_hash(true)].push_back(report);
     }
   }
 }
@@ -188,7 +188,7 @@ bool BugReportMgr::insert_report(int ty_id, BugReport *report,
   // Track hash for future deduplication
   if (deduplicate_by_trace) {
     size_t hash = report->compute_hash(deduplicate_by_trace);
-    report_hashes[hash] = report;
+    report_hashes[hash].push_back(report);
   }
 
   return true;
@@ -198,14 +198,20 @@ bool BugReportMgr::is_duplicate(int ty_id, const BugReport *report,
                                 bool use_trace) const {
   size_t hash = report->compute_hash(use_trace);
 
-  // Check if we've seen this hash before
-  auto it = report_hashes.find(hash);
-  if (it != report_hashes.end() && it->second->get_bug_type_id() == ty_id &&
-      reportsEquivalent(it->second, report, use_trace)) {
-    return true;
+  if (use_trace) {
+    auto it = report_hashes.find(hash);
+    if (it == report_hashes.end()) {
+      return false;
+    }
+    for (const BugReport *existing : it->second) {
+      if (existing && existing->get_bug_type_id() == ty_id &&
+          reportsEquivalent(existing, report, use_trace)) {
+        return true;
+      }
+    }
+    return false;
   }
 
-  // Also check existing reports of the same type
   auto reports_it = reports.find(ty_id);
   if (reports_it != reports.end()) {
     for (const BugReport *existing : reports_it->second) {
@@ -322,11 +328,17 @@ void BugReportMgr::deduplicate_reports(DedupMode mode) {
       if (!isDuplicate) {
         const bool useTrace = mode == DedupMode::ExactTrace;
         size_t hash = report->compute_hash(useTrace);
-        auto existing = report_hashes.find(hash);
-        if (existing == report_hashes.end() ||
-            !reportsEquivalent(existing->second, report, useTrace)) {
+        auto &bucket = report_hashes[hash];
+        bool found = false;
+        for (const BugReport *existing : bucket) {
+          if (reportsEquivalent(existing, report, useTrace)) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
           deduplicated.push_back(report);
-          report_hashes[hash] = report;
+          bucket.push_back(report);
         } else {
           isDuplicate = true;
         }
@@ -341,6 +353,15 @@ void BugReportMgr::deduplicate_reports(DedupMode mode) {
     sortByLocation(deduplicated);
 
     report_list = std::move(deduplicated);
+  }
+
+  report_hashes.clear();
+  for (const auto &pair : reports) {
+    for (BugReport *report : pair.second) {
+      if (report) {
+        report_hashes[report->compute_hash(true)].push_back(report);
+      }
+    }
   }
 }
 
@@ -380,7 +401,7 @@ void BugReportMgr::filterSuppressed(const SuppressionManager &manager) {
   for (const auto &pair : reports) {
     for (BugReport *report : pair.second) {
       if (report) {
-        report_hashes[report->compute_hash(true)] = report;
+        report_hashes[report->compute_hash(true)].push_back(report);
       }
     }
   }

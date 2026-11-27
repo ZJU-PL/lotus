@@ -520,3 +520,132 @@ TEST(LotusAA, ReassigningSSAValueTriggersAssertion) {
       },
       "Re-assigning value");
 }
+
+TEST(LotusAA, PathCondSmtTogglePreservesSoundnessOnDisjunctiveAig) {
+  LotusConfigScope ConfigScope;
+  EXPECT_FALSE(IntraLotusAAConfig::lotus_enable_pathcond_smt);
+
+  PathCondBddManager Mgr;
+  uint32_t a = Mgr.aigVar(Mgr.allocVar());
+  uint32_t b = Mgr.aigVar(Mgr.allocVar());
+  uint32_t c = Mgr.aigVar(Mgr.allocVar());
+
+  // Direct contradiction caught by exact BCP regardless of SMT toggle:
+  // (a & b) & !(a & c) & c is unsatisfiable by unit propagation.
+  uint32_t ab = Mgr.aigAnd(a, b);
+  uint32_t ac = Mgr.aigAnd(a, c);
+  uint32_t bcp_unsat = Mgr.aigAnd(Mgr.aigAnd(ab, PathCondBddManager::aigNot(ac)), c);
+  IntraLotusAAConfig::lotus_enable_pathcond_smt = false;
+  EXPECT_FALSE(Mgr.isAigSatisfiable(bcp_unsat));
+
+  // Unsatisfiable 2-SAT / resolution formula with no top-level unit clauses:
+  // (a | b) & (!a | b) & (a | !b) & (!a | !b).
+  uint32_t c1 = Mgr.aigOr(a, b);
+  uint32_t c2 = Mgr.aigOr(PathCondBddManager::aigNot(a), b);
+  uint32_t c3 = Mgr.aigOr(a, PathCondBddManager::aigNot(b));
+  uint32_t c4 = Mgr.aigOr(PathCondBddManager::aigNot(a), PathCondBddManager::aigNot(b));
+  uint32_t hard_unsat = Mgr.aigAnd(Mgr.aigAnd(c1, c2), Mgr.aigAnd(c3, c4));
+
+  // With SMT disabled, inconclusive disjunctive cones over-approximate as SAT
+  // (never dropping feasible alias/points-to edges) and do not pollute cache.
+  IntraLotusAAConfig::lotus_enable_pathcond_smt = false;
+  EXPECT_TRUE(Mgr.isAigSatisfiable(hard_unsat));
+
+  // Enabling SMT solves the exact cone via incremental Z3 SAT.
+  IntraLotusAAConfig::lotus_enable_pathcond_smt = true;
+  EXPECT_FALSE(Mgr.isAigSatisfiable(hard_unsat));
+}
+
+TEST(LotusAA, NonPointerBitCastAndVectorGepDoNotCrash) {
+  const char *IR = R"(
+    define i64 @main(<2 x i32> %vec, float %f, <2 x i8*> %ptrs) {
+    entry:
+      %bc1 = bitcast <2 x i32> %vec to i64
+      %bc2 = bitcast float %f to i32
+      %gep = getelementptr i8, <2 x i8*> %ptrs, <2 x i64> <i64 1, i64 2>
+      %ext = extractelement <2 x i8*> %gep, i32 0
+      %pi = ptrtoint i8* %ext to i64
+      %z = zext i32 %bc2 to i64
+      %sum = add i64 %bc1, %z
+      %res = add i64 %sum, %pi
+      ret i64 %res
+    }
+  )";
+
+  LLVMContext Ctx;
+  auto M = parseAssembly(Ctx, IR);
+  ASSERT_NE(M, nullptr);
+
+  LotusAA *Pass = runLotusAA(*M);
+  auto *PTG = Pass->getPtGraph(M->getFunction("main"));
+  ASSERT_NE(PTG, nullptr);
+}
+
+TEST(LotusAA, MayAliasMatchesAliasConditionAndBlockReachesHandlesCycles) {
+  const char *IR = R"(
+    define i8* @main(i1 %cond) {
+    entry:
+      %a = alloca i8
+      %b = alloca i8
+      br i1 %cond, label %then, label %else
+    then:
+      br label %merge
+    else:
+      br label %merge
+    merge:
+      %p = phi i8* [ %a, %then ], [ %b, %else ]
+      br label %loop
+    loop:
+      br i1 %cond, label %loop, label %exit
+    exit:
+      ret i8* %p
+    dead:
+      ret i8* %a
+    }
+  )";
+
+  LLVMContext Ctx;
+  auto M = parseAssembly(Ctx, IR);
+  ASSERT_NE(M, nullptr);
+
+  LotusAA *Pass = runLotusAA(*M);
+  Function *Main = M->getFunction("main");
+  auto *PTG = Pass->getPtGraph(Main);
+  ASSERT_NE(PTG, nullptr);
+
+  Value *A = findValueByName(*Main, "a");
+  Value *B = findValueByName(*Main, "b");
+  Value *P = findValueByName(*Main, "p");
+  ASSERT_NE(A, nullptr);
+  ASSERT_NE(B, nullptr);
+  ASSERT_NE(P, nullptr);
+
+  EXPECT_EQ(PTG->mayAlias(A, B), PTG->isSatisfiable(PTG->getAliasCondition(A, B)));
+  EXPECT_FALSE(PTG->mayAlias(A, B));
+  EXPECT_EQ(PTG->mayAlias(P, A), PTG->isSatisfiable(PTG->getAliasCondition(P, A)));
+  EXPECT_TRUE(PTG->mayAlias(P, A));
+  EXPECT_EQ(PTG->mayAlias(P, B), PTG->isSatisfiable(PTG->getAliasCondition(P, B)));
+  EXPECT_TRUE(PTG->mayAlias(P, B));
+
+  BasicBlock *Entry = &Main->getEntryBlock();
+  BasicBlock *Loop = nullptr;
+  BasicBlock *Exit = nullptr;
+  BasicBlock *Dead = nullptr;
+  for (BasicBlock &BB : *Main) {
+    if (BB.getName() == "loop")
+      Loop = &BB;
+    else if (BB.getName() == "exit")
+      Exit = &BB;
+    else if (BB.getName() == "dead")
+      Dead = &BB;
+  }
+  ASSERT_NE(Loop, nullptr);
+  ASSERT_NE(Exit, nullptr);
+  ASSERT_NE(Dead, nullptr);
+
+  EXPECT_TRUE(PTG->blockReaches(Entry, Exit));
+  EXPECT_TRUE(PTG->blockReaches(Loop, Loop));
+  EXPECT_FALSE(PTG->blockReaches(Exit, Entry));
+  EXPECT_FALSE(PTG->blockReaches(Entry, Dead));
+  EXPECT_NE(PTG->findOrCreateBBRegion(Entry, Loop), nullptr);
+}

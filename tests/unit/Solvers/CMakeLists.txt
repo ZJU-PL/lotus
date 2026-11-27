@@ -2,8 +2,8 @@ add_subdirectory(EGraph)
 add_subdirectory(Datalog)
 add_subdirectory(Automata)
 
-set(LOTUS_SOLVER_SMT_TEST_SOURCES SymAbsTest.cpp SMTSamplerTest.cpp)
-set(LOTUS_SOLVER_SMT_TEST_LIBS SMTSampler SymAbs ${Z3_LIBRARIES})
+set(LOTUS_SOLVER_SMT_TEST_SOURCES SymAbsTest.cpp SMTSamplerTest.cpp SMTSolverTest.cpp)
+set(LOTUS_SOLVER_SMT_TEST_LIBS SMTSampler SymAbs CanarySMT ${Z3_LIBRARIES})
 set(LOTUS_SOLVER_SMT_TEST_DEFINITIONS)
 
 if(LOTUS_ENABLE_SMT_STABILIZER)
@@ -19,6 +19,7 @@ lotus_collect_test_sources(solvers_tests ${LOTUS_SOLVER_SMT_TEST_SOURCES})
 set(LOTUS_SOLVERS_TEST_LIBS
     SMTSampler
     SymAbs
+    CanarySMT
     LotusDatalogFrontend
     LotusEGraph
     ${Z3_LIBRARIES})
