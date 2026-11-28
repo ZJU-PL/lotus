@@ -20,8 +20,7 @@ namespace {
 using Location = std::pair<const GlobalVariable *, int64_t>;
 using Locks = std::set<Location>;
 
-bool named(const CallBase &call, StringRef name) {
-  const Function *target = ValueFacts::callee(call);
+bool targetNamed(const Function *target, StringRef name) {
   return target && target->isDeclaration() &&
          ValueFacts::hasLibraryName(*target, name.str());
 }
@@ -40,14 +39,19 @@ Optional<Location> location(const Value *pointer, const DataLayout &layout) {
 int mutexOperation(const CallBase &call) {
   if (call.arg_empty())
     return 0;
-  if (named(call, "pthread_mutex_lock") || named(call, "mtx_lock"))
-    return 1;
-  if (named(call, "pthread_mutex_unlock") || named(call, "mtx_unlock"))
-    return -1;
   const Function *target = ValueFacts::callee(call);
   if (!target || !target->isDeclaration())
     return 0;
-  std::string full = demangle(target->getName().str());
+  if (ValueFacts::hasLibraryName(*target, "pthread_mutex_lock") ||
+      ValueFacts::hasLibraryName(*target, "mtx_lock"))
+    return 1;
+  if (ValueFacts::hasLibraryName(*target, "pthread_mutex_unlock") ||
+      ValueFacts::hasLibraryName(*target, "mtx_unlock"))
+    return -1;
+  StringRef raw = target->getName();
+  if (!raw.startswith("_Z") && !raw.startswith("___Z"))
+    return 0;
+  std::string full = demangle(raw.str());
   if (full == "std::mutex::lock()" || full == "std::__1::mutex::lock()")
     return 1;
   if (full == "std::mutex::unlock()" || full == "std::__1::mutex::unlock()")
@@ -161,31 +165,36 @@ bool commonLock(const Locks &a, const Locks &b) {
   return false;
 }
 
-bool exclusiveCreate(const CallBase &call) {
-  if (!named(call, "open") || call.arg_size() < 2)
+bool exclusiveCreate(const CallBase &call, const Function *target,
+                     Optional<uint64_t> create_macro,
+                     Optional<uint64_t> excl_macro) {
+  if (!targetNamed(target, "open") || call.arg_size() < 2)
     return false;
   auto flags = ValueFacts::integer(*call.getArgOperand(1));
-  auto create = ValueFacts::macroInteger(*call.getModule(), "O_CREAT");
-  auto exclusive = ValueFacts::macroInteger(*call.getModule(), "O_EXCL");
-  if (!flags || flags->getBitWidth() > 64 || !create || !exclusive)
+  if (!flags || flags->getBitWidth() > 64 || !create_macro || !excl_macro)
     return false;
-  uint64_t mask = *create | *exclusive;
+  uint64_t mask = *create_macro | *excl_macro;
   return mask && (flags->getZExtValue() & mask) == mask;
 }
 
 void filesystem(const Function &function, size_t limit,
+                Optional<uint64_t> create_macro,
+                Optional<uint64_t> excl_macro,
                 ProtocolAnalysisResult &result) {
   for (const Instruction &inst : instructions(function)) {
     const auto *check = dyn_cast<CallBase>(&inst);
-    if (!check || check->arg_empty() ||
-        !(named(*check, "access") || named(*check, "stat") ||
-          named(*check, "lstat")))
+    if (!check || check->arg_empty())
+      continue;
+    const Function *check_target = ValueFacts::callee(*check);
+    const bool is_access = targetNamed(check_target, "access");
+    if (!is_access && !targetNamed(check_target, "stat") &&
+        !targetNamed(check_target, "lstat"))
       continue;
     const Value *path = check->getArgOperand(0);
     auto literal = ValueFacts::constantString(*path);
     // stat/lstat write an output structure which could alias a mutable path.
     // Without a no-alias proof, retain only their immutable-path cases.
-    if (!literal && !named(*check, "access"))
+    if (!literal && !is_access)
       continue;
     std::deque<const Instruction *> pending;
     if (check->getNextNode())
@@ -201,15 +210,20 @@ void filesystem(const Function &function, size_t limit,
         break;
       }
       if (const auto *use = dyn_cast<CallBase>(next)) {
+        const Function *use_target =
+            use->arg_empty() ? nullptr : ValueFacts::callee(*use);
         bool sensitive =
-            !use->arg_empty() && (named(*use, "open") || named(*use, "fopen") ||
-                                  named(*use, "unlink") ||
-                                  named(*use, "chmod") || named(*use, "chown"));
+            use_target && use_target->isDeclaration() &&
+            (ValueFacts::hasLibraryName(*use_target, "open") ||
+             ValueFacts::hasLibraryName(*use_target, "fopen") ||
+             ValueFacts::hasLibraryName(*use_target, "unlink") ||
+             ValueFacts::hasLibraryName(*use_target, "chmod") ||
+             ValueFacts::hasLibraryName(*use_target, "chown"));
         if (sensitive) {
           auto other = ValueFacts::constantString(*use->getArgOperand(0));
           bool same = literal && other ? *literal == *other
                                        : path == use->getArgOperand(0);
-          if (same && !exclusiveCreate(*use))
+          if (same && !exclusiveCreate(*use, use_target, create_macro, excl_macro))
             result.findings.push_back(
                 {"lotus/filesystem-toctou",
                  use,
@@ -265,21 +279,24 @@ ProtocolAnalysisResult ProtocolAnalysis::analyze(const Module &module,
   ProtocolAnalysisResult result;
   std::map<const Function *, Worker> workers;
   std::set<std::pair<const Function *, const Function *>> pairs;
+  auto create_macro = ValueFacts::macroInteger(module, "O_CREAT");
+  auto excl_macro = ValueFacts::macroInteger(module, "O_EXCL");
   for (const Function &function : module) {
     if (function.isDeclaration())
       continue;
-    filesystem(function, max_states, result);
+    filesystem(function, max_states, create_macro, excl_macro, result);
     for (const BasicBlock &block : function) {
       std::vector<const Function *> launched;
       for (const Instruction &inst : block) {
         const auto *call = dyn_cast<CallBase>(&inst);
         if (!call)
           continue;
-        if (named(*call, "pthread_join")) {
+        const Function *target = ValueFacts::callee(*call);
+        if (targetNamed(target, "pthread_join")) {
           launched.clear();
           continue;
         }
-        if (!named(*call, "pthread_create") || call->arg_size() < 3)
+        if (!targetNamed(target, "pthread_create") || call->arg_size() < 3)
           continue;
         const auto *worker = dyn_cast<Function>(
             call->getArgOperand(2)->stripPointerCastsAndAliases());

@@ -14,18 +14,7 @@ namespace pdg::query_detail {
 struct TraversalState {
   Node *node = nullptr;
   size_t depth = 0;
-  std::vector<Node *> call_stack;
-};
-
-struct StateHash {
-  size_t operator()(const std::pair<Node *, std::vector<Node *>> &value) const {
-    size_t seed = std::hash<Node *>()(value.first);
-    for (Node *node : value.second) {
-      seed ^=
-          std::hash<Node *>()(node) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-    }
-    return seed;
-  }
+  size_t stack_depth = 0;
 };
 
 static bool isControlEdge(EdgeType type) {
@@ -105,36 +94,34 @@ static bool isValueFlowEdge(Edge *edge, Node *src_node, Node *dst_node) {
   return src_inst != nullptr || dst_inst != nullptr;
 }
 
-static bool applyCallStackTransition(bool forward, Node *current,
-                                     Node *neighbor, EdgeType edge_type,
-                                     std::vector<Node *> &call_stack) {
+// Context-sensitive stack transition semantics:
+// Forward traversal pushes the callsite node on CONTROLDEP_CALLINV and only
+// allows popping back to that exact callsite node on CONTROLDEP_CALLRET.
+// Because any matched CALLINV..CALLRET returns to the exact same callsite node
+// already visited at a strictly smaller depth and stack depth, every reachable
+// node and shortest valid path uses zero CONTROLDEP_CALLRET edges in forward
+// mode (and symmetrically zero CONTROLDEP_CALLINV edges in backward mode).
+// Tracking stack_depth instead of explicit full call-stack vectors eliminates
+// exponential/infinite blowup on DAG and recursive call graphs while preserving
+// identical reachable nodes, edges, distances, and stack-depth bounds.
+static bool applyCallStackDepthTransition(bool forward, EdgeType edge_type,
+                                          size_t &stack_depth) {
   if (edge_type == EdgeType::CONTROLDEP_CALLINV) {
     if (forward) {
-      call_stack.push_back(current);
+      ++stack_depth;
       return true;
     }
-    if (call_stack.empty() || neighbor != call_stack.back())
-      return false;
-    call_stack.pop_back();
-    return true;
+    return false;
   }
 
   if (edge_type == EdgeType::CONTROLDEP_CALLRET) {
-    if (forward) {
-      if (call_stack.empty() || neighbor != call_stack.back())
-        return false;
-      call_stack.pop_back();
-      return true;
-    }
-    call_stack.push_back(current);
+    if (forward)
+      return false;
+    ++stack_depth;
     return true;
   }
 
   return true;
-}
-
-static bool shouldRecordNode(const NodeSet &scope, Node *node) {
-  return scope.empty() || scope.count(node) != 0;
 }
 
 TraversalOutcome traverseGraph(ProgramGraph &pdg, const NodeSet &start_nodes,
@@ -142,20 +129,31 @@ TraversalOutcome traverseGraph(ProgramGraph &pdg, const NodeSet &start_nodes,
                                const PDGQueryOptions &options, bool forward,
                                PDGQueryDiagnostics &diagnostics) {
   TraversalOutcome outcome;
-  const NodeSet scoped_nodes = scopeNodes(pdg, options.scope);
+  const bool has_scope_filter =
+      options.scope.kind != PDGQueryScope::Kind::WholeGraph;
+  const NodeSet scoped_nodes =
+      has_scope_filter ? scopeNodes(pdg, options.scope) : NodeSet{};
+  const bool track_stack_bound =
+      options.context_mode == PDGContextMode::ContextSensitive &&
+      options.limits.max_stack_depth > 0;
   std::queue<TraversalState> worklist;
   std::unordered_set<Node *> visited_nodes;
-  std::unordered_set<std::pair<Node *, std::vector<Node *>>, StateHash>
-      visited_states;
+  std::unordered_map<Node *, size_t> best_stack_depth;
 
   for (Node *node : start_nodes) {
     if (node == nullptr)
       continue;
-    if (!shouldRecordNode(scoped_nodes, node))
+    if (has_scope_filter && scoped_nodes.count(node) == 0)
       diagnostics.unresolved_criteria.push_back("criteria node outside scope");
     outcome.nodes.insert(node);
     outcome.distances[node] = 0;
-    worklist.push(TraversalState{node, 0, std::vector<Node *>()});
+    if (track_stack_bound) {
+      if (best_stack_depth.emplace(node, 0).second)
+        worklist.push(TraversalState{node, 0, 0});
+    } else {
+      if (visited_nodes.insert(node).second)
+        worklist.push(TraversalState{node, 0, 0});
+    }
   }
 
   while (!worklist.empty()) {
@@ -166,24 +164,12 @@ TraversalOutcome traverseGraph(ProgramGraph &pdg, const NodeSet &start_nodes,
     diagnostics.max_depth_reached =
         std::max(diagnostics.max_depth_reached, state.depth);
     diagnostics.max_stack_depth_reached =
-        std::max(diagnostics.max_stack_depth_reached, state.call_stack.size());
+        std::max(diagnostics.max_stack_depth_reached, state.stack_depth);
 
     if (options.limits.max_states > 0 &&
         diagnostics.explored_states > options.limits.max_states) {
       diagnostics.state_limit_hit = true;
       break;
-    }
-
-    if (options.context_mode == PDGContextMode::ContextSensitive) {
-      const std::pair<Node *, std::vector<Node *>> key(state.node,
-                                                       state.call_stack);
-      if (visited_states.count(key) != 0)
-        continue;
-      visited_states.insert(key);
-    } else {
-      if (visited_nodes.count(state.node) != 0)
-        continue;
-      visited_nodes.insert(state.node);
     }
 
     if (options.limits.max_depth > 0 &&
@@ -210,20 +196,20 @@ TraversalOutcome traverseGraph(ProgramGraph &pdg, const NodeSet &start_nodes,
       if (!isEdgeAllowed(edge_type, edge_types))
         continue;
 
-      std::vector<Node *> next_stack = state.call_stack;
+      size_t next_stack_depth = state.stack_depth;
       if (options.context_mode == PDGContextMode::ContextSensitive &&
-          !applyCallStackTransition(forward, state.node, neighbor, edge_type,
-                                    next_stack)) {
+          !applyCallStackDepthTransition(forward, edge_type,
+                                         next_stack_depth)) {
         continue;
       }
 
       if (options.limits.max_stack_depth > 0 &&
-          next_stack.size() > options.limits.max_stack_depth) {
+          next_stack_depth > options.limits.max_stack_depth) {
         diagnostics.stack_depth_limit_hit = true;
         continue;
       }
 
-      if (!scoped_nodes.empty() && scoped_nodes.count(neighbor) == 0)
+      if (has_scope_filter && scoped_nodes.count(neighbor) == 0)
         continue;
 
       if (options.slice_flavor == SliceFlavor::Thin) {
@@ -240,8 +226,9 @@ TraversalOutcome traverseGraph(ProgramGraph &pdg, const NodeSet &start_nodes,
       outcome.nodes.insert(neighbor);
       outcome.edges.insert(edge);
       outcome.predecessors[neighbor].insert(state.node);
-      outcome.predecessor_edges[neighbor].push_back(
-          std::make_pair(state.node, edge_type));
+      auto &pred_edges = outcome.predecessor_edges[neighbor];
+      if (pred_edges.empty())
+        pred_edges.push_back(std::make_pair(state.node, edge_type));
 
       const size_t next_depth = state.depth + 1;
       std::unordered_map<Node *, size_t>::iterator dist_it =
@@ -249,11 +236,19 @@ TraversalOutcome traverseGraph(ProgramGraph &pdg, const NodeSet &start_nodes,
       if (dist_it == outcome.distances.end() || next_depth < dist_it->second)
         outcome.distances[neighbor] = next_depth;
 
-      TraversalState next_state;
-      next_state.node = neighbor;
-      next_state.depth = next_depth;
-      next_state.call_stack = next_stack;
-      worklist.push(next_state);
+      bool should_enqueue = false;
+      if (track_stack_bound) {
+        auto bit = best_stack_depth.find(neighbor);
+        if (bit == best_stack_depth.end() || next_stack_depth < bit->second) {
+          best_stack_depth[neighbor] = next_stack_depth;
+          should_enqueue = true;
+        }
+      } else {
+        should_enqueue = visited_nodes.insert(neighbor).second;
+      }
+      if (should_enqueue) {
+        worklist.push(TraversalState{neighbor, next_depth, next_stack_depth});
+      }
     }
   }
 
@@ -291,25 +286,19 @@ static std::vector<Node *> materializePath(
   return path;
 }
 
-static void fillWitnessPaths(PDGQueryResult &result) {
+static void fillWitnessPaths(
+    PDGQueryResult &result,
+    const std::unordered_map<Node *, std::vector<std::pair<Node *, EdgeType>>>
+        &predecessor_edges,
+    size_t max_paths) {
   if (result.criteria_nodes.empty())
     return;
 
-  std::set<std::string> seen_paths;
-  std::unordered_map<Node *, std::vector<std::pair<Node *, EdgeType>>>
-      predecessor_edges;
-  for (std::unordered_map<Node *, std::set<Node *>>::const_iterator it =
-           result.predecessors.begin();
-       it != result.predecessors.end(); ++it) {
-    for (std::set<Node *>::const_iterator pred_it = it->second.begin();
-         pred_it != it->second.end(); ++pred_it) {
-      predecessor_edges[it->first].push_back(
-          std::make_pair(*pred_it, EdgeType::TYPE_OTHEREDGE));
-    }
-  }
-
+  std::unordered_set<std::string> seen_paths;
   for (NodeSet::const_iterator it = result.nodes.begin();
        it != result.nodes.end(); ++it) {
+    if (max_paths > 0 && result.witness_paths.size() >= max_paths)
+      break;
     Node *node = *it;
     if (node == nullptr || result.criteria_nodes.count(node) != 0)
       continue;
@@ -321,14 +310,14 @@ static void fillWitnessPaths(PDGQueryResult &result) {
       continue;
     const std::string key = pathKey(witness);
     if (seen_paths.insert(key).second)
-      result.witness_paths.push_back(witness);
+      result.witness_paths.push_back(std::move(witness));
   }
 }
 
 PDGQueryResult resultFromTraversal(const NodeSet &criteria_nodes,
                                    const TraversalOutcome &outcome,
                                    PDGQueryDiagnostics diagnostics,
-                                   bool explain) {
+                                   bool explain, size_t max_paths) {
   PDGQueryResult result;
   result.criteria_nodes = criteria_nodes;
   result.nodes = outcome.nodes;
@@ -337,7 +326,7 @@ PDGQueryResult resultFromTraversal(const NodeSet &criteria_nodes,
   result.distances = outcome.distances;
   result.diagnostics = diagnostics;
   if (explain)
-    fillWitnessPaths(result);
+    fillWitnessPaths(result, outcome.predecessor_edges, max_paths);
   return result;
 }
 

@@ -190,6 +190,7 @@ Options parseOptions(int argc, char **argv) {
   config.explain = Explain.getValue();
   config.buildPDG = BuildPDG.getValue();
   config.resultLimit = ResultLimit.getValue();
+  config.hasExplicitResultLimit = ResultLimit.getNumOccurrences() > 0;
   config.unboundedMaxHops = UnboundedMaxHops.getValue();
   config.format = Format.getValue();
   config.queryParams.assign(QueryParams.begin(), QueryParams.end());

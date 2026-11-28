@@ -28,7 +28,10 @@ PDGQueryResult DependenceQuery::shortestPath(const PDGCriteria &sources,
   PDGCriteriaResolver resolver(pdg_);
   PDGQueryResult source_nodes = resolver.resolve(sources, options, module);
   PDGQueryResult target_nodes = resolver.resolve(targets, options, module);
-  const NodeSet scoped_nodes = scopeNodes(pdg_, options.scope);
+  const bool has_scope_filter =
+      options.scope.kind != PDGQueryScope::Kind::WholeGraph;
+  const NodeSet scoped_nodes =
+      has_scope_filter ? scopeNodes(pdg_, options.scope) : NodeSet{};
   const std::set<EdgeType> edge_types = edgeTypesForPreset(options.edge_preset);
 
   std::queue<Node *> worklist;
@@ -59,7 +62,7 @@ PDGQueryResult DependenceQuery::shortestPath(const PDGCriteria &sources,
       Node *neighbor = edge->getDstNode();
       if (neighbor == nullptr)
         continue;
-      if (!scoped_nodes.empty() && scoped_nodes.count(neighbor) == 0)
+      if (has_scope_filter && scoped_nodes.count(neighbor) == 0)
         continue;
 
       const size_t next_distance = distance_to_current + 1;
@@ -131,7 +134,10 @@ std::vector<PDGWitnessPath> DependenceQuery::allShortestPaths(
   PDGCriteriaResolver resolver(pdg_);
   PDGQueryResult source_nodes = resolver.resolve(sources, options, module);
   PDGQueryResult target_nodes = resolver.resolve(targets, options, module);
-  const NodeSet scoped_nodes = scopeNodes(pdg_, options.scope);
+  const bool has_scope_filter =
+      options.scope.kind != PDGQueryScope::Kind::WholeGraph;
+  const NodeSet scoped_nodes =
+      has_scope_filter ? scopeNodes(pdg_, options.scope) : NodeSet{};
   const std::set<EdgeType> edge_types = edgeTypesForPreset(options.edge_preset);
 
   std::queue<Node *> worklist;
@@ -146,6 +152,7 @@ std::vector<PDGWitnessPath> DependenceQuery::allShortestPaths(
 
   size_t best_distance = static_cast<size_t>(-1);
   std::vector<Node *> best_targets;
+  std::unordered_set<Node *> best_target_set;
 
   while (!worklist.empty()) {
     Node *current = worklist.front();
@@ -162,7 +169,7 @@ std::vector<PDGWitnessPath> DependenceQuery::allShortestPaths(
       Node *neighbor = edge->getDstNode();
       if (neighbor == nullptr)
         continue;
-      if (!scoped_nodes.empty() && scoped_nodes.count(neighbor) == 0)
+      if (has_scope_filter && scoped_nodes.count(neighbor) == 0)
         continue;
 
       const size_t next_distance = distance_to_current + 1;
@@ -180,8 +187,11 @@ std::vector<PDGWitnessPath> DependenceQuery::allShortestPaths(
         if (next_distance < best_distance) {
           best_distance = next_distance;
           best_targets.clear();
+          best_target_set.clear();
           best_targets.push_back(neighbor);
-        } else if (next_distance == best_distance) {
+          best_target_set.insert(neighbor);
+        } else if (next_distance == best_distance &&
+                   best_target_set.insert(neighbor).second) {
           best_targets.push_back(neighbor);
         }
       }

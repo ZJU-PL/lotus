@@ -11,9 +11,11 @@
  * duplicating traversal logic.
  */
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 
 #include "IR/PDG/Query/DiffQuery.h"
 #include "IR/PDG/Query/ImpactQuery.h"
@@ -84,10 +86,13 @@ ImpactQueryResult ImpactQuery::analyze(const PDGCriteria &criteria,
 
   PDGQueryResult direct;
   direct.criteria_nodes = resolved.criteria_nodes;
-  const NodeSet scoped_nodes = nodesInScope(pdg_, options.scope);
+  const bool has_scope_filter =
+      options.scope.kind != PDGQueryScope::Kind::WholeGraph;
+  const NodeSet scoped_nodes =
+      has_scope_filter ? nodesInScope(pdg_, options.scope) : NodeSet{};
   const std::set<EdgeType> edge_types = edgeTypesForPreset(options.edge_preset);
-  for (NodeSet::const_iterator it = resolved.nodes.begin(); it != resolved.nodes.end();
-       ++it) {
+  for (NodeSet::const_iterator it = resolved.nodes.begin();
+       it != resolved.nodes.end(); ++it) {
     Node *node = *it;
     direct.nodes.insert(node);
     for (Node::EdgeSet::const_iterator edge_it = node->getOutEdgeSet().begin();
@@ -98,7 +103,7 @@ ImpactQueryResult ImpactQuery::analyze(const PDGCriteria &criteria,
       Node *dst = edge->getDstNode();
       if (dst == nullptr)
         continue;
-      if (!scoped_nodes.empty() && scoped_nodes.count(dst) == 0)
+      if (has_scope_filter && scoped_nodes.count(dst) == 0)
         continue;
       direct.nodes.insert(dst);
       direct.edges.insert(edge);
@@ -141,28 +146,47 @@ ImpactQueryResult ImpactQuery::analyze(const PDGCriteria &criteria,
       result.boundary_crossings["parameter"]++;
   }
 
-  SummaryQuery summary_query(pdg_);
-  for (std::set<std::string>::const_iterator it = result.impacted_functions.begin();
-       it != result.impacted_functions.end(); ++it) {
-    if (module == nullptr)
-      continue;
-    const Function *function = module->getFunction(*it);
-    if (function == nullptr)
-      continue;
-    SummaryQueryResult summary =
-        summary_query.summarize(*function, SummaryPolicy(), options, module);
-    for (size_t j = 0; j < summary.summary.reachable_calls.size(); ++j) {
-      Node *call_node = summary.summary.reachable_calls[j].target;
-      const std::string callee = calleeName(call_node);
-      if (!callee.empty())
-        result.impacted_functions.insert(callee);
-      result.function_explanations[*it].insert(
-          result.function_explanations[*it].end(),
-          summary.summary.reachable_calls[j].witness_paths.begin(),
-          summary.summary.reachable_calls[j].witness_paths.end());
+  if (module != nullptr) {
+    SummaryQuery summary_query(pdg_);
+    SummaryPolicy calls_only;
+    calls_only.kind = SummaryKind::ReachableCalls;
+    const std::vector<std::string> initial_functions(
+        result.impacted_functions.begin(), result.impacted_functions.end());
+    for (const std::string &func_name : initial_functions) {
+      const Function *function = module->getFunction(func_name);
+      if (function == nullptr)
+        continue;
+      SummaryQueryResult summary =
+          summary_query.summarize(*function, calls_only, options, module);
+      for (size_t j = 0; j < summary.summary.reachable_calls.size(); ++j) {
+        Node *call_node = summary.summary.reachable_calls[j].target;
+        const std::string callee = calleeName(call_node);
+        if (!callee.empty())
+          result.impacted_functions.insert(callee);
+        result.function_explanations[func_name].insert(
+            result.function_explanations[func_name].end(),
+            summary.summary.reachable_calls[j].witness_paths.begin(),
+            summary.summary.reachable_calls[j].witness_paths.end());
+      }
     }
   }
 
+  llvm::DenseMap<Node *, std::pair<size_t, size_t>> witness_stats;
+  for (const PDGWitnessPath &path :
+       result.transitively_impacted_nodes.witness_paths) {
+    if (path.nodes.empty())
+      continue;
+    auto &entry = witness_stats[path.nodes.back()];
+    ++entry.first;
+    entry.second =
+        std::max(entry.second, countInterproceduralCrossings(path.edge_types));
+  }
+
+  std::unique_ptr<ModuleSlotTracker> slot_tracker;
+  if (module != nullptr)
+    slot_tracker = std::make_unique<ModuleSlotTracker>(module, false);
+
+  result.ranked_impacts.reserve(result.transitively_impacted_nodes.nodes.size());
   for (NodeSet::const_iterator it =
            result.transitively_impacted_nodes.nodes.begin();
        it != result.transitively_impacted_nodes.nodes.end(); ++it) {
@@ -171,27 +195,22 @@ ImpactQueryResult ImpactQuery::analyze(const PDGCriteria &criteria,
       continue;
     ImpactRankItem item;
     item.node = node;
-    item.stable_key = stableNodeKey(node);
+    item.stable_key = stableNodeKey(node, slot_tracker.get());
     std::unordered_map<Node *, size_t>::const_iterator dist_it =
         result.transitively_impacted_nodes.distances.find(node);
     item.shortest_distance =
         dist_it == result.transitively_impacted_nodes.distances.end()
             ? 0
             : dist_it->second;
-    size_t path_count = 0;
-    size_t crossings = 0;
-    for (size_t i = 0; i < result.transitively_impacted_nodes.witness_paths.size();
-         ++i) {
-      const PDGWitnessPath &path = result.transitively_impacted_nodes.witness_paths[i];
-      if (!path.nodes.empty() && path.nodes.back() == node) {
-        ++path_count;
-        crossings =
-            std::max(crossings, countInterproceduralCrossings(path.edge_types));
-      }
+    auto stat_it = witness_stats.find(node);
+    if (stat_it != witness_stats.end()) {
+      item.path_count = stat_it->second.first == 0 ? 1 : stat_it->second.first;
+      item.interprocedural_crossings = stat_it->second.second;
+    } else {
+      item.path_count = 1;
+      item.interprocedural_crossings = 0;
     }
-    item.path_count = path_count == 0 ? 1 : path_count;
-    item.interprocedural_crossings = crossings;
-    result.ranked_impacts.push_back(item);
+    result.ranked_impacts.push_back(std::move(item));
   }
 
   std::sort(result.ranked_impacts.begin(), result.ranked_impacts.end(),

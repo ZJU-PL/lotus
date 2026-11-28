@@ -16,6 +16,7 @@ struct Options {
   bool explain = false;
   bool buildPDG = true;
   int resultLimit = 100;
+  bool hasExplicitResultLimit = false;
   int unboundedMaxHops = 5;
   std::string format = "text";
   std::vector<std::string> queryParams;

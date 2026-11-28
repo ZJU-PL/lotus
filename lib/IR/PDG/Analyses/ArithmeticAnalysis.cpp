@@ -22,6 +22,7 @@
 #include "IR/PDG/Models/ValueFacts.h"
 
 #include <algorithm>
+#include <deque>
 #include <map>
 #include <set>
 
@@ -45,6 +46,9 @@ struct Interval {
   }
 };
 Interval full(unsigned bits, bool sign) {
+  if (bits == 0 || bits >= MathWidth)
+    return {APInt::getSignedMinValue(MathWidth),
+            APInt::getSignedMaxValue(MathWidth)};
   if (sign)
     return {wide(APInt::getSignedMinValue(bits), true),
             wide(APInt::getSignedMaxValue(bits), true)};
@@ -66,7 +70,7 @@ struct Engine {
   DominatorTree dominators;
   BasicAAResult basic_aa;
   AAResults aliases;
-  MemorySSA memory;
+  std::unique_ptr<MemorySSA> memory_;
   FunctionFacts facts;
   std::map<const Value *, bool> declared_sign;
   std::map<const LoadInst *, std::vector<const Value *>> load_definitions;
@@ -74,12 +78,19 @@ struct Engine {
   std::map<RangeKey, Interval> ranges;
   std::set<RangeKey> active_ranges;
 
+  MemorySSA &getMemory() {
+    if (!memory_)
+      memory_ = std::make_unique<MemorySSA>(function, &aliases, &dominators);
+    return *memory_;
+  }
+
   explicit Engine(Function &f)
       : function(f), tli_impl(Triple(f.getParent()->getTargetTriple())),
         tli(tli_impl), assumptions(f), dominators(f),
         basic_aa(f.getParent()->getDataLayout(), f, tli, assumptions,
                  &dominators),
-        aliases(tli), memory(f, initializedAliases(), &dominators), facts(f) {
+        aliases(tli), facts(f) {
+    aliases.addAAResult(basic_aa);
     for (const Instruction &inst : instructions(f))
       if (const auto *debug = dyn_cast<DbgVariableIntrinsic>(&inst)) {
         const DIType *type = debug->getVariable()->getType();
@@ -125,7 +136,8 @@ struct Engine {
       // operation: `(unsigned)(signed char)x` is also lowered as sext. Only
       // byte-sized operations without flags recover signedness from the
       // original local byte variables (Clang's ++/-- lowering).
-      if (op->getType()->getIntegerBitWidth() > 8)
+      if (!op->getType()->isIntegerTy() ||
+          op->getType()->getIntegerBitWidth() > 8)
         return None;
       auto a = signedness(*op->getOperand(0), depth + 1);
       auto b = signedness(*op->getOperand(1), depth + 1);
@@ -137,11 +149,6 @@ struct Engine {
         return b;
     }
     return None;
-  }
-
-  AAResults *initializedAliases() {
-    aliases.addAAResult(basic_aa);
-    return &aliases;
   }
 
   // A scalar spill is read from its MemorySSA reaching definition. May-alias
@@ -236,12 +243,13 @@ struct Engine {
                   const_cast<Constant *>(pointer), load.getType(),
                   function.getParent()->getDataLayout()))
             return {folded};
-    auto *access = memory.getMemoryAccess(&load);
+    auto &mssa = getMemory();
+    auto *access = mssa.getMemoryAccess(&load);
     if (!access)
       return {&load};
     std::vector<const Value *> result;
     SmallPtrSet<const MemoryAccess *, 16> seen;
-    definitions(load, memory.getWalker()->getClobberingMemoryAccess(access),
+    definitions(load, mssa.getWalker()->getClobberingMemoryAccess(access),
                 result, seen);
     if (result.empty())
       result.push_back(&load);
@@ -253,11 +261,14 @@ struct Engine {
   // dominance alone would incorrectly refine facts at a post-if join.
   template <class Callback>
   void guards(const Instruction &at, Callback callback) {
-    for (const BasicBlock &block : function) {
+    const auto *domNode =
+        dominators.getNode(const_cast<BasicBlock *>(at.getParent()));
+    if (!domNode)
+      return;
+    for (const auto *cur = domNode->getIDom(); cur; cur = cur->getIDom()) {
+      const BasicBlock &block = *cur->getBlock();
       const auto *branch = dyn_cast<BranchInst>(block.getTerminator());
       if (!branch || !branch->isConditional())
-        continue;
-      if (!dominators.dominates(branch, &at))
         continue;
       const auto *cmp = dyn_cast<ICmpInst>(branch->getCondition());
       if (!cmp)
@@ -317,9 +328,12 @@ struct Engine {
 
   Interval range(const Value &v, bool sign, const Instruction &at,
                  unsigned depth = 0) {
+    if (!v.getType()->isIntegerTy())
+      return {APInt::getSignedMinValue(MathWidth),
+              APInt::getSignedMaxValue(MathWidth)};
     unsigned bits = v.getType()->getIntegerBitWidth();
     Interval result = full(bits, sign);
-    if (bits > 128 || depth > 24)
+    if (bits == 0 || bits > 128 || depth > 24)
       return result;
     RangeKey key{&v, sign, &at};
     auto cached = ranges.find(key);
@@ -412,10 +426,15 @@ struct Engine {
       return {APInt::getSignedMinValue(MathWidth),
               APInt::getSignedMaxValue(MathWidth)};
     default:
-      return full(op.getType()->getIntegerBitWidth(), sign);
+      return op.getType()->isIntegerTy()
+                 ? full(op.getType()->getIntegerBitWidth(), sign)
+                 : Interval{APInt::getSignedMinValue(MathWidth),
+                            APInt::getSignedMaxValue(MathWidth)};
     }
   }
   bool mayOverflow(const BinaryOperator &op, bool sign) {
+    if (!op.getType()->isIntegerTy() || op.getType()->getIntegerBitWidth() > 128)
+      return false;
     return !mathematical(op, sign, op)
                 .subset(full(op.getType()->getIntegerBitWidth(), sign));
   }
@@ -425,7 +444,7 @@ struct Engine {
                        &assumptions, &at, &dominators) &&
         value.isZero())
       return true;
-    if (v.getType()->getIntegerBitWidth() <= 128 &&
+    if (v.getType()->isIntegerTy() && v.getType()->getIntegerBitWidth() <= 128 &&
         (!range(v, true, at).contains(wide(value, true)) ||
          !range(v, false, at).contains(wide(value, false))))
       return true;
@@ -474,33 +493,122 @@ struct Engine {
 
   void leaves(const Value &v, std::vector<const Value *> &out,
               unsigned depth = 0, bool multiply_only = false) {
-    if (depth > 24) {
-      out.push_back(&v);
+    if (multiply_only) {
+      // Preserve distinct factors of a multiplication tree (e.g., x * x has
+      // two nonconstant factors) while preventing exponential re-traversal of
+      // shared/cyclic sub-expressions inside each factor.
+      SmallVector<std::pair<const Value *, unsigned>, 16> factors;
+      SmallPtrSet<const Value *, 16> seen_mul;
+      SmallVector<std::pair<const Value *, unsigned>, 16> work;
+      work.push_back({&v, depth});
+      while (!work.empty()) {
+        auto [cur, d] = work.pop_back_val();
+        if (d > 24) {
+          factors.push_back({cur, d});
+          continue;
+        }
+        if (const auto *op = dyn_cast<BinaryOperator>(cur)) {
+          if (op->getOpcode() == Instruction::Mul && seen_mul.insert(op).second) {
+            work.push_back({op->getOperand(1), d + 1});
+            work.push_back({op->getOperand(0), d + 1});
+            continue;
+          }
+        }
+        factors.push_back({cur, d});
+      }
+      for (const auto &factor : factors) {
+        std::deque<std::pair<const Value *, unsigned>> queue;
+        SmallPtrSet<const Value *, 32> visited;
+        queue.push_back(factor);
+        visited.insert(factor.first);
+        while (!queue.empty()) {
+          const Value *cur = queue.front().first;
+          unsigned d = queue.front().second;
+          queue.pop_front();
+          if (d > 24) {
+            out.push_back(cur);
+            continue;
+          }
+          auto enqueue = [&](const Value *next) {
+            if (visited.insert(next).second)
+              queue.push_back({next, d + 1});
+          };
+          if (const auto *load = dyn_cast<LoadInst>(cur)) {
+            for (const Value *def : definitions(*load)) {
+              if (def == load)
+                out.push_back(def);
+              else
+                enqueue(def);
+            }
+          } else if (const auto *cast = dyn_cast<CastInst>(cur)) {
+            if (cast->getOperand(0)->getType()->isIntegerTy())
+              enqueue(cast->getOperand(0));
+          } else if (const auto *phi = dyn_cast<PHINode>(cur)) {
+            for (const Value *incoming : phi->incoming_values())
+              enqueue(incoming);
+          } else if (const auto *select = dyn_cast<SelectInst>(cur)) {
+            enqueue(select->getTrueValue());
+            enqueue(select->getFalseValue());
+          } else if (const auto *op = dyn_cast<BinaryOperator>(cur)) {
+            if (op->getOpcode() == Instruction::Mul) {
+              for (const Value *operand : op->operands())
+                enqueue(operand);
+            } else {
+              out.push_back(cur);
+            }
+          } else {
+            out.push_back(cur);
+          }
+        }
+      }
       return;
     }
-    if (const auto *load = dyn_cast<LoadInst>(&v)) {
-      for (const Value *def : definitions(*load))
-        if (def == load)
-          out.push_back(def);
-        else
-          leaves(*def, out, depth + 1, multiply_only);
-    } else if (const auto *cast = dyn_cast<CastInst>(&v)) {
-      if (cast->getOperand(0)->getType()->isIntegerTy())
-        leaves(*cast->getOperand(0), out, depth + 1, multiply_only);
-    } else if (const auto *phi = dyn_cast<PHINode>(&v)) {
-      for (const Value *incoming : phi->incoming_values())
-        leaves(*incoming, out, depth + 1, multiply_only);
-    } else if (const auto *select = dyn_cast<SelectInst>(&v)) {
-      leaves(*select->getTrueValue(), out, depth + 1, multiply_only);
-      leaves(*select->getFalseValue(), out, depth + 1, multiply_only);
-    } else if (const auto *op = dyn_cast<BinaryOperator>(&v)) {
-      if (!multiply_only || op->getOpcode() == Instruction::Mul)
+
+    // BFS visits each node at its minimum depth first, producing the exact
+    // same set of leaves within the depth-24 bound in O(|V| + |E|) time.
+    std::deque<std::pair<const Value *, unsigned>> queue;
+    SmallPtrSet<const Value *, 32> visited;
+    SmallPtrSet<const Value *, 32> emitted;
+    queue.push_back({&v, depth});
+    visited.insert(&v);
+    auto emitLeaf = [&](const Value *leaf) {
+      if (emitted.insert(leaf).second)
+        out.push_back(leaf);
+    };
+    while (!queue.empty()) {
+      const Value *cur = queue.front().first;
+      unsigned d = queue.front().second;
+      queue.pop_front();
+      if (d > 24) {
+        emitLeaf(cur);
+        continue;
+      }
+      auto enqueue = [&](const Value *next) {
+        if (visited.insert(next).second)
+          queue.push_back({next, d + 1});
+      };
+      if (const auto *load = dyn_cast<LoadInst>(cur)) {
+        for (const Value *def : definitions(*load)) {
+          if (def == load)
+            emitLeaf(def);
+          else
+            enqueue(def);
+        }
+      } else if (const auto *cast = dyn_cast<CastInst>(cur)) {
+        if (cast->getOperand(0)->getType()->isIntegerTy())
+          enqueue(cast->getOperand(0));
+      } else if (const auto *phi = dyn_cast<PHINode>(cur)) {
+        for (const Value *incoming : phi->incoming_values())
+          enqueue(incoming);
+      } else if (const auto *select = dyn_cast<SelectInst>(cur)) {
+        enqueue(select->getTrueValue());
+        enqueue(select->getFalseValue());
+      } else if (const auto *op = dyn_cast<BinaryOperator>(cur)) {
         for (const Value *operand : op->operands())
-          leaves(*operand, out, depth + 1, multiply_only);
-      else
-        out.push_back(&v);
-    } else {
-      out.push_back(&v);
+          enqueue(operand);
+      } else {
+        emitLeaf(cur);
+      }
     }
   }
 };
@@ -572,6 +680,8 @@ struct Queries {
   ArithmeticAnalysisResult result;
   std::map<const Function *, std::unique_ptr<Engine>> engines;
   std::map<const Function *, std::set<unsigned>> allocation_parameters;
+  std::map<const Function *, SmallVector<const BinaryOperator *, 4>>
+      div_instructions;
   const TaintFlowResult *taint;
   std::set<std::pair<std::string, const Instruction *>> reported;
 
@@ -582,6 +692,23 @@ struct Queries {
       entry = std::make_unique<Engine>(const_cast<Function &>(f));
     return *entry;
   }
+  const SmallVector<const BinaryOperator *, 4> &
+  divisionsIn(const Function &f) {
+    auto it = div_instructions.find(&f);
+    if (it != div_instructions.end())
+      return it->second;
+    auto &vec = div_instructions[&f];
+    for (const Instruction &inst : instructions(f)) {
+      const auto *div = dyn_cast<BinaryOperator>(&inst);
+      if (div && div->getType()->isIntegerTy() &&
+          (div->getOpcode() == Instruction::SDiv ||
+           div->getOpcode() == Instruction::UDiv ||
+           div->getOpcode() == Instruction::SRem ||
+           div->getOpcode() == Instruction::URem))
+        vec.push_back(div);
+    }
+    return vec;
+  }
   void report(StringRef id, const Instruction &site, StringRef message,
               std::vector<const Instruction *> evidence = {}) {
     if (reported.emplace(id.str(), &site).second)
@@ -591,17 +718,43 @@ struct Queries {
   // Enumerate demonstrated return alternatives rather than interpreting an
   // unknown declaration as a zero-returning function. Arithmetic preserves
   // machine-width behavior and only bounded finite sets are expanded.
-  std::vector<APInt> values(const Value &v, unsigned depth = 0,
-                            const CallBase *context = nullptr) {
-    if (!v.getType()->isIntegerTy() || depth > 16)
+  using ValueMemoKey = std::pair<const Value *, const CallBase *>;
+  std::vector<APInt>
+  valuesImpl(const Value &v, unsigned depth, const CallBase *context,
+             std::set<ValueMemoKey> &active,
+             std::map<ValueMemoKey, std::vector<APInt>> &memo,
+             bool &hit_cutoff) {
+    if (!v.getType()->isIntegerTy())
       return {};
+    if (depth > 16) {
+      hit_cutoff = true;
+      return {};
+    }
     if (const auto *c = dyn_cast<ConstantInt>(&v))
       return {c->getValue()};
+    ValueMemoKey key{&v, context};
+    auto cached = memo.find(key);
+    if (cached != memo.end())
+      return cached->second;
+    if (!active.insert(key).second) {
+      hit_cutoff = true;
+      return {};
+    }
+    bool local_cutoff = false;
+    auto finish = [&](std::vector<APInt> res) {
+      active.erase(key);
+      if (local_cutoff)
+        hit_cutoff = true;
+      else
+        memo.emplace(key, res);
+      return res;
+    };
     if (const auto *argument = dyn_cast<Argument>(&v)) {
       if (context && ValueFacts::callee(*context) == argument->getParent() &&
           argument->getArgNo() < context->arg_size()) {
         const Value *actual = context->getArgOperand(argument->getArgNo());
-        auto alternatives = values(*actual, depth + 1);
+        auto alternatives =
+            valuesImpl(*actual, depth + 1, nullptr, active, memo, local_cutoff);
         Engine &caller = engine(*context->getFunction());
         alternatives.erase(
             std::remove_if(alternatives.begin(), alternatives.end(),
@@ -609,13 +762,14 @@ struct Queries {
                              return caller.excludes(*actual, value, *context);
                            }),
             alternatives.end());
-        return alternatives;
+        return finish(std::move(alternatives));
       }
-      return {};
+      return finish({});
     }
     std::vector<APInt> result;
     auto append = [&](const Value &next) {
-      for (APInt x : values(next, depth + 1, context))
+      for (APInt x :
+           valuesImpl(next, depth + 1, context, active, memo, local_cutoff))
         if (result.size() < 32 &&
             std::find(result.begin(), result.end(), x) == result.end())
           result.push_back(x);
@@ -631,7 +785,8 @@ struct Queries {
       append(*select->getTrueValue());
       append(*select->getFalseValue());
     } else if (const auto *cast = dyn_cast<CastInst>(&v)) {
-      for (APInt x : values(*cast->getOperand(0), depth + 1, context))
+      for (APInt x : valuesImpl(*cast->getOperand(0), depth + 1, context,
+                                active, memo, local_cutoff))
         result.push_back(
             cast->getOpcode() == Instruction::SExt
                 ? x.sextOrTrunc(v.getType()->getIntegerBitWidth())
@@ -644,28 +799,43 @@ struct Queries {
           for (const BasicBlock &block : *target)
             if (const auto *ret = dyn_cast<ReturnInst>(block.getTerminator()))
               if (ret->getReturnValue())
-                for (APInt x : values(*ret->getReturnValue(), depth + 1, call))
+                for (APInt x : valuesImpl(*ret->getReturnValue(), depth + 1,
+                                          call, active, memo, local_cutoff))
                   if (result.size() < 32)
                     result.push_back(x);
       }
     } else if (const auto *op = dyn_cast<BinaryOperator>(&v)) {
-      for (const APInt &a : values(*op->getOperand(0), depth + 1, context))
-        for (const APInt &b : values(*op->getOperand(1), depth + 1, context)) {
-          if (result.size() >= 32)
-            break;
-          if (op->getOpcode() == Instruction::Add)
-            result.push_back(a + b);
-          else if (op->getOpcode() == Instruction::Sub)
-            result.push_back(a - b);
-          else if (op->getOpcode() == Instruction::Mul)
-            result.push_back(a * b);
-        }
+      auto lhs = valuesImpl(*op->getOperand(0), depth + 1, context, active,
+                            memo, local_cutoff);
+      if (!lhs.empty()) {
+        auto rhs = valuesImpl(*op->getOperand(1), depth + 1, context, active,
+                              memo, local_cutoff);
+        for (const APInt &a : lhs)
+          for (const APInt &b : rhs) {
+            if (result.size() >= 32)
+              break;
+            if (op->getOpcode() == Instruction::Add)
+              result.push_back(a + b);
+            else if (op->getOpcode() == Instruction::Sub)
+              result.push_back(a - b);
+            else if (op->getOpcode() == Instruction::Mul)
+              result.push_back(a * b);
+          }
+      }
     }
-    return result;
+    return finish(std::move(result));
+  }
+
+  std::vector<APInt> values(const Value &v, unsigned depth = 0,
+                            const CallBase *context = nullptr) {
+    std::set<ValueMemoKey> active;
+    std::map<ValueMemoKey, std::vector<APInt>> memo;
+    bool hit_cutoff = false;
+    return valuesImpl(v, depth, context, active, memo, hit_cutoff);
   }
 
   void comparison(const ICmpInst &cmp, Engine &facts) {
-    if (cmp.isEquality())
+    if (cmp.isEquality() || !cmp.getOperand(0)->getType()->isIntegerTy())
       return;
     for (unsigned side = 0; side < 2; ++side) {
       const auto *op = dyn_cast<BinaryOperator>(cmp.getOperand(side));
@@ -715,7 +885,8 @@ struct Queries {
 
   void assignment(const StoreInst &store, Engine &facts) {
     const auto *sub = dyn_cast<BinaryOperator>(store.getValueOperand());
-    if (!sub || sub->getOpcode() != Instruction::Sub)
+    if (!sub || sub->getOpcode() != Instruction::Sub ||
+        !sub->getType()->isIntegerTy())
       return;
     facts.guards(store, [&](const ICmpInst &cmp, CmpInst::Predicate pred) {
       if (CmpInst::isEquality(pred))
@@ -824,10 +995,13 @@ struct Queries {
   }
 
   void widening(const CastInst &cast, Engine &facts) {
-    if (!isa<SExtInst>(cast) && !isa<ZExtInst>(cast))
+    if ((!isa<SExtInst>(cast) && !isa<ZExtInst>(cast)) ||
+        !cast.getType()->isIntegerTy() ||
+        !cast.getOperand(0)->getType()->isIntegerTy())
       return;
     const auto *mul = dyn_cast<BinaryOperator>(cast.getOperand(0));
     if (!mul || mul->getOpcode() != Instruction::Mul ||
+        !mul->getType()->isIntegerTy() ||
         !facts.mayOverflow(*mul, isa<SExtInst>(cast)))
       return;
     std::vector<const Value *> operands;
@@ -845,6 +1019,8 @@ struct Queries {
   }
 
   void division(const BinaryOperator &op, Engine &facts) {
+    if (!op.getType()->isIntegerTy())
+      return;
     unsigned opcode = op.getOpcode();
     if (opcode != Instruction::SDiv && opcode != Instruction::UDiv &&
         opcode != Instruction::SRem && opcode != Instruction::URem)
@@ -874,14 +1050,11 @@ struct Queries {
     const Function *target = ValueFacts::callee(call);
     if (!target || target->isDeclaration())
       return;
+    const auto &divs = divisionsIn(*target);
+    if (divs.empty())
+      return;
     Engine &callee = engine(*target);
-    for (const Instruction &inst : instructions(*target)) {
-      const auto *div = dyn_cast<BinaryOperator>(&inst);
-      if (!div || (div->getOpcode() != Instruction::SDiv &&
-                   div->getOpcode() != Instruction::UDiv &&
-                   div->getOpcode() != Instruction::SRem &&
-                   div->getOpcode() != Instruction::URem))
-        continue;
+    for (const BinaryOperator *div : divs) {
       const Value &divisor = *div->getOperand(1);
       APInt zero(divisor.getType()->getIntegerBitWidth(), 0);
       if (callee.excludes(divisor, zero, *div))
@@ -978,6 +1151,8 @@ struct Queries {
   }
 
   void conversion(const TruncInst &cast, Engine &facts) {
+    if (!cast.getDestTy()->isIntegerTy() || !cast.getSrcTy()->isIntegerTy())
+      return;
     const auto *op = dyn_cast<BinaryOperator>(cast.getOperand(0));
     if (op && arithmetic(op->getOpcode()) &&
         op->getType()->getIntegerBitWidth() <= 128) {

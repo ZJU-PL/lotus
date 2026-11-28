@@ -25,6 +25,10 @@ using namespace llvm;
 
 void pdg::PDGCallGraph::build(Module &M) {
   reset();
+  _indexed_module = nullptr;
+  _type_key_cache.clear();
+  _sig_index.clear();
+  ensureSignatureIndex(M);
   for (auto &F : M) {
     if (F.isDeclaration() || F.empty())
       continue;
@@ -53,7 +57,8 @@ void pdg::PDGCallGraph::build(Module &M) {
                                        EdgeType::CONTROLDEP_CALLINV);
           } else {
             // indirect calls
-            auto ind_call_candidates = getIndirectCallCandidates(*ci, M);
+            const auto &ind_call_candidates =
+                getIndirectCallCandidatesFast(*ci, M);
             for (auto *ind_call_can : ind_call_candidates) {
               Node *callee_node = getNode(*ind_call_can);
               if (callee_node != nullptr)
@@ -71,6 +76,74 @@ void pdg::PDGCallGraph::build(Module &M) {
   }
 
   _is_build = true;
+}
+
+std::string pdg::PDGCallGraph::canonicalTypeKey(Type *ty) {
+  if (!ty)
+    return "null";
+  auto it = _type_key_cache.find(ty);
+  if (it != _type_key_cache.end())
+    return it->second;
+
+  std::string key;
+  if (!ty->isPointerTy()) {
+    raw_string_ostream os(key);
+    os << 'T' << static_cast<const void *>(ty);
+    os.flush();
+  } else {
+    Type *pointed = ty->getPointerElementType();
+    if (auto *st = dyn_cast<StructType>(pointed)) {
+      key = "*S:";
+      if (st->hasName())
+        key += pdgutils::stripVersionTag(st->getName().str());
+    } else if (pointed->isPointerTy()) {
+      key = "*" + canonicalTypeKey(pointed);
+    } else if (auto *at = dyn_cast<ArrayType>(pointed)) {
+      key = "*A" + std::to_string(at->getNumElements()) + ":" +
+            canonicalTypeKey(at->getElementType());
+    } else {
+      raw_string_ostream os(key);
+      os << "*P:" << static_cast<const void *>(pointed);
+      os.flush();
+    }
+  }
+  auto res = _type_key_cache.try_emplace(ty, std::move(key));
+  return res.first->second;
+}
+
+std::string pdg::PDGCallGraph::computeFuncSignatureKey(const Function &f) {
+  std::string key = std::to_string(f.arg_size());
+  key += '|';
+  key += canonicalTypeKey(f.getReturnType());
+  for (unsigned i = 0; i < f.arg_size(); ++i) {
+    key += ',';
+    key += canonicalTypeKey(f.getArg(i)->getType());
+  }
+  return key;
+}
+
+std::string pdg::PDGCallGraph::computeCallSignatureKey(const CallBase &ci) {
+  std::string key = std::to_string(ci.arg_size());
+  key += '|';
+  key += canonicalTypeKey(ci.getType());
+  for (unsigned i = 0; i < ci.arg_size(); ++i) {
+    key += ',';
+    key += canonicalTypeKey(ci.getArgOperand(i)->getType());
+  }
+  return key;
+}
+
+void pdg::PDGCallGraph::ensureSignatureIndex(Module &M) {
+  if (_indexed_module == &M)
+    return;
+  _indexed_module = &M;
+  _type_key_cache.clear();
+  _sig_index.clear();
+  for (auto &F : M) {
+    if (F.isDeclaration() || F.empty() || F.isVarArg())
+      continue;
+    _sig_index[computeFuncSignatureKey(F)].push_back(&F);
+  }
 }
 
 bool pdg::PDGCallGraph::isFuncSignatureMatch(CallBase &ci, llvm::Function &f) {
@@ -117,12 +190,14 @@ bool pdg::PDGCallGraph::isTypeEqual(Type &t1, Type &t2) {
 
   // Pointer-to-struct: compare struct names after stripping llvm-link version
   // tags (e.g. "struct.Foo.1" vs "struct.Foo").
-  if (t1_pointed_ty->isStructTy() && t2_pointed_ty->isStructTy()) {
-    auto t1_name =
-        pdgutils::stripVersionTag(t1_pointed_ty->getStructName().str());
-    auto t2_name =
-        pdgutils::stripVersionTag(t2_pointed_ty->getStructName().str());
-    return (t1_name == t2_name);
+  if (auto *st1 = dyn_cast<StructType>(t1_pointed_ty)) {
+    if (auto *st2 = dyn_cast<StructType>(t2_pointed_ty)) {
+      std::string t1_name =
+          st1->hasName() ? pdgutils::stripVersionTag(st1->getName().str()) : "";
+      std::string t2_name =
+          st2->hasName() ? pdgutils::stripVersionTag(st2->getName().str()) : "";
+      return (t1_name == t2_name);
+    }
   }
 
   // Pointer-to-pointer: recurse.
@@ -147,19 +222,22 @@ bool pdg::PDGCallGraph::isTypeEqual(Type &t1, Type &t2) {
   return (t1_pointed_ty == t2_pointed_ty);
 }
 
+const std::vector<Function *> &
+pdg::PDGCallGraph::getIndirectCallCandidatesFast(CallBase &ci, Module &M) {
+  static const std::vector<Function *> kEmpty;
+  if (!ci.getFunctionType())
+    return kEmpty;
+  ensureSignatureIndex(M);
+  auto it = _sig_index.find(computeCallSignatureKey(ci));
+  if (it == _sig_index.end())
+    return kEmpty;
+  return it->second;
+}
+
 std::set<Function *> pdg::PDGCallGraph::getIndirectCallCandidates(CallBase &ci,
                                                                   Module &M) {
-  Type *call_func_ty = ci.getFunctionType();
-  assert(call_func_ty != nullptr &&
-         "cannot find indirect call for null function type!\n");
-  std::set<Function *> ind_call_cand;
-  for (auto &F : M) {
-    if (F.isDeclaration() || F.empty())
-      continue;
-    if (isFuncSignatureMatch(ci, F))
-      ind_call_cand.insert(&F);
-  }
-  return ind_call_cand;
+  const auto &fast = getIndirectCallCandidatesFast(ci, M);
+  return std::set<Function *>(fast.begin(), fast.end());
 }
 
 bool pdg::PDGCallGraph::canReach(Node &src, Node &sink) {
@@ -228,12 +306,10 @@ void pdg::PDGCallGraph::computePathsHelper(
     std::unordered_set<llvm::Function *> visited_funcs, bool &found_path) {
   if (found_path)
     return;
-  assert(isa<Function>(src.getValue()) &&
-         "cannot process non function node (compute path, src)\n");
-  assert(isa<Function>(sink.getValue()) &&
-         "cannot process non function node (compute path, sink)\n");
-  Function *src_func = cast<Function>(src.getValue());
-  Function *sink_func = cast<Function>(sink.getValue());
+  Function *src_func = dyn_cast_or_null<Function>(src.getValue());
+  Function *sink_func = dyn_cast_or_null<Function>(sink.getValue());
+  if (!src_func || !sink_func)
+    return;
   if (visited_funcs.find(src_func) != visited_funcs.end())
     return;
   visited_funcs.insert(src_func);

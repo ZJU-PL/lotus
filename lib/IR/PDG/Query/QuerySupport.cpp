@@ -5,6 +5,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
@@ -194,13 +195,28 @@ std::string sourceKeyForNode(Node *node) {
   return locationKey(inst->getDebugLoc());
 }
 
-std::string stringifyValue(const Value *value) {
+std::string stringifyValue(const Value *value,
+                           ModuleSlotTracker *slot_tracker) {
   if (value == nullptr)
     return "";
   std::string rendered;
   raw_string_ostream os(rendered);
+  if (slot_tracker != nullptr) {
+    if (const auto *inst = dyn_cast<Instruction>(value)) {
+      if (const Function *func = inst->getFunction())
+        slot_tracker->incorporateFunction(*func);
+      inst->print(os, *slot_tracker);
+      return os.str();
+    }
+    value->print(os, *slot_tracker);
+    return os.str();
+  }
   os << *value;
   return os.str();
+}
+
+std::string stringifyValue(const Value *value) {
+  return stringifyValue(value, nullptr);
 }
 
 /// Resolve the callee behind pointer casts. Clang lowers calls to variadic

@@ -10,6 +10,9 @@
  * SummaryQuery to reuse interprocedural resource behavior.
  */
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 
@@ -19,6 +22,9 @@
 #include "IR/PDG/Query/SummaryQuery.h"
 
 #include <algorithm>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
 
 using namespace llvm;
 
@@ -164,22 +170,19 @@ ResourceFlowQuery::analyze(const PDGCriteria &criteria,
   if (local_options.edge_preset == PDGEdgePreset::All)
     local_options.edge_preset = PDGEdgePreset::ValueFlow;
 
-  NodeSet region;
-  if (!criteria.empty()) {
-    SliceQuery slice_query(pdg_);
-    region = slice_query.forward(criteria, local_options, module).nodes;
-  } else {
-    region = nodesInScope(pdg_, local_options.scope);
-  }
+  const bool has_scope_filter =
+      local_options.scope.kind != PDGQueryScope::Kind::WholeGraph;
+  const NodeSet scoped_nodes =
+      has_scope_filter ? nodesInScope(pdg_, local_options.scope) : NodeSet{};
+  const std::set<EdgeType> edge_types =
+      edgeTypesForPreset(local_options.edge_preset);
 
-  SummaryQuery summary_query(pdg_);
   std::map<ResourceKind, std::vector<Node *>> acquires_by_kind;
   std::map<ResourceKind, std::vector<Node *>> releases_by_kind;
 
-  for (NodeSet::const_iterator it = region.begin(); it != region.end(); ++it) {
-    Node *node = *it;
+  auto classifyNode = [&](Node *node) {
     if (!isCallNode(node))
-      continue;
+      return;
     const ResourceKind acquire_kind = resourceKindForNode(node, false);
     const ResourceKind release_kind = resourceKindForNode(node, true);
     if (acquire_kind != ResourceKind::Unknown &&
@@ -195,53 +198,110 @@ ResourceFlowQuery::analyze(const PDGCriteria &criteria,
       result.release_sites.push_back(ResourceEvent{
           release_kind, ResourceEventKind::Release, node, calleeName(node)});
     }
+  };
+
+  if (!criteria.empty()) {
+    SliceQuery slice_query(pdg_);
+    PDGQueryOptions region_opts = local_options;
+    region_opts.explain = false;
+    NodeSet region = slice_query.forward(criteria, region_opts, module).nodes;
+    for (Node *node : region)
+      classifyNode(node);
+  } else if (has_scope_filter) {
+    for (Node *node : scoped_nodes)
+      classifyNode(node);
+  } else {
+    for (auto it = pdg_.begin(); it != pdg_.end(); ++it)
+      classifyNode(*it);
   }
 
-  DependenceQuery dependence_query(pdg_);
+  // Precompute caller -> release-kinds map once if interprocedural fallback
+  // may be needed, avoiding O(|acquires| * |functions|) SummaryQuery::All calls.
+  std::unordered_map<std::string, std::set<ResourceKind>>
+      callee_to_caller_release_kinds;
+  if (policy.include_interprocedural && module != nullptr &&
+      !acquires_by_kind.empty()) {
+    for (const Function &F : *module) {
+      if (F.isDeclaration())
+        continue;
+      std::set<ResourceKind> func_releases;
+      std::vector<std::string> direct_callees;
+      for (const Instruction &I : instructions(F)) {
+        const auto *cb = dyn_cast<CallBase>(&I);
+        if (!cb || !cb->getCalledFunction())
+          continue;
+        std::string name = cb->getCalledFunction()->getName().str();
+        ResourceKind rk = resourceKindForReleaseName(name);
+        if (rk != ResourceKind::Unknown)
+          func_releases.insert(rk);
+        direct_callees.push_back(std::move(name));
+      }
+      if (!func_releases.empty()) {
+        for (const std::string &callee : direct_callees) {
+          auto &kinds = callee_to_caller_release_kinds[callee];
+          kinds.insert(func_releases.begin(), func_releases.end());
+        }
+      }
+    }
+  }
+
   for (std::map<ResourceKind, std::vector<Node *>>::const_iterator acquire_it =
            acquires_by_kind.begin();
        acquire_it != acquires_by_kind.end(); ++acquire_it) {
     const ResourceKind kind = acquire_it->first;
-    for (size_t i = 0; i < acquire_it->second.size(); ++i) {
-      Node *acquire = acquire_it->second[i];
+    const auto rel_it = releases_by_kind.find(kind);
+    const std::vector<Node *> empty_releases;
+    const std::vector<Node *> &kind_releases =
+        rel_it != releases_by_kind.end() ? rel_it->second : empty_releases;
+    llvm::DenseSet<Node *> release_set(kind_releases.begin(),
+                                       kind_releases.end());
+
+    for (Node *acquire : acquire_it->second) {
+      // Single forward BFS from acquire finds shortest paths to ALL reachable
+      // releases of the same kind simultaneously.
+      llvm::DenseMap<Node *, std::pair<Node *, EdgeType>> pred;
+      llvm::DenseSet<Node *> visited;
+      std::queue<Node *> worklist;
       std::vector<Node *> candidate_releases;
 
-      if (releases_by_kind.count(kind) != 0) {
-        for (size_t j = 0; j < releases_by_kind.find(kind)->second.size(); ++j) {
-          Node *release = releases_by_kind.find(kind)->second[j];
-          PDGCriteria source;
-          source.nodes.insert(acquire);
-          PDGCriteria target;
-          target.nodes.insert(release);
-          PDGQueryResult path =
-              dependence_query.shortestPath(source, target, local_options, module);
-          if (!path.witness_paths.empty())
-            candidate_releases.push_back(release);
+      if (!release_set.empty()) {
+        worklist.push(acquire);
+        visited.insert(acquire);
+        while (!worklist.empty()) {
+          Node *cur = worklist.front();
+          worklist.pop();
+          for (Edge *edge : cur->getOutEdgeSet()) {
+            if (!edge || !query_detail::isEdgeAllowed(edge->getEdgeType(),
+                                                      edge_types))
+              continue;
+            Node *nbr = edge->getDstNode();
+            if (!nbr)
+              continue;
+            if (has_scope_filter && scoped_nodes.count(nbr) == 0)
+              continue;
+            if (visited.insert(nbr).second) {
+              pred[nbr] = {cur, edge->getEdgeType()};
+              if (release_set.count(nbr))
+                candidate_releases.push_back(nbr);
+              worklist.push(nbr);
+            }
+          }
         }
       }
 
+      bool used_interproc_fallback = false;
       if (candidate_releases.empty() && policy.include_interprocedural &&
-          module != nullptr) {
+          module != nullptr && !kind_releases.empty()) {
         const Function *owner = functionForNode(acquire);
         if (owner != nullptr) {
-          for (Module::const_iterator fit = module->begin(); fit != module->end();
-               ++fit) {
-            if (fit->isDeclaration())
-              continue;
-            SummaryQueryResult summary =
-                summary_query.summarize(*fit, SummaryPolicy(), local_options, module);
-            if (summary.summary.may_release_resource_kinds.count(kind) == 0)
-              continue;
-            for (size_t j = 0; j < summary.summary.reachable_calls.size(); ++j) {
-              Node *callsite = summary.summary.reachable_calls[j].target;
-              if (calleeName(callsite) == owner->getName().str() &&
-                  releases_by_kind.count(kind) != 0) {
-                candidate_releases.insert(candidate_releases.end(),
-                    releases_by_kind.find(kind)->second.begin(),
-                    releases_by_kind.find(kind)->second.end());
-                break;
-              }
-            }
+          auto cit =
+              callee_to_caller_release_kinds.find(owner->getName().str());
+          if (cit != callee_to_caller_release_kinds.end() &&
+              cit->second.count(kind) != 0) {
+            candidate_releases.insert(candidate_releases.end(),
+                                      kind_releases.begin(),
+                                      kind_releases.end());
+            used_interproc_fallback = true;
           }
         }
       }
@@ -255,9 +315,9 @@ ResourceFlowQuery::analyze(const PDGCriteria &criteria,
         PDGWitnessPath witness;
         witness.kind = PDGWitnessPathKind::Slice;
         witness.nodes.push_back(acquire);
-        path.witness_paths.push_back(witness);
+        path.witness_paths.push_back(std::move(witness));
         result.orphaned_resources.push_back(path);
-        result.resource_paths.push_back(path);
+        result.resource_paths.push_back(std::move(path));
         result.diagnostics.notes.push_back("Detected orphaned resource");
         continue;
       }
@@ -266,23 +326,36 @@ ResourceFlowQuery::analyze(const PDGCriteria &criteria,
         result.diagnostics.notes.push_back(
             "Multiple candidate releases observed for resource");
 
-      for (size_t j = 0; j < candidate_releases.size(); ++j) {
-        PDGCriteria source;
-        source.nodes.insert(acquire);
-        PDGCriteria target;
-        target.nodes.insert(candidate_releases[j]);
-        PDGQueryResult path_result =
-            dependence_query.shortestPath(source, target, local_options, module);
+      for (Node *release : candidate_releases) {
         ResourcePath path;
         path.resource_kind = kind;
         path.acquire_site = acquire;
-        path.release_site = candidate_releases[j];
+        path.release_site = release;
         path.released = true;
         path.double_release_candidate = candidate_releases.size() > 1;
-        path.witness_paths = path_result.witness_paths;
+        if (!used_interproc_fallback && local_options.explain) {
+          PDGWitnessPath witness;
+          witness.kind = PDGWitnessPathKind::ShortestPath;
+          Node *cur = release;
+          llvm::DenseSet<Node *> seen;
+          while (cur != nullptr && seen.insert(cur).second) {
+            witness.nodes.push_back(cur);
+            if (cur == acquire)
+              break;
+            auto pit = pred.find(cur);
+            if (pit == pred.end())
+              break;
+            witness.edge_types.push_back(pit->second.second);
+            cur = pit->second.first;
+          }
+          std::reverse(witness.nodes.begin(), witness.nodes.end());
+          std::reverse(witness.edge_types.begin(), witness.edge_types.end());
+          if (witness.nodes.size() >= 2)
+            path.witness_paths.push_back(std::move(witness));
+        }
         result.resource_paths.push_back(path);
         if (path.double_release_candidate)
-          result.double_release_candidates.push_back(path);
+          result.double_release_candidates.push_back(std::move(path));
       }
     }
   }

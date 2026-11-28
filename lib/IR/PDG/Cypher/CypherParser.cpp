@@ -309,9 +309,10 @@ CypherParser::parseQuery(std::vector<std::string> &tokens, size_t &pos,
       while (hasMore(tokens, pos) && peekUpper() != "MATCH" &&
              peekUpper() != "RETURN" && peekUpper() != ";") {
         auto item = parseReturnItem(tokens, pos);
-        if (item) {
-          query->addWithItem(std::move(item));
+        if (!item) {
+          return nullptr;
         }
+        query->addWithItem(std::move(item));
         if (hasMore(tokens, pos) && peek(tokens, pos) == ",") {
           consume(tokens, pos);
         }
@@ -1068,10 +1069,13 @@ CypherParser::parseReturnItem(std::vector<std::string> &tokens, size_t &pos) {
   std::string variable = token;
   if (hasMore(tokens, pos) && peek(tokens, pos) == ".") {
     consume(tokens, pos); // consume '.'
-    if (hasMore(tokens, pos)) {
-      std::string prop = consume(tokens, pos);
-      variable += "." + prop; // Combine into single variable
+    if (!hasMore(tokens, pos)) {
+      setError(CypherErrorCode::SYNTAX_ERROR,
+               "Expected property after '.' in return item", 0, 0);
+      return nullptr;
     }
+    std::string prop = consume(tokens, pos);
+    variable += "." + prop; // Combine into single variable
   }
 
   if (hasMore(tokens, pos) &&

@@ -30,7 +30,10 @@
 #include <algorithm>
 #include <cctype>
 #include <string>
+#include <vector>
 
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/raw_ostream.h>
@@ -40,32 +43,28 @@ using llvm::cl::init;
 using llvm::cl::opt;
 
 namespace {
-// Fast filter: only consider instructions that touch or produce pointers.
+// Fast filter: AliasAnalysisWrapper::query only answers alias queries when both
+// values have pointer type (all non-pointer instructions return NoAlias).
 static bool isAliasRelevantInst(const llvm::Instruction &I) {
-  if (I.mayReadOrWriteMemory() || I.getType()->isPointerTy())
-    return true;
-  for (const auto &Op : I.operands())
-    if (Op->getType()->isPointerTy())
-      return true;
-  return false;
+  return I.getType()->isPointerTy();
 }
 
 // Command-line knobs to choose alias analyses for data dependence construction.
 // -pdg-aa : over-approximate (sound) AA used to add alias edges (default:
-// Andersen). -pdg-aa-under : under-approximate AA used to confirm must-alias
-// edges (default: UnderApprox, use "none" to disable).
+// Andersen). -pdg-aa-under : optional under-approximate AA used to restrict
+// alias edges to proven must-alias pairs (default: none).
 static opt<std::string> PdgAliasOverOpt(
     "pdg-aa",
     desc("Alias analysis used for PDG data deps "
          "(andersen, andersen-1cfa, andersen-2cfa, dyck, cfl-anders, "
-         "cfl-steens, combined, underapprox)"),
+         "cfl-steens, combined, underapprox, none)"),
     init("andersen"));
 
 static opt<std::string> PdgAliasUnderOpt(
     "pdg-aa-under",
-    desc("Under-approximate alias analysis for must-alias pruning "
-         "(underapprox|none)"),
-    init("underapprox"));
+    desc("Under-approximate alias analysis for must-alias filtering "
+         "(none|underapprox)"),
+    init("none"));
 
 // Map a user-facing string to an AAConfig. Defaults to the provided fallback
 // when the string is unknown.
@@ -82,11 +81,23 @@ buildAliasWrapper(llvm::Module &M, const std::string &userChoice,
   std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
   if (lower == "none" || lower == "off" || lower == "disable") {
-    llvm::errs() << "pdg: " << label << " alias analysis disabled by flag\n";
+    if (pdg::DEBUG)
+      llvm::errs() << "pdg: " << label << " alias analysis disabled by flag\n";
     return nullptr;
   }
 
   auto config = parseAAConfig(userChoice, fallback);
+  // AliasAnalysisWrapper::initialize() leaves _tli null for CFLSteens, which
+  // dereferences null during construction. Guard cleanly here without touching
+  // lib/Alias/.
+  if (config.impl == lotus::AAConfig::Implementation::CFLSteens) {
+    llvm::errs() << "pdg: alias analysis 'cfl-steens' is unavailable "
+                    "(AliasAnalysisWrapper does not initialize TLI for "
+                    "CFLSteens); disabling "
+                 << label << " alias analysis\n";
+    return nullptr;
+  }
+
   auto wrapper = lotus::AliasAnalysisFactory::create(M, config);
 
   if (!wrapper || !wrapper->isInitialized()) {
@@ -140,11 +151,7 @@ bool pdg::DataDependencyGraph::runOnModule(Module &M) {
 }
 
 void pdg::DataDependencyGraph::addAliasEdgesForFunction(Function &F) {
-  // When the over-approximate AA failed to initialize it returns MayAlias for
-  // every pair, which would add a DATA_ALIAS edge between every two
-  // pointer-touching instructions — an O(n²) graph blowup that makes all
-  // alias-based queries useless.  Guard against this by skipping alias-edge
-  // construction entirely when the over-approximate wrapper is unavailable.
+  // Guard against AA-unavailable conservative MayAlias blowup.
   if (!_alias_wrapper_over || !_alias_wrapper_over->isInitialized()) {
     if (pdg::DEBUG)
       llvm::errs() << "pdg: skipping alias edges for " << F.getName()
@@ -154,40 +161,140 @@ void pdg::DataDependencyGraph::addAliasEdgesForFunction(Function &F) {
 
   ProgramGraph &g = ProgramGraph::getInstance();
 
-  // Collect alias-relevant instructions once.
-  llvm::SmallVector<Instruction *, 64> relevant;
+  // Collect pointer-producing instructions and group by stripPointerCasts() so
+  // bitcasts/no-op GEPs share one representative AA query.
+  struct PtrGroup {
+    const Value *rep;
+    llvm::SmallVector<std::pair<Instruction *, Node *>, 4> members;
+  };
+  llvm::DenseMap<const Value *, unsigned> canon_to_group;
+  std::vector<PtrGroup> groups;
   for (auto inst_iter = inst_begin(F); inst_iter != inst_end(F); ++inst_iter) {
-    if (isAliasRelevantInst(*inst_iter))
-      relevant.push_back(&*inst_iter);
+    Instruction &I = *inst_iter;
+    if (!isAliasRelevantInst(I))
+      continue;
+    Node *n = g.getNode(I);
+    if (!n)
+      continue;
+    const Value *canon = I.stripPointerCasts();
+    if (!canon || !canon->getType()->isPointerTy())
+      canon = &I;
+    auto res = canon_to_group.try_emplace(canon, groups.size());
+    if (res.second) {
+      PtrGroup group;
+      group.rep = canon;
+      group.members.push_back({&I, n});
+      groups.push_back(std::move(group));
+    } else {
+      groups[res.first->second].members.push_back({&I, n});
+    }
   }
 
-  // O(n²) over relevant instructions only (not all instructions).
-  for (unsigned i = 0; i < relevant.size(); ++i) {
-    Instruction *a = relevant[i];
-    Node *src = g.getNode(*a);
-    if (!src)
+  if (groups.empty())
+    return;
+
+  const bool filter_must_only =
+      (_alias_wrapper_under && _alias_wrapper_under->isInitialized());
+
+  auto connectGroups = [&](unsigned lhs, unsigned rhs, bool known_must) {
+    if (lhs == rhs)
+      return;
+    const auto &g1 = groups[lhs];
+    const auto &g2 = groups[rhs];
+    if (filter_must_only && !known_must) {
+      auto under = queryAliasUnderApproximate(
+          *const_cast<Value *>(g1.rep), *const_cast<Value *>(g2.rep));
+      if (under != llvm::AliasResult::MustAlias)
+        return;
+    }
+    for (const auto &m1 : g1.members) {
+      for (const auto &m2 : g2.members) {
+        m1.second->addNeighbor(*m2.second, EdgeType::DATA_ALIAS);
+        m2.second->addNeighbor(*m1.second, EdgeType::DATA_ALIAS);
+      }
+    }
+  };
+
+  // Intra-group edges: pointers sharing the same stripPointerCasts() base
+  // always must-alias each other.
+  for (const auto &grp : groups) {
+    if (grp.members.size() <= 1)
       continue;
+    for (size_t i = 0; i < grp.members.size(); ++i) {
+      for (size_t j = i + 1; j < grp.members.size(); ++j) {
+        grp.members[i].second->addNeighbor(*grp.members[j].second,
+                                           EdgeType::DATA_ALIAS);
+        grp.members[j].second->addNeighbor(*grp.members[i].second,
+                                           EdgeType::DATA_ALIAS);
+      }
+    }
+  }
 
-    for (unsigned j = i + 1; j < relevant.size(); ++j) {
-      Instruction *b = relevant[j];
+  if (groups.size() <= 1)
+    return;
 
-      // Fast path: if both AAs agree on NoAlias, skip.
-      auto over_result = queryAliasOverApproximate(*a, *b);
+  const auto impl = _alias_wrapper_over->getConfig().impl;
+  const bool supports_alias_set =
+      (impl == lotus::AAConfig::Implementation::DyckAA);
+
+  if (supports_alias_set) {
+    // DyckAA is unification-based: values in the same equivalence class alias
+    // each other, and values without an alias set conservatively alias all
+    // other pointers (matching DyckAliasAnalysis::mayAlias).
+    std::vector<bool> visited(groups.size(), false);
+    std::vector<bool> untracked(groups.size(), false);
+    std::vector<const Value *> alias_set;
+    for (unsigned i = 0; i < groups.size(); ++i) {
+      if (visited[i])
+        continue;
+      visited[i] = true;
+      alias_set.clear();
+      if (!_alias_wrapper_over->getAliasSet(groups[i].rep, alias_set)) {
+        untracked[i] = true;
+        continue;
+      }
+      llvm::SmallVector<unsigned, 16> local_class;
+      local_class.push_back(i);
+      for (const Value *member : alias_set) {
+        if (!member)
+          continue;
+        auto it = canon_to_group.find(member);
+        if (it == canon_to_group.end())
+          it = canon_to_group.find(member->stripPointerCasts());
+        if (it != canon_to_group.end() && !visited[it->second]) {
+          visited[it->second] = true;
+          local_class.push_back(it->second);
+        }
+      }
+      if (local_class.size() <= 1)
+        continue;
+      for (size_t a = 0; a < local_class.size(); ++a) {
+        for (size_t b = a + 1; b < local_class.size(); ++b) {
+          connectGroups(local_class[a], local_class[b], false);
+        }
+      }
+    }
+    for (unsigned i = 0; i < groups.size(); ++i) {
+      if (!untracked[i])
+        continue;
+      for (unsigned j = 0; j < groups.size(); ++j) {
+        if (j == i || (j < i && untracked[j]))
+          continue;
+        connectGroups(i, j, false);
+      }
+    }
+    return;
+  }
+
+  // Exact pairwise queries over deduplicated stripPointerCasts() groups.
+  for (unsigned i = 0; i < groups.size(); ++i) {
+    for (unsigned j = i + 1; j < groups.size(); ++j) {
+      auto over_result = queryAliasOverApproximate(
+          *const_cast<Value *>(groups[i].rep),
+          *const_cast<Value *>(groups[j].rep));
       if (over_result == llvm::AliasResult::NoAlias)
         continue;
-
-      // Under-approximate AA can confirm NoAlias even when over says MayAlias.
-      auto under_result = queryAliasUnderApproximate(*a, *b);
-      if (under_result == llvm::AliasResult::NoAlias)
-        continue;
-
-      Node *dst = g.getNode(*b);
-      if (!dst)
-        continue;
-
-      // Add bidirectional alias edges (alias is symmetric).
-      src->addNeighbor(*dst, EdgeType::DATA_ALIAS);
-      dst->addNeighbor(*src, EdgeType::DATA_ALIAS);
+      connectGroups(i, j, over_result == llvm::AliasResult::MustAlias);
     }
   }
 }

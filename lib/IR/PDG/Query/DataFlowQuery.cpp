@@ -68,36 +68,61 @@ DataFlowQuery::useDefChain(Node &use, const PDGQueryOptions &options) const {
 }
 
 PDGQueryResult DataFlowQuery::liveNodes(const PDGQueryOptions &options) const {
-  const NodeSet nodes = scopeNodes(pdg_, options.scope);
+  const bool whole_graph =
+      options.scope.kind == PDGQueryScope::Kind::WholeGraph;
+  const NodeSet nodes = whole_graph ? NodeSet{} : scopeNodes(pdg_, options.scope);
   const std::set<EdgeType> edge_types = edgeTypesForPreset(PDGEdgePreset::Data);
   PDGQueryResult result;
-  for (NodeSet::const_iterator it = nodes.begin(); it != nodes.end(); ++it) {
-    Node *node = *it;
-    for (Node::EdgeSet::const_iterator edge_it = node->getOutEdgeSet().begin();
-         edge_it != node->getOutEdgeSet().end(); ++edge_it) {
-      Edge *edge = *edge_it;
+  auto checkNode = [&](Node *node) {
+    if (!node)
+      return;
+    for (Edge *edge : node->getOutEdgeSet()) {
       if (edge == nullptr || !isEdgeAllowed(edge->getEdgeType(), edge_types))
         continue;
-      if (nodes.count(edge->getDstNode()) != 0) {
+      Node *dst = edge->getDstNode();
+      if (dst != nullptr && (whole_graph || nodes.count(dst) != 0)) {
         result.nodes.insert(node);
         break;
       }
     }
+  };
+  if (whole_graph) {
+    for (auto it = pdg_.begin(); it != pdg_.end(); ++it)
+      checkNode(*it);
+  } else {
+    for (Node *node : nodes)
+      checkNode(node);
   }
   result.edges = collectInducedEdges(result.nodes, edge_types);
   return result;
 }
 
 PDGQueryResult DataFlowQuery::deadNodes(const PDGQueryOptions &options) const {
-  const NodeSet nodes = scopeNodes(pdg_, options.scope);
-  PDGQueryResult live = liveNodes(options);
+  const bool whole_graph =
+      options.scope.kind == PDGQueryScope::Kind::WholeGraph;
+  const NodeSet nodes = whole_graph ? NodeSet{} : scopeNodes(pdg_, options.scope);
+  const std::set<EdgeType> edge_types = edgeTypesForPreset(PDGEdgePreset::Data);
   PDGQueryResult result;
-  for (NodeSet::const_iterator it = nodes.begin(); it != nodes.end(); ++it) {
-    if (live.nodes.count(*it) == 0)
-      result.nodes.insert(*it);
+  auto checkDead = [&](Node *node) {
+    if (!node)
+      return;
+    for (Edge *edge : node->getOutEdgeSet()) {
+      if (edge == nullptr || !isEdgeAllowed(edge->getEdgeType(), edge_types))
+        continue;
+      Node *dst = edge->getDstNode();
+      if (dst != nullptr && (whole_graph || nodes.count(dst) != 0))
+        return;
+    }
+    result.nodes.insert(node);
+  };
+  if (whole_graph) {
+    for (auto it = pdg_.begin(); it != pdg_.end(); ++it)
+      checkDead(*it);
+  } else {
+    for (Node *node : nodes)
+      checkDead(node);
   }
-  result.edges = collectInducedEdges(result.nodes,
-                                     edgeTypesForPreset(PDGEdgePreset::Data));
+  result.edges = collectInducedEdges(result.nodes, edge_types);
   return result;
 }
 

@@ -92,7 +92,7 @@ public:
 
   /// @brief Gets the number of edges in the graph
   /// @return Edge count
-  int numEdge() { return _edge_set.size(); }
+  int numEdge();
 
   /// @brief Gets the number of nodes in the graph
   /// @return Node count
@@ -259,6 +259,16 @@ public:
   /// @return Pointer to the class node, or nullptr if not found
   Node *getClassNodeByName(std::string cls_name);
 
+  /// @brief Checks whether control dependencies were already added for F
+  bool hasControlDeps(llvm::Function &F) const {
+    return _cdg_built_funcs.find(&F) != _cdg_built_funcs.end();
+  }
+
+  /// @brief Marks control dependencies as constructed for F
+  void markControlDepsBuilt(llvm::Function &F) {
+    _cdg_built_funcs.insert(&F);
+  }
+
   /// @brief Resets the graph and all its mappings
   ///
   /// Tree wrapper objects are owned by FunctionWrapper/CallWrapper, while the
@@ -275,6 +285,7 @@ private:
   NodeDIMap _node_di_type_map;
   ClassNodeMap _class_node_map;
   std::set<std::string> _class_name_set;
+  std::unordered_set<llvm::Function *> _cdg_built_funcs;
   llvm::Module *_built_module = nullptr;
 };
 } // namespace pdg

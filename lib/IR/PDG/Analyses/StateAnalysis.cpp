@@ -1,5 +1,6 @@
 #include "IR/PDG/Analyses/StateAnalysis.h"
 
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -172,6 +173,11 @@ NullFact mergeFact(const NullFact &a, const NullFact &b) {
   return result;
 }
 
+bool isTopDomain(const ScalarDomain &d) {
+  return !d.finite && d.lower == std::numeric_limits<int64_t>::min() &&
+         d.upper == std::numeric_limits<int64_t>::max() && d.excluded.empty();
+}
+
 ScalarDomain mergeDomain(const ScalarDomain &a, const ScalarDomain &b) {
   ScalarDomain result;
   result.lower = std::min(a.lower, b.lower);
@@ -189,14 +195,25 @@ ScalarDomain mergeDomain(const ScalarDomain &a, const ScalarDomain &b) {
 
 void mergeDomains(std::map<const Value *, ScalarDomain> &to,
                   const std::map<const Value *, ScalarDomain> &from) {
-  for (auto &entry : to) {
-    auto found = from.find(entry.first);
-    entry.second = mergeDomain(
-        entry.second, found == from.end() ? ScalarDomain{} : found->second);
+  auto itA = to.begin();
+  auto itB = from.begin();
+  while (itA != to.end() && itB != from.end()) {
+    if (itA->first < itB->first) {
+      // Merging with missing entry (= top) produces top, which can be omitted.
+      itA = to.erase(itA);
+    } else if (itB->first < itA->first) {
+      ++itB;
+    } else {
+      itA->second = mergeDomain(itA->second, itB->second);
+      if (isTopDomain(itA->second))
+        itA = to.erase(itA);
+      else
+        ++itA;
+      ++itB;
+    }
   }
-  for (const auto &entry : from)
-    if (!to.count(entry.first))
-      to[entry.first] = mergeDomain(ScalarDomain{}, entry.second);
+  if (itA != to.end())
+    to.erase(itA, to.end());
 }
 
 void mergeCell(Cell &cell, const Cell &other) {
@@ -236,105 +253,146 @@ void mergeState(State &to, const State &from) {
     to = from;
     return;
   }
-  for (auto &entry : to.cells) {
-    auto found = from.cells.find(entry.first);
-    Cell other = found == from.cells.end() ? Cell{} : found->second;
-    mergeCell(entry.second, other);
-  }
-  for (const auto &entry : from.cells)
-    if (!to.cells.count(entry.first)) {
-      Cell cell = entry.second;
-      cell.initialization |= UnknownInit;
-      cell.pointer.bits |= UnknownNull;
-      cell.last_write = nullptr;
-      to.cells.emplace(entry.first, cell);
+  // Sorted two-pointer merges across all std::map fields: O(|A| + |B|) with
+  // emplace_hint instead of O((|A| + |B|) log |A|) tree searches.
+  {
+    auto itA = to.cells.begin();
+    auto itB = from.cells.begin();
+    while (itA != to.cells.end() || itB != from.cells.end()) {
+      if (itB == from.cells.end() ||
+          (itA != to.cells.end() && itA->first < itB->first)) {
+        mergeCell(itA->second, Cell{});
+        ++itA;
+      } else if (itA == to.cells.end() || itB->first < itA->first) {
+        Cell cell = itB->second;
+        cell.initialization |= UnknownInit;
+        cell.pointer.bits |= UnknownNull;
+        cell.last_write = nullptr;
+        to.cells.emplace_hint(itA, itB->first, std::move(cell));
+        ++itB;
+      } else {
+        mergeCell(itA->second, itB->second);
+        ++itA;
+        ++itB;
+      }
     }
-  for (auto &entry : to.pointers) {
-    auto found = from.pointers.find(entry.first);
-    entry.second =
-        mergeFact(entry.second,
-                  found == from.pointers.end() ? NullFact{} : found->second);
   }
-  for (const auto &entry : from.pointers)
-    if (!to.pointers.count(entry.first))
-      to.pointers.emplace(entry.first, mergeFact(NullFact{}, entry.second));
-  for (auto &entry : to.integers) {
-    auto found = from.integers.find(entry.first);
-    if (found == from.integers.end() || found->second != entry.second)
-      entry.second = nullptr;
-  }
-  for (const auto &entry : from.integers)
-    if (!to.integers.count(entry.first))
-      to.integers[entry.first] = nullptr;
-  auto mergeCopies = [](auto &destination, const auto &source) {
-    for (auto &entry : destination) {
-      auto found = source.find(entry.first);
-      if (found == source.end() || found->second != entry.second)
-        entry.second = nullptr;
+  {
+    auto itA = to.pointers.begin();
+    auto itB = from.pointers.begin();
+    while (itA != to.pointers.end() || itB != from.pointers.end()) {
+      if (itB == from.pointers.end() ||
+          (itA != to.pointers.end() && itA->first < itB->first)) {
+        itA->second = mergeFact(itA->second, NullFact{});
+        ++itA;
+      } else if (itA == to.pointers.end() || itB->first < itA->first) {
+        to.pointers.emplace_hint(itA, itB->first,
+                                 mergeFact(NullFact{}, itB->second));
+        ++itB;
+      } else {
+        itA->second = mergeFact(itA->second, itB->second);
+        ++itA;
+        ++itB;
+      }
     }
-    for (const auto &entry : source)
-      if (!destination.count(entry.first))
-        destination[entry.first] = nullptr;
+  }
+  auto mergeNullablePtrMap = [](auto &destination, const auto &source) {
+    auto itA = destination.begin();
+    auto itB = source.begin();
+    while (itA != destination.end() || itB != source.end()) {
+      if (itB == source.end() ||
+          (itA != destination.end() && itA->first < itB->first)) {
+        itA->second = nullptr;
+        ++itA;
+      } else if (itA == destination.end() || itB->first < itA->first) {
+        destination.emplace_hint(itA, itB->first, nullptr);
+        ++itB;
+      } else {
+        if (itA->second != itB->second)
+          itA->second = nullptr;
+        ++itA;
+        ++itB;
+      }
+    }
   };
-  mergeCopies(to.scalar_sources, from.scalar_sources);
-  mergeCopies(to.pointer_copies, from.pointer_copies);
-  for (auto &entry : to.domains) {
-    auto found = from.domains.find(entry.first);
-    entry.second =
-        mergeDomain(entry.second, found == from.domains.end() ? ScalarDomain{}
-                                                              : found->second);
-  }
-  for (const auto &entry : from.domains)
-    if (!to.domains.count(entry.first))
-      to.domains[entry.first] = mergeDomain(ScalarDomain{}, entry.second);
-  for (auto &entry : to.boolean_guards) {
-    auto found = from.boolean_guards.find(entry.first);
-    if (found == from.boolean_guards.end()) {
-      entry.second = {};
-      entry.second.true_possible = entry.second.false_possible = true;
-      continue;
+  mergeNullablePtrMap(to.integers, from.integers);
+  mergeNullablePtrMap(to.scalar_sources, from.scalar_sources);
+  mergeNullablePtrMap(to.pointer_copies, from.pointer_copies);
+  mergeDomains(to.domains, from.domains);
+  {
+    auto itA = to.boolean_guards.begin();
+    auto itB = from.boolean_guards.begin();
+    while (itA != to.boolean_guards.end() || itB != from.boolean_guards.end()) {
+      if (itB == from.boolean_guards.end() ||
+          (itA != to.boolean_guards.end() && itA->first < itB->first)) {
+        itA->second = {};
+        itA->second.true_possible = itA->second.false_possible = true;
+        ++itA;
+      } else if (itA == to.boolean_guards.end() || itB->first < itA->first) {
+        BooleanGuard unknown;
+        unknown.true_possible = unknown.false_possible = true;
+        to.boolean_guards.emplace_hint(itA, itB->first, std::move(unknown));
+        ++itB;
+      } else {
+        const BooleanGuard &other = itB->second;
+        if (itA->second.true_possible && other.true_possible)
+          mergeDomains(itA->second.when_true, other.when_true);
+        else if (other.true_possible)
+          itA->second.when_true = other.when_true;
+        if (itA->second.false_possible && other.false_possible)
+          mergeDomains(itA->second.when_false, other.when_false);
+        else if (other.false_possible)
+          itA->second.when_false = other.when_false;
+        itA->second.true_possible |= other.true_possible;
+        itA->second.false_possible |= other.false_possible;
+        ++itA;
+        ++itB;
+      }
     }
-    const BooleanGuard &other = found->second;
-    if (entry.second.true_possible && other.true_possible)
-      mergeDomains(entry.second.when_true, other.when_true);
-    else if (other.true_possible)
-      entry.second.when_true = other.when_true;
-    if (entry.second.false_possible && other.false_possible)
-      mergeDomains(entry.second.when_false, other.when_false);
-    else if (other.false_possible)
-      entry.second.when_false = other.when_false;
-    entry.second.true_possible |= other.true_possible;
-    entry.second.false_possible |= other.false_possible;
   }
-  for (const auto &entry : from.boolean_guards)
-    if (!to.boolean_guards.count(entry.first)) {
-      BooleanGuard unknown;
-      unknown.true_possible = unknown.false_possible = true;
-      to.boolean_guards[entry.first] = std::move(unknown);
+  {
+    auto itA = to.memory_cells.begin();
+    auto itB = from.memory_cells.begin();
+    while (itA != to.memory_cells.end() || itB != from.memory_cells.end()) {
+      if (itB == from.memory_cells.end() ||
+          (itA != to.memory_cells.end() && itA->first < itB->first)) {
+        Cell other;
+        other.initialization = memoryDefault(from, itA->first);
+        mergeCell(itA->second, other);
+        ++itA;
+      } else if (itA == to.memory_cells.end() || itB->first < itA->first) {
+        Cell cell = itB->second;
+        cell.initialization |= memoryDefault(to, itB->first);
+        to.memory_cells.emplace_hint(itA, itB->first, std::move(cell));
+        ++itB;
+      } else {
+        mergeCell(itA->second, itB->second);
+        ++itA;
+        ++itB;
+      }
     }
-  for (auto &entry : to.memory_cells) {
-    auto found = from.memory_cells.find(entry.first);
-    Cell other;
-    if (found != from.memory_cells.end())
-      other = found->second;
-    else
-      other.initialization = memoryDefault(from, entry.first);
-    mergeCell(entry.second, other);
   }
-  for (const auto &entry : from.memory_cells)
-    if (!to.memory_cells.count(entry.first)) {
-      Cell cell = entry.second;
-      cell.initialization |= memoryDefault(to, entry.first);
-      to.memory_cells.emplace(entry.first, std::move(cell));
+  {
+    auto itA = to.root_initialization.begin();
+    auto itB = from.root_initialization.begin();
+    while (itA != to.root_initialization.end() ||
+           itB != from.root_initialization.end()) {
+      if (itB == from.root_initialization.end() ||
+          (itA != to.root_initialization.end() && itA->first < itB->first)) {
+        itA->second |= UnknownInit;
+        ++itA;
+      } else if (itA == to.root_initialization.end() ||
+                 itB->first < itA->first) {
+        to.root_initialization.emplace_hint(itA, itB->first,
+                                            itB->second | UnknownInit);
+        ++itB;
+      } else {
+        itA->second |= itB->second;
+        ++itA;
+        ++itB;
+      }
     }
-  for (auto &entry : to.root_initialization) {
-    auto found = from.root_initialization.find(entry.first);
-    entry.second |=
-        found == from.root_initialization.end() ? UnknownInit : found->second;
   }
-  for (const auto &entry : from.root_initialization)
-    if (!to.root_initialization.count(entry.first))
-      to.root_initialization[entry.first] = entry.second | UnknownInit;
   std::set<const CallBase *> checked;
   std::set_intersection(to.checked_statuses.begin(), to.checked_statuses.end(),
                         from.checked_statuses.begin(),
@@ -1935,10 +1993,18 @@ FunctionRun analyzeFunction(const Function &function,
                             StateAnalysisResult *result) {
   const DataLayout &layout = function.getParent()->getDataLayout();
   std::map<const BasicBlock *, State> inputs;
-  std::map<const BasicBlock *, State> outputs;
   std::map<std::pair<const BasicBlock *, const BasicBlock *>, State> edges;
-  std::deque<const BasicBlock *> queue;
-  std::set<const BasicBlock *> queued;
+  std::map<const BasicBlock *, unsigned> rpo_order;
+  ReversePostOrderTraversal<const Function *> rpot(&function);
+  unsigned rpo_index = 0;
+  for (const BasicBlock *block : rpot)
+    rpo_order[block] = rpo_index++;
+  std::set<std::pair<unsigned, const BasicBlock *>> worklist;
+  auto scheduleBlock = [&](const BasicBlock *b) {
+    auto it = rpo_order.find(b);
+    unsigned idx = it != rpo_order.end() ? it->second : rpo_index;
+    worklist.emplace(idx, b);
+  };
   State entry;
   entry.reachable = true;
   for (const Argument &argument : function.args())
@@ -1948,8 +2014,7 @@ FunctionRun analyzeFunction(const Function &function,
     else if (argument.getType()->isIntegerTy())
       entry.scalar_sources[&argument] = &argument;
   inputs[&function.getEntryBlock()] = entry;
-  queue.push_back(&function.getEntryBlock());
-  queued.insert(&function.getEntryBlock());
+  scheduleBlock(&function.getEntryBlock());
   const size_t limit = std::max<size_t>(1024, function.size() * 128);
   size_t visits = 0;
   FunctionRun run;
@@ -2033,8 +2098,15 @@ FunctionRun analyzeFunction(const Function &function,
                 bool &possible =
                     truth ? guard.true_possible : guard.false_possible;
                 auto &implied = truth ? guard.when_true : guard.when_false;
+                for (auto it = alternative.domains.begin();
+                     it != alternative.domains.end();) {
+                  if (isTopDomain(it->second))
+                    it = alternative.domains.erase(it);
+                  else
+                    ++it;
+                }
                 if (!possible)
-                  implied = alternative.domains;
+                  implied = std::move(alternative.domains);
                 else
                   mergeDomains(implied, alternative.domains);
                 possible = true;
@@ -2507,76 +2579,89 @@ FunctionRun analyzeFunction(const Function &function,
     return state;
   };
 
-  while (!queue.empty()) {
+  while (!worklist.empty()) {
     if (++visits > limit) {
       run.converged = false;
       break;
     }
-    const BasicBlock *block = queue.front();
-    queue.pop_front();
-    queued.erase(block);
+    const BasicBlock *block = worklist.begin()->second;
+    worklist.erase(worklist.begin());
+    // Compute incoming state once when popped in RPO order (avoids O(in-deg^2)
+    // repeated merges at large switch/CFG join points).
+    State incoming;
+    if (block == &function.getEntryBlock())
+      incoming = entry;
+    SmallPtrSet<const BasicBlock *, 16> seen_preds;
+    for (const BasicBlock *predecessor : predecessors(block)) {
+      if (!seen_preds.insert(predecessor).second)
+        continue;
+      auto edge = edges.find({predecessor, block});
+      if (edge != edges.end())
+        mergeState(incoming, edge->second);
+    }
+    inputs[block] = std::move(incoming);
     State state = transfer(*block, inputs[block], false);
-    outputs[block] = state;
+
+    // Pre-group SwitchInst case values by target block once (avoids O(cases^2)
+    // scans and duplicate successor processing on large switches).
+    const auto *selection = dyn_cast<SwitchInst>(block->getTerminator());
+    DenseMap<const BasicBlock *, SmallVector<int64_t, 4>> switch_cases;
+    const Value *switch_source = nullptr;
+    if (selection) {
+      switch_source = scalarSource(selection->getCondition(), state);
+      for (const auto &case_value : selection->cases())
+        switch_cases[case_value.getCaseSuccessor()].push_back(
+            signedConstant(*case_value.getCaseValue()));
+    }
+
+    SmallPtrSet<const BasicBlock *, 16> seen_succs;
     for (const BasicBlock *successor : successors(block)) {
+      if (!seen_succs.insert(successor).second)
+        continue;
       State edge_state = state;
       if (const auto *branch = dyn_cast<BranchInst>(block->getTerminator()))
         if (branch->isConditional())
           refineCondition(edge_state, branch->getCondition(),
                           branch->getSuccessor(0) == successor, nullable);
-      if (const auto *selection =
-              dyn_cast<SwitchInst>(block->getTerminator())) {
-        bool selected_case = false;
-        ScalarDomain alternatives;
-        alternatives.finite = true;
-        const Value *source =
-            scalarSource(selection->getCondition(), edge_state);
-        for (const auto &case_value : selection->cases())
-          if (case_value.getCaseSuccessor() == successor) {
-            alternatives.values.insert(
-                signedConstant(*case_value.getCaseValue()));
-            selected_case = true;
-          }
-        if (selected_case && source) {
-          ScalarDomain prior = domainFor(source, edge_state);
-          for (auto it = alternatives.values.begin();
-               it != alternatives.values.end();)
-            if (!contains(prior, *it))
-              it = alternatives.values.erase(it);
-            else
-              ++it;
-          edge_state.domains[source] = alternatives;
+      if (selection && switch_source) {
+        auto case_it = switch_cases.find(successor);
+        if (case_it != switch_cases.end()) {
+          ScalarDomain alternatives;
+          alternatives.finite = true;
+          ScalarDomain prior = domainFor(switch_source, edge_state);
+          for (int64_t val : case_it->second)
+            if (contains(prior, val))
+              alternatives.values.insert(val);
           edge_state.reachable &= !alternatives.values.empty();
-          if (const auto *call = dyn_cast<CallBase>(source))
+          if (isTopDomain(alternatives))
+            edge_state.domains.erase(switch_source);
+          else
+            edge_state.domains[switch_source] = std::move(alternatives);
+          if (const auto *call = dyn_cast<CallBase>(switch_source))
             edge_state.checked_statuses.insert(call);
           updateConditionalCells(edge_state);
-        } else if (source) {
-          ScalarDomain domain = domainFor(source, edge_state);
+        } else {
+          ScalarDomain domain = domainFor(switch_source, edge_state);
           for (const auto &case_value : selection->cases())
             domain.excluded.insert(signedConstant(*case_value.getCaseValue()));
-          edge_state.domains[source] = domain;
-          if (const auto *call = dyn_cast<CallBase>(source))
+          if (isTopDomain(domain))
+            edge_state.domains.erase(switch_source);
+          else
+            edge_state.domains[switch_source] = std::move(domain);
+          if (const auto *call = dyn_cast<CallBase>(switch_source))
             edge_state.checked_statuses.insert(call);
           updateConditionalCells(edge_state);
         }
       }
       auto key = std::make_pair(block, successor);
-      if (edges.count(key) && edges[key] == edge_state)
+      auto existing_edge = edges.find(key);
+      if (existing_edge != edges.end() && existing_edge->second == edge_state)
         continue;
-      edges[key] = edge_state;
-      State incoming;
-      if (successor == &function.getEntryBlock())
-        incoming = entry;
-      for (const BasicBlock *predecessor : predecessors(successor)) {
-        auto edge = edges.find({predecessor, successor});
-        if (edge != edges.end())
-          mergeState(incoming, edge->second);
-      }
+      edges[key] = std::move(edge_state);
       // PHIs use individual predecessor-edge states. Their inputs can change
       // even when the merged block state is identical (e.g. a new true/false
       // incoming value), so every changed edge must schedule the successor.
-      inputs[successor] = std::move(incoming);
-      if (queued.insert(successor).second)
-        queue.push_back(successor);
+      scheduleBlock(successor);
     }
   }
   // Emit only after convergence. Transient worklist states are not findings.

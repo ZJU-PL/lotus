@@ -7,6 +7,7 @@
 
 #include <cstdlib>
 #include <set>
+#include <unordered_map>
 
 using namespace llvm;
 namespace pdg {
@@ -21,16 +22,29 @@ struct Name {
 };
 
 Optional<Name> name(const Function &function) {
-  ItaniumPartialDemangler demangler;
-  std::string encoded = function.getName().str();
-  if (demangler.partialDemangle(encoded.c_str()) || !demangler.isFunction())
+  StringRef raw = function.getName();
+  if (!raw.startswith("_Z") && !raw.startswith("___Z"))
     return None;
+  std::string encoded = raw.str();
+  static std::unordered_map<std::string, Optional<Name>> cache;
+  auto cached = cache.find(encoded);
+  if (cached != cache.end())
+    return cached->second;
+  if (cache.size() >= 8192)
+    cache.clear();
+  auto store = [&](Optional<Name> val) -> Optional<Name> {
+    cache.emplace(encoded, val);
+    return val;
+  };
+  ItaniumPartialDemangler demangler;
+  if (demangler.partialDemangle(encoded.c_str()) || !demangler.isFunction())
+    return store(None);
   char *base = demangler.getFunctionBaseName(nullptr, nullptr);
   char *context = demangler.getFunctionDeclContextName(nullptr, nullptr);
   if (!base || !context) {
     std::free(base);
     std::free(context);
-    return None;
+    return store(None);
   }
   Name result{base, context, demangler.isCtorOrDtor() && base[0] != '~',
               demangler.isCtorOrDtor() && base[0] == '~'};
@@ -71,10 +85,10 @@ Optional<Name> name(const Function &function) {
        tag = result.method.find("[abi:")) {
     size_t end = result.method.find(']', tag);
     if (end == std::string::npos)
-      return None;
+      return store(None);
     result.method.erase(tag, end - tag + 1);
   }
-  return result;
+  return store(result);
 }
 
 bool namespacePrefix(StringRef &context) {

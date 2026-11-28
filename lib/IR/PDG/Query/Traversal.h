@@ -21,5 +21,5 @@ TraversalOutcome traverseGraph(ProgramGraph &pdg, const NodeSet &start_nodes,
 PDGQueryResult resultFromTraversal(const NodeSet &criteria_nodes,
                                    const TraversalOutcome &outcome,
                                    PDGQueryDiagnostics diagnostics,
-                                   bool explain);
+                                   bool explain, size_t max_paths = 0);
 } // namespace pdg::query_detail

@@ -24,6 +24,8 @@ std::string pathKey(const PDGWitnessPath &path);
 std::string functionNameForNode(Node *node);
 std::string sourceKeyForNode(Node *node);
 std::string stringifyValue(const llvm::Value *value);
+std::string stringifyValue(const llvm::Value *value,
+                           llvm::ModuleSlotTracker *slot_tracker);
 NodeSet resolvePropertyCriteria(ProgramGraph &pdg, const llvm::Module &module,
                                 const PropertySpec &spec);
 void syncCacheEpoch(

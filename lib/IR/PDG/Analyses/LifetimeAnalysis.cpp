@@ -11,10 +11,11 @@
 #include "IR/PDG/Models/ValueFacts.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <set>
-#include <sstream>
+#include <unordered_set>
 #include <utility>
 
 using namespace llvm;
@@ -142,23 +143,49 @@ bool named(const Function &function, StringRef name) {
          ValueFacts::hasLibraryName(function, name.str(), true);
 }
 
+std::string fastDemangle(StringRef raw) {
+  if (!raw.startswith("_Z") && !raw.startswith("___Z"))
+    return raw.str();
+  return llvm::demangle(raw.str());
+}
+
 Optional<LockModel> lockModel(const CallBase &call) {
   const Function *callee = ValueFacts::callee(call);
   if (!callee)
     return None;
-  for (StringRef name : {"pthread_mutex_lock", "pthread_mutex_trylock",
-                         "mtx_lock", "mtx_trylock"})
-    if (named(*callee, name) && !call.arg_empty()) {
-      LockModel model{Family::Mutex, true};
-      model.try_lock = name.endswith("trylock");
-      return model;
+  if (callee->isDeclaration()) {
+    for (StringRef name : {"pthread_mutex_lock", "pthread_mutex_trylock",
+                           "mtx_lock", "mtx_trylock"})
+      if (ValueFacts::hasLibraryName(*callee, name.str(), true) &&
+          !call.arg_empty()) {
+        LockModel model{Family::Mutex, true};
+        model.try_lock = name.endswith("trylock");
+        return model;
+      }
+    for (StringRef name : {"pthread_mutex_unlock", "mtx_unlock"})
+      if (ValueFacts::hasLibraryName(*callee, name.str(), true) &&
+          !call.arg_empty())
+        return LockModel{Family::Mutex, false};
+    if (ValueFacts::hasLibraryName(*callee, "semTake", true) &&
+        !call.arg_empty())
+      return LockModel{Family::Semaphore, true};
+    if (ValueFacts::hasLibraryName(*callee, "semGive", true) &&
+        !call.arg_empty())
+      return LockModel{Family::Semaphore, false};
+    for (const auto &names :
+         {std::pair<const char *, const char *>{"taskLock", "taskUnlock"},
+          {"intLock", "intUnlock"},
+          {"taskRtpLock", "taskRtpUnlock"}}) {
+      if (ValueFacts::hasLibraryName(*callee, names.first, true))
+        return LockModel{Family::Semaphore, true, -1, names.first};
+      if (ValueFacts::hasLibraryName(*callee, names.second, true))
+        return LockModel{Family::Semaphore, false, -1, names.first};
     }
-  for (StringRef name : {"pthread_mutex_unlock", "mtx_unlock"})
-    if (named(*callee, name) && !call.arg_empty())
-      return LockModel{Family::Mutex, false};
-  const std::string full = llvm::demangle(callee->getName().str());
-  const std::string base = ValueFacts::functionBaseName(*callee);
-  if (!call.arg_empty())
+  }
+  StringRef raw = callee->getName();
+  if (!call.arg_empty() && (raw.startswith("_Z") || raw.startswith("___Z"))) {
+    const std::string full = llvm::demangle(raw.str());
+    const std::string base = ValueFacts::functionBaseName(*callee);
     for (StringRef type :
          {"std::mutex", "std::recursive_mutex", "std::timed_mutex",
           "std::recursive_timed_mutex", "std::__1::mutex",
@@ -175,18 +202,6 @@ Optional<LockModel> lockModel(const CallBase &call) {
         if (base == "unlock")
           return LockModel{Family::Mutex, false};
       }
-  if (named(*callee, "semTake") && !call.arg_empty())
-    return LockModel{Family::Semaphore, true};
-  if (named(*callee, "semGive") && !call.arg_empty())
-    return LockModel{Family::Semaphore, false};
-  for (const auto &names :
-       {std::pair<const char *, const char *>{"taskLock", "taskUnlock"},
-        {"intLock", "intUnlock"},
-        {"taskRtpLock", "taskRtpUnlock"}}) {
-    if (named(*callee, names.first))
-      return LockModel{Family::Semaphore, true, -1, names.first};
-    if (named(*callee, names.second))
-      return LockModel{Family::Semaphore, false, -1, names.first};
   }
   return None;
 }
@@ -240,34 +255,52 @@ bool releases(const CallBase &call, Family family) {
 }
 
 bool reachesRelease(const Function &function, Family family,
-                    std::set<const Function *> &visited) {
+                    std::set<const Function *> &visited,
+                    std::map<std::pair<const Function *, Family>, bool> &memo) {
+  auto cached = memo.find({&function, family});
+  if (cached != memo.end())
+    return cached->second;
   if (!visited.insert(&function).second || function.isDeclaration())
     return false;
   for (const BasicBlock &block : function)
     for (const Instruction &instruction : block)
       if (const auto *call = dyn_cast<CallBase>(&instruction)) {
-        if (releases(*call, family))
+        if (releases(*call, family)) {
+          memo[{&function, family}] = true;
           return true;
+        }
         if (const Function *callee = ValueFacts::callee(*call))
-          if (reachesRelease(*callee, family, visited))
+          if (reachesRelease(*callee, family, visited, memo)) {
+            memo[{&function, family}] = true;
             return true;
+          }
       }
+  if (visited.size() == 1 || &function == *visited.begin())
+    memo[{&function, family}] = false;
   return false;
 }
 
 bool reachesMutexLock(const Function &function,
-                      std::set<const Function *> &visited) {
+                      std::set<const Function *> &visited,
+                      std::map<const Function *, bool> &memo) {
+  auto cached = memo.find(&function);
+  if (cached != memo.end())
+    return cached->second;
   if (!visited.insert(&function).second || function.isDeclaration())
     return false;
   for (const BasicBlock &block : function)
     for (const Instruction &instruction : block)
       if (const auto *call = dyn_cast<CallBase>(&instruction)) {
         if (auto model = lockModel(*call))
-          if (model->family == Family::Mutex && model->acquire)
+          if (model->family == Family::Mutex && model->acquire) {
+            memo[&function] = true;
             return true;
+          }
         if (const Function *callee = ValueFacts::callee(*call))
-          if (reachesMutexLock(*callee, visited))
+          if (reachesMutexLock(*callee, visited, memo)) {
+            memo[&function] = true;
             return true;
+          }
       }
   return false;
 }
@@ -344,6 +377,13 @@ bool invalidateSlots(State &state, const Slot &location,
 const Value *scalarRoot(const Value *value, const State &state) {
   auto found = state.scalar_roots.find(value);
   return found == state.scalar_roots.end() ? value : found->second;
+}
+
+void setScalarRoot(State &state, const Value *key, const Value *root) {
+  if (root == key)
+    state.scalar_roots.erase(key);
+  else
+    state.scalar_roots[key] = root;
 }
 
 const ConstantInt *knownInteger(const Value *value, const State &state) {
@@ -641,62 +681,142 @@ bool assume(State &state, const Value *value, bool truth, Family family) {
   return true;
 }
 
-std::string key(const Work &work) {
-  std::ostringstream out;
-  out << work.block << ':' << work.predecessor << ':' << work.state.acquired
-      << ':' << work.state.released << ':' << work.state.escaped << ':'
-      << work.resume << ':' << work.state.success_checked;
-  for (const ReturnFrame &frame : work.frames)
-    out << 'c' << frame.call << ':' << frame.resume;
-  for (const auto &alias : work.state.aliases)
-    out << 'a' << alias.first << ':' << static_cast<int>(alias.second);
-  for (const auto &slot : work.state.slots)
-    out << 's' << slot.first.base << ':' << slot.first.offset << ':'
-        << static_cast<int>(slot.second);
-  for (const auto &slot : work.state.owners)
-    out << 'u' << slot.first.base << ':' << slot.first.offset << ':'
-        << static_cast<int>(slot.second);
-  for (const auto &entry : work.state.scalar_roots)
-    out << 'r' << entry.first << ':' << entry.second;
-  for (const auto &entry : work.state.scalar_slots)
-    out << 'v' << entry.first.base << ':' << entry.first.offset << ':'
-        << entry.second;
-  for (const auto &entry : work.state.conditions)
-    out << 'c' << entry.first << ':' << entry.second;
-  for (const auto &entry : work.state.integer_equal)
-    out << 'e' << entry.first << ':' << entry.second;
-  for (const auto &entry : work.state.integer_excluded) {
-    out << 'n' << entry.first;
-    for (const auto *constant : entry.second)
-      out << ':' << constant;
+struct WorkKey {
+  std::vector<uint64_t> words;
+  size_t hash = 0;
+
+  bool operator==(const WorkKey &other) const {
+    return hash == other.hash && words == other.words;
   }
-  for (const auto &entry : work.state.comparisons)
-    out << 'p' << entry.first.left << ':' << entry.first.right << ':'
-        << entry.first.predicate << ':' << entry.second;
+};
+
+struct WorkKeyHash {
+  size_t operator()(const WorkKey &k) const noexcept { return k.hash; }
+};
+
+WorkKey key(const Work &work) {
+  WorkKey k;
+  auto &w = k.words;
+  w.reserve(64);
+  auto ptr = [&](const void *p) {
+    w.push_back(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p)));
+  };
+  auto num = [&](uint64_t v) { w.push_back(v); };
+
+  ptr(work.block);
+  ptr(work.predecessor);
+  ptr(work.state.released);
+  ptr(work.resume);
+  uint64_t flags = (work.state.acquired ? 1u : 0u) |
+                   (work.state.escaped ? 2u : 0u) |
+                   (work.state.success_checked ? 4u : 0u) |
+                   (work.state.jpl_unmatched ? 8u : 0u) |
+                   (work.state.acquired_lock ? 16u : 0u);
+  num(flags);
+  if (work.state.acquired_lock) {
+    ptr(work.state.acquired_lock->base);
+    num(static_cast<uint64_t>(work.state.acquired_lock->offset));
+  }
+  num(work.frames.size());
+  for (const ReturnFrame &frame : work.frames) {
+    ptr(frame.call);
+    ptr(frame.resume);
+  }
+  num(work.state.aliases.size());
+  for (const auto &alias : work.state.aliases) {
+    ptr(alias.first);
+    num(static_cast<uint64_t>(alias.second));
+  }
+  num(work.state.slots.size());
+  for (const auto &slot : work.state.slots) {
+    ptr(slot.first.base);
+    num(static_cast<uint64_t>(slot.first.offset));
+    num(static_cast<uint64_t>(slot.second));
+  }
+  num(work.state.owners.size());
+  for (const auto &slot : work.state.owners) {
+    ptr(slot.first.base);
+    num(static_cast<uint64_t>(slot.first.offset));
+    num(static_cast<uint64_t>(slot.second));
+  }
+  num(work.state.scalar_roots.size());
+  for (const auto &entry : work.state.scalar_roots) {
+    ptr(entry.first);
+    ptr(entry.second);
+  }
+  num(work.state.scalar_slots.size());
+  for (const auto &entry : work.state.scalar_slots) {
+    ptr(entry.first.base);
+    num(static_cast<uint64_t>(entry.first.offset));
+    ptr(entry.second);
+  }
+  num(work.state.conditions.size());
+  for (const auto &entry : work.state.conditions) {
+    ptr(entry.first);
+    num(entry.second ? 1u : 0u);
+  }
+  num(work.state.integer_equal.size());
+  for (const auto &entry : work.state.integer_equal) {
+    ptr(entry.first);
+    ptr(entry.second);
+  }
+  num(work.state.integer_excluded.size());
+  for (const auto &entry : work.state.integer_excluded) {
+    ptr(entry.first);
+    num(entry.second.size());
+    for (const auto *constant : entry.second)
+      ptr(constant);
+  }
+  num(work.state.comparisons.size());
+  for (const auto &entry : work.state.comparisons) {
+    ptr(entry.first.left);
+    ptr(entry.first.right);
+    num((static_cast<uint64_t>(entry.first.predicate) << 1) |
+        (entry.second ? 1u : 0u));
+  }
+  num(work.state.escaped_locals.size());
   for (const AllocaInst *local : work.state.escaped_locals)
-    out << 'l' << local;
+    ptr(local);
+  num(work.state.published_pointers.size());
   for (const Value *published : work.state.published_pointers)
-    out << 'p' << published;
+    ptr(published);
+  num(work.state.nonnull_values.size());
   for (const Value *value : work.state.nonnull_values)
-    out << 'v' << value;
-  for (const auto &failure : work.state.failed_realloc_slots)
-    out << 'f' << failure.first << ':' << failure.second.base << ':'
-        << failure.second.offset;
+    ptr(value);
+  num(work.state.failed_realloc_slots.size());
+  for (const auto &failure : work.state.failed_realloc_slots) {
+    ptr(failure.first);
+    ptr(failure.second.base);
+    num(static_cast<uint64_t>(failure.second.offset));
+  }
+  num(work.state.overwritten_reallocs.size());
   for (const CallBase *call : work.state.overwritten_reallocs)
-    out << 'o' << call;
-  for (const auto &value : work.state.failed_results)
-    out << 'a' << value.first << ':' << value.second;
-  for (const auto &slot : work.state.failed_result_slots)
-    out << 'b' << slot.first.base << ':' << slot.first.offset << ':'
-        << slot.second;
-  for (const auto &count : work.state.lock_counts)
-    out << 'k' << count.first.base << ':' << count.first.offset << ':'
-        << count.second;
-  if (work.state.acquired_lock)
-    out << 'm' << work.state.acquired_lock->base << ':'
-        << work.state.acquired_lock->offset;
-  out << 'j' << work.state.jpl_unmatched;
-  return out.str();
+    ptr(call);
+  num(work.state.failed_results.size());
+  for (const auto &value : work.state.failed_results) {
+    ptr(value.first);
+    ptr(value.second);
+  }
+  num(work.state.failed_result_slots.size());
+  for (const auto &slot : work.state.failed_result_slots) {
+    ptr(slot.first.base);
+    num(static_cast<uint64_t>(slot.first.offset));
+    ptr(slot.second);
+  }
+  num(work.state.lock_counts.size());
+  for (const auto &count : work.state.lock_counts) {
+    ptr(count.first.base);
+    num(static_cast<uint64_t>(count.first.offset));
+    num(static_cast<uint64_t>(count.second));
+  }
+
+  uint64_t h = 14695981039346656037ULL;
+  for (uint64_t word : w) {
+    h ^= word;
+    h *= 1099511628211ULL;
+  }
+  k.hash = static_cast<size_t>(h);
+  return k;
 }
 
 bool dereferences(const CallBase &call, unsigned argument) {
@@ -1033,7 +1153,7 @@ struct Explorer {
           id = found->second;
         auto scalar = state.scalar_slots.find(*slot);
         if (scalar != state.scalar_slots.end())
-          state.scalar_roots[load] = scalar->second;
+          setScalarRoot(state, load, scalar->second);
         else
           state.scalar_roots.erase(load);
         auto failed = state.failed_result_slots.find(*slot);
@@ -1073,12 +1193,16 @@ struct Explorer {
             escapeLocal(stored_address, state);
         }
       } else if (id != Identity::None) {
-        if (store->getValueOperand()->getType()->isPointerTy())
+        if ((object.family == Family::Mutex ||
+             object.family == Family::Semaphore) &&
+            store->getValueOperand()->getType()->isPointerTy())
           state.published_pointers.insert(
               lockLocation(store->getValueOperand(), layout, state).base);
         escape(state);
       } else {
-        if (store->getValueOperand()->getType()->isPointerTy())
+        if ((object.family == Family::Mutex ||
+             object.family == Family::Semaphore) &&
+            store->getValueOperand()->getType()->isPointerTy())
           state.published_pointers.insert(
               lockLocation(store->getValueOperand(), layout, state).base);
         if (const AllocaInst *stored_address =
@@ -1133,36 +1257,41 @@ struct Explorer {
         return true;
       if (object.family == Family::Memory && !call->arg_empty()) {
         const Function *target = ValueFacts::callee(*call);
-        const std::string full =
-            target ? llvm::demangle(target->getName().str()) : "";
-        const bool unique =
-            (StringRef(full).startswith("std::unique_ptr<") ||
-             StringRef(full).startswith("std::__1::unique_ptr<")) &&
-            (StringRef(full).contains("std::default_delete<") ||
-             StringRef(full).contains("std::__1::default_delete<"));
-        auto owner = localSlot(call->getArgOperand(0), layout, state);
-        if (unique && target->isDeclaration() && owner) {
-          const std::string method = ValueFacts::functionBaseName(*target);
-          if (method == "unique_ptr" && call->arg_size() == 2 &&
-              !StringRef(full).contains("&&")) {
-            state.owners[*owner] = valueIdentity(call->getArgOperand(1), state);
-            return true;
-          }
-          if (method == "~unique_ptr" || method == "reset") {
-            if (state.owners[*owner] == Identity::Base)
-              release(call, state);
-            state.owners[*owner] =
-                method == "reset" && call->arg_size() == 2
-                    ? valueIdentity(call->getArgOperand(1), state)
-                    : Identity::None;
-            return true;
-          }
-          if ((method == "get" || method == "release") &&
-              call->getType()->isPointerTy()) {
-            bind(state, call, state.owners[*owner]);
-            if (method == "release")
-              state.owners[*owner] = Identity::None;
-            return true;
+        if (target && target->isDeclaration() &&
+            (target->getName().startswith("_Z") ||
+             target->getName().startswith("___Z"))) {
+          const std::string full = fastDemangle(target->getName());
+          const bool unique =
+              (StringRef(full).startswith("std::unique_ptr<") ||
+               StringRef(full).startswith("std::__1::unique_ptr<")) &&
+              (StringRef(full).contains("std::default_delete<") ||
+               StringRef(full).contains("std::__1::default_delete<"));
+          auto owner =
+              unique ? localSlot(call->getArgOperand(0), layout, state) : None;
+          if (unique && owner) {
+            const std::string method = ValueFacts::functionBaseName(*target);
+            if (method == "unique_ptr" && call->arg_size() == 2 &&
+                !StringRef(full).contains("&&")) {
+              state.owners[*owner] =
+                  valueIdentity(call->getArgOperand(1), state);
+              return true;
+            }
+            if (method == "~unique_ptr" || method == "reset") {
+              if (state.owners[*owner] == Identity::Base)
+                release(call, state);
+              state.owners[*owner] =
+                  method == "reset" && call->arg_size() == 2
+                      ? valueIdentity(call->getArgOperand(1), state)
+                      : Identity::None;
+              return true;
+            }
+            if ((method == "get" || method == "release") &&
+                call->getType()->isPointerTy()) {
+              bind(state, call, state.owners[*owner]);
+              if (method == "release")
+                state.owners[*owner] = Identity::None;
+              return true;
+            }
           }
         }
       }
@@ -1174,7 +1303,9 @@ struct Explorer {
             use(call->getArgOperand(mutex->argument), instruction, state);
             return true;
           }
-      invalidateLocks(*call, state);
+      if (object.family == Family::Mutex ||
+          object.family == Family::Semaphore)
+        invalidateLocks(*call, state);
       if (object.family == Family::Descriptor && state.released)
         if (auto acquired = acquireFamily(*call))
           if (*acquired == Family::Descriptor)
@@ -1232,7 +1363,7 @@ struct Explorer {
       if (cast->getOpcode() == Instruction::BitCast ||
           cast->getOpcode() == Instruction::AddrSpaceCast) {
         bind(state, cast, valueIdentity(cast->getOperand(0), state));
-        state.scalar_roots[cast] = scalarRoot(cast->getOperand(0), state);
+        setScalarRoot(state, cast, scalarRoot(cast->getOperand(0), state));
         if (const CallBase *failed = failedResult(cast->getOperand(0), state))
           state.failed_results[cast] = failed;
         else
@@ -1276,7 +1407,7 @@ struct Explorer {
     }
     std::deque<Work> queue;
     queue.push_back({&function.getEntryBlock(), nullptr, std::move(initial)});
-    std::set<std::string> seen;
+    std::unordered_set<WorkKey, WorkKeyHash> seen;
     while (!queue.empty()) {
       Work work = std::move(queue.front());
       queue.pop_front();
@@ -1291,18 +1422,26 @@ struct Explorer {
       State &state = work.state;
       current_call = work.frames.empty() ? nullptr : work.frames.front().call;
       // LLVM phi operands are selected simultaneously on the incoming edge.
-      State incoming = state;
-      for (const PHINode &phi : work.block->phis()) {
-        if (work.resume)
-          break;
-        int index =
-            work.predecessor ? phi.getBasicBlockIndex(work.predecessor) : -1;
-        bind(state, &phi,
-             index < 0 ? Identity::None
-                       : valueIdentity(phi.getIncomingValue(index), incoming));
-        if (index >= 0)
-          state.scalar_roots[&phi] =
-              scalarRoot(phi.getIncomingValue(index), incoming);
+      if (!work.resume && !work.block->phis().empty()) {
+        SmallVector<std::tuple<const PHINode *, Identity, bool, const Value *>,
+                    4>
+            phi_updates;
+        for (const PHINode &phi : work.block->phis()) {
+          int index =
+              work.predecessor ? phi.getBasicBlockIndex(work.predecessor) : -1;
+          Identity id =
+              index < 0 ? Identity::None
+                        : valueIdentity(phi.getIncomingValue(index), state);
+          const Value *root =
+              index >= 0 ? scalarRoot(phi.getIncomingValue(index), state)
+                         : nullptr;
+          phi_updates.push_back({&phi, id, index >= 0, root});
+        }
+        for (const auto &entry : phi_updates) {
+          bind(state, std::get<0>(entry), std::get<1>(entry));
+          if (std::get<2>(entry))
+            setScalarRoot(state, std::get<0>(entry), std::get<3>(entry));
+        }
       }
       bool alive = true;
       bool started = work.resume == nullptr;
@@ -1341,7 +1480,7 @@ struct Explorer {
                 // pthread/mtx mutex attributes may permit recursion, so they
                 // need an attribute model before making the same conclusion.
                 const std::string name =
-                    callee ? llvm::demangle(callee->getName().str()) : "";
+                    callee ? fastDemangle(callee->getName()) : "";
                 if (model->family == Family::Mutex && !state.escaped &&
                     !model->try_lock && !model->recursive &&
                     StringRef(name).startswith("std::") &&
@@ -1442,7 +1581,7 @@ struct Explorer {
                 returned = call->getArgOperand(argument->getArgNo());
               bind(state, call, valueIdentity(returned, state));
               if (returned)
-                state.scalar_roots[call] = scalarRoot(returned, state);
+                setScalarRoot(state, call, scalarRoot(returned, state));
               ++result.matched_calls;
               continue;
             }
@@ -1481,37 +1620,50 @@ struct Explorer {
                   it = state.failed_result_slots.erase(it);
                 else
                   ++it;
-              auto reset_value = [&](const Value *value) {
-                state.aliases.erase(value);
-                state.scalar_roots.erase(value);
-                state.conditions.erase(value);
-                state.integer_equal.erase(value);
-                state.integer_excluded.erase(value);
-                state.nonnull_values.erase(value);
-                state.failed_results.erase(value);
-                for (auto it = state.comparisons.begin();
-                     it != state.comparisons.end();)
-                  if (it->first.left == value || it->first.right == value)
-                    it = state.comparisons.erase(it);
+              auto belongs_to_callee = [&](const Value *v) {
+                if (const auto *inst = dyn_cast_or_null<Instruction>(v))
+                  return inst->getFunction() == callee;
+                if (const auto *arg = dyn_cast_or_null<Argument>(v))
+                  return arg->getParent() == callee;
+                return false;
+              };
+              auto erase_callee_entries = [&](auto &map) {
+                for (auto it = map.begin(); it != map.end();)
+                  if (belongs_to_callee(it->first))
+                    it = map.erase(it);
                   else
                     ++it;
               };
-              for (const Argument &formal : callee->args())
-                reset_value(&formal);
-              for (const BasicBlock &block : *callee)
-                for (const Instruction &instruction : block)
-                  reset_value(&instruction);
+              erase_callee_entries(state.aliases);
+              erase_callee_entries(state.scalar_roots);
+              erase_callee_entries(state.conditions);
+              erase_callee_entries(state.integer_equal);
+              erase_callee_entries(state.integer_excluded);
+              erase_callee_entries(state.failed_results);
+              for (auto it = state.nonnull_values.begin();
+                   it != state.nonnull_values.end();)
+                if (belongs_to_callee(*it))
+                  it = state.nonnull_values.erase(it);
+                else
+                  ++it;
+              for (auto it = state.comparisons.begin();
+                   it != state.comparisons.end();)
+                if (belongs_to_callee(it->first.left) ||
+                    belongs_to_callee(it->first.right))
+                  it = state.comparisons.erase(it);
+                else
+                  ++it;
               for (const Argument &formal : callee->args()) {
                 const Value *actual = call->getArgOperand(formal.getArgNo());
                 bind(state, &formal, valueIdentity(actual, state));
-                state.scalar_roots[&formal] = scalarRoot(actual, state);
+                setScalarRoot(state, &formal, scalarRoot(actual, state));
               }
-              auto frames = work.frames;
+              auto frames = std::move(work.frames);
               frames.push_back(
                   {call, work.block, work.predecessor, call->getNextNode()});
               ++result.matched_calls;
-              queue.push_back({&callee->getEntryBlock(), nullptr, state,
-                               nullptr, std::move(frames)});
+              queue.push_back({&callee->getEntryBlock(), nullptr,
+                               std::move(state), nullptr, std::move(frames)});
               alive = false;
               break;
             }
@@ -1603,16 +1755,17 @@ struct Explorer {
       const Instruction *terminator = work.block->getTerminator();
       if (const auto *branch = dyn_cast<BranchInst>(terminator)) {
         if (!branch->isConditional()) {
-          queue.push_back({branch->getSuccessor(0), work.block, state, nullptr,
-                           work.frames});
+          queue.push_back({branch->getSuccessor(0), work.block,
+                           std::move(state), nullptr, std::move(work.frames)});
         } else {
-          for (unsigned index = 0; index < 2; ++index) {
-            State alternative = state;
-            if (assume(alternative, branch->getCondition(), index == 0,
-                       object.family))
-              queue.push_back({branch->getSuccessor(index), work.block,
-                               std::move(alternative), nullptr, work.frames});
-          }
+          State true_state = state;
+          if (assume(true_state, branch->getCondition(), true, object.family))
+            queue.push_back({branch->getSuccessor(0), work.block,
+                             std::move(true_state), nullptr, work.frames});
+          if (assume(state, branch->getCondition(), false, object.family))
+            queue.push_back({branch->getSuccessor(1), work.block,
+                             std::move(state), nullptr,
+                             std::move(work.frames)});
         }
       } else if (const auto *dispatch = dyn_cast<SwitchInst>(terminator)) {
         State fallback = state;
@@ -1628,10 +1781,18 @@ struct Explorer {
         }
         if (default_possible)
           queue.push_back({dispatch->getDefaultDest(), work.block,
-                           std::move(fallback), nullptr, work.frames});
+                           std::move(fallback), nullptr,
+                           std::move(work.frames)});
       } else {
-        for (const BasicBlock *successor : successors(work.block))
-          queue.push_back({successor, work.block, state, nullptr, work.frames});
+        SmallVector<const BasicBlock *, 4> succs(successors(work.block));
+        for (size_t idx = 0; idx < succs.size(); ++idx) {
+          if (idx + 1 == succs.size())
+            queue.push_back({succs[idx], work.block, std::move(state), nullptr,
+                             std::move(work.frames)});
+          else
+            queue.push_back(
+                {succs[idx], work.block, state, nullptr, work.frames});
+        }
       }
     }
     if (incomplete) {
@@ -1768,6 +1929,8 @@ LifetimeAnalysisResult LifetimeAnalysis::analyze(const Module &module,
                                            size_t max_states_per_object) const {
   LifetimeAnalysisResult result;
   SummaryCache summaries;
+  std::map<std::pair<const Function *, Family>, bool> release_memo;
+  std::map<const Function *, bool> mutex_memo;
   for (const Function &function : module) {
     if (function.isDeclaration())
       continue;
@@ -1796,16 +1959,27 @@ LifetimeAnalysisResult LifetimeAnalysis::analyze(const Module &module,
       }
     if (!has_memory_release) {
       std::set<const Function *> visited;
-      has_memory_release = reachesRelease(function, Family::Memory, visited);
+      has_memory_release =
+          reachesRelease(function, Family::Memory, visited, release_memo);
+      if (!has_memory_release)
+        for (const Function *v : visited)
+          release_memo[{v, Family::Memory}] = false;
     }
     if (!has_file_release) {
       std::set<const Function *> visited;
-      has_file_release = reachesRelease(function, Family::File, visited);
+      has_file_release =
+          reachesRelease(function, Family::File, visited, release_memo);
+      if (!has_file_release)
+        for (const Function *v : visited)
+          release_memo[{v, Family::File}] = false;
     }
     if (!has_descriptor_release) {
       std::set<const Function *> visited;
       has_descriptor_release =
-          reachesRelease(function, Family::Descriptor, visited);
+          reachesRelease(function, Family::Descriptor, visited, release_memo);
+      if (!has_descriptor_release)
+        for (const Function *v : visited)
+          release_memo[{v, Family::Descriptor}] = false;
     }
     // External parameters matter for flow-after-free rules, but never for
     // acquisition leaks. Avoid exploring every ordinary pointer argument.
@@ -1824,7 +1998,11 @@ LifetimeAnalysisResult LifetimeAnalysis::analyze(const Module &module,
           return object.family == Family::Mutex;
         })) {
       std::set<const Function *> visited;
-      if (reachesMutexLock(function, visited))
+      bool reaches_lock = reachesMutexLock(function, visited, mutex_memo);
+      if (!reaches_lock)
+        for (const Function *v : visited)
+          mutex_memo[v] = false;
+      if (reaches_lock)
         // A caller with only wrapper acquisitions still carries lock counts
         // through matched calls. It has no synthetic acquisition finding;
         // concrete blocking sites in the callee retain the source identity.

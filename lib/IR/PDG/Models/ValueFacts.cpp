@@ -14,10 +14,56 @@
 
 #include <cstdlib>
 #include <functional>
+#include <unordered_map>
 
 using namespace llvm;
 
 namespace pdg {
+
+namespace {
+bool isItaniumMangledName(StringRef name) {
+  return name.startswith("_Z") || name.startswith("___Z");
+}
+
+struct DemangledFuncName {
+  bool valid = false;
+  std::string base;
+  std::string context;
+};
+
+const DemangledFuncName &cachedDemangleFunc(const std::string &mangled) {
+  static std::unordered_map<std::string, DemangledFuncName> cache;
+  auto it = cache.find(mangled);
+  if (it != cache.end())
+    return it->second;
+  if (cache.size() >= 8192)
+    cache.clear();
+  DemangledFuncName entry;
+  ItaniumPartialDemangler demangler;
+  if (!demangler.partialDemangle(mangled.c_str()) && demangler.isFunction()) {
+    char *base = demangler.getFunctionBaseName(nullptr, nullptr);
+    char *context = demangler.getFunctionDeclContextName(nullptr, nullptr);
+    if (base && context) {
+      entry.valid = true;
+      entry.base = base;
+      entry.context = context;
+    }
+    std::free(base);
+    std::free(context);
+  }
+  return cache.emplace(mangled, std::move(entry)).first->second;
+}
+
+bool functionHasMatchingStoreType(const Function &function, const Type *ty) {
+  for (const BasicBlock &block : function)
+    for (const Instruction &inst : block)
+      if (const auto *store = dyn_cast<StoreInst>(&inst))
+        if (!store->isAtomic() && !store->isVolatile() &&
+            store->getValueOperand()->getType() == ty)
+          return true;
+  return false;
+}
+} // namespace
 
 const Function *ValueFacts::callee(const CallBase &call) {
   const Value *operand = call.getCalledOperand()->stripPointerCastsAndAliases();
@@ -39,7 +85,9 @@ const Function *ValueFacts::callee(const CallBase &call) {
         if (const auto *global = dyn_cast<GlobalVariable>(address)) {
           if (global->isConstant() && global->hasDefinitiveInitializer())
             result = resolve(global->getInitializer(), depth - 1);
-        } else if (load->getFunction() == call.getFunction()) {
+        } else if (load->getFunction() == call.getFunction() &&
+                   functionHasMatchingStoreType(*call.getFunction(),
+                                                load->getType())) {
           if (!facts)
             facts = std::make_unique<FunctionFacts>(
                 *const_cast<Function *>(call.getFunction()));
@@ -252,29 +300,22 @@ bool ValueFacts::hasLibraryName(const Function &function,
   const std::string mangled = canonicalSymbolName(function);
   if (mangled == name)
     return true;
-  ItaniumPartialDemangler demangler;
-  if (demangler.partialDemangle(mangled.c_str()) || !demangler.isFunction())
+  if (!isItaniumMangledName(mangled))
     return false;
-  char *base = demangler.getFunctionBaseName(nullptr, nullptr);
-  char *context = demangler.getFunctionDeclContextName(nullptr, nullptr);
-  bool match = base && context && name == base &&
-               (StringRef(context).empty() ||
-                (allow_std && StringRef(context) == "std") ||
-                (allow_bsl && StringRef(context) == "bsl"));
-  std::free(base);
-  std::free(context);
-  return match;
+  const auto &info = cachedDemangleFunc(mangled);
+  if (!info.valid)
+    return false;
+  return info.base == name &&
+         (info.context.empty() || (allow_std && info.context == "std") ||
+          (allow_bsl && info.context == "bsl"));
 }
 
 std::string ValueFacts::functionBaseName(const Function &function) {
-  ItaniumPartialDemangler demangler;
   const std::string mangled = canonicalSymbolName(function);
-  if (demangler.partialDemangle(mangled.c_str()) || !demangler.isFunction())
+  if (!isItaniumMangledName(mangled))
     return mangled;
-  char *base = demangler.getFunctionBaseName(nullptr, nullptr);
-  std::string name = base ? base : function.getName().str();
-  std::free(base);
-  return name;
+  const auto &info = cachedDemangleFunc(mangled);
+  return info.valid ? info.base : mangled;
 }
 
 Optional<std::string> ValueFacts::constantString(const Value &value) {

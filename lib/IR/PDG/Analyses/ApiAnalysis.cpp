@@ -1,5 +1,7 @@
 #include "IR/PDG/Analyses/ApiAnalysis.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/AssumptionCache.h"
@@ -30,6 +32,12 @@ using namespace llvm;
 namespace pdg {
 namespace {
 
+std::string fastDemangle(StringRef raw) {
+  if (!raw.startswith("_Z") && !raw.startswith("___Z"))
+    return raw.str();
+  return demangle(raw.str());
+}
+
 std::string name(const CallBase &call) {
   const Function *f = ValueFacts::callee(call);
   return f ? ValueFacts::functionBaseName(*f) : std::string();
@@ -37,7 +45,7 @@ std::string name(const CallBase &call) {
 
 std::string qualifiedName(const CallBase &call) {
   const Function *f = ValueFacts::callee(call);
-  return f ? demangle(f->getName().str()) : std::string();
+  return f ? fastDemangle(f->getName()) : std::string();
 }
 
 bool globalCall(const CallBase &call, StringRef expected) {
@@ -45,13 +53,15 @@ bool globalCall(const CallBase &call, StringRef expected) {
   return f && ValueFacts::hasLibraryName(*f, expected.str(), true);
 }
 
+struct Engine;
+
 // MemorySSA gives a unique reaching definition, rather than looking for a
 // convenient earlier store. Unknown calls and overlapping writes prevent
 // propagation through mutable memory.
 class Facts {
 public:
-  explicit Facts(const Function &function)
-      : function_(const_cast<Function &>(function)),
+  Facts(const Function &function, Engine &engine)
+      : function_(const_cast<Function &>(function)), engine_(engine),
         tli_impl_(Triple(function.getParent()->getTargetTriple())),
         tli_(tli_impl_), assumptions_(function_), dominators_(function_),
         basic_aa_(function.getParent()->getDataLayout(), function_, tli_,
@@ -61,194 +71,8 @@ public:
     memory_ = std::make_unique<MemorySSA>(function_, &aliases_, &dominators_);
   }
 
-  const Value *resolve(const Value *v, unsigned depth = 0) const {
-    if (!v || depth > 24)
-      return v;
-    if (const auto *cast = dyn_cast<CastInst>(v)) {
-      if (cast->isNoopCast(function_.getParent()->getDataLayout()) ||
-          cast->getOpcode() == Instruction::BitCast)
-        return resolve(cast->getOperand(0), depth + 1);
-    }
-    if (const auto *gep = dyn_cast<GEPOperator>(v)) {
-      if (gep->hasAllZeroIndices())
-        return resolve(gep->getPointerOperand(), depth + 1);
-    }
-    if (const auto *load = dyn_cast<LoadInst>(v)) {
-      if (load->isVolatile() || load->isAtomic())
-        return v;
-      const auto *access =
-          memory_->getWalker()->getClobberingMemoryAccess(load);
-      const auto *def = dyn_cast_or_null<MemoryDef>(access);
-      const auto *store =
-          def ? dyn_cast_or_null<StoreInst>(def->getMemoryInst()) : nullptr;
-      if (store && !store->isVolatile() && !store->isAtomic() &&
-          store->getValueOperand()->getType() == load->getType() &&
-          dominators_.dominates(store, load) &&
-          aliases_.alias(MemoryLocation::get(store),
-                         MemoryLocation::get(load)) == AliasResult::MustAlias)
-        return resolve(store->getValueOperand(), depth + 1);
-      const auto *global = dyn_cast<GlobalVariable>(
-          load->getPointerOperand()->stripPointerCasts());
-      if (global && global->isConstant() && global->hasInitializer())
-        return resolve(global->getInitializer(), depth + 1);
-    }
-    if (const auto *select = dyn_cast<SelectInst>(v)) {
-      if (auto c = integer(select->getCondition(), depth + 1))
-        return resolve(c->isZero() ? select->getFalseValue()
-                                   : select->getTrueValue(),
-                       depth + 1);
-      const Value *a = resolve(select->getTrueValue(), depth + 1);
-      if (a == resolve(select->getFalseValue(), depth + 1))
-        return a;
-    }
-    if (const auto *phi = dyn_cast<PHINode>(v)) {
-      const Value *result = nullptr;
-      for (const Value *incoming : phi->incoming_values()) {
-        if (incoming == v)
-          continue;
-        const Value *item = resolve(incoming, depth + 1);
-        if (result && result != item)
-          return v;
-        result = item;
-      }
-      if (result)
-        return result;
-    }
-    if (const auto *call = dyn_cast<CallBase>(v)) {
-      const Function *target = ValueFacts::callee(*call);
-      if (target && !target->isDeclaration() && target != &function_) {
-        const Value *result = nullptr;
-        Facts nested(*target);
-        for (const Instruction &inst : instructions(target)) {
-          const auto *ret = dyn_cast<ReturnInst>(&inst);
-          if (!ret || !ret->getReturnValue())
-            continue;
-          const Value *item = nested.resolve(ret->getReturnValue(), depth + 1);
-          if (const auto *arg = dyn_cast<Argument>(item)) {
-            if (arg->getArgNo() >= call->arg_size())
-              return v;
-            item = resolve(call->getArgOperand(arg->getArgNo()), depth + 1);
-          } else if (!isa<Constant>(item)) {
-            return v;
-          }
-          if (result && result != item)
-            return v;
-          result = item;
-        }
-        if (result)
-          return result;
-      }
-    }
-    return v;
-  }
-
-  Optional<APInt> integer(const Value *v, unsigned depth = 0) const {
-    if (!v || depth > 24)
-      return None;
-    const Value *r = resolve(v, depth + 1);
-    if (const auto *constant = dyn_cast<ConstantInt>(r))
-      return constant->getValue();
-    if (const auto *cast = dyn_cast<CastInst>(r)) {
-      auto value = integer(cast->getOperand(0), depth + 1);
-      if (!value || !cast->getType()->isIntegerTy())
-        return None;
-      unsigned width = cast->getType()->getIntegerBitWidth();
-      return cast->getOpcode() == Instruction::SExt ? value->sextOrTrunc(width)
-                                                    : value->zextOrTrunc(width);
-    }
-    if (const auto *cmp = dyn_cast<ICmpInst>(r)) {
-      auto a = integer(cmp->getOperand(0), depth + 1);
-      auto b = integer(cmp->getOperand(1), depth + 1);
-      if (!a || !b || a->getBitWidth() != b->getBitWidth())
-        return None;
-      bool result;
-      switch (cmp->getPredicate()) {
-      case ICmpInst::ICMP_EQ:
-        result = *a == *b;
-        break;
-      case ICmpInst::ICMP_NE:
-        result = *a != *b;
-        break;
-      case ICmpInst::ICMP_ULT:
-        result = a->ult(*b);
-        break;
-      case ICmpInst::ICMP_ULE:
-        result = a->ule(*b);
-        break;
-      case ICmpInst::ICMP_UGT:
-        result = a->ugt(*b);
-        break;
-      case ICmpInst::ICMP_UGE:
-        result = a->uge(*b);
-        break;
-      case ICmpInst::ICMP_SLT:
-        result = a->slt(*b);
-        break;
-      case ICmpInst::ICMP_SLE:
-        result = a->sle(*b);
-        break;
-      case ICmpInst::ICMP_SGT:
-        result = a->sgt(*b);
-        break;
-      case ICmpInst::ICMP_SGE:
-        result = a->sge(*b);
-        break;
-      default:
-        return None;
-      }
-      return APInt(1, result);
-    }
-    if (const auto *op = dyn_cast<BinaryOperator>(r)) {
-      auto a = integer(op->getOperand(0), depth + 1);
-      auto b = integer(op->getOperand(1), depth + 1);
-      if (!a || !b || a->getBitWidth() != b->getBitWidth())
-        return None;
-      switch (op->getOpcode()) {
-      case Instruction::Add:
-        return *a + *b;
-      case Instruction::Sub:
-        return *a - *b;
-      case Instruction::Mul:
-        return *a * *b;
-      case Instruction::Or:
-        return *a | *b;
-      case Instruction::And:
-        return *a & *b;
-      case Instruction::Xor:
-        return *a ^ *b;
-      default:
-        return None;
-      }
-    }
-    if (const auto *call = dyn_cast<CallBase>(r)) {
-      const Function *target = ValueFacts::callee(*call);
-      if (target && !target->isDeclaration() && target != &function_) {
-        Optional<APInt> result;
-        bool returned = false;
-        for (const Instruction &inst : instructions(target)) {
-          const auto *ret = dyn_cast<ReturnInst>(&inst);
-          if (!ret || !ret->getReturnValue())
-            continue;
-          const Value *value = ret->getReturnValue();
-          Facts nested(*target);
-          value = nested.resolve(value);
-          Optional<APInt> item;
-          if (const auto *arg = dyn_cast<Argument>(value)) {
-            if (arg->getArgNo() < call->arg_size())
-              item = integer(call->getArgOperand(arg->getArgNo()), depth + 1);
-          } else {
-            item = nested.integer(value, depth + 1);
-          }
-          if (!item || (returned && *result != *item))
-            return None;
-          result = item;
-          returned = true;
-        }
-        return result;
-      }
-    }
-    return None;
-  }
+  const Value *resolve(const Value *v, unsigned depth = 0) const;
+  Optional<APInt> integer(const Value *v, unsigned depth = 0) const;
 
   bool same(const Value *a, const Value *b) const {
     return a && b && (resolve(a) == resolve(b) || facts_.equivalent(*a, *b));
@@ -266,6 +90,7 @@ public:
 
 private:
   Function &function_;
+  Engine &engine_;
   TargetLibraryInfoImpl tli_impl_;
   TargetLibraryInfo tli_;
   AssumptionCache assumptions_;
@@ -274,6 +99,10 @@ private:
   mutable AAResults aliases_;
   std::unique_ptr<MemorySSA> memory_;
   FunctionFacts facts_;
+  mutable llvm::DenseMap<const Value *, const Value *> resolve_cache_;
+  mutable llvm::SmallPtrSet<const Value *, 32> resolve_active_;
+  mutable llvm::DenseMap<const Value *, Optional<APInt>> integer_cache_;
+  mutable llvm::SmallPtrSet<const Value *, 32> integer_active_;
 };
 
 struct Engine {
@@ -282,11 +111,12 @@ struct Engine {
   std::set<std::pair<std::string, const Instruction *>> emitted;
   std::set<const Function *> verify_returns;
   std::set<const Argument *> verify_arguments;
+  bool has_ssl_verify = false;
 
   Facts &facts(const Function &f) {
     auto &entry = functions[&f];
     if (!entry)
-      entry = std::make_unique<Facts>(f);
+      entry = std::make_unique<Facts>(f, *this);
     return *entry;
   }
 
@@ -316,6 +146,15 @@ struct Engine {
   }
 
   void inferVerifyFlow(const Module &module) {
+    has_ssl_verify = false;
+    for (const Function &f : module) {
+      if (ValueFacts::hasLibraryName(f, "SSL_get_verify_result", true)) {
+        has_ssl_verify = true;
+        break;
+      }
+    }
+    if (!has_ssl_verify)
+      return;
     bool changed;
     do {
       changed = false;
@@ -351,32 +190,38 @@ struct Engine {
     using Point = std::tuple<const Instruction *, unsigned, Constraints>;
     Facts &initial_facts = facts(*start.getFunction());
     Constraints initial_constraints;
-    for (const Instruction &inst : instructions(start.getFunction())) {
-      const auto *branch = dyn_cast<BranchInst>(&inst);
-      const auto *cmp = branch && branch->isConditional()
-                            ? dyn_cast<ICmpInst>(
-                                  initial_facts.resolve(branch->getCondition()))
-                            : nullptr;
-      if (!cmp || !cmp->isEquality())
-        continue;
-      for (unsigned successor = 0; successor < 2; ++successor) {
-        if (!initial_facts.dominators().dominates(
-                BasicBlockEdge(branch->getParent(),
-                               branch->getSuccessor(successor)),
-                start.getParent()))
+    if (const auto *domNode = initial_facts.dominators().getNode(
+            const_cast<BasicBlock *>(start.getParent()))) {
+      for (const auto *cur = domNode->getIDom(); cur; cur = cur->getIDom()) {
+        const auto *branch =
+            dyn_cast<BranchInst>(cur->getBlock()->getTerminator());
+        const auto *cmp =
+            branch && branch->isConditional()
+                ? dyn_cast<ICmpInst>(
+                      initial_facts.resolve(branch->getCondition()))
+                : nullptr;
+        if (!cmp || !cmp->isEquality())
           continue;
-        for (unsigned operand = 0; operand < 2; ++operand) {
-          auto constant = initial_facts.integer(cmp->getOperand(1 - operand));
-          const Value *value = initial_facts.resolve(cmp->getOperand(operand));
-          if (!constant || initial_facts.integer(value))
+        for (unsigned successor = 0; successor < 2; ++successor) {
+          if (!initial_facts.dominators().dominates(
+                  BasicBlockEdge(branch->getParent(),
+                                 branch->getSuccessor(successor)),
+                  start.getParent()))
             continue;
-          SmallString<40> text;
-          constant->toString(text, 10, true);
-          std::string encoded =
-              std::to_string(constant->getBitWidth()) + ":" + text.str().str();
-          bool equal =
-              (successor == 0) == (cmp->getPredicate() == ICmpInst::ICMP_EQ);
-          initial_constraints.emplace(value, encoded, equal);
+          for (unsigned operand = 0; operand < 2; ++operand) {
+            auto constant = initial_facts.integer(cmp->getOperand(1 - operand));
+            const Value *value =
+                initial_facts.resolve(cmp->getOperand(operand));
+            if (!constant || initial_facts.integer(value))
+              continue;
+            SmallString<40> text;
+            constant->toString(text, 10, true);
+            std::string encoded =
+                std::to_string(constant->getBitWidth()) + ":" + text.str().str();
+            bool equal =
+                (successor == 0) == (cmp->getPredicate() == ICmpInst::ICMP_EQ);
+            initial_constraints.emplace(value, encoded, equal);
+          }
         }
       }
     }
@@ -392,11 +237,11 @@ struct Engine {
     while (!pending.empty()) {
       auto item = pending.front();
       pending.pop_front();
+      if (!visited.insert(item).second)
+        continue;
       const Instruction *inst = std::get<0>(item);
       unsigned state = std::get<1>(item);
       const Constraints &constraints = std::get<2>(item);
-      if (!visited.insert(item).second)
-        continue;
       if (!step(*inst, state))
         continue;
       if (!inst->isTerminator()) {
@@ -609,7 +454,7 @@ struct Engine {
               const auto *global =
                   dyn_cast<GlobalValue>(feature->stripPointerCasts());
               if (global &&
-                  demangle(global->getName().str())
+                  fastDemangle(global->getName())
                           .find("XMLUni::"
                                 "fgXercesDisableDefaultEntityResolution") !=
                       std::string::npos) {
@@ -772,6 +617,220 @@ struct Engine {
   }
 };
 
+const Value *Facts::resolve(const Value *v, unsigned depth) const {
+  if (!v || depth > 24)
+    return v;
+  if (depth == 0) {
+    auto cached = resolve_cache_.find(v);
+    if (cached != resolve_cache_.end())
+      return cached->second;
+  }
+  if (!resolve_active_.insert(v).second)
+    return v;
+  auto finish = [&](const Value *res) {
+    resolve_active_.erase(v);
+    if (depth == 0)
+      resolve_cache_[v] = res;
+    return res;
+  };
+  if (const auto *cast = dyn_cast<CastInst>(v)) {
+    if (cast->isNoopCast(function_.getParent()->getDataLayout()) ||
+        cast->getOpcode() == Instruction::BitCast)
+      return finish(resolve(cast->getOperand(0), depth + 1));
+  }
+  if (const auto *gep = dyn_cast<GEPOperator>(v)) {
+    if (gep->hasAllZeroIndices())
+      return finish(resolve(gep->getPointerOperand(), depth + 1));
+  }
+  if (const auto *load = dyn_cast<LoadInst>(v)) {
+    if (load->isVolatile() || load->isAtomic())
+      return finish(v);
+    const auto *access = memory_->getWalker()->getClobberingMemoryAccess(load);
+    const auto *def = dyn_cast_or_null<MemoryDef>(access);
+    const auto *store =
+        def ? dyn_cast_or_null<StoreInst>(def->getMemoryInst()) : nullptr;
+    if (store && !store->isVolatile() && !store->isAtomic() &&
+        store->getValueOperand()->getType() == load->getType() &&
+        dominators_.dominates(store, load) &&
+        aliases_.alias(MemoryLocation::get(store), MemoryLocation::get(load)) ==
+            AliasResult::MustAlias)
+      return finish(resolve(store->getValueOperand(), depth + 1));
+    const auto *global = dyn_cast<GlobalVariable>(
+        load->getPointerOperand()->stripPointerCasts());
+    if (global && global->isConstant() && global->hasInitializer())
+      return finish(resolve(global->getInitializer(), depth + 1));
+  }
+  if (const auto *select = dyn_cast<SelectInst>(v)) {
+    if (auto c = integer(select->getCondition(), depth + 1))
+      return finish(resolve(c->isZero() ? select->getFalseValue()
+                                        : select->getTrueValue(),
+                            depth + 1));
+    const Value *a = resolve(select->getTrueValue(), depth + 1);
+    if (a == resolve(select->getFalseValue(), depth + 1))
+      return finish(a);
+  }
+  if (const auto *phi = dyn_cast<PHINode>(v)) {
+    const Value *result = nullptr;
+    for (const Value *incoming : phi->incoming_values()) {
+      if (incoming == v)
+        continue;
+      const Value *item = resolve(incoming, depth + 1);
+      if (result && result != item)
+        return finish(v);
+      result = item;
+    }
+    if (result)
+      return finish(result);
+  }
+  if (const auto *call = dyn_cast<CallBase>(v)) {
+    const Function *target = ValueFacts::callee(*call);
+    if (target && !target->isDeclaration() && target != &function_) {
+      const Value *result = nullptr;
+      Facts &nested = engine_.facts(*target);
+      for (const Instruction &inst : instructions(target)) {
+        const auto *ret = dyn_cast<ReturnInst>(&inst);
+        if (!ret || !ret->getReturnValue())
+          continue;
+        const Value *item = nested.resolve(ret->getReturnValue(), depth + 1);
+        if (const auto *arg = dyn_cast<Argument>(item)) {
+          if (arg->getArgNo() >= call->arg_size())
+            return finish(v);
+          item = resolve(call->getArgOperand(arg->getArgNo()), depth + 1);
+        } else if (!isa<Constant>(item)) {
+          return finish(v);
+        }
+        if (result && result != item)
+          return finish(v);
+        result = item;
+      }
+      if (result)
+        return finish(result);
+    }
+  }
+  return finish(v);
+}
+
+Optional<APInt> Facts::integer(const Value *v, unsigned depth) const {
+  if (!v || depth > 24)
+    return None;
+  if (depth == 0) {
+    auto cached = integer_cache_.find(v);
+    if (cached != integer_cache_.end())
+      return cached->second;
+  }
+  if (!integer_active_.insert(v).second)
+    return None;
+  auto finish = [&](Optional<APInt> res) {
+    integer_active_.erase(v);
+    if (depth == 0)
+      integer_cache_[v] = res;
+    return res;
+  };
+  const Value *r = resolve(v, depth + 1);
+  if (const auto *constant = dyn_cast<ConstantInt>(r))
+    return finish(constant->getValue());
+  if (const auto *cast = dyn_cast<CastInst>(r)) {
+    auto value = integer(cast->getOperand(0), depth + 1);
+    if (!value || !cast->getType()->isIntegerTy())
+      return finish(None);
+    unsigned width = cast->getType()->getIntegerBitWidth();
+    return finish(cast->getOpcode() == Instruction::SExt
+                      ? value->sextOrTrunc(width)
+                      : value->zextOrTrunc(width));
+  }
+  if (const auto *cmp = dyn_cast<ICmpInst>(r)) {
+    auto a = integer(cmp->getOperand(0), depth + 1);
+    auto b = integer(cmp->getOperand(1), depth + 1);
+    if (!a || !b || a->getBitWidth() != b->getBitWidth())
+      return finish(None);
+    bool result;
+    switch (cmp->getPredicate()) {
+    case ICmpInst::ICMP_EQ:
+      result = *a == *b;
+      break;
+    case ICmpInst::ICMP_NE:
+      result = *a != *b;
+      break;
+    case ICmpInst::ICMP_ULT:
+      result = a->ult(*b);
+      break;
+    case ICmpInst::ICMP_ULE:
+      result = a->ule(*b);
+      break;
+    case ICmpInst::ICMP_UGT:
+      result = a->ugt(*b);
+      break;
+    case ICmpInst::ICMP_UGE:
+      result = a->uge(*b);
+      break;
+    case ICmpInst::ICMP_SLT:
+      result = a->slt(*b);
+      break;
+    case ICmpInst::ICMP_SLE:
+      result = a->sle(*b);
+      break;
+    case ICmpInst::ICMP_SGT:
+      result = a->sgt(*b);
+      break;
+    case ICmpInst::ICMP_SGE:
+      result = a->sge(*b);
+      break;
+    default:
+      return finish(None);
+    }
+    return finish(APInt(1, result));
+  }
+  if (const auto *op = dyn_cast<BinaryOperator>(r)) {
+    auto a = integer(op->getOperand(0), depth + 1);
+    auto b = integer(op->getOperand(1), depth + 1);
+    if (!a || !b || a->getBitWidth() != b->getBitWidth())
+      return finish(None);
+    switch (op->getOpcode()) {
+    case Instruction::Add:
+      return finish(*a + *b);
+    case Instruction::Sub:
+      return finish(*a - *b);
+    case Instruction::Mul:
+      return finish(*a * *b);
+    case Instruction::Or:
+      return finish(*a | *b);
+    case Instruction::And:
+      return finish(*a & *b);
+    case Instruction::Xor:
+      return finish(*a ^ *b);
+    default:
+      return finish(None);
+    }
+  }
+  if (const auto *call = dyn_cast<CallBase>(r)) {
+    const Function *target = ValueFacts::callee(*call);
+    if (target && !target->isDeclaration() && target != &function_) {
+      Optional<APInt> result;
+      bool returned = false;
+      Facts &nested = engine_.facts(*target);
+      for (const Instruction &inst : instructions(target)) {
+        const auto *ret = dyn_cast<ReturnInst>(&inst);
+        if (!ret || !ret->getReturnValue())
+          continue;
+        const Value *value = nested.resolve(ret->getReturnValue(), depth + 1);
+        Optional<APInt> item;
+        if (const auto *arg = dyn_cast<Argument>(value)) {
+          if (arg->getArgNo() < call->arg_size())
+            item = integer(call->getArgOperand(arg->getArgNo()), depth + 1);
+        } else {
+          item = nested.integer(value, depth + 1);
+        }
+        if (!item || (returned && *result != *item))
+          return finish(None);
+        result = item;
+        returned = true;
+      }
+      return finish(result);
+    }
+  }
+  return finish(None);
+}
+
 bool arithmetic(const Value *value, Facts &facts, unsigned depth = 0) {
   if (!value || depth > 24)
     return false;
@@ -897,9 +956,11 @@ ApiAnalysisResult ApiAnalysis::analyze(const Module &module) const {
   for (const Function &f : module) {
     if (f.isDeclaration())
       continue;
-    Facts &facts = engine.facts(f);
-    engine.conflation(f);
+    if (engine.has_ssl_verify)
+      engine.conflation(f);
     std::vector<const CallBase *> masks, permissions;
+    bool template_body_computed = false;
+    bool template_body = false;
     for (const Instruction &inst : instructions(f)) {
       const auto *call = dyn_cast<CallBase>(&inst);
       if (!call)
@@ -907,15 +968,16 @@ ApiAnalysisResult ApiAnalysis::analyze(const Module &module) const {
       std::string base = name(*call);
       if (key_apis.count(base) && globalCall(*call, base) &&
           call->arg_size() >= 2) {
-        auto strength = facts.integer(call->getArgOperand(1));
+        auto strength = engine.facts(f).integer(call->getArgOperand(1));
         if (strength && strength->isStrictlyPositive() && strength->ult(2048))
           engine.emit("cpp/insufficient-key-size", inst,
                       "The cryptographic key strength is below 2048 bits.");
       }
       if (globalCall(*call, "SetSecurityDescriptorDacl") &&
           call->arg_size() >= 3) {
-        auto present = facts.integer(call->getArgOperand(1));
-        if (present && !present->isZero() && facts.zero(call->getArgOperand(2)))
+        Facts &fa = engine.facts(f);
+        auto present = fa.integer(call->getArgOperand(1));
+        if (present && !present->isZero() && fa.zero(call->getArgOperand(2)))
           engine.emit("cpp/unsafe-dacl-security-descriptor", inst,
                       "A present null DACL grants unrestricted access to the "
                       "protected object.");
@@ -928,7 +990,7 @@ ApiAnalysisResult ApiAnalysis::analyze(const Module &module) const {
       auto options = xml_options.find(base);
       if (options != xml_options.end() && globalCall(*call, base) &&
           call->arg_size() > options->second) {
-        auto flags = facts.integer(call->getArgOperand(options->second));
+        auto flags = engine.facts(f).integer(call->getArgOperand(options->second));
         if (flags && !(*flags & APInt(flags->getBitWidth(), 6)).isZero())
           engine.emit(
               "cpp/external-entity-expansion", inst,
@@ -952,7 +1014,7 @@ ApiAnalysisResult ApiAnalysis::analyze(const Module &module) const {
       if ((globalCall(*call, "umask") || globalCall(*call, "chmod") ||
            globalCall(*call, "fchmod")) &&
           call->arg_size() > permission_argument &&
-          arithmetic(call->getArgOperand(permission_argument), facts))
+          arithmetic(call->getArgOperand(permission_argument), engine.facts(f)))
         engine.emit("cpp/wrong-use-of-the-umask", inst,
                     "Arithmetic computes a permission mask whose bits should "
                     "be combined with bitwise operations.");
@@ -963,74 +1025,84 @@ ApiAnalysisResult ApiAnalysis::analyze(const Module &module) const {
                         StringRef(lower).contains("cipher") ||
                         StringRef(lower).contains("cbc") ||
                         StringRef(lower).contains("key");
+      // Parameters with an explicit key type supply the additional evidence
+      // used by the original query without attributing all methods of a
+      // cipher-named class to encryption operations.
+      size_t parameters = qualified.find('(');
+      if (!encryption && parameters != std::string::npos)
+        encryption =
+            StringRef(qualified).drop_front(parameters).lower().find("key") !=
+            std::string::npos;
+      if (!encryption)
+        continue;
       bool weak = weakAlgorithm(qualified);
       bool buffer = false;
+      Facts &fa = engine.facts(f);
       for (const Use &arg : call->args()) {
-        const Value *v = facts.resolve(arg.get());
+        const Value *v = fa.resolve(arg.get());
         buffer |= v->getType()->isPointerTy() && !isa<Constant>(v);
-        if (encryption) {
+        if (!weak) {
           if (auto text = ValueFacts::constantString(*v))
             weak |= weakAlgorithm(*text);
           if (const auto *algorithm = dyn_cast<CallBase>(v))
             weak |= weakAlgorithm(qualifiedName(*algorithm));
         }
       }
-      // Parameters with an explicit key type supply the additional evidence
-      // used by the original query without attributing all methods of a
-      // cipher-named class to encryption operations.
-      size_t parameters = qualified.find('(');
-      if (parameters != std::string::npos)
-        encryption |=
-            StringRef(qualified).drop_front(parameters).lower().find("key") !=
-            std::string::npos;
-      bool template_body = StringRef(demangle(f.getName().str())).contains("<");
-      if (weak && encryption && buffer && !template_body &&
-          !StringRef(base).startswith("~"))
+      if (!weak || !buffer || StringRef(base).startswith("~"))
+        continue;
+      if (!template_body_computed) {
+        template_body = StringRef(fastDemangle(f.getName())).contains("<");
+        template_body_computed = true;
+      }
+      if (!template_body)
         engine.emit("cpp/weak-cryptographic-algorithm", inst,
                     "The encryption operation selects a broken DES/RC-family "
                     "algorithm.");
     }
-    for (const CallBase *mask : masks) {
-      auto constant = facts.integer(mask->getArgOperand(0));
-      for (const CallBase *permission : permissions)
-        if ((!constant || !constant->isZero()) &&
-            facts.same(mask->getArgOperand(0), permission->getArgOperand(1)))
-          engine.emit("cpp/wrong-use-of-the-umask", *mask,
-                      "The same nonzero bits are used as both a permission "
-                      "mask and allowed chmod permissions.",
-                      {permission});
-      if (!constant || !constant->isZero())
-        continue;
-      engine.walk(
-          *mask, 0,
-          [&](const Instruction &inst, unsigned &) {
-            const auto *call = dyn_cast<CallBase>(&inst);
-            if (!call)
-              return true;
-            if (globalCall(*call, "umask") && call->arg_size()) {
-              auto value = facts.integer(call->getArgOperand(0));
-              if (!value || !value->isZero())
+    if (!masks.empty()) {
+      Facts &facts = engine.facts(f);
+      for (const CallBase *mask : masks) {
+        auto constant = facts.integer(mask->getArgOperand(0));
+        for (const CallBase *permission : permissions)
+          if ((!constant || !constant->isZero()) &&
+              facts.same(mask->getArgOperand(0), permission->getArgOperand(1)))
+            engine.emit("cpp/wrong-use-of-the-umask", *mask,
+                        "The same nonzero bits are used as both a permission "
+                        "mask and allowed chmod permissions.",
+                        {permission});
+        if (!constant || !constant->isZero())
+          continue;
+        engine.walk(
+            *mask, 0,
+            [&](const Instruction &inst, unsigned &) {
+              const auto *call = dyn_cast<CallBase>(&inst);
+              if (!call)
+                return true;
+              if (globalCall(*call, "umask") && call->arg_size()) {
+                auto value = facts.integer(call->getArgOperand(0));
+                if (!value || !value->isZero())
+                  return false;
+              }
+              if (globalCall(*call, "chmod") || globalCall(*call, "fchmod"))
                 return false;
-            }
-            if (globalCall(*call, "chmod") || globalCall(*call, "fchmod"))
-              return false;
-            if (globalCall(*call, "fopen") && call->arg_size() >= 2) {
-              auto mode = ValueFacts::constantString(
-                  *facts.resolve(call->getArgOperand(1)));
-              auto path = ValueFacts::constantString(
-                  *facts.resolve(call->getArgOperand(0)));
-              if (mode &&
-                  (mode->find('w') != std::string::npos ||
-                   mode->find('a') != std::string::npos) &&
-                  (!path || *path != "/dev/null"))
-                engine.emit("cpp/wrong-use-of-the-umask", *mask,
-                            "A zero umask leaves a created file accessible "
-                            "without restrictive permission setup.",
-                            {call});
-            }
-            return true;
-          },
-          [](const Instruction &, unsigned, unsigned) { return true; });
+              if (globalCall(*call, "fopen") && call->arg_size() >= 2) {
+                auto mode = ValueFacts::constantString(
+                    *facts.resolve(call->getArgOperand(1)));
+                auto path = ValueFacts::constantString(
+                    *facts.resolve(call->getArgOperand(0)));
+                if (mode &&
+                    (mode->find('w') != std::string::npos ||
+                     mode->find('a') != std::string::npos) &&
+                    (!path || *path != "/dev/null"))
+                  engine.emit("cpp/wrong-use-of-the-umask", *mask,
+                              "A zero umask leaves a created file accessible "
+                              "without restrictive permission setup.",
+                              {call});
+              }
+              return true;
+            },
+            [](const Instruction &, unsigned, unsigned) { return true; });
+      }
     }
   }
   return std::move(engine.result);

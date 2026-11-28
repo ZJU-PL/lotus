@@ -1808,4 +1808,128 @@ TEST_F(PDGRuleEngineTest, LifetimeBudgetDoesNotReduceTheIndependentTaintBudget) 
   for (const auto &note : result.diagnostics.notes)
     EXPECT_EQ(note.find("Taint step limit reached"), std::string::npos);
 }
+
+TEST_F(PDGRuleEngineTest,
+       ArithmeticHandlesVectorInstructionsAndCyclicPhisExactWidening) {
+  load(R"(
+    define <8 x i32> @simd_ops(<8 x i16> %a, <8 x i16> %b, <4 x i32> %c, <4 x i32> %d) {
+    entry:
+      %vmul = mul <8 x i16> %a, %b
+      %vwiden = zext <8 x i16> %vmul to <8 x i32>
+      %vtrunc = trunc <4 x i32> %c to <4 x i8>
+      %vdiv = sdiv <4 x i32> %c, %d
+      %vcmp = icmp slt <4 x i32> %c, %d
+      ret <8 x i32> %vwiden
+    }
+    define i64 @cyclic_square(i32 %x, i1 %cond) {
+    entry:
+      br label %loop
+    loop:
+      %p = phi i32 [ %x, %entry ], [ %sq, %loop ]
+      %sq = mul i32 %p, %p
+      br i1 %cond, label %loop, label %exit
+    exit:
+      %wide = sext i32 %sq to i64
+      ret i64 %wide
+    }
+  )");
+  auto begin = std::chrono::steady_clock::now();
+  auto result = run("cpp/integer-multiplication-cast-to-long");
+  EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::seconds(2));
+  // x * x (p * p) must still be recognized as two nonconstant factors.
+  ASSERT_EQ(result.findings.size(), 1u);
+  EXPECT_EQ(result.findings.front().site->getFunc()->getName(), "cyclic_square");
+  // All arithmetic rules run cleanly on SIMD vector instructions without crash.
+  auto all_arith = RuleEngine(graph).analyze(
+      {"cpp/bad-addition-overflow-check",
+       "cpp/unsigned-difference-expression-compared-zero",
+       "cpp/divide-by-zero-using-return-value",
+       "cpp/arithmetic-with-extreme-values",
+       "cpp/tainted-arithmetic",
+       "cpp/integer-overflow-tainted"},
+      {}, {}, module.get());
+  EXPECT_FALSE(all_arith.rules.empty());
+}
+
+TEST_F(PDGRuleEngineTest, BoundsAnalysisHandlesIntToPtrAndLoopMemoryDiamonds) {
+  std::string ir = R"(
+    target datalayout = "e-p:64:64-i32:32-i64:64"
+    declare i8* @strcpy(i8*, i8*)
+    @src = private constant [4 x i8] c"abc\00"
+    define void @inttoptr_and_diamonds(i1 %cond) {
+    entry:
+      %dst = alloca [2 x i8]
+      %other = alloca i32
+      %p_int = inttoptr i64 42 to i8*
+      %d0 = getelementptr [2 x i8], [2 x i8]* %dst, i32 0, i32 0
+      %s0 = getelementptr [4 x i8], [4 x i8]* @src, i32 0, i32 0
+      br label %g0
+  )";
+  for (unsigned i = 0; i < 30; ++i) {
+    std::string id = std::to_string(i);
+    ir += "g" + id + ":\n  br i1 %cond, label %l" + id + ", label %r" + id + "\n";
+    ir += "l" + id + ":\n  store i32 1, i32* %other\n  br label %j" + id + "\n";
+    ir += "r" + id + ":\n  store i32 2, i32* %other\n  br label %j" + id + "\n";
+    ir += "j" + id + ":\n";
+    if (i < 29)
+      ir += "  br label %g" + std::to_string(i + 1) + "\n";
+  }
+  ir += R"(
+      %cp = call i8* @strcpy(i8* %d0, i8* %s0)
+      store i8 0, i8* %p_int
+      ret void
+    }
+  )";
+  load(ir.c_str());
+  auto begin = std::chrono::steady_clock::now();
+  auto result = run("cpp/very-likely-overrunning-write");
+  EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::seconds(2));
+  EXPECT_FALSE(result.findings.empty());
+}
+
+TEST_F(PDGRuleEngineTest, RecursionSCCMatchesDirectAndMutualCyclesExactly) {
+  load(R"(
+    define void @leaf() {
+      ret void
+    }
+    define void @self_rec(i1 %c) {
+      call void @leaf()
+      br i1 %c, label %again, label %done
+    again:
+      call void @self_rec(i1 false)
+      br label %done
+    done:
+      ret void
+    }
+    define void @mut_a(i1 %c) {
+      br i1 %c, label %go, label %done
+    go:
+      call void @mut_b(i1 false)
+      br label %done
+    done:
+      ret void
+    }
+    define void @mut_b(i1 %c) {
+      br i1 %c, label %go, label %done
+    go:
+      call void @mut_a(i1 false)
+      br label %done
+    done:
+      ret void
+    }
+    define void @entry_caller() {
+      call void @mut_a(i1 true)
+      call void @self_rec(i1 true)
+      ret void
+    }
+  )");
+  auto result = run("cpp/power-of-10/use-of-recursion");
+  // Exactly 3 calls are in a recursion cycle: self_rec->self_rec, mut_a->mut_b,
+  // mut_b->mut_a. Neither entry_caller's calls nor self_rec->leaf are cycles.
+  ASSERT_EQ(result.findings.size(), 3u);
+  std::set<std::string> callers;
+  for (const auto &f : result.findings)
+    callers.insert(f.site->getFunc()->getName().str());
+  EXPECT_EQ(callers, (std::set<std::string>{"mut_a", "mut_b", "self_rec"}));
+}
 } // namespace

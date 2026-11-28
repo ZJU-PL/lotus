@@ -90,6 +90,9 @@ public:
   // Caching
   // Also call this after changing the retained LLVM IR without rebuilding PDG.
   void clearCache();
+  void setPreserveSemanticCache(bool preserve) {
+    preserveSemanticCache_ = preserve;
+  }
   void setCacheMaxSize(size_t maxSize) { cacheMaxSize_ = maxSize; }
   void setQueryTimeout(std::chrono::seconds timeout) {
     queryTimeout_ = timeout;
@@ -123,6 +126,7 @@ private:
   // Semantic services are evaluated on demand, once per unchanged module.
   struct SemanticCache;
   std::unique_ptr<SemanticCache> semanticCache_;
+  bool preserveSemanticCache_ = false;
   void syncSemanticFacts();
   BoundsAnalysis &getBoundsFacts(const llvm::Module &module);
 

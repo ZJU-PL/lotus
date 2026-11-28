@@ -64,7 +64,7 @@ void pdg::FunctionWrapper::addInst(Instruction &i) {
 DIType *pdg::FunctionWrapper::getArgDIType(Argument &arg) {
   for (auto *dbg_declare_inst : _dbg_declare_insts) {
     DILocalVariable *di_local_var = dbg_declare_inst->getVariable();
-    if (!di_local_var)
+    if (!di_local_var || !di_local_var->getScope())
       continue;
     if (di_local_var->getArg() == arg.getArgNo() + 1 &&
         !di_local_var->getName().empty() &&
@@ -112,8 +112,10 @@ void pdg::FunctionWrapper::buildFormalTreeForArgs() {
     formal_out_tree->setBaseVal(*arg);
     TreeNode *formal_out_root_node = formal_out_tree->getRootNode();
     // copy address variables
-    for (auto *addr_var : formal_in_root_node->getAddrVars()) {
-      formal_out_root_node->addAddrVar(*addr_var);
+    if (formal_out_root_node != nullptr) {
+      for (auto *addr_var : formal_in_root_node->getAddrVars()) {
+        formal_out_root_node->addAddrVar(*addr_var);
+      }
     }
     formal_out_tree->setTreeNodeType(GraphNodeType::PARAM_FORMALOUT);
     _arg_formal_out_tree_map.insert(std::make_pair(arg, formal_out_tree));
@@ -156,8 +158,10 @@ void pdg::FunctionWrapper::buildFormalTreesForRetVal() {
   Tree *ret_formal_out_tree = new Tree(*ret_formal_in_tree);
   TreeNode *ret_formal_out_tree_root_node = ret_formal_out_tree->getRootNode();
   // copy address variables
-  for (auto *addr_var : ret_formal_in_tree_root_node->getAddrVars()) {
-    ret_formal_out_tree_root_node->addAddrVar(*addr_var);
+  if (ret_formal_out_tree_root_node != nullptr) {
+    for (auto *addr_var : ret_formal_in_tree_root_node->getAddrVars()) {
+      ret_formal_out_tree_root_node->addAddrVar(*addr_var);
+    }
   }
   ret_formal_out_tree->setTreeNodeType(GraphNodeType::PARAM_FORMALOUT);
   _ret_val_formal_out_tree = ret_formal_out_tree;
@@ -172,11 +176,8 @@ void pdg::FunctionWrapper::buildFormalTreesForRetVal() {
 DILocalVariable *pdg::FunctionWrapper::getArgDILocalVar(Argument &arg) {
   for (auto *dbg_declare_inst : _dbg_declare_insts) {
     DILocalVariable *di_local_var = dbg_declare_inst->getVariable();
-    if (!di_local_var)
+    if (!di_local_var || !di_local_var->getScope())
       continue;
-    // if (di_local_var->getArg() == arg.getArgNo() + 1 &&
-    // !di_local_var->getName().empty() &&
-    // di_local_var->getScope()->getSubprogram() == _func->getSubprogram())
     if (di_local_var->getArg() == arg.getArgNo() + 1 &&
         !di_local_var->getName().empty() &&
         di_local_var->getScope()->getSubprogram() == _func->getSubprogram())
@@ -188,15 +189,15 @@ DILocalVariable *pdg::FunctionWrapper::getArgDILocalVar(Argument &arg) {
 AllocaInst *pdg::FunctionWrapper::getArgAllocaInst(Argument &arg) {
   for (auto *dbg_declare_inst : _dbg_declare_insts) {
     DILocalVariable *di_local_var = dbg_declare_inst->getVariable();
-    if (!di_local_var)
+    if (!di_local_var || !di_local_var->getScope())
       continue;
     if (di_local_var->getArg() == arg.getArgNo() + 1 &&
         !di_local_var->getName().empty() &&
         di_local_var->getScope()->getSubprogram() == _func->getSubprogram()) {
       // For LLVM 14.0.0, we need to handle Metadata conversion correctly
       Metadata *MD = dbg_declare_inst->getRawLocation();
-      if (auto *VMD = dyn_cast<ValueAsMetadata>(MD)) {
-        if (AllocaInst *ai = dyn_cast<AllocaInst>(VMD->getValue()))
+      if (auto *VMD = dyn_cast_or_null<ValueAsMetadata>(MD)) {
+        if (AllocaInst *ai = dyn_cast_or_null<AllocaInst>(VMD->getValue()))
           return ai;
       }
     }

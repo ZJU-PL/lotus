@@ -26,8 +26,12 @@ char pdg::ControlDependencyGraph::ID = 0;
 
 using namespace llvm;
 bool pdg::ControlDependencyGraph::runOnFunction(Function &F) {
+  ProgramGraph &g = ProgramGraph::getInstance();
+  if (!g.hasFuncWrapper(F) || g.hasControlDeps(F))
+    return false;
   addControlDepFromEntryNodeToInsts(F);
   addStandardControlDependencies(F);
+  g.markControlDepsBuilt(F);
   return false;
 }
 

@@ -91,7 +91,8 @@ public:
 
   void setRootNode(TreeNode &root_node) { _root_node = &root_node; }
   void setTreeNodeType(GraphNodeType node_type) {
-    _root_node->setNodeType(node_type);
+    if (_root_node != nullptr)
+      _root_node->setNodeType(node_type);
   }
   TreeNode *getRootNode() const { return _root_node; }
   int size() const { return _size; }

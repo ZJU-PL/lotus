@@ -1,6 +1,7 @@
 #include "IR/PDG/Core/PDGNode.h"
 #include "IR/PDG/Core/DebugInfoUtils.h"
 #include "IR/PDG/Core/PDGUtils.h"
+#include "IR/PDG/Core/Tree.h"
 
 #include "TestUtils/LLVMHelpers.h"
 
@@ -314,6 +315,55 @@ TEST_F(PDGSupportUtilsTest, DebugInfoQueriesHandlePresentAndMissingMetadata) {
   EXPECT_EQ(pdg::dbgutils::getFuncRetDIType(*without_debug), nullptr);
   EXPECT_EQ(pdg::dbgutils::getGlobalVarDIType(*global_with_debug), int_type);
   EXPECT_EQ(pdg::dbgutils::getGlobalVarDIType(*global_without_debug), nullptr);
+}
+
+TEST_F(PDGSupportUtilsTest, NullStrippedDITypeAndOpaqueStructGEPDoNotCrash) {
+  // 1. TreeNode::expandNode() and Tree::Tree(copy) must not crash on null/void
+  //    stripped DITypes (e.g., const void or broken DW_TAG_member).
+  auto dbg_mod = std::make_unique<Module>("dbg-tree", context_);
+  DIBuilder dib(*dbg_mod);
+  DIFile *file = dib.createFile("tree.c", "/tmp");
+  dib.createCompileUnit(dwarf::DW_LANG_C99, file, "PDGSupportUtilsTest", false,
+                        "", 0);
+  DIType *const_void = dib.createQualifiedType(dwarf::DW_TAG_const_type, nullptr);
+  DIType *broken_member =
+      dib.createMemberType(file, "m", file, 1, 0, 0, 0, DINode::FlagZero, nullptr);
+  dib.finalize();
+
+  pdg::Tree tree;
+  auto *root_const = new pdg::TreeNode(const_void, 0, nullptr, &tree,
+                                       pdg::GraphNodeType::PARAM_FORMALIN);
+  tree.setRootNode(*root_const);
+  EXPECT_EQ(root_const->expandNode(), 0);
+  pdg::Tree copied(tree);
+  EXPECT_NE(copied.getRootNode(), nullptr);
+
+  pdg::Tree empty_tree;
+  pdg::Tree copied_empty(empty_tree);
+  EXPECT_EQ(copied_empty.getRootNode(), nullptr);
+
+  pdg::Tree member_tree;
+  auto *root_member = new pdg::TreeNode(broken_member, 0, nullptr, &member_tree,
+                                        pdg::GraphNodeType::PARAM_FORMALIN);
+  member_tree.setRootNode(*root_member);
+  EXPECT_EQ(root_member->expandNode(), 0);
+
+  // 2. Opaque struct GEP offset calculation must return -1 cleanly without crash.
+  auto mod = parseModule(R"(
+    define i8* @opaque_gep(i8* %p) {
+    entry:
+      %q = getelementptr i8, i8* %p, i32 1
+      ret i8* %q
+    }
+  )");
+  ASSERT_NE(mod, nullptr);
+  Function *fn = mod->getFunction("opaque_gep");
+  ASSERT_NE(fn, nullptr);
+  auto *gep = findInstruction<GetElementPtrInst>(*fn, "q");
+  ASSERT_NE(gep, nullptr);
+  StructType *opaque = StructType::create(context_, "struct.Opaque");
+  ASSERT_NE(opaque, nullptr);
+  EXPECT_EQ(pdg::pdgutils::getGEPOffsetInBits(*mod, *opaque, *gep), INT_MIN);
 }
 
 } // namespace

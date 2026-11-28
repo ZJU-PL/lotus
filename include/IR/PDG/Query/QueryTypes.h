@@ -20,6 +20,7 @@ namespace llvm {
 class Value;
 class Function;
 class Module;
+class ModuleSlotTracker;
 } // namespace llvm
 
 namespace pdg {
@@ -144,6 +145,7 @@ std::set<EdgeType> edgeTypesForPreset(PDGEdgePreset preset);
 std::string describeNode(Node *node);
 
 std::string stableNodeKey(Node *node);
+std::string stableNodeKey(Node *node, llvm::ModuleSlotTracker *slot_tracker);
 
 
 } // namespace pdg

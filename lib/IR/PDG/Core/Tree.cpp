@@ -21,8 +21,8 @@
  * model how data flows through function parameters and return values.
  */
 
-#include "IR/PDG/Core/Tree.h"
 #include "IR/PDG/Core/PDGUtils.h"
+#include "IR/PDG/Core/Tree.h"
 
 using namespace llvm;
 
@@ -68,7 +68,11 @@ int pdg::TreeNode::expandNode() {
     return 0;
   }
   DIType *dt = dbgutils::stripAttributes(*_node_di_type);
+  if (dt == nullptr)
+    return 0;
   dt = dbgutils::stripMemberTag(*dt);
+  if (dt == nullptr)
+    return 0;
   // iterate through all the child nodes, build a tree node for each of them.
   if (!dbgutils::isReferenceType(*dt) && !dbgutils::isPointerType(*dt) &&
       !dbgutils::isStructType(*dt) && !dbgutils::isClassType(*dt))
@@ -92,6 +96,7 @@ int pdg::TreeNode::expandNode() {
     if (composite_type == nullptr)
       return 0;
     auto di_node_arr = composite_type->getElements();
+    int created = 0;
     for (unsigned i = 0; i < di_node_arr.size(); i++) {
       DIType *field_di_type = dyn_cast<DIType>(di_node_arr[i]);
       if (field_di_type == nullptr)
@@ -101,8 +106,9 @@ int pdg::TreeNode::expandNode() {
       new_child_node->computeDerivedAddrVarsFromParent();
       _children.push_back(new_child_node);
       this->addNeighbor(*new_child_node, EdgeType::PARAMETER_FIELD);
+      ++created;
     }
-    return di_node_arr.size();
+    return created;
   }
 
   return 0;
@@ -113,21 +119,24 @@ void pdg::TreeNode::computeDerivedAddrVarsFromParent() {
     return;
   if (!_node_di_type)
     return;
+  DIType *parent_di_type = _parent_node->getDIType();
   std::unordered_set<llvm::Value *> base_node_addr_vars;
   // handle struct pointer
   auto *grand_parent_node = _parent_node->getParentNode();
   // TODO: now hanlde struct specifically, but should also verify on other
   // aggregate pointer types
-  if (grand_parent_node != nullptr &&
-      dbgutils::isStructType(*_parent_node->getDIType()) &&
+  if (grand_parent_node != nullptr && parent_di_type != nullptr &&
+      grand_parent_node->getDIType() != nullptr &&
+      dbgutils::isStructType(*parent_di_type) &&
       dbgutils::isStructPointerType(*grand_parent_node->getDIType())) {
     base_node_addr_vars = grand_parent_node->getAddrVars();
   } else
     base_node_addr_vars = _parent_node->getAddrVars();
 
   bool is_struct_field = false;
-  if (dbgutils::isStructType(*_parent_node->getDIType()) ||
-      dbgutils::isClassType(*_parent_node->getDIType()))
+  if (parent_di_type != nullptr &&
+      (dbgutils::isStructType(*parent_di_type) ||
+       dbgutils::isClassType(*parent_di_type)))
     is_struct_field = true;
 
   for (auto *base_node_addr_var : base_node_addr_vars) {
@@ -188,13 +197,26 @@ bool pdg::Tree::isShapeCompatible(const Tree &other) const {
     return false;
   auto *lhs_type = _root_node->getDIType();
   auto *rhs_type = other._root_node->getDIType();
-  if (lhs_type == nullptr || rhs_type == nullptr)
-    return true;
-  auto *lhs_stripped = dbgutils::stripAttributes(*lhs_type);
-  auto *rhs_stripped = dbgutils::stripAttributes(*rhs_type);
-  if (lhs_stripped == nullptr || rhs_stripped == nullptr)
-    return true;
-  return dbgutils::hasSameDIName(*lhs_stripped, *rhs_stripped);
+  if (lhs_type != nullptr && rhs_type != nullptr) {
+    auto *lhs_stripped = dbgutils::stripAttributes(*lhs_type);
+    auto *rhs_stripped = dbgutils::stripAttributes(*rhs_type);
+    if (lhs_stripped != nullptr && rhs_stripped != nullptr &&
+        !dbgutils::hasSameDIName(*lhs_stripped, *rhs_stripped))
+      return false;
+  }
+  std::queue<std::pair<TreeNode *, TreeNode *>> q;
+  q.push({_root_node, other._root_node});
+  while (!q.empty()) {
+    auto [lhs, rhs] = q.front();
+    q.pop();
+    if (lhs->numOfChild() != rhs->numOfChild())
+      return false;
+    const auto &lc = lhs->getChildNodes();
+    const auto &rc = rhs->getChildNodes();
+    for (size_t i = 0; i < lc.size(); ++i)
+      q.push({lc[i], rc[i]});
+  }
+  return true;
 }
 
 void pdg::Tree::print() {

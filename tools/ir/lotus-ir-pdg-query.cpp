@@ -26,9 +26,9 @@ int main(int argc, char **argv) {
   llvm::InitLLVM init(argc, argv);
   const auto config = lotus::pdg_query::parseOptions(argc, argv);
 
-  // Alias-analysis diagnostics must not corrupt machine-readable results.
-  if (config.format == "json")
-    spdlog::set_default_logger(spdlog::stderr_logger_mt("pdg-query"));
+  // Route alias-analysis and library diagnostic logs to stderr so stdout
+  // always contains clean query output (text, json, or dot).
+  spdlog::set_default_logger(spdlog::stderr_logger_mt("pdg-query"));
 
   if (auto status = lotus::pdg_query::handleCatalogOptions(config))
     return *status;
@@ -49,7 +49,6 @@ int main(int argc, char **argv) {
     llvm::initializeTransformUtils(registry);
     llvm::legacy::PassManager passes;
     passes.add(new pdg::DataDependencyGraph());
-    passes.add(new pdg::ControlDependencyGraph());
     passes.add(new pdg::ProgramDependencyGraph());
     passes.run(*module);
   } else {

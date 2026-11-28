@@ -33,8 +33,9 @@ PDGQueryResult SliceQuery::forward(const PDGCriteria &criteria,
   TraversalOutcome outcome = traverseGraph(
       pdg_, criteria_nodes, edgeTypesForPreset(options.edge_preset), options,
       true, resolved.diagnostics);
-  PDGQueryResult result = resultFromTraversal(
-      criteria_nodes, outcome, resolved.diagnostics, options.explain);
+  PDGQueryResult result =
+      resultFromTraversal(criteria_nodes, outcome, resolved.diagnostics,
+                          options.explain, options.limits.max_paths);
 
   if (options.cache_policy == PDGCachePolicy::Enabled)
     result_cache_[cache_key] = result;
@@ -65,8 +66,9 @@ PDGQueryResult SliceQuery::backward(const PDGCriteria &criteria,
   TraversalOutcome outcome = traverseGraph(
       pdg_, criteria_nodes, edgeTypesForPreset(options.edge_preset), options,
       false, resolved.diagnostics);
-  PDGQueryResult result = resultFromTraversal(
-      criteria_nodes, outcome, resolved.diagnostics, options.explain);
+  PDGQueryResult result =
+      resultFromTraversal(criteria_nodes, outcome, resolved.diagnostics,
+                          options.explain, options.limits.max_paths);
 
   if (options.cache_policy == PDGCachePolicy::Enabled)
     result_cache_[cache_key] = result;

@@ -444,6 +444,63 @@ TEST_F(CypherQuerySyntheticTest, ParserDoesNotMutateConstInput) {
   EXPECT_EQ(query_text, "   MATCH (n) RETURN n   ");
 }
 
+TEST_F(CypherQuerySyntheticTest, MatchesAllEdgeTypesAndExactMinHops) {
+  Node *a = addNode(GraphNodeType::INST_OTHER);
+  Node *b = addNode(GraphNodeType::INST_OTHER);
+  Node *c = addNode(GraphNodeType::FUNC_ENTRY);
+  Node *cls = addNode(GraphNodeType::CLASS);
+  Node *mth = addNode(GraphNodeType::FUNC);
+  Node *ann = addNode(GraphNodeType::ANNO_GLOBAL);
+
+  // Triangle A -> B -> C and A -> C so C is reachable in both 1 and 2 hops.
+  addEdge(a, b, EdgeType::DATA_DEF_USE);
+  addEdge(b, c, EdgeType::DATA_DEF_USE);
+  addEdge(a, c, EdgeType::DATA_DEF_USE);
+
+  // Additional PDG edge types previously missing from CypherExecutor.
+  addEdge(a, b, EdgeType::PARAMETER_FIELD);
+  addEdge(cls, mth, EdgeType::CLS_MTH);
+  addEdge(ann, c, EdgeType::ANNO_GLOBAL);
+
+  CypherParser parser;
+  CypherQueryExecutor executor(*pdg_);
+
+  // [*2..2] MUST reach C via A->B->C even though C is also 1 hop from A.
+  auto q2 = parser.parse(
+      "MATCH (x:INST_OTHER)-[:DATA_DEF_USE*2..2]->(y:FUNC_ENTRY) RETURN y");
+  ASSERT_NE(q2, nullptr);
+  auto r2 = executor.execute(*q2);
+  ASSERT_NE(r2, nullptr);
+  EXPECT_EQ(r2->getNodes().size(), 1u);
+  EXPECT_EQ(r2->getNodes()[0], c);
+
+  // Inverted hop range returns empty without error or hang.
+  auto qInv = parser.parse("MATCH (x)-[*3..1]->(y) RETURN y");
+  ASSERT_NE(qInv, nullptr);
+  auto rInv = executor.execute(*qInv);
+  ASSERT_NE(rInv, nullptr);
+  EXPECT_TRUE(rInv->getNodes().empty());
+
+  // Newly wired edge types match cleanly.
+  for (const char *edge_name : {"PARAMETER_FIELD", "CLS_MTH", "ANNO_GLOBAL"}) {
+    auto qEdge = parser.parse(std::string("MATCH (x)-[:") + edge_name +
+                              "]->(y) RETURN y");
+    ASSERT_NE(qEdge, nullptr) << edge_name;
+    auto rEdge = executor.execute(*qEdge);
+    ASSERT_NE(rEdge, nullptr) << edge_name;
+    EXPECT_EQ(rEdge->getNodes().size(), 1u) << edge_name;
+  }
+}
+
+TEST_F(CypherQuerySyntheticTest, MalformedWithAndLimitOverflowFailCleanly) {
+  CypherParser parser;
+  // Regression: malformed WITH return item previously looped infinitely.
+  EXPECT_EQ(parser.parse("MATCH (n) WITH COUNT( RETURN n"), nullptr);
+  EXPECT_EQ(parser.parse("MATCH (n) WITH n."), nullptr);
+  EXPECT_EQ(parser.parse("MATCH (n) RETURN n LIMIT 9999999999999999999999"),
+            nullptr);
+}
+
 #ifndef LOTUS_GTEST_NO_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);

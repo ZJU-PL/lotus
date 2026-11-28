@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Pass.h"
 
 #include "IR/PDG/Construction/ControlDependencyGraph.h"
@@ -136,8 +137,15 @@ public:
   bool canReach(Node &src, Node &dst, std::set<EdgeType> exclude_edge_types);
 
 private:
+  void ensureInstOrderForFunction(llvm::Function &F);
+  void connectCallerAndCalleeInternal(CallWrapper &cw, FunctionWrapper &fw,
+                                      EdgeType call_edge_type,
+                                      bool attach_actual_trees);
+
   llvm::Module *_module = nullptr;
   ProgramGraph *_PDG = nullptr;
   PDGCallGraph _call_graph;
+  const llvm::Function *_inst_order_func = nullptr;
+  llvm::DenseMap<const llvm::Instruction *, unsigned> _inst_order_map;
 };
 } // namespace pdg

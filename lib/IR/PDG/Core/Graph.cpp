@@ -33,9 +33,19 @@ bool pdg::GenericGraph::hasNode(Value &v) {
 }
 
 pdg::Node *pdg::GenericGraph::getNode(Value &v) {
-  if (!hasNode(v))
+  auto it = _val_node_map.find(&v);
+  if (it == _val_node_map.end())
     return nullptr;
-  return _val_node_map[&v];
+  return it->second;
+}
+
+int pdg::GenericGraph::numEdge() {
+  size_t total = 0;
+  for (auto *node : _node_set) {
+    if (node)
+      total += node->getOutEdgeSet().size();
+  }
+  return static_cast<int>(std::max(total, _edge_set.size()));
 }
 
 // pretty print nodes and edges in PDG
@@ -105,16 +115,14 @@ bool pdg::GenericGraph::canReach(pdg::Node &src, pdg::Node &dst) {
  */
 bool pdg::GenericGraph::canReach(pdg::Node &src, pdg::Node &dst,
                                  std::set<EdgeType> exclude_edge_types) {
-  std::set<Node *> visited;
+  std::unordered_set<Node *> visited;
   std::stack<Node *> node_stack;
   node_stack.push(&src);
+  visited.insert(&src);
 
   while (!node_stack.empty()) {
     auto *current_node = node_stack.top();
     node_stack.pop();
-    if (visited.find(current_node) != visited.end())
-      continue;
-    visited.insert(current_node);
     if (current_node == &dst)
       return true;
     for (auto *out_edge : current_node->getOutEdgeSet()) {
@@ -122,7 +130,9 @@ bool pdg::GenericGraph::canReach(pdg::Node &src, pdg::Node &dst,
       if (exclude_edge_types.find(out_edge->getEdgeType()) !=
           exclude_edge_types.end())
         continue;
-      node_stack.push(out_edge->getDstNode());
+      auto *next_node = out_edge->getDstNode();
+      if (next_node && visited.insert(next_node).second)
+        node_stack.push(next_node);
     }
   }
   return false;
@@ -130,14 +140,19 @@ bool pdg::GenericGraph::canReach(pdg::Node &src, pdg::Node &dst,
 
 void pdg::ProgramGraph::addTreeNodesToGraph(pdg::Tree &tree) {
   TreeNode *root_node = tree.getRootNode();
+  if (root_node == nullptr)
+    return;
   std::queue<TreeNode *> node_queue;
   node_queue.push(root_node);
   while (!node_queue.empty()) {
     TreeNode *current_node = node_queue.front();
     node_queue.pop();
+    if (!current_node)
+      continue;
     addNode(*current_node);
     for (auto *child_node : current_node->getChildNodes()) {
-      node_queue.push(child_node);
+      if (child_node)
+        node_queue.push(child_node);
     }
   }
 }
@@ -203,5 +218,6 @@ void pdg::ProgramGraph::reset() {
   _node_di_type_map.clear();
   _class_node_map.clear();
   _class_name_set.clear();
+  _cdg_built_funcs.clear();
   _built_module = nullptr;
 }

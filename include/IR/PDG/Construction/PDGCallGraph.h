@@ -4,10 +4,15 @@
  */
 
 #pragma once
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/Module.h"
 
 #include "IR/PDG/Core/Graph.h"
 #include "IR/PDG/Core/PDGUtils.h"
+
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace pdg {
 /**
@@ -44,6 +49,12 @@ public:
    */
   std::set<llvm::Function *> getIndirectCallCandidates(llvm::CallBase &ci,
                                                        llvm::Module &M);
+
+  /**
+   * @brief Fast O(1)-lookup variant returning cached signature-matching callees
+   */
+  const std::vector<llvm::Function *> &
+  getIndirectCallCandidatesFast(llvm::CallBase &ci, llvm::Module &M);
 
   /**
    * @brief Check if a function signature matches a call instruction
@@ -94,5 +105,14 @@ public:
                           std::unordered_set<llvm::Function *> visited_funcs,
                           bool &found_path);
 
+private:
+  void ensureSignatureIndex(llvm::Module &M);
+  std::string canonicalTypeKey(llvm::Type *ty);
+  std::string computeFuncSignatureKey(const llvm::Function &f);
+  std::string computeCallSignatureKey(const llvm::CallBase &ci);
+
+  llvm::Module *_indexed_module = nullptr;
+  llvm::DenseMap<llvm::Type *, std::string> _type_key_cache;
+  std::unordered_map<std::string, std::vector<llvm::Function *>> _sig_index;
 };
 } // namespace pdg

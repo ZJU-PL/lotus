@@ -8,6 +8,7 @@
 /// edge connections for dependency tracking.
 
 #pragma once
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/IR/Instructions.h"
 
 #include "IR/PDG/Core/PDGEdge.h"
@@ -67,11 +68,19 @@ public:
 
   /// @brief Adds an incoming edge to this node
   /// @param e Edge to add (edge's destination must be this node)
-  void addInEdge(Edge &e) { _in_edge_set.insert(&e); }
+  void addInEdge(Edge &e) {
+    _in_edge_set.insert(&e);
+    _in_edge_index.insert(
+        {e.getSrcNode(), static_cast<unsigned>(e.getEdgeType())});
+  }
 
   /// @brief Adds an outgoing edge from this node
   /// @param e Edge to add (edge's source must be this node)
-  void addOutEdge(Edge &e) { _out_edge_set.insert(&e); }
+  void addOutEdge(Edge &e) {
+    _out_edge_set.insert(&e);
+    _out_edge_index.insert(
+        {e.getDstNode(), static_cast<unsigned>(e.getEdgeType())});
+  }
 
   /// @brief Gets the set of incoming edges
   /// @return Reference to the set of incoming edges
@@ -174,11 +183,15 @@ public:
   virtual ~Node() = default;
 
 protected:
+  using EdgeIndex = llvm::DenseSet<std::pair<Node *, unsigned>>;
+
   llvm::Value *_val;
   llvm::Function *_func;
   bool _is_visited;
   EdgeSet _in_edge_set;
   EdgeSet _out_edge_set;
+  EdgeIndex _in_edge_index;
+  EdgeIndex _out_edge_index;
   GraphNodeType _node_type;
   llvm::DIType *_node_di_type;
 };

@@ -148,6 +148,7 @@ static bool executeQuery(CypherQueryExecutor &executor,
 
 static void runInteractiveMode(CypherQueryExecutor &executor,
                                const Options &config, const Output &output) {
+  executor.setPreserveSemanticCache(true);
   outs() << "PDG Query (type 'help' or 'quit')\n> ";
 
   std::string line;
@@ -212,11 +213,14 @@ static bool runBatchMode(CypherQueryExecutor &executor,
     return false;
   }
 
+  // Batch files query an immutable module; share semantic analyses across queries.
+  executor.setPreserveSemanticCache(true);
+
+  std::vector<std::string> statements;
   std::string pending;
-  bool success = true;
-  auto flush = [&]() {
+  auto pushPending = [&]() {
     if (!pending.empty()) {
-      success = executeQuery(executor, pending, config, output) && success;
+      statements.push_back(std::move(pending));
       pending.clear();
     }
   };
@@ -225,21 +229,39 @@ static bool runBatchMode(CypherQueryExecutor &executor,
   while (std::getline(file, line)) {
     const std::string trimmed = trim(line);
     if (trimmed.empty() || trimmed[0] == '#') {
-      flush();
+      pushPending();
       continue;
     }
     // A new MATCH after a completed query starts a new statement. UNION keeps
     // the current statement open for the following MATCH.
     if (!pending.empty() && startsWithClause(trimmed, "MATCH") &&
         queryIsComplete(pending) && !endsWithUnion(pending))
-      flush();
+      pushPending();
     if (!pending.empty())
       pending += ' ';
     pending += trimmed;
     if (trimmed.back() == ';')
-      flush();
+      pushPending();
   }
-  flush();
+  pushPending();
+
+  const bool wrap_json_array =
+      config.format == "json" && statements.size() > 1;
+  bool success = true;
+  if (wrap_json_array)
+    outs() << "[\n";
+  bool emitted = false;
+  for (const std::string &stmt : statements) {
+    if (wrap_json_array && emitted)
+      outs() << ",\n";
+    bool ok = executeQuery(executor, stmt, config, output);
+    if (wrap_json_array && !ok)
+      outs() << "null\n";
+    emitted = true;
+    success = ok && success;
+  }
+  if (wrap_json_array)
+    outs() << "]\n";
   return success;
 }
 
@@ -271,6 +293,10 @@ buildAnalysisOptions(const Module &module, CypherQueryExecutor &executor,
                              : PDGContextMode::ContextInsensitive;
   options.slice_flavor = config.thin ? SliceFlavor::Thin : SliceFlavor::Full;
   options.explain = true;
+  if (config.hasExplicitResultLimit && config.resultLimit > 0 &&
+      config.analysisName != "impact" &&
+      config.analysisName != "shortest-path")
+    options.limits.max_paths = static_cast<size_t>(config.resultLimit);
   if (!config.scopeFunction.empty()) {
     if (Function *function = module.getFunction(config.scopeFunction))
       options.scope = PDGQueryScope::functionScope(*function);

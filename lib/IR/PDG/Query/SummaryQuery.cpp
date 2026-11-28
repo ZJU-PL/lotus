@@ -11,15 +11,22 @@
  * summary engine.
  */
 
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 
 #include "IR/PDG/Query/DependenceQuery.h"
 #include "IR/PDG/Query/SliceQuery.h"
 #include "IR/PDG/Query/SummaryQuery.h"
+#include "QuerySupport.h"
 
 #include <algorithm>
+#include <functional>
+#include <queue>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 
 using namespace llvm;
 
@@ -81,39 +88,87 @@ static bool isControlPredicateNode(Node *node) {
           node->getNodeType() == GraphNodeType::FUNC_ENTRY);
 }
 
+static void collectTreeNodes(Tree *tree, NodeSet &nodes) {
+  if (!tree || !tree->getRootNode())
+    return;
+  std::queue<TreeNode *> q;
+  q.push(tree->getRootNode());
+  while (!q.empty()) {
+    TreeNode *cur = q.front();
+    q.pop();
+    if (!cur)
+      continue;
+    nodes.insert(cur);
+    for (TreeNode *child : cur->getChildNodes())
+      if (child)
+        q.push(child);
+  }
+}
+
 /// Collect all nodes that belong to @p function plus optionally adjacent globals.
 static NodeSet collectFunctionNodes(ProgramGraph &pdg, const Function &function,
                                     bool include_connected_globals) {
   NodeSet nodes;
-  for (ProgramGraph::NodeSet::iterator it = pdg.begin(); it != pdg.end(); ++it) {
-    Node *node = *it;
-    if (node != nullptr && functionForNode(node) == &function)
-      nodes.insert(node);
+  Function &mutable_func = const_cast<Function &>(function);
+  if (FunctionWrapper *fw = pdg.getFuncWrapper(mutable_func)) {
+    if (Node *entry = fw->getEntryNode())
+      nodes.insert(entry);
+    if (Node *fn_node = pdg.getNode(mutable_func))
+      nodes.insert(fn_node);
+    for (Argument &arg : mutable_func.args()) {
+      if (Node *arg_node = pdg.getNode(arg))
+        nodes.insert(arg_node);
+      collectTreeNodes(fw->getArgFormalInTree(arg), nodes);
+      collectTreeNodes(fw->getArgFormalOutTree(arg), nodes);
+    }
+    collectTreeNodes(fw->getRetFormalInTree(), nodes);
+    collectTreeNodes(fw->getRetFormalOutTree(), nodes);
+    for (Instruction &inst : instructions(mutable_func)) {
+      if (Node *n = pdg.getNode(inst))
+        nodes.insert(n);
+    }
+    for (CallBase *cb : fw->getCallInsts()) {
+      if (CallWrapper *cw = pdg.getCallWrapper(*cb)) {
+        for (Value *arg : cw->getArgList()) {
+          if (arg) {
+            collectTreeNodes(cw->getArgActualInTree(*arg), nodes);
+            collectTreeNodes(cw->getArgActualOutTree(*arg), nodes);
+          }
+        }
+        collectTreeNodes(cw->getRetActualInTree(), nodes);
+        collectTreeNodes(cw->getRetActualOutTree(), nodes);
+      }
+    }
+  } else {
+    for (ProgramGraph::NodeSet::iterator it = pdg.begin(); it != pdg.end();
+         ++it) {
+      Node *node = *it;
+      if (node != nullptr && functionForNode(node) == &function)
+        nodes.insert(node);
+    }
+    if (pdg.hasNode(mutable_func))
+      nodes.insert(pdg.getNode(mutable_func));
   }
-  if (pdg.hasNode(const_cast<Function &>(function)))
-    nodes.insert(pdg.getNode(const_cast<Function &>(function)));
 
   if (!include_connected_globals)
     return nodes;
 
-  for (ProgramGraph::NodeSet::iterator it = pdg.begin(); it != pdg.end(); ++it) {
-    Node *node = *it;
-    if (!isGlobalNode(node))
+  std::vector<Node *> connected_globals;
+  for (Node *node : nodes) {
+    if (!node)
       continue;
-    bool connected = false;
-    for (Node::EdgeSet::const_iterator edge_it = node->getOutEdgeSet().begin();
-         edge_it != node->getOutEdgeSet().end() && !connected; ++edge_it) {
-      Edge *edge = *edge_it;
-      connected = edge != nullptr && functionForNode(edge->getDstNode()) == &function;
+    for (Edge *edge : node->getInEdgeSet()) {
+      Node *src = edge ? edge->getSrcNode() : nullptr;
+      if (src && isGlobalNode(src))
+        connected_globals.push_back(src);
     }
-    for (Node::EdgeSet::const_iterator edge_it = node->getInEdgeSet().begin();
-         edge_it != node->getInEdgeSet().end() && !connected; ++edge_it) {
-      Edge *edge = *edge_it;
-      connected = edge != nullptr && functionForNode(edge->getSrcNode()) == &function;
+    for (Edge *edge : node->getOutEdgeSet()) {
+      Node *dst = edge ? edge->getDstNode() : nullptr;
+      if (dst && isGlobalNode(dst))
+        connected_globals.push_back(dst);
     }
-    if (connected)
-      nodes.insert(node);
   }
+  nodes.insert(connected_globals.begin(), connected_globals.end());
   return nodes;
 }
 
@@ -220,25 +275,57 @@ static bool summaryKindEnabled(SummaryKind selected, SummaryKind candidate) {
   return selected == SummaryKind::All || selected == candidate;
 }
 
-static bool containsBucketEntry(const std::vector<SummaryBucketEntry> &entries,
-                                Node *source, Node *target) {
-  for (size_t i = 0; i < entries.size(); ++i) {
-    if (entries[i].source == source && entries[i].target == target)
-      return true;
-  }
-  return false;
-}
+using PairSet = llvm::DenseSet<std::pair<Node *, Node *>>;
 
 static void appendBucketEntry(std::vector<SummaryBucketEntry> &entries,
-                              Node *source, Node *target,
-                              const std::vector<PDGWitnessPath> &witnesses) {
-  if (containsBucketEntry(entries, source, target))
+                              PairSet &seen, Node *source, Node *target,
+                              std::vector<PDGWitnessPath> witnesses) {
+  if (!seen.insert({source, target}).second)
     return;
   SummaryBucketEntry entry;
   entry.source = source;
   entry.target = target;
-  entry.witness_paths = witnesses;
-  entries.push_back(entry);
+  entry.witness_paths = std::move(witnesses);
+  entries.push_back(std::move(entry));
+}
+
+static std::vector<PDGWitnessPath> reconstructShortestPaths(
+    Node *source, Node *target,
+    const std::unordered_map<Node *, std::vector<std::pair<Node *, EdgeType>>>
+        &preds,
+    size_t max_paths) {
+  std::vector<PDGWitnessPath> results;
+  std::unordered_set<std::string> seen_paths;
+  std::vector<Node *> path_nodes{target};
+  std::vector<EdgeType> path_edges;
+  std::function<void(Node *)> build = [&](Node *current) {
+    if (max_paths > 0 && results.size() >= max_paths)
+      return;
+    if (current == source) {
+      PDGWitnessPath witness;
+      witness.kind = PDGWitnessPathKind::AllShortestPath;
+      witness.nodes.assign(path_nodes.rbegin(), path_nodes.rend());
+      witness.edge_types.assign(path_edges.rbegin(), path_edges.rend());
+      const std::string key = query_detail::pathKey(witness);
+      if (seen_paths.insert(key).second)
+        results.push_back(std::move(witness));
+      return;
+    }
+    auto it = preds.find(current);
+    if (it == preds.end())
+      return;
+    for (const auto &pred : it->second) {
+      path_nodes.push_back(pred.first);
+      path_edges.push_back(pred.second);
+      build(pred.first);
+      path_edges.pop_back();
+      path_nodes.pop_back();
+      if (max_paths > 0 && results.size() >= max_paths)
+        return;
+    }
+  };
+  build(target);
+  return results;
 }
 
 } // namespace
@@ -265,10 +352,12 @@ SummaryQueryResult SummaryQuery::summarize(const Function &function,
 
   SummaryQueryResult result;
   result.summary.function = &function;
-  const NodeSet function_nodes = collectFunctionNodes(pdg_, function, true);
-
-  PDGQueryOptions scoped_options = options;
-  scoped_options.scope = PDGQueryScope::nodeSet(function_nodes);
+  const bool need_globals =
+      summaryKindEnabled(policy.kind, SummaryKind::InputToGlobalWrite) ||
+      summaryKindEnabled(policy.kind, SummaryKind::GlobalReaders) ||
+      summaryKindEnabled(policy.kind, SummaryKind::GlobalWriters);
+  const NodeSet function_nodes =
+      collectFunctionNodes(pdg_, function, need_globals);
 
   std::vector<Node *> input_nodes;
   std::vector<Node *> return_nodes;
@@ -276,8 +365,8 @@ SummaryQueryResult SummaryQuery::summarize(const Function &function,
   std::vector<Node *> control_nodes;
   std::vector<Node *> global_nodes;
 
-  for (NodeSet::const_iterator it = function_nodes.begin(); it != function_nodes.end();
-       ++it) {
+  for (NodeSet::const_iterator it = function_nodes.begin();
+       it != function_nodes.end(); ++it) {
     Node *node = *it;
     if (isInputNode(node, function))
       input_nodes.push_back(node);
@@ -291,67 +380,95 @@ SummaryQueryResult SummaryQuery::summarize(const Function &function,
       global_nodes.push_back(node);
   }
 
-  SliceQuery slice_query(pdg_);
-  DependenceQuery dependence_query(pdg_);
-  for (size_t i = 0; i < input_nodes.size(); ++i) {
-    PDGCriteria seed;
-    seed.nodes.insert(input_nodes[i]);
-    PDGQueryResult slice = slice_query.forward(seed, scoped_options, module);
+  const bool need_input_return =
+      summaryKindEnabled(policy.kind, SummaryKind::InputToReturn) &&
+      !return_nodes.empty();
+  const bool need_input_call =
+      summaryKindEnabled(policy.kind, SummaryKind::InputToCallsite) &&
+      !call_nodes.empty();
+  const bool need_input_global =
+      summaryKindEnabled(policy.kind, SummaryKind::InputToGlobalWrite) &&
+      !global_nodes.empty();
 
-    if (summaryKindEnabled(policy.kind, SummaryKind::InputToReturn)) {
-      for (size_t j = 0; j < return_nodes.size(); ++j) {
-        if (slice.nodes.count(return_nodes[j]) == 0)
+  if ((need_input_return || need_input_call || need_input_global) &&
+      !input_nodes.empty()) {
+    const std::set<EdgeType> edge_types =
+        edgeTypesForPreset(options.edge_preset);
+    const size_t witness_cap =
+        policy.max_witnesses_per_bucket > 0
+            ? policy.max_witnesses_per_bucket
+            : (options.limits.max_paths > 0 ? options.limits.max_paths : 0);
+    PairSet seen_ret, seen_call, seen_global;
+
+    for (Node *input : input_nodes) {
+      std::queue<Node *> worklist;
+      std::unordered_map<Node *, size_t> distances;
+      std::unordered_map<Node *, std::vector<std::pair<Node *, EdgeType>>>
+          preds;
+      worklist.push(input);
+      distances[input] = 0;
+
+      while (!worklist.empty()) {
+        Node *cur = worklist.front();
+        worklist.pop();
+        const size_t cur_dist = distances[cur];
+        if (options.limits.max_depth > 0 &&
+            cur_dist >= options.limits.max_depth)
           continue;
-        PDGCriteria target_criteria;
-        target_criteria.nodes.insert(return_nodes[j]);
-        std::vector<PDGWitnessPath> witnesses =
-            dependence_query.allShortestPaths(seed, target_criteria,
-                                             scoped_options, module);
-        if (policy.max_witnesses_per_bucket > 0 &&
-            witnesses.size() > policy.max_witnesses_per_bucket)
-          witnesses.resize(policy.max_witnesses_per_bucket);
-        appendBucketEntry(result.summary.input_to_return, input_nodes[i],
-                          return_nodes[j], witnesses);
+        for (Edge *edge : cur->getOutEdgeSet()) {
+          if (!edge || !query_detail::isEdgeAllowed(edge->getEdgeType(), edge_types))
+            continue;
+          Node *nbr = edge->getDstNode();
+          if (!nbr || function_nodes.count(nbr) == 0)
+            continue;
+          const size_t next_dist = cur_dist + 1;
+          auto dit = distances.find(nbr);
+          if (dit == distances.end()) {
+            distances[nbr] = next_dist;
+            preds[nbr].push_back({cur, edge->getEdgeType()});
+            worklist.push(nbr);
+          } else if (next_dist == dit->second) {
+            preds[nbr].push_back({cur, edge->getEdgeType()});
+          }
+        }
       }
-    }
 
-    if (summaryKindEnabled(policy.kind, SummaryKind::InputToCallsite)) {
-      for (size_t j = 0; j < call_nodes.size(); ++j) {
-        if (slice.nodes.count(call_nodes[j]) == 0)
-          continue;
-        PDGCriteria target_criteria;
-        target_criteria.nodes.insert(call_nodes[j]);
-        std::vector<PDGWitnessPath> witnesses =
-            dependence_query.allShortestPaths(seed, target_criteria,
-                                             scoped_options, module);
-        if (policy.max_witnesses_per_bucket > 0 &&
-            witnesses.size() > policy.max_witnesses_per_bucket)
-          witnesses.resize(policy.max_witnesses_per_bucket);
-        appendBucketEntry(result.summary.input_to_callsite, input_nodes[i],
-                          call_nodes[j], witnesses);
+      if (need_input_return) {
+        for (Node *ret : return_nodes) {
+          if (distances.count(ret) == 0)
+            continue;
+          auto witnesses =
+              reconstructShortestPaths(input, ret, preds, witness_cap);
+          appendBucketEntry(result.summary.input_to_return, seen_ret, input,
+                            ret, std::move(witnesses));
+        }
       }
-    }
-
-    if (summaryKindEnabled(policy.kind, SummaryKind::InputToGlobalWrite)) {
-      for (size_t j = 0; j < global_nodes.size(); ++j) {
-        if (slice.nodes.count(global_nodes[j]) == 0)
-          continue;
-        PDGCriteria target_criteria;
-        target_criteria.nodes.insert(global_nodes[j]);
-        std::vector<PDGWitnessPath> witnesses =
-            dependence_query.allShortestPaths(seed, target_criteria,
-                                             scoped_options, module);
-        if (policy.max_witnesses_per_bucket > 0 &&
-            witnesses.size() > policy.max_witnesses_per_bucket)
-          witnesses.resize(policy.max_witnesses_per_bucket);
-        appendBucketEntry(result.summary.input_to_global_write, input_nodes[i],
-                          global_nodes[j], witnesses);
+      if (need_input_call) {
+        for (Node *call : call_nodes) {
+          if (distances.count(call) == 0)
+            continue;
+          auto witnesses =
+              reconstructShortestPaths(input, call, preds, witness_cap);
+          appendBucketEntry(result.summary.input_to_callsite, seen_call, input,
+                            call, std::move(witnesses));
+        }
+      }
+      if (need_input_global) {
+        for (Node *glob : global_nodes) {
+          if (distances.count(glob) == 0)
+            continue;
+          auto witnesses =
+              reconstructShortestPaths(input, glob, preds, witness_cap);
+          appendBucketEntry(result.summary.input_to_global_write, seen_global,
+                            input, glob, std::move(witnesses));
+        }
       }
     }
   }
 
   if (summaryKindEnabled(policy.kind, SummaryKind::GlobalReaders) ||
       summaryKindEnabled(policy.kind, SummaryKind::GlobalWriters)) {
+    PairSet seen_readers, seen_writers;
     for (size_t i = 0; i < global_nodes.size(); ++i) {
       for (Node::EdgeSet::const_iterator edge_it =
                global_nodes[i]->getOutEdgeSet().begin();
@@ -359,8 +476,8 @@ SummaryQueryResult SummaryQuery::summarize(const Function &function,
         Edge *edge = *edge_it;
         Node *reader = edge != nullptr ? edge->getDstNode() : nullptr;
         if (reader != nullptr && functionForNode(reader) == &function)
-          appendBucketEntry(result.summary.global_readers, global_nodes[i], reader,
-                            std::vector<PDGWitnessPath>());
+          appendBucketEntry(result.summary.global_readers, seen_readers,
+                            global_nodes[i], reader, {});
       }
       for (Node::EdgeSet::const_iterator edge_it =
                global_nodes[i]->getInEdgeSet().begin();
@@ -368,32 +485,46 @@ SummaryQueryResult SummaryQuery::summarize(const Function &function,
         Edge *edge = *edge_it;
         Node *writer = edge != nullptr ? edge->getSrcNode() : nullptr;
         if (writer != nullptr && functionForNode(writer) == &function)
-          appendBucketEntry(result.summary.global_writers, global_nodes[i], writer,
-                            std::vector<PDGWitnessPath>());
+          appendBucketEntry(result.summary.global_writers, seen_writers,
+                            global_nodes[i], writer, {});
       }
     }
   }
 
   if (summaryKindEnabled(policy.kind, SummaryKind::ControlPredicates)) {
-    for (size_t i = 0; i < control_nodes.size(); ++i) {
-      PDGCriteria seed;
-      seed.nodes.insert(control_nodes[i]);
-      PDGQueryOptions control_options = scoped_options;
-      control_options.edge_preset = PDGEdgePreset::Control;
-      PDGQueryResult region = slice_query.forward(seed, control_options, module);
-      for (NodeSet::const_iterator it = region.nodes.begin(); it != region.nodes.end();
-           ++it) {
-        if (*it != control_nodes[i])
-          appendBucketEntry(result.summary.control_predicates, control_nodes[i], *it,
-                            std::vector<PDGWitnessPath>());
+    const std::set<EdgeType> control_edges =
+        edgeTypesForPreset(PDGEdgePreset::Control);
+    PairSet seen_ctrl;
+    for (Node *ctrl : control_nodes) {
+      std::queue<Node *> worklist;
+      llvm::DenseSet<Node *> visited;
+      worklist.push(ctrl);
+      visited.insert(ctrl);
+      while (!worklist.empty()) {
+        Node *cur = worklist.front();
+        worklist.pop();
+        for (Edge *edge : cur->getOutEdgeSet()) {
+          if (!edge || !query_detail::isEdgeAllowed(edge->getEdgeType(),
+                                                    control_edges))
+            continue;
+          Node *nbr = edge->getDstNode();
+          if (!nbr || function_nodes.count(nbr) == 0)
+            continue;
+          if (visited.insert(nbr).second) {
+            appendBucketEntry(result.summary.control_predicates, seen_ctrl,
+                              ctrl, nbr, {});
+            worklist.push(nbr);
+          }
+        }
       }
     }
   }
 
   if (summaryKindEnabled(policy.kind, SummaryKind::ReachableCalls)) {
+    PairSet seen_calls;
     for (size_t i = 0; i < call_nodes.size(); ++i)
-      appendBucketEntry(result.summary.reachable_calls, nullptr, call_nodes[i],
-                        std::vector<PDGWitnessPath>());
+      appendBucketEntry(result.summary.reachable_calls, seen_calls, nullptr,
+                        call_nodes[i], {});
   }
 
   if (summaryKindEnabled(policy.kind, SummaryKind::ResourceKinds) ||

@@ -1,6 +1,10 @@
 #include "Output.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
@@ -41,8 +45,50 @@ static std::string describeEdge(CypherQueryExecutor &executor, Edge *edge) {
 static std::string jsonEscape(const std::string &input) {
   std::string output;
   output.reserve(input.size());
+  static const char kHex[] = "0123456789abcdef";
   for (size_t i = 0; i < input.size(); ++i) {
-    switch (input[i]) {
+    unsigned char ch = static_cast<unsigned char>(input[i]);
+    switch (ch) {
+    case '\\':
+      output += "\\\\";
+      break;
+    case '"':
+      output += "\\\"";
+      break;
+    case '\b':
+      output += "\\b";
+      break;
+    case '\f':
+      output += "\\f";
+      break;
+    case '\n':
+      output += "\\n";
+      break;
+    case '\r':
+      output += "\\r";
+      break;
+    case '\t':
+      output += "\\t";
+      break;
+    default:
+      if (ch < 0x20) {
+        output += "\\u00";
+        output.push_back(kHex[(ch >> 4) & 0x0f]);
+        output.push_back(kHex[ch & 0x0f]);
+      } else {
+        output.push_back(static_cast<char>(ch));
+      }
+      break;
+    }
+  }
+  return output;
+}
+
+static std::string dotEscape(const std::string &input) {
+  std::string output;
+  output.reserve(input.size());
+  for (char c : input) {
+    switch (c) {
     case '\\':
       output += "\\\\";
       break;
@@ -52,13 +98,55 @@ static std::string jsonEscape(const std::string &input) {
     case '\n':
       output += "\\n";
       break;
+    case '\r':
+      output += "\\r";
+      break;
     default:
-      output += input[i];
+      output.push_back(c);
       break;
     }
   }
   return output;
 }
+
+class StableKeyCache {
+public:
+  explicit StableKeyCache(const PDGQueryResult &result) {
+    const Module *mod = nullptr;
+    for (Node *node : result.nodes) {
+      if (!node)
+        continue;
+      if (const Function *f = node->getFunc()) {
+        mod = f->getParent();
+        break;
+      }
+      if (const Value *v = node->getValue()) {
+        if (const auto *inst = dyn_cast<Instruction>(v)) {
+          mod = inst->getModule();
+          break;
+        }
+        if (const auto *gv = dyn_cast<GlobalValue>(v)) {
+          mod = gv->getParent();
+          break;
+        }
+      }
+    }
+    if (mod)
+      slot_tracker_ = std::make_unique<ModuleSlotTracker>(mod, false);
+  }
+
+  const std::string &get(Node *node) {
+    auto it = cache_.find(node);
+    if (it != cache_.end())
+      return it->second;
+    return cache_.try_emplace(node, stableNodeKey(node, slot_tracker_.get()))
+        .first->second;
+  }
+
+private:
+  std::unique_ptr<ModuleSlotTracker> slot_tracker_;
+  llvm::DenseMap<Node *, std::string> cache_;
+};
 
 static json::Array ruleCatalogJson(const std::vector<RuleDescriptor> &rules) {
   json::Array catalog;
@@ -102,7 +190,8 @@ void Output::printVersion() const {
 }
 
 void Output::printPDGInfo(ProgramGraph &pdg) const {
-  raw_ostream &output = config_.format == "json" ? errs() : outs();
+  raw_ostream &output =
+      (config_.format == "json" || config_.format == "dot") ? errs() : outs();
   output << "PDG Information:\n";
   output << "  Total nodes: " << pdg.numNode() << "\n";
   output << "  Total edges: " << pdg.numEdge() << "\n";
@@ -477,11 +566,12 @@ void Output::printResultText(const PDGQueryResult &result) const {
       outs() << "  - " << result.diagnostics.unresolved_criteria[i] << "\n";
   }
   if (!result.witness_paths.empty()) {
+    StableKeyCache keys(result);
     outs() << "witness paths:\n";
     for (size_t i = 0; i < result.witness_paths.size(); ++i) {
       outs() << "  path " << i << ":";
       for (size_t j = 0; j < result.witness_paths[i].nodes.size(); ++j)
-        outs() << " " << stableNodeKey(result.witness_paths[i].nodes[j]);
+        outs() << " " << keys.get(result.witness_paths[i].nodes[j]);
       outs() << "\n";
     }
   }
@@ -493,6 +583,7 @@ void Output::printResultText(const PDGQueryResult &result) const {
 }
 
 void Output::printResultJson(const PDGQueryResult &result) const {
+  StableKeyCache keys(result);
   outs() << "{";
   outs() << "\"criteria_nodes\":" << result.criteria_nodes.size() << ",";
   outs() << "\"nodes\":[";
@@ -502,7 +593,7 @@ void Output::printResultJson(const PDGQueryResult &result) const {
     if (!first)
       outs() << ",";
     first = false;
-    outs() << "\"" << jsonEscape(stableNodeKey(*it)) << "\"";
+    outs() << "\"" << jsonEscape(keys.get(*it)) << "\"";
   }
   outs() << "],";
   outs() << "\"witness_paths\":[";
@@ -513,8 +604,7 @@ void Output::printResultJson(const PDGQueryResult &result) const {
     for (size_t j = 0; j < result.witness_paths[i].nodes.size(); ++j) {
       if (j != 0)
         outs() << ",";
-      outs() << "\""
-             << jsonEscape(stableNodeKey(result.witness_paths[i].nodes[j]))
+      outs() << "\"" << jsonEscape(keys.get(result.witness_paths[i].nodes[j]))
              << "\"";
     }
     outs() << "]";
@@ -524,17 +614,19 @@ void Output::printResultJson(const PDGQueryResult &result) const {
 }
 
 void Output::printResultDot(const PDGQueryResult &result) const {
+  StableKeyCache keys(result);
   outs() << "digraph PDGQuery {\n";
   for (PDGQueryResult::NodeSet::const_iterator it = result.nodes.begin();
        it != result.nodes.end(); ++it) {
-    outs() << "  \"" << stableNodeKey(*it) << "\";\n";
+    outs() << "  \"" << dotEscape(keys.get(*it)) << "\";\n";
   }
   for (PDGQueryResult::EdgeSet::const_iterator it = result.edges.begin();
        it != result.edges.end(); ++it) {
     Edge *edge = *it;
-    outs() << "  \"" << stableNodeKey(edge->getSrcNode()) << "\" -> \""
-           << stableNodeKey(edge->getDstNode()) << "\""
-           << " [label=\"" << pdgutils::getEdgeTypeStr(edge->getEdgeType())
+    outs() << "  \"" << dotEscape(keys.get(edge->getSrcNode())) << "\" -> \""
+           << dotEscape(keys.get(edge->getDstNode())) << "\""
+           << " [label=\""
+           << dotEscape(pdgutils::getEdgeTypeStr(edge->getEdgeType()))
            << "\"];\n";
   }
   outs() << "}\n";
@@ -824,6 +916,113 @@ void Output::printResourceFlow(const ResourceFlowQueryResult &result) const {
 
 void Output::printQueryResult(CypherQueryExecutor &executor,
                               const CypherResult &result) const {
+  if (config_.format == "json") {
+    json::Object obj;
+    switch (result.getType()) {
+    case CypherResult::ResultType::NODES: {
+      obj["type"] = "nodes";
+      size_t limit = config_.resultLimit > 0
+                         ? std::min(result.getNodes().size(),
+                                    static_cast<size_t>(config_.resultLimit))
+                         : result.getNodes().size();
+      obj["total"] = static_cast<int64_t>(result.getNodes().size());
+      json::Array items;
+      for (size_t i = 0; i < limit; ++i)
+        items.push_back(describeNode(result.getNodes()[i]));
+      obj["nodes"] = std::move(items);
+      break;
+    }
+    case CypherResult::ResultType::RELATIONSHIPS: {
+      obj["type"] = "relationships";
+      size_t limit =
+          config_.resultLimit > 0
+              ? std::min(result.getRelationships().size(),
+                         static_cast<size_t>(config_.resultLimit))
+              : result.getRelationships().size();
+      obj["total"] = static_cast<int64_t>(result.getRelationships().size());
+      json::Array items;
+      for (size_t i = 0; i < limit; ++i) {
+        Edge *edge = result.getRelationships()[i];
+        items.push_back(json::Object{
+            {"label", describeEdge(executor, edge)},
+            {"src", edge ? describeNode(edge->getSrcNode()) : "<null>"},
+            {"dst", edge ? describeNode(edge->getDstNode()) : "<null>"}});
+      }
+      obj["relationships"] = std::move(items);
+      break;
+    }
+    case CypherResult::ResultType::INTEGER:
+      obj["type"] = "integer";
+      obj["value"] = static_cast<int64_t>(result.getIntegerValue());
+      break;
+    case CypherResult::ResultType::BOOLEAN:
+      obj["type"] = "boolean";
+      obj["value"] = result.getBooleanValue();
+      break;
+    case CypherResult::ResultType::SCALAR:
+    case CypherResult::ResultType::PATHS:
+    default: {
+      obj["type"] = "scalar";
+      obj["value"] = result.getScalarValue();
+      json::Array rows;
+      StringRef raw(result.getScalarValue());
+      while (!raw.empty()) {
+        auto split = raw.split('\n');
+        rows.push_back(split.first.str());
+        raw = split.second;
+      }
+      obj["rows"] = std::move(rows);
+      break;
+    }
+    }
+    outs() << formatv("{0:2}\n", json::Value(std::move(obj)));
+    return;
+  }
+
+  if (config_.format == "dot") {
+    outs() << "digraph pdg_query {\n";
+    if (result.getType() == CypherResult::ResultType::NODES) {
+      size_t limit = config_.resultLimit > 0
+                         ? std::min(result.getNodes().size(),
+                                    static_cast<size_t>(config_.resultLimit))
+                         : result.getNodes().size();
+      for (size_t i = 0; i < limit; ++i) {
+        Node *node = result.getNodes()[i];
+        outs() << "  \"n" << i << "\" [label=\""
+               << dotEscape(describeNode(node)) << "\"];\n";
+      }
+    } else if (result.getType() == CypherResult::ResultType::RELATIONSHIPS) {
+      size_t limit =
+          config_.resultLimit > 0
+              ? std::min(result.getRelationships().size(),
+                         static_cast<size_t>(config_.resultLimit))
+              : result.getRelationships().size();
+      llvm::DenseMap<Node *, size_t> ids;
+      auto getId = [&](Node *node) {
+        auto res = ids.try_emplace(node, ids.size());
+        if (res.second) {
+          outs() << "  \"n" << res.first->second << "\" [label=\""
+                 << dotEscape(describeNode(node)) << "\"];\n";
+        }
+        return res.first->second;
+      };
+      for (size_t i = 0; i < limit; ++i) {
+        Edge *edge = result.getRelationships()[i];
+        if (!edge || !edge->getSrcNode() || !edge->getDstNode())
+          continue;
+        size_t s = getId(edge->getSrcNode());
+        size_t d = getId(edge->getDstNode());
+        outs() << "  \"n" << s << "\" -> \"n" << d << "\" [label=\""
+               << dotEscape(describeEdge(executor, edge)) << "\"];\n";
+      }
+    } else {
+      outs() << "  \"result\" [label=\"" << dotEscape(result.toString())
+             << "\"];\n";
+    }
+    outs() << "}\n";
+    return;
+  }
+
   outs() << "Result: " << result.toString() << "\n";
   if (result.getType() == CypherResult::ResultType::NODES) {
     size_t limit = config_.resultLimit > 0

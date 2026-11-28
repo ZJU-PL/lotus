@@ -88,7 +88,7 @@ std::string describeNode(Node *node) {
   return description;
 }
 
-std::string stableNodeKey(Node *node) {
+std::string stableNodeKey(Node *node, llvm::ModuleSlotTracker *slot_tracker) {
   if (node == nullptr)
     return "<null>";
 
@@ -99,10 +99,12 @@ std::string stableNodeKey(Node *node) {
   if (!source.empty())
     os << source;
   else if (node->getValue() != nullptr)
-    os << stringifyValue(node->getValue());
+    os << stringifyValue(node->getValue(), slot_tracker);
   else
     os << pointerKey(node);
   return os.str();
 }
+
+std::string stableNodeKey(Node *node) { return stableNodeKey(node, nullptr); }
 
 } // namespace pdg

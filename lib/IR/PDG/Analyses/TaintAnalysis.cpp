@@ -1,5 +1,8 @@
 #include "IR/PDG/Analyses/TaintAnalysis.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -15,6 +18,7 @@
 #include <deque>
 #include <memory>
 #include <tuple>
+#include <unordered_map>
 
 using namespace llvm;
 
@@ -72,19 +76,27 @@ public:
   Location location(const Value *pointer, unsigned depth = 0) const {
     if (!pointer || !pointer->getType()->isPointerTy() || depth > 16)
       return {};
+    if (depth == 0) {
+      auto cached = location_cache_.find(pointer);
+      if (cached != location_cache_.end())
+        return cached->second;
+    }
     int64_t offset = 0;
     const Value *base = GetPointerBaseWithConstantOffset(
         pointer, offset, module_.getDataLayout());
+    Location res;
     if (const auto *call = dyn_cast<CallBase>(base)) {
       auto alias = LibraryModels::returnAlias(*call);
       if (alias)
         if (const Value *owner = ValueFacts::argument(*call, *alias)) {
-          auto result = location(owner, depth + 1);
-          if (__builtin_add_overflow(result.offset, offset, &result.offset)) {
-            result.offset = 0;
-            result.unknown = true;
+          res = location(owner, depth + 1);
+          if (__builtin_add_overflow(res.offset, offset, &res.offset)) {
+            res.offset = 0;
+            res.unknown = true;
           }
-          return result;
+          if (depth == 0)
+            location_cache_[pointer] = res;
+          return res;
         }
     }
     if (const auto *load = dyn_cast<LoadInst>(base)) {
@@ -94,16 +106,21 @@ public:
             *const_cast<Function *>(load->getFunction()));
       const Value &origin = facts->pointerOrigin(*load);
       if (&origin != load) {
-        auto result = location(&origin, depth + 1);
-        if (__builtin_add_overflow(result.offset, offset, &result.offset)) {
-          result.offset = 0;
-          result.unknown = true;
+        res = location(&origin, depth + 1);
+        if (__builtin_add_overflow(res.offset, offset, &res.offset)) {
+          res.offset = 0;
+          res.unknown = true;
         }
-        return result;
+        if (depth == 0)
+          location_cache_[pointer] = res;
+        return res;
       }
     }
     const Value *root = getUnderlyingObject(base);
-    return {root, base == root ? offset : 0, base != root};
+    res = {root, base == root ? offset : 0, base != root};
+    if (depth == 0)
+      location_cache_[pointer] = res;
+    return res;
   }
   uint64_t bytes(Type *type) const {
     if (!type->isSized())
@@ -139,12 +156,14 @@ public:
     result.pointer_slot = false;
     result.object_content = false;
     result.pointee_object_content = false;
-    if (const auto *inst = dyn_cast<Instruction>(v)) {
-      auto &facts = function_facts_[inst->getFunction()];
-      if (!facts)
-        facts = std::make_unique<FunctionFacts>(
-            *const_cast<Function *>(inst->getFunction()));
-      result.allocation_safe |= facts->boundedAt(*v, *inst);
+    if (v->getType()->isIntegerTy()) {
+      if (const auto *inst = dyn_cast<Instruction>(v)) {
+        auto &facts = function_facts_[inst->getFunction()];
+        if (!facts)
+          facts = std::make_unique<FunctionFacts>(
+              *const_cast<Function *>(inst->getFunction()));
+        result.allocation_safe |= facts->boundedAt(*v, *inst);
+      }
     }
     return result;
   }
@@ -211,9 +230,23 @@ public:
            (point.channel == TaintChannel::Value ||
             target->getType()->isPointerTy());
   }
-  CallTaintModel model(const CallBase &call) const {
-    return policy_.call_model ? policy_.call_model(call)
-                              : LibraryModels::taint(call);
+  const CallTaintModel &model(const CallBase &call) const {
+    auto it = model_cache_.find(&call);
+    if (it != model_cache_.end())
+      return it->second;
+    return model_cache_
+        .emplace(&call, policy_.call_model ? policy_.call_model(call)
+                                           : LibraryModels::taint(call))
+        .first->second;
+  }
+
+  const Function *resolvedCallee(const CallBase &call) const {
+    auto it = callee_cache_.find(&call);
+    if (it != callee_cache_.end())
+      return it->second;
+    const Function *target = ValueFacts::callee(call);
+    callee_cache_[&call] = target;
+    return target;
   }
 
   FactSet initial_facts(const Function *function) {
@@ -474,9 +507,9 @@ public:
   FactSet call_to_return_flow(const CallBase *call, const Instruction *next,
                               ArrayRef<const Function *>, const Fact &fact) {
     FactSet result;
-    CallTaintModel effects = model(*call);
+    const CallTaintModel &effects = model(*call);
     bool keep = true;
-    const Function *target = ValueFacts::callee(*call);
+    const Function *target = resolvedCallee(*call);
     if (fact.kind != Kind::Zero) {
       if (target && !target->isDeclaration() && !effects.known &&
           fact.kind == Kind::Memory) {
@@ -556,6 +589,9 @@ private:
   const TaintPolicy &policy_;
   mutable std::map<const Function *, std::unique_ptr<FunctionFacts>>
       function_facts_;
+  mutable std::unordered_map<const CallBase *, CallTaintModel> model_cache_;
+  mutable llvm::DenseMap<const CallBase *, const Function *> callee_cache_;
+  mutable llvm::DenseMap<const Value *, Location> location_cache_;
 };
 /// A PDG-owned context worklist. Each callee summary is keyed by its incoming
 /// content/value state; return effects are instantiated at the originating
@@ -648,10 +684,13 @@ public:
     if (known != fact_cache_.end())
       return known->second;
     FactSet result;
-    for (const auto &context : contexts_) {
-      auto it = context->states.find(&inst);
-      if (it != context->states.end())
-        result.insert(it->second.begin(), it->second.end());
+    auto by_fn = contexts_by_func_.find(inst.getFunction());
+    if (by_fn != contexts_by_func_.end()) {
+      for (const Context *context : by_fn->second) {
+        auto it = context->states.find(&inst);
+        if (it != context->states.end())
+          result.insert(it->second.begin(), it->second.end());
+      }
     }
     return fact_cache_.emplace(&inst, std::move(result)).first->second;
   }
@@ -671,7 +710,7 @@ private:
     }
   };
   struct Context {
-    std::map<const Instruction *, FactSet> states;
+    std::unordered_map<const Instruction *, FactSet> states;
     std::map<const Instruction *, FactSet> exits;
     std::set<std::pair<size_t, const Instruction *>> dependents;
   };
@@ -685,6 +724,7 @@ private:
     ++misses_;
     size_t id = contexts_.size();
     contexts_.push_back(std::make_unique<Context>());
+    contexts_by_func_[&function].push_back(contexts_[id].get());
     context_ids_.emplace(std::move(key), id);
     merge(id, &function.getEntryBlock().front(), input);
     return *contexts_[id];
@@ -694,7 +734,7 @@ private:
     if (it != graph_.getCallWrapperMap().end() && it->second)
       if (const Function *target = it->second->getCalledFunc())
         return target;
-    return ValueFacts::callee(call);
+    return transfer_.resolvedCallee(call);
   }
   static std::vector<const Instruction *>
   nextInstructions(const Instruction &inst) {
@@ -726,10 +766,12 @@ private:
   size_t budget_, steps_ = 0, hits_ = 0, misses_ = 0;
   bool limited_ = false;
   std::vector<std::unique_ptr<Context>> contexts_;
+  llvm::DenseMap<const Function *, llvm::SmallVector<Context *, 4>>
+      contexts_by_func_;
   std::map<ContextKey, size_t> context_ids_;
   std::deque<std::pair<size_t, const Instruction *>> queue_;
-  std::set<std::pair<size_t, const Instruction *>> queued_;
-  mutable std::map<const Instruction *, FactSet> fact_cache_;
+  llvm::DenseSet<std::pair<size_t, const Instruction *>> queued_;
+  mutable std::unordered_map<const Instruction *, FactSet> fact_cache_;
 };
 } // namespace taint_detail
 
@@ -816,104 +858,154 @@ TaintFlowResult TaintAnalysis::analyze(const Module &module,
   result.diagnostics.summary_cache_misses = solver.summaryMisses();
   // Infer unchanged-parameter wrapper roles to a finite fixed point, shared
   // by the string-flow rules rather than hard-coding individual wrappers.
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (const Function &function : module)
-      for (const BasicBlock &block : function)
-        for (const Instruction &inst : block)
-          if (const auto *call = dyn_cast<CallBase>(&inst))
-            for (auto domain :
-                 {TaintDomain::Process, TaintDomain::Command, TaintDomain::Sql,
-                  TaintDomain::Path, TaintDomain::Format,
-                  TaintDomain::Allocation, TaintDomain::Wordexp})
-              for (unsigned index : result.sinkArguments(*call, domain)) {
-                if (index >= call->arg_size())
-                  continue;
-                const auto *formal = dyn_cast<Argument>(
-                    call->getArgOperand(index)->stripPointerCasts());
-                if (formal && formal->getParent() == &function) {
-                  // Allocation wrappers expose an allocated result. Helpers
-                  // which only allocate internally retain the actual allocator
-                  // as the diagnostic site (even when they later free it).
-                  if (domain == TaintDomain::Allocation &&
-                      !function.getReturnType()->isPointerTy())
-                    continue;
-                  TaintChannel channel = domain == TaintDomain::Allocation
-                                             ? TaintChannel::Value
-                                             : TaintChannel::Memory;
-                  bool flows = false;
-                  for (const auto &fact : solver.factsAt(*call))
-                    if (fact.wrapper_probe && fact.source == formal &&
-                        problem.matches(fact, call->getArgOperand(index),
-                                        channel) &&
-                        !(channel == TaintChannel::Memory &&
-                          (fact.numeric || fact.pointer_slot)) &&
-                        !(domain == TaintDomain::Sql && fact.sql_safe) &&
-                        !(domain == TaintDomain::Allocation &&
-                          fact.allocation_safe))
-                      flows = true;
-                  if (!flows ||
-                      (domain == TaintDomain::Allocation &&
-                       problem.boundedAt(*call->getArgOperand(index), *call)))
-                    continue;
-                  changed |= result.wrapper_arguments[{&function, domain}]
-                                 .insert(formal->getArgNo())
-                                 .second;
-                  auto guards = LibraryModels::taintSinkGuards(*call, domain);
-                  if (const Function *target = ValueFacts::callee(*call)) {
-                    auto inherited =
-                        result.conditional_wrapper_sinks.find({target, domain});
-                    if (inherited != result.conditional_wrapper_sinks.end())
-                      guards.insert(guards.end(), inherited->second.begin(),
-                                    inherited->second.end());
-                    auto unguarded =
-                        result.unconditional_wrapper_arguments.find(
-                            {target, domain});
-                    if (unguarded !=
-                            result.unconditional_wrapper_arguments.end() &&
-                        unguarded->second.count(index))
-                      changed |= result
-                                     .unconditional_wrapper_arguments[{
-                                         &function, domain}]
-                                     .insert(formal->getArgNo())
-                                     .second;
-                  }
-                  bool has_guard = false;
-                  for (auto guard : guards) {
-                    if (guard.argument != index)
-                      continue;
-                    const Value *flags =
-                        ValueFacts::argument(*call, guard.flag_argument);
-                    const auto *parameter = dyn_cast_or_null<Argument>(flags);
-                    if (!parameter || parameter->getParent() != &function)
-                      continue;
-                    has_guard = true;
-                    guard.argument = formal->getArgNo();
-                    guard.flag_argument = parameter->getArgNo();
-                    auto &entries =
-                        result.conditional_wrapper_sinks[{&function, domain}];
-                    if (std::none_of(
-                            entries.begin(), entries.end(),
-                            [&](const auto &entry) {
-                              return entry.argument == guard.argument &&
-                                     entry.flag_argument ==
-                                         guard.flag_argument &&
-                                     entry.disabled_by_any_set_bits ==
-                                         guard.disabled_by_any_set_bits;
-                            })) {
-                      entries.push_back(guard);
-                      changed = true;
-                    }
-                  }
-                  if (!has_guard)
-                    changed |= result
-                                   .unconditional_wrapper_arguments[{&function,
-                                                                     domain}]
-                                   .insert(formal->getArgNo())
-                                   .second;
-                }
-              }
+  // Pre-index callsites that pass at least one enclosing formal Argument so
+  // the fixed point only revisits callers of functions whose wrapper summary
+  // changed (exact least fixed point).
+  struct WrapperCandidate {
+    const Function *function = nullptr;
+    const CallBase *call = nullptr;
+    const Function *callee = nullptr;
+    llvm::SmallVector<std::pair<unsigned, const Argument *>, 4> formal_args;
+  };
+  std::vector<WrapperCandidate> wrapper_candidates;
+  llvm::DenseMap<const Function *, llvm::SmallVector<size_t, 4>>
+      callers_by_callee;
+  for (const Function &function : module) {
+    if (function.isDeclaration() || function.arg_empty())
+      continue;
+    for (const BasicBlock &block : function) {
+      for (const Instruction &inst : block) {
+        const auto *call = dyn_cast<CallBase>(&inst);
+        if (!call || call->arg_empty())
+          continue;
+        WrapperCandidate cand;
+        cand.function = &function;
+        cand.call = call;
+        for (unsigned i = 0; i < call->arg_size(); ++i) {
+          const auto *formal = dyn_cast<Argument>(
+              call->getArgOperand(i)->stripPointerCasts());
+          if (formal && formal->getParent() == &function)
+            cand.formal_args.push_back({i, formal});
+        }
+        if (cand.formal_args.empty())
+          continue;
+        cand.callee = problem.resolvedCallee(*call);
+        size_t idx = wrapper_candidates.size();
+        wrapper_candidates.push_back(std::move(cand));
+        if (wrapper_candidates[idx].callee)
+          callers_by_callee[wrapper_candidates[idx].callee].push_back(idx);
+      }
+    }
+  }
+  auto processWrapper = [&](const WrapperCandidate &cand,
+                            TaintDomain domain) -> bool {
+    const Function &function = *cand.function;
+    const CallBase *call = cand.call;
+    if (domain == TaintDomain::Allocation &&
+        !function.getReturnType()->isPointerTy())
+      return false;
+    bool local_changed = false;
+    for (unsigned index : result.sinkArguments(*call, domain)) {
+      const Argument *formal = nullptr;
+      for (const auto &entry : cand.formal_args) {
+        if (entry.first == index) {
+          formal = entry.second;
+          break;
+        }
+      }
+      if (!formal)
+        continue;
+      TaintChannel channel = domain == TaintDomain::Allocation
+                                 ? TaintChannel::Value
+                                 : TaintChannel::Memory;
+      bool flows = false;
+      for (const auto &fact : solver.factsAt(*call))
+        if (fact.wrapper_probe && fact.source == formal &&
+            problem.matches(fact, call->getArgOperand(index), channel) &&
+            !(channel == TaintChannel::Memory &&
+              (fact.numeric || fact.pointer_slot)) &&
+            !(domain == TaintDomain::Sql && fact.sql_safe) &&
+            !(domain == TaintDomain::Allocation && fact.allocation_safe)) {
+          flows = true;
+          break;
+        }
+      if (!flows || (domain == TaintDomain::Allocation &&
+                     problem.boundedAt(*call->getArgOperand(index), *call)))
+        continue;
+      local_changed |= result.wrapper_arguments[{&function, domain}]
+                           .insert(formal->getArgNo())
+                           .second;
+      auto guards = LibraryModels::taintSinkGuards(*call, domain);
+      if (const Function *target = cand.callee) {
+        auto inherited =
+            result.conditional_wrapper_sinks.find({target, domain});
+        if (inherited != result.conditional_wrapper_sinks.end())
+          guards.insert(guards.end(), inherited->second.begin(),
+                        inherited->second.end());
+        auto unguarded =
+            result.unconditional_wrapper_arguments.find({target, domain});
+        if (unguarded != result.unconditional_wrapper_arguments.end() &&
+            unguarded->second.count(index))
+          local_changed |=
+              result.unconditional_wrapper_arguments[{&function, domain}]
+                  .insert(formal->getArgNo())
+                  .second;
+      }
+      bool has_guard = false;
+      for (auto guard : guards) {
+        if (guard.argument != index)
+          continue;
+        const Value *flags = ValueFacts::argument(*call, guard.flag_argument);
+        const auto *parameter = dyn_cast_or_null<Argument>(flags);
+        if (!parameter || parameter->getParent() != &function)
+          continue;
+        has_guard = true;
+        guard.argument = formal->getArgNo();
+        guard.flag_argument = parameter->getArgNo();
+        auto &entries = result.conditional_wrapper_sinks[{&function, domain}];
+        if (std::none_of(entries.begin(), entries.end(),
+                         [&](const auto &entry) {
+                           return entry.argument == guard.argument &&
+                                  entry.flag_argument == guard.flag_argument &&
+                                  entry.disabled_by_any_set_bits ==
+                                      guard.disabled_by_any_set_bits;
+                         })) {
+          entries.push_back(guard);
+          local_changed = true;
+        }
+      }
+      if (!has_guard)
+        local_changed |=
+            result.unconditional_wrapper_arguments[{&function, domain}]
+                .insert(formal->getArgNo())
+                .second;
+    }
+    return local_changed;
+  };
+  constexpr TaintDomain kAllDomains[] = {
+      TaintDomain::Process,    TaintDomain::Command, TaintDomain::Sql,
+      TaintDomain::Path,       TaintDomain::Format,  TaintDomain::Allocation,
+      TaintDomain::Wordexp};
+  std::deque<std::pair<const Function *, TaintDomain>> wrapper_queue;
+  std::set<std::pair<const Function *, TaintDomain>> wrapper_queued;
+  auto enqueueWrapper = [&](const Function *fn, TaintDomain domain) {
+    if (wrapper_queued.insert({fn, domain}).second)
+      wrapper_queue.push_back({fn, domain});
+  };
+  for (const auto &cand : wrapper_candidates)
+    for (auto domain : kAllDomains)
+      if (processWrapper(cand, domain))
+        enqueueWrapper(cand.function, domain);
+  while (!wrapper_queue.empty()) {
+    auto item = wrapper_queue.front();
+    wrapper_queue.pop_front();
+    wrapper_queued.erase(item);
+    auto callers_it = callers_by_callee.find(item.first);
+    if (callers_it == callers_by_callee.end())
+      continue;
+    for (size_t idx : callers_it->second)
+      if (processWrapper(wrapper_candidates[idx], item.second))
+        enqueueWrapper(wrapper_candidates[idx].function, item.second);
   }
   auto appendOrigin = [](std::vector<TaintOrigin> &origins,
                          const taint_detail::Fact &fact) {
@@ -928,58 +1020,72 @@ TaintFlowResult TaintAnalysis::analyze(const Module &module,
       origins.push_back({fact.source, fact.concat, fact.nonconstant,
                          fact.sql_safe, fact.allocation_safe});
   };
+  llvm::SmallVector<const taint_detail::Fact *, 16> active_facts;
+  llvm::SmallVector<const taint_detail::Fact *, 16> mem_facts;
   for (const Function &function : module)
     for (const BasicBlock &block : function)
       for (const Instruction &inst : block) {
         const auto &facts = solver.factsAt(inst);
-        for (const auto &fact : facts)
-          if (fact.kind == taint_detail::Kind::Value && fact.source &&
-              !fact.wrapper_probe)
-            appendOrigin(result.value_origins[fact.root], fact);
-        for (const Use &operand : inst.operands()) {
-          const Value *pointer = operand.get();
-          if (!pointer->getType()->isPointerTy())
+        if (facts.empty())
+          continue;
+        active_facts.clear();
+        mem_facts.clear();
+        for (const auto &fact : facts) {
+          if (fact.wrapper_probe || fact.kind == taint_detail::Kind::Zero)
             continue;
-          for (const auto &fact : facts)
-            if (!fact.numeric && !fact.pointer_slot && fact.source &&
-                !fact.wrapper_probe &&
-                problem.overlaps(fact, pointer, 0, fact.object_content))
-              appendOrigin(fact.object_content
-                               ? result.object_uses[{&inst, pointer}]
-                               : result.memory_uses[{&inst, pointer}],
-                           fact);
+          active_facts.push_back(&fact);
+          if (fact.kind == taint_detail::Kind::Value && fact.source)
+            appendOrigin(result.value_origins[fact.root], fact);
+          else if (fact.kind == taint_detail::Kind::Memory && !fact.numeric &&
+                   !fact.pointer_slot && fact.source)
+            mem_facts.push_back(&fact);
+        }
+        if (active_facts.empty())
+          continue;
+        if (!mem_facts.empty()) {
+          for (const Use &operand : inst.operands()) {
+            const Value *pointer = operand.get();
+            if (!pointer->getType()->isPointerTy())
+              continue;
+            for (const auto *fact : mem_facts)
+              if (problem.overlaps(*fact, pointer, 0, fact->object_content))
+                appendOrigin(fact->object_content
+                                 ? result.object_uses[{&inst, pointer}]
+                                 : result.memory_uses[{&inst, pointer}],
+                             *fact);
+          }
         }
         if (const auto *call = dyn_cast<CallBase>(&inst)) {
           if (!graph_.hasNode(const_cast<CallBase &>(*call)))
             continue;
           for (unsigned i = 0; i < call->arg_size(); ++i) {
             const Value *argument = call->getArgOperand(i);
-            for (const auto &fact : facts)
-              if (fact.kind == taint_detail::Kind::Value &&
-                  !fact.wrapper_probe && fact.root == argument)
+            for (const auto *fact : active_facts)
+              if (fact->kind == taint_detail::Kind::Value &&
+                  fact->root == argument)
                 result.value_arguments[{call, i}].push_back(
-                    {fact.source, fact.concat, fact.nonconstant, fact.sql_safe,
-                     fact.allocation_safe});
+                    {fact->source, fact->concat, fact->nonconstant,
+                     fact->sql_safe, fact->allocation_safe});
             if (!argument->getType()->isPointerTy())
               continue;
             std::set<std::tuple<uintptr_t, uintptr_t, bool, bool>> seen;
-            for (const auto &fact : facts) {
-              if (fact.object_content && !fact.numeric && !fact.wrapper_probe &&
-                  problem.overlaps(fact, argument, 0, true)) {
-                appendOrigin(result.object_arguments[{call, i}], fact);
+            for (const auto *fact : active_facts) {
+              if (fact->object_content && !fact->numeric &&
+                  problem.overlaps(*fact, argument, 0, true)) {
+                appendOrigin(result.object_arguments[{call, i}], *fact);
                 continue;
               }
-              if (fact.numeric || fact.pointer_slot || fact.wrapper_probe ||
-                  !problem.overlaps(fact, argument))
+              if (fact->numeric || fact->pointer_slot ||
+                  !problem.overlaps(*fact, argument))
                 continue;
               auto key =
-                  std::make_tuple(reinterpret_cast<uintptr_t>(fact.source),
-                                  reinterpret_cast<uintptr_t>(fact.concat),
-                                  fact.nonconstant, fact.sql_safe);
+                  std::make_tuple(reinterpret_cast<uintptr_t>(fact->source),
+                                  reinterpret_cast<uintptr_t>(fact->concat),
+                                  fact->nonconstant, fact->sql_safe);
               if (seen.insert(key).second)
                 result.string_arguments[{call, i}].push_back(
-                    {fact.source, fact.concat, fact.nonconstant,
-                     fact.sql_safe});
+                    {fact->source, fact->concat, fact->nonconstant,
+                     fact->sql_safe});
             }
           }
         }

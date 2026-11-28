@@ -33,10 +33,11 @@ using namespace llvm;
  * @param edge_type The type of dependency (e.g., CONTROLDEP_BR, DATA_DEF_USE).
  */
 void pdg::Node::addNeighbor(Node &neighbor, EdgeType edge_type) {
-  if (hasOutNeighborWithEdgeType(neighbor, edge_type))
+  auto key = std::make_pair(&neighbor, static_cast<unsigned>(edge_type));
+  if (!_out_edge_index.insert(key).second)
     return;
   Edge *edge = new Edge(this, &neighbor, edge_type);
-  addOutEdge(*edge);
+  _out_edge_set.insert(edge);
   neighbor.addInEdge(*edge);
 }
 
@@ -88,17 +89,9 @@ pdg::Node::getOutNeighborsWithDepType(pdg::EdgeType edge_type) {
 }
 
 bool pdg::Node::hasInNeighborWithEdgeType(Node &n, EdgeType edge_type) {
-  for (auto *e : _in_edge_set) {
-    if (e->getSrcNode() == &n && e->getEdgeType() == edge_type)
-      return true;
-  }
-  return false;
+  return _in_edge_index.count({&n, static_cast<unsigned>(edge_type)}) > 0;
 }
 
 bool pdg::Node::hasOutNeighborWithEdgeType(Node &n, EdgeType edge_type) {
-  for (auto *e : _out_edge_set) {
-    if (e->getDstNode() == &n && e->getEdgeType() == edge_type)
-      return true;
-  }
-  return false;
+  return _out_edge_index.count({&n, static_cast<unsigned>(edge_type)}) > 0;
 }

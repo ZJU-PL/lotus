@@ -24,9 +24,9 @@
  * by providing common operations used across multiple components.
  */
 
-#include "IR/PDG/Core/Tree.h"
 #include "IR/PDG/Core/PDGCommandLineOptions.h"
 #include "IR/PDG/Core/PDGUtils.h"
+#include "IR/PDG/Core/Tree.h"
 
 using namespace llvm;
 
@@ -83,21 +83,25 @@ StructType *pdg::pdgutils::getStructTypeFromGEP(GetElementPtrInst &gep) {
  */
 int64_t pdg::pdgutils::getGEPOffsetInBits(Module &M, StructType &struct_type,
                                           GetElementPtrInst &gep) {
+  if (struct_type.isOpaque())
+    return INT_MIN;
+
   // Get the accessed struct member offset from the gep instruction
   int gep_offset = getGEPAccessFieldOffset(gep);
   if (gep_offset == INT_MIN)
     return INT_MIN;
 
-  // Use the struct layout to figure out the offset in bits
-  auto const &data_layout = M.getDataLayout();
-  auto const *struct_layout = data_layout.getStructLayout(&struct_type);
-
-  // Check for out-of-bounds access
-  if (gep_offset >= static_cast<int>(struct_type.getNumElements())) {
+  // Check for out-of-bounds access before querying struct layout
+  if (gep_offset < 0 ||
+      gep_offset >= static_cast<int>(struct_type.getNumElements())) {
     emitSupportWarning(Twine("dubious GEP access out of bounds in function ") +
                        gep.getFunction()->getName());
     return INT_MIN;
   }
+
+  // Use the struct layout to figure out the offset in bits
+  auto const &data_layout = M.getDataLayout();
+  auto const *struct_layout = data_layout.getStructLayout(&struct_type);
 
   int64_t field_bit_offset =
       static_cast<int64_t>(struct_layout->getElementOffsetInBits(gep_offset));
@@ -128,7 +132,11 @@ int64_t pdg::pdgutils::getGEPOffsetInBits(Module &M, StructType &struct_type,
  * @return The field offset (0-based index), or INT_MIN on error
  */
 int pdg::pdgutils::getGEPAccessFieldOffset(GetElementPtrInst &gep) {
+  // A struct field access requires at least base pointer + pointer index +
+  // field index (3 operands); 1-index GEPs perform pointer arithmetic.
   int operand_num = gep.getNumOperands();
+  if (operand_num < 3)
+    return INT_MIN;
   Value *last_idx = gep.getOperand(operand_num - 1);
   // cast the last_idx to int type
   if (ConstantInt *constInt = dyn_cast<ConstantInt>(last_idx)) {
@@ -480,6 +488,8 @@ std::string pdg::pdgutils::computeTreeNodeID(TreeNode &tree_node) {
   if (!tree_node.getDIType())
     return parent_type_name;
   DIType *node_di_type = dbgutils::stripAttributes(*tree_node.getDIType());
+  if (!node_di_type)
+    return parent_type_name;
   node_field_name = dbgutils::getSourceLevelVariableName(*node_di_type);
 
   return (parent_type_name + node_field_name);
@@ -542,6 +552,8 @@ std::string pdg::pdgutils::getNodeTypeStr(GraphNodeType node_type) {
     return "VAR_OTHER";
   case GraphNodeType::FUNC:
     return "FUNC";
+  case GraphNodeType::CLASS:
+    return "CLASS";
   case GraphNodeType::ANNO_VAR:
     return "ANNO_VAR";
   case GraphNodeType::ANNO_GLOBAL:
@@ -566,6 +578,8 @@ std::string pdg::pdgutils::getEdgeTypeStr(EdgeType edge_type) {
     return "IND_CALL";
   case EdgeType::CONTROLDEP_CALLINV:
     return "CONTROLDEP_CALLINV";
+  case EdgeType::CONTROLDEP_CALLRET:
+    return "CONTROLDEP_CALLRET";
   case EdgeType::CONTROLDEP_ENTRY:
     return "CONTROLDEP_ENTRY";
   case EdgeType::CONTROLDEP_BR:
@@ -592,6 +606,8 @@ std::string pdg::pdgutils::getEdgeTypeStr(EdgeType edge_type) {
     return "GLOBAL_DEP";
   case EdgeType::VAL_DEP:
     return "VAL_DEP";
+  case EdgeType::CLS_MTH:
+    return "CLS_MTH";
   case EdgeType::ANNO_VAR:
     return "ANNO_VAR";
   case EdgeType::ANNO_GLOBAL:

@@ -1,6 +1,8 @@
 #include "IR/PDG/Analyses/BoundsAnalysis.h"
 
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/BasicAliasAnalysis.h"
@@ -66,6 +68,7 @@ Optional<uint64_t> product(uint64_t a, uint64_t b) {
 
 struct BoundsAnalysis::Impl {
   struct FunctionState {
+    Function &function;
     TargetLibraryInfoImpl tli_impl;
     TargetLibraryInfo tli;
     AssumptionCache assumptions;
@@ -74,18 +77,26 @@ struct BoundsAnalysis::Impl {
     AAResults aliases;
     std::unique_ptr<MemorySSA> memory;
     FunctionFacts facts;
-    LoopInfo loops;
-    ScalarEvolution evolution;
+    std::unique_ptr<LoopInfo> loops_;
+    std::unique_ptr<ScalarEvolution> evolution_;
 
-    explicit FunctionState(Function &function)
-        : tli_impl(Triple(function.getParent()->getTargetTriple())),
-          tli(tli_impl), assumptions(function), dominators(function),
-          basic_aa(function.getParent()->getDataLayout(), function, tli,
-                   assumptions, &dominators),
-          aliases(tli), facts(function), loops(dominators),
-          evolution(function, tli, assumptions, dominators, loops) {
+    ScalarEvolution &getEvolution() {
+      if (!evolution_) {
+        loops_ = std::make_unique<LoopInfo>(dominators);
+        evolution_ = std::make_unique<ScalarEvolution>(
+            function, tli, assumptions, dominators, *loops_);
+      }
+      return *evolution_;
+    }
+
+    explicit FunctionState(Function &f)
+        : function(f), tli_impl(Triple(f.getParent()->getTargetTriple())),
+          tli(tli_impl), assumptions(f), dominators(f),
+          basic_aa(f.getParent()->getDataLayout(), f, tli, assumptions,
+                   &dominators),
+          aliases(tli), facts(f) {
       aliases.addAAResult(basic_aa);
-      memory = std::make_unique<MemorySSA>(function, &aliases, &dominators);
+      memory = std::make_unique<MemorySSA>(f, &aliases, &dominators);
     }
   };
 
@@ -93,6 +104,17 @@ struct BoundsAnalysis::Impl {
   const DataLayout &layout;
   mutable std::map<const Function *, std::unique_ptr<FunctionState>> states;
   mutable std::set<const LoadInst *> load_active;
+  mutable llvm::DenseMap<const LoadInst *, const Value *> load_value_cache;
+  mutable llvm::DenseMap<const Value *, Optional<APInt>> integer_cache;
+  mutable llvm::SmallPtrSet<const Value *, 32> integer_active;
+  mutable llvm::DenseMap<const Value *, Optional<MemoryRegion>> region_cache;
+  mutable llvm::SmallPtrSet<const Value *, 32> region_active;
+  mutable llvm::DenseMap<const Function *, bool> local_writes_only_cache;
+  mutable llvm::DenseMap<std::pair<const Function *, unsigned>,
+                         std::vector<unsigned>>
+      null_args_cache;
+  mutable std::unordered_map<const Value *, std::vector<const Value *>>
+      pointer_alternatives_cache;
 
   struct StringState {
     StringBounds bounds;
@@ -115,10 +137,18 @@ struct BoundsAnalysis::Impl {
   }
 
   const Value *loadValue(const LoadInst &load) const {
+    const bool top_level = load_active.empty();
+    if (top_level) {
+      auto cached = load_value_cache.find(&load);
+      if (cached != load_value_cache.end())
+        return cached->second;
+    }
     if (load.isVolatile() || load.isAtomic() || !load_active.insert(&load).second)
       return nullptr;
     auto done = [&](const Value *value) {
       load_active.erase(&load);
+      if (top_level)
+        load_value_cache[&load] = value;
       return value;
     };
     auto &analysis = state(*load.getFunction());
@@ -201,45 +231,68 @@ struct BoundsAnalysis::Impl {
   }
 
   Optional<APInt> integer(const Value *value, unsigned depth = 32) const {
-    if (!depth || !value->getType()->isIntegerTy())
+    if (!depth || !value || !value->getType()->isIntegerTy())
       return None;
-    value = resolve(value, depth);
     if (const auto *constant = dyn_cast<ConstantInt>(value))
       return constant->getValue();
-    if (const auto *call = dyn_cast<CallBase>(value)) {
+    const bool top_level = (depth == 32 && integer_active.empty());
+    if (top_level) {
+      auto cached = integer_cache.find(value);
+      if (cached != integer_cache.end())
+        return cached->second;
+    }
+    if (!integer_active.insert(value).second)
+      return None;
+    auto finish = [&](Optional<APInt> res) {
+      integer_active.erase(value);
+      if (top_level)
+        integer_cache[value] = res;
+      return res;
+    };
+    const Value *resolved = resolve(value, depth);
+    if (const auto *constant = dyn_cast<ConstantInt>(resolved))
+      return finish(constant->getValue());
+    if (const auto *call = dyn_cast<CallBase>(resolved)) {
       const Function *target = ValueFacts::callee(*call);
-      if (target && call->arg_size() == 1 &&
+      if (target && call->arg_size() == 1 && call->getType()->isIntegerTy() &&
           (ValueFacts::hasLibraryName(*target, "strlen", true, true) ||
            ValueFacts::hasLibraryName(*target, "wcslen", true, true)))
         if (auto bytes = literalByteLength(call->getArgOperand(0)))
-          return APInt(call->getType()->getIntegerBitWidth(),
-                       *bytes / characterBytes(call->getArgOperand(0)));
+          return finish(APInt(call->getType()->getIntegerBitWidth(),
+                              *bytes / characterBytes(call->getArgOperand(0))));
     }
-    if (const auto *cast = dyn_cast<CastInst>(value)) {
+    if (const auto *cast = dyn_cast<CastInst>(resolved)) {
+      if (!cast->getType()->isIntegerTy() ||
+          (cast->getOpcode() != Instruction::SExt &&
+           cast->getOpcode() != Instruction::ZExt &&
+           cast->getOpcode() != Instruction::Trunc))
+        return finish(None);
       auto input = integer(cast->getOperand(0), depth - 1);
       if (!input)
-        return None;
+        return finish(None);
       unsigned width = cast->getType()->getIntegerBitWidth();
       if (cast->getOpcode() == Instruction::SExt)
-        return input->sext(width);
+        return finish(input->sext(width));
       if (cast->getOpcode() == Instruction::ZExt)
-        return input->zext(width);
+        return finish(input->zext(width));
       if (cast->getOpcode() == Instruction::Trunc)
-        return input->trunc(width);
+        return finish(input->trunc(width));
     }
-    if (const auto *op = dyn_cast<BinaryOperator>(value)) {
+    if (const auto *op = dyn_cast<BinaryOperator>(resolved)) {
       auto a = integer(op->getOperand(0), depth - 1);
+      if (!a)
+        return finish(None);
       auto b = integer(op->getOperand(1), depth - 1);
-      if (!a || !b)
-        return None;
+      if (!b)
+        return finish(None);
       if (op->getOpcode() == Instruction::Add)
-        return *a + *b;
+        return finish(*a + *b);
       if (op->getOpcode() == Instruction::Sub)
-        return *a - *b;
+        return finish(*a - *b);
       if (op->getOpcode() == Instruction::Mul)
-        return *a * *b;
+        return finish(*a * *b);
     }
-    return None;
+    return finish(None);
   }
 
   Optional<uint64_t> unsignedInteger(const Value *value) const {
@@ -339,7 +392,11 @@ struct BoundsAnalysis::Impl {
   bool localWritesOnly(const Function &function) const {
     if (function.isDeclaration())
       return false;
-    for (const BasicBlock &block : function)
+    auto cached = local_writes_only_cache.find(&function);
+    if (cached != local_writes_only_cache.end())
+      return cached->second;
+    bool result = true;
+    for (const BasicBlock &block : function) {
       for (const Instruction &inst : block) {
         if (!inst.mayWriteToMemory())
           continue;
@@ -354,9 +411,14 @@ struct BoundsAnalysis::Impl {
                 target->getIntrinsicID() == Intrinsic::lifetime_start ||
                 target->getIntrinsicID() == Intrinsic::lifetime_end)
               continue;
-        return false;
+        result = false;
+        break;
       }
-    return true;
+      if (!result)
+        break;
+    }
+    local_writes_only_cache[&function] = result;
+    return result;
   }
 
   static Optional<uint64_t> sum(Optional<uint64_t> a,
@@ -366,29 +428,49 @@ struct BoundsAnalysis::Impl {
     return *a + *b;
   }
 
-  std::vector<const Value *> pointerAlternatives(const Value *pointer,
-                                                unsigned depth = 24) const {
-    if (!depth)
-      return {pointer};
+  void collectPointerAlternatives(const Value *pointer, unsigned depth,
+                                  SmallPtrSetImpl<const Value *> &visited,
+                                  std::vector<const Value *> &out,
+                                  bool &overflowed) const {
+    if (overflowed || !pointer)
+      return;
+    if (!depth) {
+      out.push_back(pointer);
+      if (out.size() > 32)
+        overflowed = true;
+      return;
+    }
+    if (!visited.insert(pointer).second)
+      return;
     const Value *resolved = resolve(pointer);
-    if (resolved != pointer)
-      return pointerAlternatives(resolved, depth - 1);
-    std::vector<const Value *> inputs;
+    if (resolved != pointer) {
+      collectPointerAlternatives(resolved, depth - 1, visited, out, overflowed);
+      return;
+    }
+    SmallVector<const Value *, 8> inputs;
     if (const auto *phi = dyn_cast<PHINode>(pointer))
       for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i)
         inputs.push_back(phi->getIncomingValue(i));
-    if (const auto *select = dyn_cast<SelectInst>(pointer)) {
+    else if (const auto *select = dyn_cast<SelectInst>(pointer)) {
       inputs.push_back(select->getTrueValue());
       inputs.push_back(select->getFalseValue());
-    }
-    if (const auto *load = dyn_cast<LoadInst>(pointer)) {
-      const auto *slot = dyn_cast<AllocaInst>(getUnderlyingObject(load->getPointerOperand()));
-      if (!slot || load->isAtomic() || load->isVolatile())
-        return {pointer};
+    } else if (const auto *load = dyn_cast<LoadInst>(pointer)) {
+      const auto *slot =
+          dyn_cast<AllocaInst>(getUnderlyingObject(load->getPointerOperand()));
+      if (!slot || load->isAtomic() || load->isVolatile()) {
+        out.push_back(pointer);
+        if (out.size() > 32)
+          overflowed = true;
+        return;
+      }
       auto &analysis = state(*load->getFunction());
-      std::set<MemoryAccess *> seen;
+      SmallPtrSet<MemoryAccess *, 32> seen;
       std::function<void(MemoryAccess *, unsigned)> collect;
       collect = [&](MemoryAccess *memory, unsigned remaining) {
+        if (inputs.size() > 32) {
+          overflowed = true;
+          return;
+        }
         if (!remaining || !memory) {
           inputs.push_back(pointer);
           return;
@@ -405,38 +487,67 @@ struct BoundsAnalysis::Impl {
           return;
         }
         const auto *definition = dyn_cast<MemoryDef>(memory);
-        const auto *store = definition
-                                ? dyn_cast_or_null<StoreInst>(definition->getMemoryInst())
-                                : nullptr;
+        const auto *store =
+            definition ? dyn_cast_or_null<StoreInst>(definition->getMemoryInst())
+                       : nullptr;
         if (store && analysis.aliases.alias(MemoryLocation::get(store),
-                                            MemoryLocation::get(load)) == AliasResult::MustAlias) {
+                                            MemoryLocation::get(load)) ==
+                         AliasResult::MustAlias) {
           inputs.push_back(store->getValueOperand());
           return;
         }
-        const auto *call = definition
-                               ? dyn_cast_or_null<CallBase>(definition->getMemoryInst())
-                               : nullptr;
+        const auto *call =
+            definition ? dyn_cast_or_null<CallBase>(definition->getMemoryInst())
+                       : nullptr;
         if (call && modeledDisjointStackWrite(*call, load->getPointerOperand()))
           collect(definition->getDefiningAccess(), remaining - 1);
         else
           inputs.push_back(pointer);
       };
-      collect(analysis.memory->getWalker()->getClobberingMemoryAccess(load), depth);
+      collect(analysis.memory->getWalker()->getClobberingMemoryAccess(load),
+              depth);
     }
-    if (inputs.empty())
-      return {pointer};
-    std::vector<const Value *> result;
+    if (overflowed)
+      return;
+    if (inputs.empty()) {
+      out.push_back(pointer);
+      if (out.size() > 32)
+        overflowed = true;
+      return;
+    }
     for (const Value *input : inputs) {
+      if (overflowed)
+        return;
       if (input == pointer) {
-        result.push_back(pointer);
+        out.push_back(pointer);
+        if (out.size() > 32)
+          overflowed = true;
         continue;
       }
-      auto nested = pointerAlternatives(input, depth - 1);
-      result.insert(result.end(), nested.begin(), nested.end());
-      if (result.size() > 32)
-        return {pointer};
+      collectPointerAlternatives(input, depth - 1, visited, out, overflowed);
     }
+  }
+
+  std::vector<const Value *> pointerAlternatives(const Value *pointer) const {
+    auto cached = pointer_alternatives_cache.find(pointer);
+    if (cached != pointer_alternatives_cache.end())
+      return cached->second;
+    SmallPtrSet<const Value *, 32> visited;
+    std::vector<const Value *> result;
+    bool overflowed = false;
+    collectPointerAlternatives(pointer, 24, visited, result, overflowed);
+    if (overflowed || result.empty())
+      result = {pointer};
+    pointer_alternatives_cache.emplace(pointer, result);
     return result;
+  }
+
+  static void appendUniqueEvidence(std::vector<const Instruction *> &dst,
+                                   const std::vector<const Instruction *> &src) {
+    for (const Instruction *inst : src) {
+      if (std::find(dst.begin(), dst.end(), inst) == dst.end())
+        dst.push_back(inst);
+    }
   }
 
   static StringState mergeStrings(const std::vector<StringState> &inputs) {
@@ -468,11 +579,26 @@ struct BoundsAnalysis::Impl {
       merged.bounds.value_flow |= next.bounds.value_flow;
       if (merged.copied_source != next.copied_source)
         merged.copied_source = nullptr;
-      merged.bounds.evidence.insert(merged.bounds.evidence.end(),
-                                    next.bounds.evidence.begin(), next.bounds.evidence.end());
+      appendUniqueEvidence(merged.bounds.evidence, next.bounds.evidence);
     }
     return merged;
   }
+
+  struct StringFromMemoEntry {
+    StringState state;
+    uint64_t dep_mask = 0;
+  };
+
+  struct StringFromContext {
+    llvm::DenseMap<MemoryAccess *, StringFromMemoEntry> exact;
+    llvm::DenseMap<std::pair<MemoryAccess *, unsigned>, StringFromMemoEntry>
+        by_depth;
+    llvm::DenseMap<MemoryAccess *, MemoryAccess *> clobber;
+    llvm::DenseMap<MemoryAccess *, unsigned> active_pos;
+    std::vector<llvm::SmallVector<MemoryAccess *, 8>> undo_exact;
+    std::vector<llvm::SmallVector<std::pair<MemoryAccess *, unsigned>, 8>>
+        undo_depth;
+  };
 
   StringState stringState(const Value *pointer, const Instruction &at) const {
     pointer = resolve(pointer);
@@ -503,8 +629,11 @@ struct BoundsAnalysis::Impl {
     auto *access = dyn_cast_or_null<MemoryUseOrDef>(
         analysis.memory->getMemoryAccess(&at));
     if (access) {
-      std::set<MemoryAccess *> active;
-      result = stringFrom(access->getDefiningAccess(), pointer, at, 64, active);
+      StringFromContext ctx;
+      uint64_t dep_mask = 0;
+      bool hit_zero = false;
+      result = stringFrom(access->getDefiningAccess(), pointer, at, 64, ctx,
+                          dep_mask, hit_zero);
     }
     string_active.erase(key);
     string_cache[key] = result;
@@ -513,23 +642,87 @@ struct BoundsAnalysis::Impl {
 
   StringState stringFrom(MemoryAccess *memory, const Value *pointer,
                          const Instruction &at, unsigned depth,
-                         std::set<MemoryAccess *> &active) const {
+                         StringFromContext &ctx, uint64_t &dep_mask,
+                         bool &hit_zero) const {
     auto &analysis = state(*at.getFunction());
-    if (!depth || !memory)
+    if (!depth || !memory) {
+      if (!depth)
+        hit_zero = true;
       return {};
+    }
     if (analysis.memory->isLiveOnEntryDef(memory))
       return initialString(pointer);
     auto capacity = available(pointer);
     MemoryLocation location(pointer, capacity ? LocationSize::precise(*capacity)
                                              : LocationSize::beforeOrAfterPointer());
-    memory = analysis.memory->getWalker()->getClobberingMemoryAccess(memory,
-                                                                   location);
+    auto clob_it = ctx.clobber.find(memory);
+    if (clob_it != ctx.clobber.end()) {
+      memory = clob_it->second;
+    } else {
+      MemoryAccess *resolved_clob =
+          analysis.memory->getWalker()->getClobberingMemoryAccess(memory,
+                                                                  location);
+      ctx.clobber[memory] = resolved_clob;
+      memory = resolved_clob;
+    }
     if (analysis.memory->isLiveOnEntryDef(memory))
       return initialString(pointer);
-    if (!active.insert(memory).second)
+    auto exact_it = ctx.exact.find(memory);
+    if (exact_it != ctx.exact.end()) {
+      dep_mask |= exact_it->second.dep_mask;
+      return exact_it->second.state;
+    }
+    auto depth_it = ctx.by_depth.find({memory, depth});
+    if (depth_it != ctx.by_depth.end()) {
+      dep_mask |= depth_it->second.dep_mask;
+      hit_zero = true;
+      return depth_it->second.state;
+    }
+    auto act_it = ctx.active_pos.find(memory);
+    if (act_it != ctx.active_pos.end()) {
+      if (act_it->second < 64)
+        dep_mask |= (uint64_t(1) << act_it->second);
       return {};
+    }
+    const unsigned my_pos = static_cast<unsigned>(ctx.active_pos.size());
+    ctx.active_pos.try_emplace(memory, my_pos);
+    if (ctx.undo_exact.size() <= my_pos) {
+      ctx.undo_exact.resize(my_pos + 1);
+      ctx.undo_depth.resize(my_pos + 1);
+    }
+    uint64_t local_mask = 0;
+    bool local_hit_zero = false;
     auto done = [&](StringState result) {
-      active.erase(memory);
+      ctx.active_pos.erase(memory);
+      for (MemoryAccess *stale : ctx.undo_exact[my_pos])
+        ctx.exact.erase(stale);
+      ctx.undo_exact[my_pos].clear();
+      for (const auto &stale : ctx.undo_depth[my_pos])
+        ctx.by_depth.erase(stale);
+      ctx.undo_depth[my_pos].clear();
+
+      // Any cycle back to `memory` itself is self-contained; only active
+      // ancestors strictly above `my_pos` constrain memo lifetime.
+      uint64_t outer_mask =
+          my_pos < 64 ? (local_mask & ~(uint64_t(1) << my_pos)) : local_mask;
+      dep_mask |= outer_mask;
+      if (local_hit_zero)
+        hit_zero = true;
+      if (my_pos < 64) {
+        if (!local_hit_zero) {
+          ctx.exact[memory] = {result, outer_mask};
+          if (outer_mask != 0) {
+            unsigned deepest = 63u - static_cast<unsigned>(__builtin_clzll(outer_mask));
+            ctx.undo_exact[deepest].push_back(memory);
+          }
+        } else {
+          ctx.by_depth[{memory, depth}] = {result, outer_mask};
+          if (outer_mask != 0) {
+            unsigned deepest = 63u - static_cast<unsigned>(__builtin_clzll(outer_mask));
+            ctx.undo_depth[deepest].push_back({memory, depth});
+          }
+        }
+      }
       return result;
     };
     if (auto *phi = dyn_cast<MemoryPhi>(memory)) {
@@ -537,7 +730,7 @@ struct BoundsAnalysis::Impl {
       bool first = true;
       for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
         auto next = stringFrom(phi->getIncomingValue(i), pointer, at,
-                               depth - 1, active);
+                               depth - 1, ctx, local_mask, local_hit_zero);
         if (first) {
           merged = next;
           first = false;
@@ -566,9 +759,7 @@ struct BoundsAnalysis::Impl {
           merged.bounds.value_flow |= next.bounds.value_flow;
           if (merged.copied_source != next.copied_source)
             merged.copied_source = nullptr;
-          merged.bounds.evidence.insert(merged.bounds.evidence.end(),
-                                        next.bounds.evidence.begin(),
-                                        next.bounds.evidence.end());
+          appendUniqueEvidence(merged.bounds.evidence, next.bounds.evidence);
         }
       }
       return done(merged);
@@ -579,7 +770,7 @@ struct BoundsAnalysis::Impl {
     const Instruction *writer = definition->getMemoryInst();
     auto previous = [&]() {
       return stringFrom(definition->getDefiningAccess(), pointer, at,
-                         depth - 1, active);
+                         depth - 1, ctx, local_mask, local_hit_zero);
     };
     auto disjointDestination = [&](const Value *destination) {
       return analysis.aliases.alias(
@@ -963,17 +1154,23 @@ struct BoundsAnalysis::Impl {
                                                &analysis.assumptions, &at,
                                                &analysis.dominators);
     if (const auto *cast = dyn_cast<CastInst>(value)) {
-      unsigned width = cast->getType()->getIntegerBitWidth();
-      if (cast->getOpcode() == Instruction::SExt)
-        range = range.intersectWith(integerRange(cast->getOperand(0), at, true).signExtend(width));
-      if (cast->getOpcode() == Instruction::ZExt)
-        range = range.intersectWith(integerRange(cast->getOperand(0), at, false).zeroExtend(width));
+      if (cast->getType()->isIntegerTy() &&
+          cast->getOperand(0)->getType()->isIntegerTy()) {
+        unsigned width = cast->getType()->getIntegerBitWidth();
+        if (cast->getOpcode() == Instruction::SExt)
+          range = range.intersectWith(
+              integerRange(cast->getOperand(0), at, true).signExtend(width));
+        if (cast->getOpcode() == Instruction::ZExt)
+          range = range.intersectWith(
+              integerRange(cast->getOperand(0), at, false).zeroExtend(width));
+      }
     }
     if (const auto *call = dyn_cast<CallBase>(value)) {
       const Function *target = ValueFacts::callee(*call);
       Triple triple(module.getTargetTriple());
       bool standardEOF = triple.isOSWindows() || triple.isOSLinux() || triple.isOSDarwin();
       if (standardEOF && target && target->isDeclaration() &&
+          value->getType()->isIntegerTy() &&
           value->getType()->getIntegerBitWidth() >= 16)
         for (const char *name : {"getc", "fgetc", "getchar"})
           if (ValueFacts::hasLibraryName(*target, name, true, true)) {
@@ -983,37 +1180,44 @@ struct BoundsAnalysis::Impl {
     }
     auto *instruction = dyn_cast<Instruction>(value);
     if (!instruction || instruction->getFunction() == at.getFunction()) {
-      auto *scev = analysis.evolution.getSCEV(const_cast<Value *>(value));
-      range = range.intersectWith(signedValue
-                                      ? analysis.evolution.getSignedRange(scev)
-                                      : analysis.evolution.getUnsignedRange(scev));
+      ScalarEvolution &evo = analysis.getEvolution();
+      auto *scev = evo.getSCEV(const_cast<Value *>(value));
+      range = range.intersectWith(signedValue ? evo.getSignedRange(scev)
+                                              : evo.getUnsignedRange(scev));
     }
-    for (const BasicBlock &block : *at.getFunction()) {
-      const auto *branch = dyn_cast<BranchInst>(block.getTerminator());
-      if (!branch || !branch->isConditional() ||
-          !analysis.dominators.dominates(branch, &at))
-        continue;
-      bool yes = analysis.dominators.dominates(
-          BasicBlockEdge(branch->getParent(), branch->getSuccessor(0)), at.getParent());
-      bool no = analysis.dominators.dominates(
-          BasicBlockEdge(branch->getParent(), branch->getSuccessor(1)), at.getParent());
-      if (yes == no)
-        continue;
-      const auto *cmp = dyn_cast<ICmpInst>(branch->getCondition());
-      if (!cmp)
-        continue;
-      auto predicate = yes ? cmp->getPredicate() : cmp->getInversePredicate();
-      const Value *other = nullptr;
-      if (analysis.facts.equivalent(*value, *resolve(cmp->getOperand(0))))
-        other = cmp->getOperand(1);
-      else if (analysis.facts.equivalent(*value, *resolve(cmp->getOperand(1)))) {
-        other = cmp->getOperand(0);
-        predicate = ICmpInst::getSwappedPredicate(predicate);
+    if (const auto *domNode = analysis.dominators.getNode(
+            const_cast<BasicBlock *>(at.getParent()))) {
+      for (const auto *cur = domNode->getIDom(); cur; cur = cur->getIDom()) {
+        const BasicBlock &block = *cur->getBlock();
+        const auto *branch = dyn_cast<BranchInst>(block.getTerminator());
+        if (!branch || !branch->isConditional())
+          continue;
+        bool yes = analysis.dominators.dominates(
+            BasicBlockEdge(branch->getParent(), branch->getSuccessor(0)),
+            at.getParent());
+        bool no = analysis.dominators.dominates(
+            BasicBlockEdge(branch->getParent(), branch->getSuccessor(1)),
+            at.getParent());
+        if (yes == no)
+          continue;
+        const auto *cmp = dyn_cast<ICmpInst>(branch->getCondition());
+        if (!cmp)
+          continue;
+        auto predicate = yes ? cmp->getPredicate() : cmp->getInversePredicate();
+        const Value *other = nullptr;
+        if (analysis.facts.equivalent(*value, *resolve(cmp->getOperand(0))))
+          other = cmp->getOperand(1);
+        else if (analysis.facts.equivalent(*value,
+                                           *resolve(cmp->getOperand(1)))) {
+          other = cmp->getOperand(0);
+          predicate = ICmpInst::getSwappedPredicate(predicate);
+        }
+        auto bound = other ? integer(other) : None;
+        if (bound &&
+            bound->getBitWidth() == value->getType()->getIntegerBitWidth())
+          range = range.intersectWith(ConstantRange::makeAllowedICmpRegion(
+              predicate, ConstantRange(*bound)));
       }
-      auto bound = other ? integer(other) : None;
-      if (bound && bound->getBitWidth() == value->getType()->getIntegerBitWidth())
-        range = range.intersectWith(ConstantRange::makeAllowedICmpRegion(
-            predicate, ConstantRange(*bound)));
     }
     return range;
   }
@@ -1185,39 +1389,53 @@ struct BoundsAnalysis::Impl {
   }
 
   Optional<MemoryRegion> region(const Value *value, unsigned depth = 48) const {
-    if (!depth || !value->getType()->isPointerTy())
+    if (!depth || !value || !value->getType()->isPointerTy())
       return None;
+    const bool top_level = (depth == 48 && region_active.empty());
+    if (top_level) {
+      auto cached = region_cache.find(value);
+      if (cached != region_cache.end())
+        return cached->second;
+    }
+    if (!region_active.insert(value).second)
+      return None;
+    auto finish = [&](Optional<MemoryRegion> res) {
+      region_active.erase(value);
+      if (top_level)
+        region_cache[value] = res;
+      return res;
+    };
     const Value *resolved = resolve(value);
     if (resolved != value)
-      return region(resolved, depth - 1);
+      return finish(region(resolved, depth - 1));
     if (const auto *alias = dyn_cast<GlobalAlias>(value))
-      return region(alias->getAliasee(), depth - 1);
+      return finish(region(alias->getAliasee(), depth - 1));
     if (const auto *cast = dyn_cast<BitCastOperator>(value))
-      return region(cast->getOperand(0), depth - 1);
+      return finish(region(cast->getOperand(0), depth - 1));
     if (const auto *cast = dyn_cast<AddrSpaceCastOperator>(value))
-      return region(cast->getOperand(0), depth - 1);
+      return finish(region(cast->getOperand(0), depth - 1));
     if (const auto *allocation = dyn_cast<AllocaInst>(value)) {
       auto size = typeBytes(allocation->getAllocatedType(), layout);
       auto count = unsignedInteger(allocation->getArraySize());
       if (!size || !count)
-        return None;
+        return finish(None);
       auto total = product(*size, *count);
       if (total)
-        return MemoryRegion{value, *total, 0, false,
-                            characterArray(allocation->getAllocatedType())};
-      return None;
+        return finish(MemoryRegion{value, *total, 0, false,
+                                   characterArray(allocation->getAllocatedType())});
+      return finish(None);
     }
     if (const auto *global = dyn_cast<GlobalVariable>(value)) {
       auto size = typeBytes(global->getValueType(), layout);
       if (size)
-        return MemoryRegion{value, *size, 0, false,
-                            characterArray(global->getValueType())};
-      return None;
+        return finish(MemoryRegion{value, *size, 0, false,
+                                   characterArray(global->getValueType())});
+      return finish(None);
     }
     if (const auto *call = dyn_cast<CallBase>(value)) {
       const Function *target = ValueFacts::callee(*call);
       if (!target)
-        return None;
+        return finish(None);
       Optional<uint64_t> size;
       AllocationKind kind = LibraryModels::allocation(*target);
       if ((ValueFacts::hasLibraryName(*target, "malloc", true) ||
@@ -1237,8 +1455,8 @@ struct BoundsAnalysis::Impl {
           call->arg_size() >= 2)
         size = unsignedInteger(call->getArgOperand(1));
       if (size)
-        return MemoryRegion{value, *size, 0, true, false};
-      return None;
+        return finish(MemoryRegion{value, *size, 0, true, false});
+      return finish(None);
     }
     if (const auto *gep = dyn_cast<GEPOperator>(value)) {
       auto result = region(gep->getPointerOperand(), depth - 1);
@@ -1263,32 +1481,32 @@ struct BoundsAnalysis::Impl {
         }
       }
       if (!result)
-        return None;
+        return finish(None);
       for (const Use &use : gep->indices()) {
         auto index = integer(use.get());
         if (!index || index->getMinSignedBits() > 64)
-          return None;
+          return finish(None);
         int64_t n = index->getSExtValue();
         if (!first && type->isStructTy()) {
           auto *structure = cast<StructType>(type);
           if (n < 0 || static_cast<uint64_t>(n) >= structure->getNumElements())
-            return None;
+            return finish(None);
           // Selecting a field narrows the region, preventing access from
           // silently crossing into a following struct member.
           auto enclosing = typeBytes(type, layout);
           if (!enclosing || result->offset < 0 ||
               static_cast<uint64_t>(result->offset) > result->capacity)
-            return None;
+            return finish(None);
           const uint64_t fieldOffset =
               layout.getStructLayout(structure)->getElementOffset(n);
           const uint64_t remaining =
               result->capacity - static_cast<uint64_t>(result->offset);
           if (fieldOffset > remaining)
-            return None;
+            return finish(None);
           type = structure->getElementType(n);
           auto bytes = typeBytes(type, layout);
           if (!bytes)
-            return None;
+            return finish(None);
           // LLVM retains the trailing array shape but not the distinction
           // between a flexible member and the historical one-element idiom.
           // A zero-length tail stays unknown. An overallocated heap object
@@ -1297,7 +1515,7 @@ struct BoundsAnalysis::Impl {
           bool last =
               static_cast<unsigned>(n) + 1 == structure->getNumElements();
           if (last && array && !array->getNumElements())
-            return None;
+            return finish(None);
           bool expandedTail = last && array && array->getNumElements() == 1 &&
                               result->heap && remaining > *enclosing;
           // The declared tail-array subobject grows by the bytes beyond the
@@ -1315,21 +1533,21 @@ struct BoundsAnalysis::Impl {
                         : type->isArrayTy() ? type->getArrayElementType()
                                             : nullptr;
         if (!element)
-          return None;
+          return finish(None);
         auto stride = typeBytes(element, layout);
         if (!stride)
-          return None;
+          return finish(None);
         APInt offset(128, static_cast<uint64_t>(result->offset), true);
         offset +=
             APInt(128, static_cast<uint64_t>(n), true) * APInt(128, *stride);
         if (offset.getMinSignedBits() > 64)
-          return None;
+          return finish(None);
         result->offset = offset.getSExtValue();
         if (!first && element->isArrayTy()) {
           // Only a valid outer index selects an inner array subobject.
           auto *outer = cast<ArrayType>(type);
           if (n < 0 || static_cast<uint64_t>(n) >= outer->getNumElements())
-            return result;
+            return finish(result);
           result->capacity = *stride;
           result->offset = 0;
           result->static_character_array = characterArray(element);
@@ -1337,7 +1555,7 @@ struct BoundsAnalysis::Impl {
         type = element;
         first = false;
       }
-      return result;
+      return finish(result);
     }
     // Require every alternative to identify the same region. Mixed origins
     // are unknown, rather than pretending that a may-origin is a proof.
@@ -1352,16 +1570,16 @@ struct BoundsAnalysis::Impl {
                                  : select->getTrueValue();
         auto incoming = region(input, depth - 1);
         if (!incoming)
-          return None;
+          return finish(None);
         if (merged && (merged->allocation != incoming->allocation ||
                        merged->capacity != incoming->capacity ||
                        merged->offset != incoming->offset))
-          return None;
+          return finish(None);
         merged = incoming;
       }
-      return merged;
+      return finish(merged);
     }
-    return None;
+    return finish(None);
   }
 
   std::vector<BufferAccess> accesses(const Instruction &site) const {
@@ -1749,10 +1967,14 @@ struct BoundsAnalysis::Impl {
   bool hasRangeGuard(const Value *value, const Instruction &at) const {
     value = resolve(value);
     auto &analysis = state(*at.getFunction());
-    for (const BasicBlock &block : *at.getFunction()) {
+    const auto *domNode =
+        analysis.dominators.getNode(const_cast<BasicBlock *>(at.getParent()));
+    if (!domNode)
+      return false;
+    for (const auto *cur = domNode->getIDom(); cur; cur = cur->getIDom()) {
+      const BasicBlock &block = *cur->getBlock();
       const auto *branch = dyn_cast<BranchInst>(block.getTerminator());
-      if (!branch || !branch->isConditional() ||
-          !analysis.dominators.dominates(branch, &at))
+      if (!branch || !branch->isConditional())
         continue;
       bool yes = analysis.dominators.dominates(
           BasicBlockEdge(branch->getParent(), branch->getSuccessor(0)), at.getParent());
@@ -1766,14 +1988,22 @@ struct BoundsAnalysis::Impl {
     return false;
   }
 
-  std::vector<unsigned> nullArguments(const CallBase &call,
-                                      unsigned depth = 4) const {
+  // Call-independent portion of nullArguments(target, depth): memoized by
+  // (Function *, depth) to avoid O(fanout^4) re-traversal of the call graph.
+  const std::vector<unsigned> &
+  nullArgumentsForFunction(const Function &target, unsigned depth) const {
+    static const std::vector<unsigned> kEmpty;
+    if (!depth)
+      return kEmpty;
+    auto key = std::make_pair(&target, depth);
+    auto cached = null_args_cache.find(key);
+    if (cached != null_args_cache.end())
+      return cached->second;
+    // Insert empty sentinel before recursing to guard direct/mutual recursion
+    // and ensure cache presence; overwrite with final result below.
     std::set<unsigned> result;
-    const Function *target = ValueFacts::callee(call);
-    if (!target || !depth)
-      return {};
     auto named = [&](const char *name) {
-      return ValueFacts::hasLibraryName(*target, name, true, true);
+      return ValueFacts::hasLibraryName(target, name, true, true);
     };
     for (const char *name : {"strlen", "wcslen", "strdup", "strchr", "strrchr",
                              "atoi", "atol", "atoll", "atof", "strtol", "strtoul",
@@ -1794,37 +2024,61 @@ struct BoundsAnalysis::Impl {
       result.insert(0);
     if (named("sscanf"))
       result.insert(0);
-    auto model = LibraryModels::format(*target);
-    if (model && model->format < call.arg_size()) {
-      result.insert(model->format);
-      if (!model->scanf)
-        if (auto format = printFormat(call))
-          for (const PrintConversion &conversion : format->conversions)
-            if (std::tolower(conversion.conversion) == 's' &&
-                !conversion.precision)
-              result.insert(conversion.argument);
-    }
-    if (!target->isDeclaration())
-      for (const BasicBlock &block : *target)
-        for (const Instruction &inst : block)
-          if (const auto *child = dyn_cast<CallBase>(&inst))
+    if (!target.isDeclaration() && depth > 1) {
+      for (const BasicBlock &block : target) {
+        for (const Instruction &inst : block) {
+          if (const auto *child = dyn_cast<CallBase>(&inst)) {
             for (unsigned index : nullArguments(*child, depth - 1)) {
               if (index >= child->arg_size())
                 continue;
               const Value *argument = child->getArgOperand(index);
+              auto origin = address(argument);
+              const auto *parameter =
+                  origin ? dyn_cast<Argument>(origin->object) : nullptr;
+              if (!parameter || parameter->getParent() != &target)
+                continue;
               if (stringState(argument, *child).bounds.termination ==
                   StringTermination::Terminated)
                 continue;
-              auto origin = address(argument);
-              const auto *parameter = origin
-                                          ? dyn_cast<Argument>(origin->object)
-                                          : nullptr;
-              if (parameter && parameter->getParent() == target)
-                result.insert(parameter->getArgNo());
+              result.insert(parameter->getArgNo());
             }
+          }
+        }
+      }
+    }
+    std::vector<unsigned> vec(result.begin(), result.end());
+    return null_args_cache.try_emplace(key, std::move(vec)).first->second;
+  }
+
+  std::vector<unsigned> nullArguments(const CallBase &call,
+                                      unsigned depth = 4) const {
+    const Function *target = ValueFacts::callee(call);
+    if (!target || !depth)
+      return {};
+    const auto &base = nullArgumentsForFunction(*target, depth);
+    auto model = LibraryModels::format(*target);
+    if (!model || model->format >= call.arg_size()) {
+      std::vector<unsigned> valid;
+      valid.reserve(base.size());
+      for (unsigned index : base)
+        if (index < call.arg_size() &&
+            call.getArgOperand(index)->getType()->isPointerTy())
+          valid.push_back(index);
+      return valid;
+    }
+    std::set<unsigned> result(base.begin(), base.end());
+    result.insert(model->format);
+    if (!model->scanf)
+      if (auto format = printFormat(call))
+        for (const PrintConversion &conversion : format->conversions)
+          if (std::tolower(conversion.conversion) == 's' &&
+              !conversion.precision)
+            result.insert(conversion.argument);
     std::vector<unsigned> valid;
+    valid.reserve(result.size());
     for (unsigned index : result)
-      if (index < call.arg_size() && call.getArgOperand(index)->getType()->isPointerTy())
+      if (index < call.arg_size() &&
+          call.getArgOperand(index)->getType()->isPointerTy())
         valid.push_back(index);
     return valid;
   }

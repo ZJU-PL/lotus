@@ -1098,6 +1098,139 @@ TEST_F(PDGQueryTest, PdgQueryCliSmokeCoversNewAnalyses) {
   }
 }
 
+TEST_F(PDGQueryTest, ContextSensitiveSliceTerminatesOnRecursionAndKeepsEdges) {
+  ASSERT_TRUE(loadModule(R"(
+    define i32 @rec(i32 %n) {
+    entry:
+      %next = sub i32 %n, 1
+      %r = call i32 @rec(i32 %next)
+      ret i32 %r
+    }
+    define i32 @caller1(i32 %a) {
+    entry:
+      %x = call i32 @rec(i32 %a)
+      ret i32 %x
+    }
+    define i32 @caller2(i32 %b) {
+    entry:
+      %y = call i32 @rec(i32 %b)
+      ret i32 %y
+    }
+  )"));
+
+  Function *rec = module->getFunction("rec");
+  Function *caller1 = module->getFunction("caller1");
+  Function *caller2 = module->getFunction("caller2");
+  ASSERT_NE(rec, nullptr);
+  ASSERT_NE(caller1, nullptr);
+  ASSERT_NE(caller2, nullptr);
+
+  CallInst *rec_call = findInstruction<CallInst>(*rec);
+  CallInst *c1_call = findInstruction<CallInst>(*caller1);
+  CallInst *c2_call = findInstruction<CallInst>(*caller2);
+  ReturnInst *c1_ret = findInstruction<ReturnInst>(*caller1);
+  ReturnInst *c2_ret = findInstruction<ReturnInst>(*caller2);
+  ASSERT_NE(rec_call, nullptr);
+  ASSERT_NE(c1_call, nullptr);
+  ASSERT_NE(c2_call, nullptr);
+  ASSERT_NE(c1_ret, nullptr);
+  ASSERT_NE(c2_ret, nullptr);
+
+  Node *rec_entry = addValueNode(*rec, GraphNodeType::FUNC_ENTRY);
+  Node *rec_call_n = addValueNode(*rec_call, GraphNodeType::INST_FUNCALL);
+  Node *c1_call_n = addValueNode(*c1_call, GraphNodeType::INST_FUNCALL);
+  Node *c2_call_n = addValueNode(*c2_call, GraphNodeType::INST_FUNCALL);
+  Node *c1_ret_n = addValueNode(*c1_ret, GraphNodeType::INST_RET);
+  Node *c2_ret_n = addValueNode(*c2_ret, GraphNodeType::INST_RET);
+
+  // Forward call-invocation and return-edge structure with mutual self-cycle.
+  addEdge(c1_call_n, rec_entry, EdgeType::CONTROLDEP_CALLINV);
+  addEdge(c2_call_n, rec_entry, EdgeType::CONTROLDEP_CALLINV);
+  addEdge(rec_entry, rec_call_n, EdgeType::DATA_DEF_USE);
+  addEdge(rec_call_n, rec_entry, EdgeType::CONTROLDEP_CALLINV);
+  addEdge(rec_entry, c1_call_n, EdgeType::CONTROLDEP_CALLRET);
+  addEdge(rec_entry, c2_call_n, EdgeType::CONTROLDEP_CALLRET);
+  addEdge(c1_call_n, c1_ret_n, EdgeType::DATA_DEF_USE);
+  addEdge(c2_call_n, c2_ret_n, EdgeType::DATA_DEF_USE);
+
+  PDGCriteria criteria;
+  criteria.nodes.insert(c1_call_n);
+  PDGQueryOptions opts;
+  opts.context_mode = PDGContextMode::ContextSensitive;
+  opts.explain = true;
+  opts.edge_preset = PDGEdgePreset::All;
+
+  SliceQuery query(graph);
+  PDGQueryResult fwd = query.forward(criteria, opts, module.get());
+  EXPECT_TRUE(fwd.nodes.count(rec_entry));
+  EXPECT_TRUE(fwd.nodes.count(rec_call_n));
+  // Context sensitivity rejects returning from rec into unrelated caller2.
+  EXPECT_FALSE(fwd.nodes.count(c2_call_n));
+  EXPECT_FALSE(fwd.nodes.count(c2_ret_n));
+  // Witness paths retain actual interprocedural edge types.
+  bool saw_callinv = false;
+  for (const auto &path : fwd.witness_paths) {
+    for (EdgeType et : path.edge_types) {
+      if (et == EdgeType::CONTROLDEP_CALLINV)
+        saw_callinv = true;
+    }
+  }
+  EXPECT_TRUE(saw_callinv);
+
+  // Bounded stack depth also terminates cleanly on recursion.
+  opts.limits.max_stack_depth = 2;
+  PDGQueryResult bounded = query.forward(criteria, opts, module.get());
+  EXPECT_TRUE(bounded.nodes.count(rec_entry));
+  EXPECT_FALSE(bounded.nodes.count(c2_call_n));
+}
+
+TEST_F(PDGQueryTest, CliJsonAndDotQueryOutputAreCleanAndValid) {
+  const std::string benchmark = benchmarkPath();
+  if (benchmark.empty()) {
+    GTEST_SKIP() << "benchmark bitcode not available";
+    return;
+  }
+
+  const std::string binary =
+      "/Users/rainoftime/Work/analysis/lotus/build/bin/lotus-ir-pdg-query";
+  // Single query JSON must start cleanly with '{' (no spdlog on stdout).
+  {
+    const std::string out = runCommand(
+        binary + " " + benchmark +
+        " -q \"MATCH (n) RETURN n LIMIT 2\" --format json");
+    ASSERT_FALSE(out.empty());
+    EXPECT_EQ(out.front(), '{') << out;
+    EXPECT_NE(out.find("\"type\": \"nodes\""), std::string::npos) << out;
+  }
+  // Single query DOT must start cleanly with 'digraph pdg_query {'.
+  {
+    const std::string out = runCommand(
+        binary + " " + benchmark +
+        " -q \"MATCH (a)-[r]->(b) RETURN r LIMIT 2\" --format dot");
+    ASSERT_FALSE(out.empty());
+    EXPECT_EQ(out.rfind("digraph pdg_query {", 0), 0u) << out;
+    EXPECT_NE(out.find("->"), std::string::npos) << out;
+  }
+  // Multi-query batch file in --format json must emit a valid JSON array.
+  {
+    const std::string qfile = "/tmp/lotus_pdg_batch_json_test.cypher";
+    {
+      FILE *fp = std::fopen(qfile.c_str(), "w");
+      ASSERT_NE(fp, nullptr);
+      std::fputs("MATCH (n) RETURN COUNT(n);\nMATCH (n:FUNC_ENTRY) RETURN n LIMIT 1;\n", fp);
+      std::fclose(fp);
+    }
+    const std::string out = runCommand(
+        binary + " " + benchmark + " -f " + qfile + " --format json");
+    std::remove(qfile.c_str());
+    ASSERT_FALSE(out.empty());
+    EXPECT_EQ(out.front(), '[') << out;
+    EXPECT_NE(out.find("]\n"), std::string::npos) << out;
+    EXPECT_NE(out.find("\"type\": \"integer\""), std::string::npos) << out;
+    EXPECT_NE(out.find("\"type\": \"nodes\""), std::string::npos) << out;
+  }
+}
+
 TEST_F(PDGQueryTest, BenchmarkBackedSmokeUsesNewSliceQueryWhenAvailable) {
   std::string path = benchmarkPath();
   if (path.empty()) {

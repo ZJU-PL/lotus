@@ -123,27 +123,29 @@ void pdg::GraphBuilder::bindDebugInfo(Module &M) {
       } else {
         continue;
       }
+      if (!addr)
+        continue;
 
       Node *addr_node = graph_.getNode(*addr);
       if (!addr_node)
         continue;
       auto *DLV = dbg_declare_inst->getVariable(); // di local variable instance
-      assert(DLV != nullptr &&
-             "cannot find DILocalVariable Node for computing DIType");
+      if (!DLV)
+        continue;
       DIType *var_di_type = DLV->getType();
+      if (!var_di_type)
+        continue;
       std::string var_name = DLV->getName().str();
-      assert(var_di_type != nullptr && "cannot bind nullptr ditype to node!");
       addr_node->setDIType(*var_di_type);
       graph_._node_di_type_map.insert(std::make_pair(addr_node, var_di_type));
       // if dbg contains class information, create a separate class node
       if (dbgutils::isClassPointerType(*var_di_type)) {
         auto class_name = dbgutils::getSourceLevelTypeName(*var_di_type);
+        // if the variable name is this, the current function is a class method
+        if (var_name == "this" && fw->getClassName().empty())
+          fw->setClassName(class_name);
         if (graph_._class_name_set.find(class_name) !=
             graph_._class_name_set.end()) {
-          // if the variable name is this, the current function is a class
-          // method
-          if (var_name == "this" && fw->getClassName().empty())
-            fw->setClassName(class_name);
           continue;
         }
         graph_._class_name_set.insert(class_name);
@@ -158,7 +160,8 @@ void pdg::GraphBuilder::bindDebugInfo(Module &M) {
          inst_iter++) {
       Instruction &i = *inst_iter;
       Node *n = graph_.getNode(i);
-      assert(n != nullptr && "cannot compute node di type for null node!\n");
+      if (!n)
+        continue;
       DIType *node_di_type = computeNodeDIType(*n);
       if (node_di_type != nullptr)
         n->setDIType(*node_di_type);
@@ -277,32 +280,34 @@ bool pdg::GraphBuilder::isAnnotationCallInst(Instruction &inst) {
 
 void pdg::GraphBuilder::buildGlobalAnnotationNodes(Module &M) {
   auto *global_annos = M.getNamedGlobal("llvm.global.annotations");
-  if (global_annos) {
-    // build a node for the annotation
-    Node *global_anno_node =
-        new Node(*global_annos, GraphNodeType::ANNO_GLOBAL);
-    graph_._val_node_map.insert(
-        std::pair<Value *, Node *>(global_annos, global_anno_node));
-    graph_.addNode(*global_anno_node);
-    auto *casted_array = cast<ConstantArray>(global_annos->getOperand(0));
-    for (unsigned i = 0; i < casted_array->getNumOperands(); i++) {
-      auto *casted_struct = cast<ConstantStruct>(casted_array->getOperand(i));
-      if (auto *annotated_gv = dyn_cast<GlobalValue>(
-              casted_struct->getOperand(0)->getOperand(0))) {
-        auto *globalSenStr =
-            cast<GlobalVariable>(casted_struct->getOperand(1)->getOperand(0));
-        auto anno = cast<ConstantDataArray>(globalSenStr->getOperand(0))
-                        ->getAsCString();
-        Node *n = graph_.getNode(*annotated_gv);
-        if (n == nullptr) {
-          n = new Node(*annotated_gv,
-                       GraphNodeType::VAR_STATICALLOCGLOBALSCOPE);
-          graph_._val_node_map.insert(
-              std::pair<Value *, Node *>(annotated_gv, n));
-          graph_.addNode(*n);
-        }
-        n->addNeighbor(*global_anno_node, EdgeType::ANNO_GLOBAL);
+  if (!global_annos || !global_annos->hasInitializer())
+    return;
+  // build a node for the annotation
+  Node *global_anno_node = new Node(*global_annos, GraphNodeType::ANNO_GLOBAL);
+  graph_._val_node_map.insert(
+      std::pair<Value *, Node *>(global_annos, global_anno_node));
+  graph_.addNode(*global_anno_node);
+  auto *casted_array = dyn_cast<ConstantArray>(global_annos->getInitializer());
+  if (!casted_array)
+    return;
+  for (unsigned i = 0; i < casted_array->getNumOperands(); i++) {
+    auto *casted_struct = dyn_cast<ConstantStruct>(casted_array->getOperand(i));
+    if (!casted_struct || casted_struct->getNumOperands() < 1)
+      continue;
+    Value *op0 = casted_struct->getOperand(0);
+    if (!op0)
+      continue;
+    Value *target = op0->stripPointerCasts();
+    if (auto *annotated_gv = dyn_cast_or_null<GlobalValue>(target)) {
+      Node *n = graph_.getNode(*annotated_gv);
+      if (n == nullptr) {
+        n = new Node(*annotated_gv,
+                     GraphNodeType::VAR_STATICALLOCGLOBALSCOPE);
+        graph_._val_node_map.insert(
+            std::pair<Value *, Node *>(annotated_gv, n));
+        graph_.addNode(*n);
       }
+      n->addNeighbor(*global_anno_node, EdgeType::ANNO_GLOBAL);
     }
   }
 }

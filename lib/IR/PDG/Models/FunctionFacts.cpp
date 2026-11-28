@@ -43,16 +43,30 @@ static bool blockReaches(const BasicBlock *from, const BasicBlock *to) {
 struct FunctionFacts::Impl {
   Function &function;
   TargetLibraryInfoImpl tli_impl;
-  TargetLibraryInfo tli;
+  mutable TargetLibraryInfo tli;
   mutable AssumptionCache assumptions;
-  DominatorTree dominators;
-  LoopInfo loops;
+  mutable DominatorTree dominators;
+  mutable std::unique_ptr<LoopInfo> loops_;
   BasicAAResult basic_aa;
   mutable AAResults aa;
-  mutable ScalarEvolution evolution;
+  mutable std::unique_ptr<ScalarEvolution> evolution_;
   mutable std::unique_ptr<MemorySSA> memory_ssa;
   std::map<const Value *, APInt> constant_arguments;
   mutable std::map<const Value *, const Value *> pointer_origins;
+  mutable SmallPtrSet<const Value *, 16> upper_bound_active;
+
+  LoopInfo &getLoops() const {
+    if (!loops_)
+      loops_ = std::make_unique<LoopInfo>(dominators);
+    return *loops_;
+  }
+
+  ScalarEvolution &getEvolution() const {
+    if (!evolution_)
+      evolution_ = std::make_unique<ScalarEvolution>(
+          function, tli, assumptions, dominators, getLoops());
+    return *evolution_;
+  }
 
   const Value *pointerOrigin(const Value *value, unsigned depth) const {
     if (!value->getType()->isPointerTy() || !depth)
@@ -112,10 +126,10 @@ struct FunctionFacts::Impl {
 
   explicit Impl(Function &f)
       : function(f), tli_impl(Triple(f.getParent()->getTargetTriple())),
-        tli(tli_impl), assumptions(f), dominators(f), loops(dominators),
+        tli(tli_impl), assumptions(f), dominators(f),
         basic_aa(f.getParent()->getDataLayout(), f, tli, assumptions,
                  &dominators),
-        aa(tli), evolution(f, tli, assumptions, dominators, loops) {
+        aa(tli) {
     aa.addAAResult(basic_aa);
   }
 
@@ -299,14 +313,15 @@ struct FunctionFacts::Impl {
     if (!bound ||
         (predicate != ICmpInst::ICMP_SLT && predicate != ICmpInst::ICMP_ULT))
       return false;
+    ScalarEvolution &evo = getEvolution();
     const auto *recurrence = dyn_cast<SCEVAddRecExpr>(
-        evolution.getSCEV(const_cast<Value *>(cmp->getOperand(0))));
+        evo.getSCEV(const_cast<Value *>(cmp->getOperand(0))));
     if (!recurrence || recurrence->getLoop() != &loop ||
         !recurrence->isAffine())
       return false;
     const auto *start = dyn_cast<SCEVConstant>(recurrence->getStart());
     const auto *step =
-        dyn_cast<SCEVConstant>(recurrence->getStepRecurrence(evolution));
+        dyn_cast<SCEVConstant>(recurrence->getStepRecurrence(evo));
     if (!start || !step || step->getAPInt() != 1 ||
         start->getAPInt().isNegative() || bound->isNegative())
       return false;
@@ -327,20 +342,26 @@ struct FunctionFacts::Impl {
       return actual->second.zextOrTrunc(width);
     if (const auto *constant = dyn_cast<ConstantInt>(&value))
       return constant->getValue();
+    if (!upper_bound_active.insert(&value).second)
+      return None;
+    auto finish = [&](Optional<APInt> res) {
+      upper_bound_active.erase(&value);
+      return res;
+    };
     bool nonnegative =
         isKnownNonNegative(&value, function.getParent()->getDataLayout(), 0,
                            &assumptions, &at, &dominators);
     Optional<APInt> bound;
     std::vector<std::pair<ICmpInst::Predicate, APInt>> guards;
-    for (const BasicBlock &block : function) {
-      const auto *branch = dyn_cast<BranchInst>(block.getTerminator());
+    auto inspectBlock = [&](const BasicBlock *block) {
+      const auto *branch = dyn_cast<BranchInst>(block->getTerminator());
       if (!branch || !branch->isConditional())
-        continue;
+        return;
       bool selected_edge = branch->getParent() == edge_from && edge_to &&
                            (branch->getSuccessor(0) == edge_to ||
                             branch->getSuccessor(1) == edge_to);
       if (!selected_edge && !dominators.dominates(branch, &at))
-        continue;
+        return;
       bool yes = dominators.dominates(
           BasicBlockEdge(branch->getParent(), branch->getSuccessor(0)),
           at.getParent());
@@ -352,10 +373,10 @@ struct FunctionFacts::Impl {
         no = branch->getSuccessor(1) == edge_to;
       }
       if (yes == no)
-        continue;
+        return;
       const auto *comparison = dyn_cast<ICmpInst>(branch->getCondition());
       if (!comparison)
-        continue;
+        return;
       auto predicate =
           yes ? comparison->getPredicate() : comparison->getInversePredicate();
       const Value *other = nullptr;
@@ -366,10 +387,10 @@ struct FunctionFacts::Impl {
         predicate = ICmpInst::getSwappedPredicate(predicate);
       }
       if (!other || other == &value)
-        continue;
+        return;
       auto limit = upperBound(*other, *comparison, depth - 1);
       if (!limit)
-        continue;
+        return;
       guards.push_back({predicate, *limit});
       bool exact_negative_one =
           (isa<ConstantInt>(other) || constant_arguments.count(other)) &&
@@ -378,7 +399,18 @@ struct FunctionFacts::Impl {
           (predicate == ICmpInst::ICMP_SGT &&
            (!limit->isNegative() || exact_negative_one)))
         nonnegative = true;
+    };
+    bool checked_edge_from = false;
+    if (const auto *domNode = dominators.getNode(const_cast<BasicBlock *>(at.getParent()))) {
+      for (const auto *cur = domNode->getIDom(); cur; cur = cur->getIDom()) {
+        const BasicBlock *blk = cur->getBlock();
+        if (blk == edge_from)
+          checked_edge_from = true;
+        inspectBlock(blk);
+      }
     }
+    if (edge_from && !checked_edge_from)
+      inspectBlock(edge_from);
     auto restrict = [&](APInt upper) {
       if (!bound || upper.ult(*bound))
         bound = upper;
@@ -486,7 +518,7 @@ struct FunctionFacts::Impl {
     }
     if (infer_type_bound && nonnegative)
       restrict(APInt::getSignedMaxValue(width));
-    return bound;
+    return finish(bound);
   }
 };
 
@@ -536,7 +568,8 @@ bool FunctionFacts::recursive(const CallBase &call) const {
 }
 bool FunctionFacts::repeatedStackAllocation(
     const AllocaInst &allocation) const {
-  for (const Loop *loop = impl_->loops.getLoopFor(allocation.getParent()); loop;
+  LoopInfo &loops = impl_->getLoops();
+  for (const Loop *loop = loops.getLoopFor(allocation.getParent()); loop;
        loop = loop->getParentLoop()) {
     bool restored = false;
     for (const BasicBlock *block : loop->blocks())
@@ -546,7 +579,8 @@ bool FunctionFacts::repeatedStackAllocation(
             restored |= target->getIntrinsicID() == Intrinsic::stackrestore;
     if (restored)
       continue; // Excludes scoped VLAs; a deliberate subset.
-    const SCEV *count = impl_->evolution.getConstantMaxBackedgeTakenCount(loop);
+    ScalarEvolution &evo = impl_->getEvolution();
+    const SCEV *count = evo.getConstantMaxBackedgeTakenCount(loop);
     if (const auto *constant = dyn_cast<SCEVConstant>(count))
       if (constant->getAPInt().ule(16))
         continue;
@@ -561,7 +595,7 @@ bool FunctionFacts::repeatedStackAllocation(
       if (!mandatory)
         continue;
       if (const auto *bound =
-              dyn_cast<SCEVConstant>(impl_->evolution.getExitCount(
+              dyn_cast<SCEVConstant>(evo.getExitCount(
                   loop, block, ScalarEvolution::ConstantMaximum)))
         if (bound->getAPInt().ule(16)) {
           small = true;
@@ -632,10 +666,9 @@ bool FunctionFacts::mayOverflowPositively(const BinaryOperator &add) const {
   if (!add.getType()->isIntegerTy())
     return false;
   unsigned width = add.getType()->getIntegerBitWidth();
-  ConstantRange left = impl_->evolution.getSignedRange(
-      impl_->evolution.getSCEV(add.getOperand(0)));
-  ConstantRange right = impl_->evolution.getSignedRange(
-      impl_->evolution.getSCEV(add.getOperand(1)));
+  ScalarEvolution &evo = impl_->getEvolution();
+  ConstantRange left = evo.getSignedRange(evo.getSCEV(add.getOperand(0)));
+  ConstantRange right = evo.getSignedRange(evo.getSCEV(add.getOperand(1)));
   APInt sum = left.getSignedMax().sext(width + 1) +
               right.getSignedMax().sext(width + 1);
   return sum.sgt(APInt::getSignedMaxValue(width).sext(width + 1));
@@ -653,35 +686,40 @@ FunctionFacts::integerRangeAt(const Value &value, const Instruction &at) const {
   if (!value.getType()->isIntegerTy() ||
       value.getType()->getIntegerBitWidth() > 64)
     return None;
-  ConstantRange range = impl_->evolution.getSignedRange(
-      impl_->evolution.getSCEV(const_cast<Value *>(&value)));
-  for (const BasicBlock &block : impl_->function) {
-    const auto *branch = dyn_cast<BranchInst>(block.getTerminator());
-    if (!branch || !branch->isConditional())
-      continue;
-    const auto *cmp = dyn_cast<ICmpInst>(branch->getCondition());
-    if (!cmp)
-      continue;
-    auto predicate = cmp->getPredicate();
-    const ConstantInt *constant = nullptr;
-    if (equivalent(value, *cmp->getOperand(0)))
-      constant = dyn_cast<ConstantInt>(cmp->getOperand(1));
-    else if (equivalent(value, *cmp->getOperand(1))) {
-      constant = dyn_cast<ConstantInt>(cmp->getOperand(0));
-      predicate = ICmpInst::getSwappedPredicate(predicate);
+  ScalarEvolution &evo = impl_->getEvolution();
+  ConstantRange range =
+      evo.getSignedRange(evo.getSCEV(const_cast<Value *>(&value)));
+  if (const auto *domNode =
+          impl_->dominators.getNode(const_cast<BasicBlock *>(at.getParent()))) {
+    for (const auto *cur = domNode->getIDom(); cur; cur = cur->getIDom()) {
+      const BasicBlock &block = *cur->getBlock();
+      const auto *branch = dyn_cast<BranchInst>(block.getTerminator());
+      if (!branch || !branch->isConditional())
+        continue;
+      const auto *cmp = dyn_cast<ICmpInst>(branch->getCondition());
+      if (!cmp)
+        continue;
+      auto predicate = cmp->getPredicate();
+      const ConstantInt *constant = nullptr;
+      if (equivalent(value, *cmp->getOperand(0)))
+        constant = dyn_cast<ConstantInt>(cmp->getOperand(1));
+      else if (equivalent(value, *cmp->getOperand(1))) {
+        constant = dyn_cast<ConstantInt>(cmp->getOperand(0));
+        predicate = ICmpInst::getSwappedPredicate(predicate);
+      }
+      if (!constant)
+        continue;
+      bool yes = impl_->dominators.dominates(
+          BasicBlockEdge(&block, branch->getSuccessor(0)), at.getParent());
+      bool no = impl_->dominators.dominates(
+          BasicBlockEdge(&block, branch->getSuccessor(1)), at.getParent());
+      if (yes == no)
+        continue;
+      if (no)
+        predicate = ICmpInst::getInversePredicate(predicate);
+      range = range.intersectWith(
+          ConstantRange::makeExactICmpRegion(predicate, constant->getValue()));
     }
-    if (!constant)
-      continue;
-    bool yes = impl_->dominators.dominates(
-        BasicBlockEdge(&block, branch->getSuccessor(0)), at.getParent());
-    bool no = impl_->dominators.dominates(
-        BasicBlockEdge(&block, branch->getSuccessor(1)), at.getParent());
-    if (yes == no)
-      continue;
-    if (no)
-      predicate = ICmpInst::getInversePredicate(predicate);
-    range = range.intersectWith(
-        ConstantRange::makeExactICmpRegion(predicate, constant->getValue()));
   }
   if (range.isEmptySet())
     return None;
