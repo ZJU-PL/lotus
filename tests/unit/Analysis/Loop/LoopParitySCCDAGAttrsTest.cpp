@@ -7,9 +7,11 @@
 #include "llvm/PassRegistry.h"
 #include "llvm/Passes/PassBuilder.h"
 
+#include "Analysis/Loop/Classification/SCCDAGAttrs.h"
+#include "Analysis/Loop/Dependence/LoopDependenceGraph.h"
+#include "Analysis/Loop/Dependence/LoopSCCDAG.h"
 #include "Analysis/Loop/FunctionLoopAnalyses.h"
-#include "Analysis/Loop/LoopDependenceGraph.h"
-#include "Analysis/Loop/SCCDAGAttrs.h"
+#include "Analysis/Loop/LoopEnvironment.h"
 #include "IR/PDG/Construction/ControlDependencyGraph.h"
 #include "IR/PDG/Construction/DataDependencyGraph.h"
 #include "IR/PDG/Construction/ProgramDependencyGraph.h"

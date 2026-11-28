@@ -1,38 +1,27 @@
 /*
- * Copyright 2019 - 2025  Simone Campanoni
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
- * OR OTHER DEALINGS IN THE SOFTWARE.
+ * Copyright 2019 - 2026 Lotus contributors
  */
 #include "Analysis/Loop/LoopForest.h"
+
+#include "Analysis/CFG/Dominator.h"
+
+#include <cassert>
 
 namespace lotus {
 namespace analysis {
 namespace loop {
 
-LoopTree::LoopTree(LoopForest *f, LoopStructure *l) : LoopTree(f, l, nullptr) {}
+LoopTree::LoopTree(LoopForest *forest, LoopStructure *loop)
+    : LoopTree(forest, loop, nullptr) {}
 
-LoopTree::LoopTree(LoopForest *f, LoopStructure *l, LoopTree *parent)
-    : forest{f}, loop{l}, parent{parent} {}
+LoopTree::LoopTree(LoopForest *forest, LoopStructure *loop, LoopTree *parent)
+    : forest{forest}, loop{loop}, parent{parent} {}
+
+LoopTree::~LoopTree() = default;
 
 LoopStructure *LoopTree::getLoop(void) const { return this->loop; }
 
-bool LoopTree::isIncludedInItsSubLoops(Instruction *inst) const {
+bool LoopTree::isIncludedInItsSubLoops(llvm::Instruction *inst) const {
   if (!this->loop->isIncluded(inst)) {
     return false;
   }
@@ -51,26 +40,26 @@ bool LoopTree::isIncludedInItsSubLoops(Instruction *inst) const {
 uint32_t LoopTree::getNumberOfSubLoops(void) const {
   uint32_t subloops = 0;
   for (auto *subLoop : this->children) {
-    subloops++;
+    ++subloops;
     subloops += subLoop->getNumberOfSubLoops();
   }
   return subloops;
 }
 
-LoopStructure *LoopTree::getInnermostLoopThatContains(Instruction *i) {
-  return this->getInnermostLoopThatContains(i->getParent());
+LoopStructure *LoopTree::getInnermostLoopThatContains(llvm::Instruction *inst) {
+  return this->getInnermostLoopThatContains(inst->getParent());
 }
 
-LoopStructure *LoopTree::getInnermostLoopThatContains(BasicBlock *bb) {
+LoopStructure *LoopTree::getInnermostLoopThatContains(llvm::BasicBlock *bb) {
   if (!this->loop->isIncluded(bb)) {
     return nullptr;
   }
 
   LoopStructure *innerLoop = nullptr;
   uint32_t innerLoopLevel = 0;
-  auto finder = [bb, &innerLoop, &innerLoopLevel](LoopTree *n,
-                                                  uint32_t treeLevel) -> bool {
-    auto *nl = n->getLoop();
+  this->visitPreOrder([bb, &innerLoop, &innerLoopLevel](LoopTree *node,
+                                                        uint32_t treeLevel) {
+    auto *nl = node->getLoop();
     if (!nl->isIncluded(bb)) {
       return false;
     }
@@ -79,26 +68,25 @@ LoopStructure *LoopTree::getInnermostLoopThatContains(BasicBlock *bb) {
       innerLoopLevel = treeLevel;
     }
     return false;
-  };
-  this->visitPreOrder(finder);
+  });
 
   return innerLoop;
 }
 
-LoopStructure *LoopTree::getOutermostLoopThatContains(Instruction *i) {
-  return this->getOutermostLoopThatContains(i->getParent());
+LoopStructure *LoopTree::getOutermostLoopThatContains(llvm::Instruction *inst) {
+  return this->getOutermostLoopThatContains(inst->getParent());
 }
 
-LoopStructure *LoopTree::getOutermostLoopThatContains(BasicBlock *bb) {
+LoopStructure *LoopTree::getOutermostLoopThatContains(llvm::BasicBlock *bb) {
   if (!this->loop->isIncluded(bb)) {
     return nullptr;
   }
 
   LoopStructure *outerLoop = nullptr;
   uint32_t outerLoopLevel = 0;
-  auto finder = [bb, &outerLoop, &outerLoopLevel](LoopTree *n,
-                                                  uint32_t treeLevel) -> bool {
-    auto *nl = n->getLoop();
+  this->visitPreOrder([bb, &outerLoop, &outerLoopLevel](LoopTree *node,
+                                                        uint32_t treeLevel) {
+    auto *nl = node->getLoop();
     if (!nl->isIncluded(bb)) {
       return false;
     }
@@ -107,8 +95,7 @@ LoopStructure *LoopTree::getOutermostLoopThatContains(BasicBlock *bb) {
       outerLoopLevel = treeLevel;
     }
     return false;
-  };
-  this->visitPreOrder(finder);
+  });
 
   return outerLoop;
 }
@@ -117,13 +104,12 @@ LoopTree *LoopTree::getParent(void) const { return this->parent; }
 
 std::unordered_set<LoopTree *> LoopTree::getDescendants(void) {
   std::unordered_set<LoopTree *> descendants;
-  auto collector = [this, &descendants](LoopTree *n, uint32_t) -> bool {
-    if (n != this) {
-      descendants.insert(n);
+  this->visitPreOrder([this, &descendants](LoopTree *node, uint32_t) {
+    if (node != this) {
+      descendants.insert(node);
     }
     return false;
-  };
-  this->visitPreOrder(collector);
+  });
   return descendants;
 }
 
@@ -133,36 +119,34 @@ std::unordered_set<LoopTree *> LoopTree::getChildren(void) const {
 
 std::set<LoopTree *> LoopTree::getNodes(void) {
   std::set<LoopTree *> nodes;
-  auto collector = [&nodes](LoopTree *n, uint32_t) -> bool {
-    nodes.insert(n);
+  this->visitPreOrder([&nodes](LoopTree *node, uint32_t) {
+    nodes.insert(node);
     return false;
-  };
-  this->visitPreOrder(collector);
+  });
   return nodes;
 }
 
 std::set<LoopStructure *> LoopTree::getLoops(void) {
   std::set<LoopStructure *> loops;
-  auto collector = [&loops](LoopTree *n, uint32_t) -> bool {
-    loops.insert(n->getLoop());
+  this->visitPreOrder([&loops](LoopTree *node, uint32_t) {
+    loops.insert(node->getLoop());
     return false;
-  };
-  this->visitPreOrder(collector);
+  });
   return loops;
 }
 
 bool LoopTree::visitPreOrder(
-    std::function<bool(LoopTree *n, uint32_t treeLevel)> funcToInvoke) {
-  return this->visitPreOrder(funcToInvoke, 1);
+    std::function<bool(LoopTree *node, uint32_t treeLevel)> funcToInvoke) {
+  return this->visitPreOrder(std::move(funcToInvoke), 1);
 }
 
 bool LoopTree::visitPostOrder(
-    std::function<bool(LoopTree *n, uint32_t treeLevel)> funcToInvoke) {
-  return this->visitPostOrder(funcToInvoke, 1);
+    std::function<bool(LoopTree *node, uint32_t treeLevel)> funcToInvoke) {
+  return this->visitPostOrder(std::move(funcToInvoke), 1);
 }
 
 bool LoopTree::visitPreOrder(
-    std::function<bool(LoopTree *n, uint32_t treeLevel)> funcToInvoke,
+    std::function<bool(LoopTree *node, uint32_t treeLevel)> funcToInvoke,
     uint32_t treeLevel) {
   if (funcToInvoke(this, treeLevel)) {
     return true;
@@ -178,7 +162,7 @@ bool LoopTree::visitPreOrder(
 }
 
 bool LoopTree::visitPostOrder(
-    std::function<bool(LoopTree *n, uint32_t treeLevel)> funcToInvoke,
+    std::function<bool(LoopTree *node, uint32_t treeLevel)> funcToInvoke,
     uint32_t treeLevel) {
   for (auto *child : this->children) {
     if (child->visitPostOrder(funcToInvoke, treeLevel + 1)) {
@@ -189,41 +173,42 @@ bool LoopTree::visitPostOrder(
   return funcToInvoke(this, treeLevel);
 }
 
-LoopTree::~LoopTree() = default;
-
 LoopForest::LoopForest(
     std::vector<LoopStructure *> const &loops,
-    std::unordered_map<Function *, noelle::DominatorSummary *> const &doms) {
+    std::unordered_map<llvm::Function *, noelle::DominatorSummary *> const
+        &doms) {
   std::unordered_set<LoopTree *> potentialTrees;
-  for (auto *l : loops) {
-    auto *func = l->getFunction();
-    auto *header = l->getHeader();
-    auto ownedNode = std::make_unique<LoopTree>(this, l);
-    auto *n = ownedNode.get();
-    this->nodes[l] = std::move(ownedNode);
-    this->functionLoops[func].insert(l);
-    this->headerLoops[header] = n;
+  for (auto *loop : loops) {
+    auto *func = loop->getFunction();
+    auto *header = loop->getHeader();
+    auto ownedNode = std::make_unique<LoopTree>(this, loop);
+    auto *node = ownedNode.get();
+    this->nodes[loop] = std::move(ownedNode);
+    this->functionLoops[func].insert(loop);
+    this->headerLoops[header] = node;
 
-    if (l->getNestingLevel() == 1) {
-      this->trees.insert(n);
+    if (loop->getNestingLevel() == 1) {
+      this->trees.insert(node);
     } else {
-      potentialTrees.insert(n);
+      potentialTrees.insert(node);
     }
   }
 
-  for (auto *t : this->trees) {
-    this->addChildrenToTree(t, doms, potentialTrees);
+  for (auto *tree : this->trees) {
+    this->addChildrenToTree(tree, doms, potentialTrees);
   }
 
-  for (auto *n : potentialTrees) {
-    this->trees.insert(n);
+  for (auto *node : potentialTrees) {
+    this->trees.insert(node);
   }
 }
+
+LoopForest::~LoopForest() = default;
 
 uint64_t LoopForest::getNumberOfLoops(void) const {
   uint64_t total = 0;
   for (auto *tree : this->getTrees()) {
-    total++;
+    ++total;
     total += tree->getNumberOfSubLoops();
   }
   return total;
@@ -231,21 +216,19 @@ uint64_t LoopForest::getNumberOfLoops(void) const {
 
 void LoopForest::addChildrenToTree(
     LoopTree *root,
-    std::unordered_map<Function *, noelle::DominatorSummary *> const &doms,
+    std::unordered_map<llvm::Function *, noelle::DominatorSummary *> const
+        &doms,
     std::unordered_set<LoopTree *> &potentialTrees) {
-  auto *l = root->getLoop();
-  auto *header = l->getHeader();
-  auto *func = l->getFunction();
+  auto *loop = root->getLoop();
+  auto *header = loop->getHeader();
+  auto *func = loop->getFunction();
 
   auto *ds = doms.at(func);
   auto *loopHeaderDominatorNode = ds->DT.getNode(header);
 
   for (auto *functionLoop : this->functionLoops[func]) {
     auto *functionLoopHeader = functionLoop->getHeader();
-    if (functionLoopHeader == header) {
-      continue;
-    }
-    if (!l->isIncluded(functionLoopHeader)) {
+    if (functionLoopHeader == header || !loop->isIncluded(functionLoopHeader)) {
       continue;
     }
 
@@ -257,13 +240,10 @@ void LoopForest::addChildrenToTree(
     while (loopHeaderDominatorNode != subLoopDominatorNode) {
       auto *bb = subLoopDominatorNode->getBlock();
       auto it = this->headerLoops.find(bb);
-      if (it != this->headerLoops.end()) {
-        auto *loopInBetween = it->second;
-        auto *lsLoopInBetween = loopInBetween->getLoop();
-        if (lsLoopInBetween->isIncluded(functionLoopHeader)) {
-          foundLoopInBetween = true;
-          break;
-        }
+      if (it != this->headerLoops.end() &&
+          it->second->getLoop()->isIncluded(functionLoopHeader)) {
+        foundLoopInBetween = true;
+        break;
       }
       subLoopDominatorNode = subLoopDominatorNode->getParent();
     }
@@ -288,43 +268,36 @@ void LoopForest::removeTree(LoopTree *tree) { this->trees.erase(tree); }
 
 void LoopForest::addTree(LoopTree *tree) { this->trees.insert(tree); }
 
-LoopForest::~LoopForest() = default;
-
 LoopTree *LoopForest::getNode(LoopStructure *loop) const {
   auto it = this->headerLoops.find(loop->getHeader());
-  if (it == this->headerLoops.end()) {
-    return nullptr;
-  }
-  return it->second;
+  return it == this->headerLoops.end() ? nullptr : it->second;
 }
 
-LoopTree *LoopForest::getInnermostLoopThatContains(Instruction *i) const {
+LoopTree *LoopForest::getInnermostLoopThatContains(
+    llvm::Instruction *inst) const {
   for (auto *tree : this->getTrees()) {
     auto *ls = tree->getLoop();
-    if (ls->getFunction() != i->getFunction()) {
-      continue;
-    }
-    if (!ls->isIncluded(i)) {
+    if (ls->getFunction() != inst->getFunction() || !ls->isIncluded(inst)) {
       continue;
     }
 
     LoopTree *innermostLoop = nullptr;
-    auto finder = [i, &innermostLoop](LoopTree *n, uint32_t) -> bool {
-      if (n->getLoop()->isIncluded(i)) {
-        innermostLoop = n;
+    tree->visitPostOrder([inst, &innermostLoop](LoopTree *node, uint32_t) {
+      if (node->getLoop()->isIncluded(inst)) {
+        innermostLoop = node;
         return true;
       }
       return false;
-    };
-    tree->visitPostOrder(finder);
+    });
     return innermostLoop;
   }
 
   return nullptr;
 }
 
-LoopTree *LoopForest::getInnermostLoopThatContains(BasicBlock *bb) const {
-  return bb->empty() ? nullptr : this->getInnermostLoopThatContains(&*bb->begin());
+LoopTree *LoopForest::getInnermostLoopThatContains(llvm::BasicBlock *bb) const {
+  return bb->empty() ? nullptr
+                     : this->getInnermostLoopThatContains(&*bb->begin());
 }
 
 } // namespace loop

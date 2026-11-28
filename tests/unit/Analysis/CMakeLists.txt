@@ -209,7 +209,7 @@ if(loop_selected)
 lotus_collect_test_sources(analysis_tests
   Loop/LoopAnalysisFoundationTest.cpp
   Loop/LoopDependenceGraphTest.cpp
-  Loop/LoopLDGBuilderTest.cpp
+  Loop/LoopDependenceBuilderTest.cpp
   Loop/LoopScalarAnalysisTest.cpp
   Loop/LoopEnvironmentAndCarriedDepsTest.cpp
   Loop/LoopIterationSpaceTest.cpp

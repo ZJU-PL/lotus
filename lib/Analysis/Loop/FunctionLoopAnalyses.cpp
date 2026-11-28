@@ -1,44 +1,31 @@
 /*
- * Copyright 2026  Lotus contributors
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to
- * deal in the Software without restriction, including without limitation the
- * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
- * sell copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
- * OR OTHER DEALINGS IN THE SOFTWARE.
+ * Copyright 2026 Lotus contributors
  */
 #include "Analysis/Loop/FunctionLoopAnalyses.h"
 
+#include "Analysis/CFG/Dominator.h"
+#include "Analysis/Loop/Dependence/LoopDependenceBuilder.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/IR/Dominators.h"
+
+#include <cassert>
 
 namespace lotus {
 namespace analysis {
 namespace loop {
 
-FunctionLoopAnalyses::FunctionLoopAnalyses(Function &F,
-                                           LoopInfo &LI,
-                                           DominatorTree &DT,
-                                           PostDominatorTree &PDT)
+FunctionLoopAnalyses::FunctionLoopAnalyses(llvm::Function &F,
+                                           llvm::LoopInfo &LI,
+                                           llvm::DominatorTree &DT,
+                                           llvm::PostDominatorTree &PDT)
     : function{&F}, dominatorTree{&DT}, postDominatorTree{&PDT} {
   std::vector<LoopStructure *> loopPtrs;
   loopPtrs.reserve(LI.getLoopsInPreorder().size());
 
   for (auto *loop : LI.getLoopsInPreorder()) {
-    auto owned = std::unique_ptr<LoopStructure>(new LoopStructure(loop));
+    auto owned = std::make_unique<LoopStructure>(loop);
     auto *raw = owned.get();
     this->loopByHeader[raw->getHeader()] = raw;
     this->ownedLoopStructures.push_back(std::move(owned));
@@ -50,32 +37,37 @@ FunctionLoopAnalyses::FunctionLoopAnalyses(Function &F,
   }
 
   noelle::DominatorSummary summary(DT, PDT);
-  std::unordered_map<Function *, noelle::DominatorSummary *> doms;
+  std::unordered_map<llvm::Function *, noelle::DominatorSummary *> doms;
   doms[&F] = &summary;
-  this->forest.reset(new LoopForest(loopPtrs, doms));
+  this->forest = std::make_unique<LoopForest>(loopPtrs, doms);
 
   for (auto *loopStructure : loopPtrs) {
     auto *loopNode = this->forest->getNode(loopStructure);
-    if (!loopNode) {
+    if (loopNode == nullptr) {
       continue;
     }
-    auto ownedContent = std::unique_ptr<LoopContent>(new LoopContent(loopNode));
+    auto ownedContent = std::make_unique<LoopContent>(loopNode);
     auto *rawContent = ownedContent.get();
     this->contentByHeader[loopStructure->getHeader()] = rawContent;
     this->loopContents.push_back(std::move(ownedContent));
   }
 }
 
-Function *FunctionLoopAnalyses::getFunction(void) const { return this->function; }
+FunctionLoopAnalyses::~FunctionLoopAnalyses() = default;
+
+llvm::Function *FunctionLoopAnalyses::getFunction(void) const {
+  return this->function;
+}
 
 LoopForest *FunctionLoopAnalyses::getLoopForest(void) const {
   return this->forest.get();
 }
 
-std::vector<LoopStructure *> FunctionLoopAnalyses::getLoopStructures(void) const {
+std::vector<LoopStructure *>
+FunctionLoopAnalyses::getLoopStructures(void) const {
   std::vector<LoopStructure *> loops;
   loops.reserve(this->ownedLoopStructures.size());
-  for (auto const &owned : this->ownedLoopStructures) {
+  for (const auto &owned : this->ownedLoopStructures) {
     loops.push_back(owned.get());
   }
   return loops;
@@ -84,36 +76,43 @@ std::vector<LoopStructure *> FunctionLoopAnalyses::getLoopStructures(void) const
 std::vector<LoopContent *> FunctionLoopAnalyses::getLoopContents(void) const {
   std::vector<LoopContent *> contents;
   contents.reserve(this->loopContents.size());
-  for (auto const &owned : this->loopContents) {
+  for (const auto &owned : this->loopContents) {
     contents.push_back(owned.get());
   }
   return contents;
 }
 
 void FunctionLoopAnalyses::materializeDependenceGraphs(pdg::ProgramGraph &pdg) {
-  for (auto const &ownedContent : this->loopContents) {
+  for (const auto &ownedContent : this->loopContents) {
     ownedContent->materializeDependenceGraph(pdg);
   }
+}
+
+void FunctionLoopAnalyses::materializeScalarAnalyses(llvm::ScalarEvolution &SE,
+                                                     llvm::LoopInfo &LI) {
+  this->materializeScalarAnalyses(SE, LI, LoopDependenceBuilderOptions{});
 }
 
 void FunctionLoopAnalyses::materializeScalarAnalyses(
     llvm::ScalarEvolution &SE,
     llvm::LoopInfo &LI,
-    LoopLDGBuilderOptions options) {
+    const LoopDependenceBuilderOptions &options) {
   assert(this->dominatorTree != nullptr);
   assert(this->postDominatorTree != nullptr);
-  noelle::DominatorSummary summary(*this->dominatorTree, *this->postDominatorTree);
-  for (auto const &ownedContent : this->loopContents) {
+  noelle::DominatorSummary summary(*this->dominatorTree,
+                                   *this->postDominatorTree);
+  for (const auto &ownedContent : this->loopContents) {
     ownedContent->materializeScalarAnalyses(SE, LI, summary, options);
     auto *llvmLoop = LI.getLoopFor(ownedContent->getLoopStructure()->getHeader());
     if (llvmLoop != nullptr) {
-      ownedContent->setCompileTimeTripCount(SE.getSmallConstantTripCount(llvmLoop));
+      ownedContent->setCompileTimeTripCount(
+          SE.getSmallConstantTripCount(llvmLoop));
     }
   }
 }
 
 void FunctionLoopAnalyses::materializeLoopEnvironments(void) {
-  for (auto const &ownedContent : this->loopContents) {
+  for (const auto &ownedContent : this->loopContents) {
     ownedContent->materializeEnvironment();
   }
 }
@@ -122,14 +121,14 @@ void FunctionLoopAnalyses::materializeLoopCarriedDependencies(
     llvm::DominatorTree &DT,
     llvm::PostDominatorTree &PDT) {
   noelle::DominatorSummary summary(DT, PDT);
-  for (auto const &ownedContent : this->loopContents) {
+  for (const auto &ownedContent : this->loopContents) {
     ownedContent->materializeLoopCarriedDependencies(summary);
   }
 }
 
 void FunctionLoopAnalyses::materializeIterationSpaceAnalyses(
     llvm::ScalarEvolution &SE) {
-  for (auto const &ownedContent : this->loopContents) {
+  for (const auto &ownedContent : this->loopContents) {
     ownedContent->materializeIterationSpaceAnalysis(SE);
   }
 }
@@ -138,51 +137,51 @@ void FunctionLoopAnalyses::materializeSCCAttrs(llvm::DominatorTree &DT,
                                                llvm::PostDominatorTree &PDT,
                                                bool enableFloatAsReal) {
   noelle::DominatorSummary summary(DT, PDT);
-  for (auto const &ownedContent : this->loopContents) {
+  for (const auto &ownedContent : this->loopContents) {
     ownedContent->materializeSCCAttrs(enableFloatAsReal, summary);
   }
 }
 
-LoopContent *FunctionLoopAnalyses::getLoopContent(Loop &loop) const {
+LoopContent *FunctionLoopAnalyses::getLoopContent(llvm::Loop &loop) const {
   return this->getLoopContent(loop.getHeader());
 }
 
-LoopContent *FunctionLoopAnalyses::getLoopContent(BasicBlock *header) const {
+LoopContent *FunctionLoopAnalyses::getLoopContent(
+    llvm::BasicBlock *header) const {
   auto it = this->contentByHeader.find(header);
-  if (it == this->contentByHeader.end()) {
-    return nullptr;
-  }
-  return it->second;
+  return it == this->contentByHeader.end() ? nullptr : it->second;
 }
 
 llvm::AnalysisKey FunctionLoopAnalysesPass::Key;
 
 FunctionLoopAnalysesPass::Result
-FunctionLoopAnalysesPass::run(Function &F, FunctionAnalysisManager &FAM) {
-  auto &LI = FAM.getResult<LoopAnalysis>(F);
-  auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
-  auto &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
+FunctionLoopAnalysesPass::run(llvm::Function &F,
+                              llvm::FunctionAnalysisManager &FAM) {
+  auto &LI = FAM.getResult<llvm::LoopAnalysis>(F);
+  auto &DT = FAM.getResult<llvm::DominatorTreeAnalysis>(F);
+  auto &PDT = FAM.getResult<llvm::PostDominatorTreeAnalysis>(F);
   return FunctionLoopAnalyses(F, LI, DT, PDT);
 }
 
 char FunctionLoopAnalysesWrapperPass::ID = 0;
 
 FunctionLoopAnalysesWrapperPass::FunctionLoopAnalysesWrapperPass()
-    : FunctionPass(ID) {}
+    : llvm::FunctionPass(ID) {}
 
-bool FunctionLoopAnalysesWrapperPass::runOnFunction(Function &F) {
-  auto &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-  auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
-  auto &PDT = getAnalysis<PostDominatorTreeWrapperPass>().getPostDomTree();
-  this->result.reset(new FunctionLoopAnalyses(F, LI, DT, PDT));
+bool FunctionLoopAnalysesWrapperPass::runOnFunction(llvm::Function &F) {
+  auto &LI = getAnalysis<llvm::LoopInfoWrapperPass>().getLoopInfo();
+  auto &DT = getAnalysis<llvm::DominatorTreeWrapperPass>().getDomTree();
+  auto &PDT = getAnalysis<llvm::PostDominatorTreeWrapperPass>().getPostDomTree();
+  this->result = std::make_unique<FunctionLoopAnalyses>(F, LI, DT, PDT);
   return false;
 }
 
-void FunctionLoopAnalysesWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
+void FunctionLoopAnalysesWrapperPass::getAnalysisUsage(
+    llvm::AnalysisUsage &AU) const {
   AU.setPreservesAll();
-  AU.addRequired<LoopInfoWrapperPass>();
-  AU.addRequired<DominatorTreeWrapperPass>();
-  AU.addRequired<PostDominatorTreeWrapperPass>();
+  AU.addRequired<llvm::LoopInfoWrapperPass>();
+  AU.addRequired<llvm::DominatorTreeWrapperPass>();
+  AU.addRequired<llvm::PostDominatorTreeWrapperPass>();
 }
 
 FunctionLoopAnalyses &FunctionLoopAnalysesWrapperPass::getResult(void) {

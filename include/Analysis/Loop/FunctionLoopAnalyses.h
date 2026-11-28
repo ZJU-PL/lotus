@@ -24,11 +24,23 @@
 
 #include "Analysis/Loop/LoopContent.h"
 
-#include "llvm/Analysis/LoopInfo.h"
-#include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Pass.h"
 
 #include <memory>
+#include <unordered_map>
+#include <vector>
+
+namespace llvm {
+class AnalysisUsage;
+class BasicBlock;
+class DominatorTree;
+class Function;
+class Loop;
+class LoopInfo;
+class PostDominatorTree;
+class ScalarEvolution;
+} // namespace llvm
 
 namespace lotus {
 namespace analysis {
@@ -37,18 +49,19 @@ namespace loop {
 class FunctionLoopAnalyses {
 public:
   FunctionLoopAnalyses() = default;
-  FunctionLoopAnalyses(Function &F,
-                       LoopInfo &LI,
-                       DominatorTree &DT,
-                       PostDominatorTree &PDT);
+  FunctionLoopAnalyses(llvm::Function &F,
+                       llvm::LoopInfo &LI,
+                       llvm::DominatorTree &DT,
+                       llvm::PostDominatorTree &PDT);
+  ~FunctionLoopAnalyses();
 
-  FunctionLoopAnalyses(FunctionLoopAnalyses &&) = default;
-  FunctionLoopAnalyses &operator=(FunctionLoopAnalyses &&) = default;
+  FunctionLoopAnalyses(FunctionLoopAnalyses &&) noexcept = default;
+  FunctionLoopAnalyses &operator=(FunctionLoopAnalyses &&) noexcept = default;
 
   FunctionLoopAnalyses(const FunctionLoopAnalyses &) = delete;
   FunctionLoopAnalyses &operator=(const FunctionLoopAnalyses &) = delete;
 
-  Function *getFunction(void) const;
+  llvm::Function *getFunction(void) const;
 
   LoopForest *getLoopForest(void) const;
 
@@ -57,8 +70,10 @@ public:
 
   void materializeDependenceGraphs(pdg::ProgramGraph &pdg);
   void materializeScalarAnalyses(llvm::ScalarEvolution &SE,
+                                 llvm::LoopInfo &LI);
+  void materializeScalarAnalyses(llvm::ScalarEvolution &SE,
                                  llvm::LoopInfo &LI,
-                                 LoopLDGBuilderOptions options = {});
+                                 const LoopDependenceBuilderOptions &options);
   void materializeLoopEnvironments(void);
   void materializeLoopCarriedDependencies(llvm::DominatorTree &DT,
                                           llvm::PostDominatorTree &PDT);
@@ -67,18 +82,18 @@ public:
                            llvm::PostDominatorTree &PDT,
                            bool enableFloatAsReal = false);
 
-  LoopContent *getLoopContent(Loop &loop) const;
-  LoopContent *getLoopContent(BasicBlock *header) const;
+  LoopContent *getLoopContent(llvm::Loop &loop) const;
+  LoopContent *getLoopContent(llvm::BasicBlock *header) const;
 
 private:
-  Function *function{nullptr};
-  DominatorTree *dominatorTree{nullptr};
-  PostDominatorTree *postDominatorTree{nullptr};
+  llvm::Function *function{nullptr};
+  llvm::DominatorTree *dominatorTree{nullptr};
+  llvm::PostDominatorTree *postDominatorTree{nullptr};
   std::vector<std::unique_ptr<LoopStructure>> ownedLoopStructures;
-  std::unordered_map<BasicBlock *, LoopStructure *> loopByHeader;
+  std::unordered_map<llvm::BasicBlock *, LoopStructure *> loopByHeader;
   std::unique_ptr<LoopForest> forest;
   std::vector<std::unique_ptr<LoopContent>> loopContents;
-  std::unordered_map<BasicBlock *, LoopContent *> contentByHeader;
+  std::unordered_map<llvm::BasicBlock *, LoopContent *> contentByHeader;
 };
 
 class FunctionLoopAnalysesPass
@@ -86,21 +101,21 @@ class FunctionLoopAnalysesPass
 public:
   using Result = FunctionLoopAnalyses;
 
-  Result run(Function &F, FunctionAnalysisManager &FAM);
+  Result run(llvm::Function &F, llvm::FunctionAnalysisManager &FAM);
 
 private:
   friend llvm::AnalysisInfoMixin<FunctionLoopAnalysesPass>;
   static llvm::AnalysisKey Key;
 };
 
-class FunctionLoopAnalysesWrapperPass : public FunctionPass {
+class FunctionLoopAnalysesWrapperPass : public llvm::FunctionPass {
 public:
   static char ID;
 
   FunctionLoopAnalysesWrapperPass();
 
-  bool runOnFunction(Function &F) override;
-  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  bool runOnFunction(llvm::Function &F) override;
+  void getAnalysisUsage(llvm::AnalysisUsage &AU) const override;
 
   FunctionLoopAnalyses &getResult(void);
   const FunctionLoopAnalyses &getResult(void) const;
@@ -112,4 +127,3 @@ private:
 } // namespace loop
 } // namespace analysis
 } // namespace lotus
-

@@ -1,4 +1,4 @@
-/** @file LoopContent.h @brief Loop content analysis for identifying instructions, blocks, and values inside loops. */
+/** @file LoopContent.h @brief Per-loop container owning incrementally materialized loop analyses. */
 /*
  * Copyright 2026 Lotus contributors
  *
@@ -22,25 +22,54 @@
  */
 #pragma once
 
-#include "Analysis/Loop/InductionVariables.h"
-#include "Analysis/Loop/Invariants.h"
-#include "Analysis/Loop/LoopCarriedDependencies.h"
-#include "Analysis/Loop/LoopDependenceGraph.h"
-#include "Analysis/Loop/LoopEnvironment.h"
 #include "Analysis/Loop/LoopForest.h"
-#include "Analysis/Loop/LoopIterationSpaceAnalysis.h"
-#include "Analysis/Loop/LoopLDGBuilder.h"
-#include "Analysis/Loop/LoopSCCDAG.h"
-#include "Analysis/Loop/MemoryCloningAnalysis.h"
-#include "Analysis/Loop/SCCDAGAttrs.h"
+
+#include <cassert>
+#include <cstdint>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace llvm {
+class Instruction;
+class LoopInfo;
+class ScalarEvolution;
+class Value;
+} // namespace llvm
+
+namespace noelle {
+class DominatorSummary;
+} // namespace noelle
+
+namespace pdg {
+class ProgramGraph;
+} // namespace pdg
 
 namespace lotus {
 namespace analysis {
 namespace loop {
 
+class InductionVariableManager;
+class InvariantManager;
+class LoopDependenceGraph;
+class LoopEnvironment;
+class LoopIterationSpaceAnalysis;
+class LoopSCCDAG;
+class MemoryCloningAnalysis;
+class SCCDAGAttrs;
+struct LoopDependenceBuilderOptions;
+
 class LoopContent {
 public:
   explicit LoopContent(LoopTree *loopNode);
+  ~LoopContent();
+
+  LoopContent(LoopContent &&) noexcept = default;
+  LoopContent &operator=(LoopContent &&) noexcept = default;
+  LoopContent(const LoopContent &) = delete;
+  LoopContent &operator=(const LoopContent &) = delete;
 
   LoopTree *getLoopHierarchyStructures(void) const { return this->loop; }
 
@@ -48,11 +77,14 @@ public:
     return this->loop ? this->loop->getLoop() : nullptr;
   }
 
-  LoopStructure *getNestedMostLoopStructure(Instruction *I) const {
-    return this->loop ? this->loop->getInnermostLoopThatContains(I) : nullptr;
+  LoopStructure *getNestedMostLoopStructure(llvm::Instruction *inst) const {
+    return this->loop ? this->loop->getInnermostLoopThatContains(inst)
+                      : nullptr;
   }
 
-  bool hasDependenceGraph(void) const { return this->dependenceGraph != nullptr; }
+  bool hasDependenceGraph(void) const {
+    return this->dependenceGraph != nullptr;
+  }
 
   LoopDependenceGraph *getLoopDependenceGraph(void) const {
     assert(this->dependenceGraph != nullptr);
@@ -90,11 +122,13 @@ public:
     return this->inductionVariables.get();
   }
 
-  void materializeScalarAnalyses(
-      llvm::ScalarEvolution &SE,
-      llvm::LoopInfo &LI,
-      const noelle::DominatorSummary &DS,
-      LoopLDGBuilderOptions options = {});
+  void materializeScalarAnalyses(llvm::ScalarEvolution &SE,
+                                 llvm::LoopInfo &LI,
+                                 const noelle::DominatorSummary &DS);
+  void materializeScalarAnalyses(llvm::ScalarEvolution &SE,
+                                 llvm::LoopInfo &LI,
+                                 const noelle::DominatorSummary &DS,
+                                 const LoopDependenceBuilderOptions &options);
 
   bool hasEnvironment(void) const { return this->environment != nullptr; }
 
@@ -118,6 +152,17 @@ public:
 
   void materializeIterationSpaceAnalysis(llvm::ScalarEvolution &SE);
 
+  bool hasMemoryCloningAnalysis(void) const {
+    return this->memoryCloningAnalysis != nullptr;
+  }
+
+  MemoryCloningAnalysis *getMemoryCloningAnalysis(void) const {
+    assert(this->memoryCloningAnalysis != nullptr);
+    return this->memoryCloningAnalysis.get();
+  }
+
+  void materializeMemoryCloningAnalysis(const noelle::DominatorSummary &DS);
+
   bool hasSCCAttrs(void) const { return this->sccAttrs != nullptr; }
 
   SCCDAGAttrs *getSCCAttrs(void) const {
@@ -126,7 +171,7 @@ public:
   }
 
   void materializeSCCAttrs(bool enableFloatAsReal,
-                           noelle::DominatorSummary &DS);
+                           const noelle::DominatorSummary &DS);
 
   bool doesHaveCompileTimeKnownTripCount(void) const {
     return this->compileTimeKnownTripCount;
@@ -142,11 +187,12 @@ public:
 private:
   void invalidateAnalysesAfterDependenceGraph(void);
   void invalidateAnalysesAfterScalarAnalyses(void);
-  void buildEnvironment(const std::set<Value *> &excludeValues);
+  void buildEnvironment(const std::set<llvm::Value *> &excludeValues);
   void materializeEnvironmentFromMemoryCloning(void);
-  void materializeInductionVariables(llvm::ScalarEvolution &SE,
-                                     llvm::LoopInfo &LI,
-                                     LoopLDGBuilderOptions const &options);
+  void materializeInductionVariables(
+      llvm::ScalarEvolution &SE,
+      llvm::LoopInfo &LI,
+      const LoopDependenceBuilderOptions &options);
 
   LoopTree *loop;
   std::unique_ptr<LoopDependenceGraph> dependenceGraph;
@@ -167,4 +213,3 @@ private:
 } // namespace loop
 } // namespace analysis
 } // namespace lotus
-

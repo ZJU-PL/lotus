@@ -8,6 +8,8 @@
 #include "llvm/Passes/PassBuilder.h"
 
 #include "Analysis/Loop/FunctionLoopAnalyses.h"
+#include "Analysis/Loop/Dependence/LoopDependenceGraph.h"
+#include "Analysis/Loop/Memory/LoopIterationSpaceAnalysis.h"
 #include "IR/PDG/Construction/ControlDependencyGraph.h"
 #include "IR/PDG/Construction/DataDependencyGraph.h"
 #include "IR/PDG/Construction/ProgramDependencyGraph.h"

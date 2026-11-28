@@ -1,4 +1,4 @@
-/** @file LoopEnvironment.h @brief Loop environment analysis tracking live values and variables within loops. */
+/** @file LoopEnvironment.h @brief Loop boundary environment tracking live-in and live-out values. */
 /*
  * Copyright 2026 Lotus contributors
  *
@@ -22,7 +22,21 @@
  */
 #pragma once
 
-#include "Analysis/Loop/LoopDependenceGraph.h"
+#include "Analysis/Loop/Dependence/LoopDependenceGraph.h"
+#include "llvm/ADT/iterator_range.h"
+
+#include <cstdint>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace llvm {
+class BasicBlock;
+class Instruction;
+class Type;
+class Value;
+} // namespace llvm
 
 namespace lotus {
 namespace analysis {
@@ -31,45 +45,45 @@ namespace loop {
 class LoopEnvironment {
 public:
   LoopEnvironment(LoopDependenceGraph *loopDG,
-                  std::vector<BasicBlock *> const &exitBlocks);
+                  std::vector<llvm::BasicBlock *> const &exitBlocks);
   LoopEnvironment(LoopDependenceGraph *loopDG,
-                  std::vector<BasicBlock *> const &exitBlocks,
-                  const std::set<Value *> &excludeValues);
+                  std::vector<llvm::BasicBlock *> const &exitBlocks,
+                  const std::set<llvm::Value *> &excludeValues);
 
-  iterator_range<std::vector<Value *>::iterator> getProducers(void);
-  iterator_range<std::set<int>::iterator> getEnvIDsOfLiveInVars(void) const;
-  iterator_range<std::set<int>::iterator> getEnvIDsOfLiveOutVars(void) const;
+  llvm::iterator_range<std::vector<llvm::Value *>::iterator> getProducers(void);
+  llvm::iterator_range<std::set<int>::iterator> getEnvIDsOfLiveInVars(void) const;
+  llvm::iterator_range<std::set<int>::iterator> getEnvIDsOfLiveOutVars(void) const;
 
   uint64_t size(void) const;
   uint64_t getNumberOfLiveIns(void) const;
   uint64_t getNumberOfLiveOuts(void) const;
   int64_t getExitBlockID(void) const;
 
-  Type *typeOfEnvironmentLocation(uint64_t id) const;
-  std::vector<Type *> getTypesOfEnvironmentLocations(void) const;
+  llvm::Type *typeOfEnvironmentLocation(uint64_t id) const;
+  std::vector<llvm::Type *> getTypesOfEnvironmentLocations(void) const;
 
-  bool isLiveIn(Value *val) const;
-  bool isProducer(Value *producer) const;
-  Value *getProducer(uint64_t id) const;
-  std::set<Value *> consumersOf(Value *prod) const;
+  bool isLiveIn(llvm::Value *val) const;
+  bool isProducer(llvm::Value *producer) const;
+  llvm::Value *getProducer(uint64_t id) const;
+  std::set<llvm::Value *> consumersOf(llvm::Value *prod) const;
 
 private:
-  std::vector<Value *> envProducers;
-  std::unordered_map<Value *, int> producerIDMap;
+  std::vector<llvm::Value *> envProducers;
+  std::unordered_map<llvm::Value *, int> producerIDMap;
   std::set<int> liveInIDs;
   std::set<int> liveOutIDs;
-  std::unordered_map<Value *, std::set<Value *>> prodConsumers;
+  std::unordered_map<llvm::Value *, std::set<llvm::Value *>> prodConsumers;
   bool hasExitBlockEnv;
-  Type *exitBlockType;
+  llvm::Type *exitBlockType;
 
-  uint64_t addProducer(Value *producer, bool liveIn);
-  uint64_t addLiveInProducer(Value *producer);
-  void addLiveOutProducer(Value *producer);
-  uint64_t addLiveInValue(Value *newLiveInValue,
-                          const std::unordered_set<Instruction *> &consumers);
+  uint64_t addProducer(llvm::Value *producer, bool liveIn);
+  uint64_t addLiveInProducer(llvm::Value *producer);
+  void addLiveOutProducer(llvm::Value *producer);
+  uint64_t addLiveInValue(
+      llvm::Value *newLiveInValue,
+      const std::unordered_set<llvm::Instruction *> &consumers);
 };
 
 } // namespace loop
 } // namespace analysis
 } // namespace lotus
-

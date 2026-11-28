@@ -1,8 +1,14 @@
 /*
- * Copyright 2026  Lotus contributors
+ * Copyright 2026 Lotus contributors
  */
 #include "Analysis/Loop/LoopNestingGraph.h"
 
+#include "IR/PDG/Construction/PDGCallGraph.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+
+#include <cassert>
 #include <queue>
 
 namespace lotus {
@@ -11,28 +17,29 @@ namespace loop {
 
 namespace {
 
-std::unordered_set<const Function *>
-collectReachableFunctions(pdg::PDGCallGraph &callGraph, Function *entryFunction) {
-  std::unordered_set<const Function *> reachableFunctions;
+std::unordered_set<const llvm::Function *>
+collectReachableFunctions(pdg::PDGCallGraph &callGraph,
+                          llvm::Function *entryFunction) {
+  std::unordered_set<const llvm::Function *> reachableFunctions;
   if (entryFunction == nullptr) {
     return reachableFunctions;
   }
 
-  std::queue<const Function *> worklist;
+  std::queue<const llvm::Function *> worklist;
   worklist.push(entryFunction);
   reachableFunctions.insert(entryFunction);
   while (!worklist.empty()) {
     auto *current = worklist.front();
     worklist.pop();
-    auto *currentNode = callGraph.getNode(*const_cast<Function *>(current));
+    auto *currentNode =
+        callGraph.getNode(*const_cast<llvm::Function *>(current));
     if (currentNode == nullptr) {
       continue;
     }
 
     for (auto *succ : currentNode->getOutNeighbors()) {
-      auto *callee = dyn_cast_or_null<Function>(succ->getValue());
-      if (callee == nullptr ||
-          !reachableFunctions.insert(callee).second) {
+      auto *callee = llvm::dyn_cast_or_null<llvm::Function>(succ->getValue());
+      if (callee == nullptr || !reachableFunctions.insert(callee).second) {
         continue;
       }
       worklist.push(callee);
@@ -42,9 +49,10 @@ collectReachableFunctions(pdg::PDGCallGraph &callGraph, Function *entryFunction)
   return reachableFunctions;
 }
 
-std::map<const Function *, std::unordered_set<LoopStructure *>>
+std::map<const llvm::Function *, std::unordered_set<LoopStructure *>>
 collectOutermostLoops(std::vector<LoopStructure *> const &allLoops) {
-  std::map<const Function *, std::unordered_set<LoopStructure *>> outermostLoops;
+  std::map<const llvm::Function *, std::unordered_set<LoopStructure *>>
+      outermostLoops;
   for (auto *loop : allLoops) {
     if (loop->getNestingLevel() == 1) {
       outermostLoops[loop->getFunction()].insert(loop);
@@ -55,11 +63,13 @@ collectOutermostLoops(std::vector<LoopStructure *> const &allLoops) {
 
 } // namespace
 
-std::set<LoopNestingGraphEdge *> LoopNestingGraphLoopNode::getIncomingEdges(void) const {
+std::set<LoopNestingGraphEdge *>
+LoopNestingGraphLoopNode::getIncomingEdges(void) const {
   return this->incomingEdges;
 }
 
-std::set<LoopNestingGraphEdge *> LoopNestingGraphLoopNode::getOutgoingEdges(void) const {
+std::set<LoopNestingGraphEdge *>
+LoopNestingGraphLoopNode::getOutgoingEdges(void) const {
   return this->outgoingEdges;
 }
 
@@ -71,8 +81,8 @@ void LoopNestingGraphLoopNode::addOutgoingEdge(LoopNestingGraphEdge *edge) {
   this->outgoingEdges.insert(edge);
 }
 
-LoopNestingGraphLoopLoopEdge *
-LoopNestingGraphLoopNode::getNestingEdgeTo(LoopNestingGraphLoopNode *target) const {
+LoopNestingGraphLoopLoopEdge *LoopNestingGraphLoopNode::getNestingEdgeTo(
+    LoopNestingGraphLoopNode *target) const {
   for (auto *edge : this->outgoingEdges) {
     auto *loopEdge = dynamic_cast<LoopNestingGraphLoopLoopEdge *>(edge);
     if (loopEdge != nullptr && loopEdge->getDst() == target) {
@@ -92,23 +102,32 @@ LoopNestingGraphLoopLoopEdge::getSubEdges(void) const {
   return this->subEdges;
 }
 
-LoopNestingGraph::LoopNestingGraph(std::vector<LoopStructure *> const &loops) {
+LoopNestingGraph::LoopNestingGraph(
+    std::vector<LoopStructure *> const &loops) {
+  this->ownedLoopNodes.reserve(loops.size());
   for (auto *loop : loops) {
-    this->loops[loop] = new LoopNestingGraphLoopNode(loop);
+    auto node = std::make_unique<LoopNestingGraphLoopNode>(loop);
+    auto *rawNode = node.get();
+    this->ownedLoopNodes.push_back(std::move(node));
+    this->loops[loop] = rawNode;
   }
 }
 
-std::unordered_set<LoopNestingGraphLoopNode *> LoopNestingGraph::getLoopNodes(void) const {
+LoopNestingGraph::~LoopNestingGraph() = default;
+
+std::unordered_set<LoopNestingGraphLoopNode *>
+LoopNestingGraph::getLoopNodes(void) const {
   std::unordered_set<LoopNestingGraphLoopNode *> nodes;
-  for (auto &pair : this->loops) {
+  for (const auto &pair : this->loops) {
     nodes.insert(pair.second);
   }
   return nodes;
 }
 
-std::unordered_set<LoopNestingGraphEdge *> LoopNestingGraph::getEdges(void) const {
+std::unordered_set<LoopNestingGraphEdge *>
+LoopNestingGraph::getEdges(void) const {
   std::unordered_set<LoopNestingGraphEdge *> edgeSet;
-  for (auto &pair : this->edges) {
+  for (const auto &pair : this->edges) {
     for (auto *edge : pair.second) {
       edgeSet.insert(edge);
     }
@@ -116,16 +135,15 @@ std::unordered_set<LoopNestingGraphEdge *> LoopNestingGraph::getEdges(void) cons
   return edgeSet;
 }
 
-LoopNestingGraphLoopNode *LoopNestingGraph::getLoopNode(LoopStructure *loop) const {
+LoopNestingGraphLoopNode *LoopNestingGraph::getLoopNode(
+    LoopStructure *loop) const {
   auto it = this->loops.find(loop);
-  if (it == this->loops.end()) {
-    return nullptr;
-  }
-  return it->second;
+  return it == this->loops.end() ? nullptr : it->second;
 }
 
-LoopNestingGraphLoopNode *LoopNestingGraph::getEntryNode(Function *entryFunction) const {
-  for (auto &pair : this->loops) {
+LoopNestingGraphLoopNode *LoopNestingGraph::getEntryNode(
+    llvm::Function *entryFunction) const {
+  for (const auto &pair : this->loops) {
     if (pair.first->getFunction() != entryFunction) {
       continue;
     }
@@ -137,7 +155,7 @@ LoopNestingGraphLoopNode *LoopNestingGraph::getEntryNode(Function *entryFunction
 }
 
 void LoopNestingGraph::createEdge(LoopStructure *from,
-                                  CallBase *callInst,
+                                  llvm::CallBase *callInst,
                                   LoopStructure *child,
                                   bool isMust) {
   auto fromIt = this->loops.find(from);
@@ -147,7 +165,7 @@ void LoopNestingGraph::createEdge(LoopStructure *from,
 
 LoopNestingGraphLoopLoopEdge *LoopNestingGraph::fetchOrCreateEdge(
     LoopNestingGraphLoopNode *fromNode,
-    CallBase *callInst,
+    llvm::CallBase *callInst,
     LoopStructure *child,
     bool isMust) {
   auto *toNode = this->loops.at(child);
@@ -156,15 +174,25 @@ LoopNestingGraphLoopLoopEdge *LoopNestingGraph::fetchOrCreateEdge(
   if (callInst != nullptr) {
     auto &slot = this->instructionNodes[callInst];
     if (slot == nullptr) {
-      slot = new LoopNestingGraphInstructionNode(callInst);
+      auto ownedInst =
+          std::make_unique<LoopNestingGraphInstructionNode>(callInst);
+      slot = ownedInst.get();
+      this->ownedInstructionNodes.push_back(std::move(ownedInst));
     }
     instNode = slot;
   }
 
-  auto *subEdge = new LoopNestingGraphInstructionLoopEdge(instNode, toNode, isMust);
+  auto ownedSubEdge = std::make_unique<LoopNestingGraphInstructionLoopEdge>(
+      instNode, toNode, isMust);
+  auto *subEdge = ownedSubEdge.get();
+  this->ownedEdges.push_back(std::move(ownedSubEdge));
+
   auto *existing = fromNode->getNestingEdgeTo(toNode);
   if (existing == nullptr) {
-    auto *newEdge = new LoopNestingGraphLoopLoopEdge(fromNode, toNode, isMust);
+    auto ownedLoopEdge =
+        std::make_unique<LoopNestingGraphLoopLoopEdge>(fromNode, toNode, isMust);
+    auto *newEdge = ownedLoopEdge.get();
+    this->ownedEdges.push_back(std::move(ownedLoopEdge));
     this->edges[fromNode].insert(newEdge);
     fromNode->addOutgoingEdge(newEdge);
     toNode->addIncomingEdge(newEdge);
@@ -182,7 +210,7 @@ LoopNestingGraphLoopLoopEdge *LoopNestingGraph::fetchOrCreateEdge(
 std::unique_ptr<LoopNestingGraph> LoopNestingGraph::buildFromAnalyses(
     std::vector<FunctionLoopAnalyses *> const &analyses,
     llvm::Module &module,
-    Function *entryFunction) {
+    llvm::Function *entryFunction) {
   pdg::PDGCallGraph callGraph;
   callGraph.build(module);
 
@@ -198,7 +226,7 @@ std::unique_ptr<LoopNestingGraph> LoopNestingGraph::buildFromAnalyses(
     allLoops.insert(allLoops.end(), loops.begin(), loops.end());
   }
 
-  auto graph = std::unique_ptr<LoopNestingGraph>(new LoopNestingGraph(allLoops));
+  auto graph = std::make_unique<LoopNestingGraph>(allLoops);
 
   for (auto *analysis : analyses) {
     auto *forest = analysis->getLoopForest();
@@ -208,10 +236,8 @@ std::unique_ptr<LoopNestingGraph> LoopNestingGraph::buildFromAnalyses(
     for (auto *tree : forest->getTrees()) {
       tree->visitPreOrder([&](LoopTree *node, uint32_t) -> bool {
         if (node->getParent() != nullptr) {
-          graph->createEdge(node->getParent()->getLoop(),
-                            nullptr,
-                            node->getLoop(),
-                            true);
+          graph->createEdge(node->getParent()->getLoop(), nullptr,
+                            node->getLoop(), true);
         }
         return false;
       });
@@ -233,7 +259,7 @@ std::unique_ptr<LoopNestingGraph> LoopNestingGraph::buildFromAnalyses(
 
     for (auto &bb : *callerFunction) {
       for (auto &inst : bb) {
-        auto *callBase = dyn_cast<CallBase>(&inst);
+        auto *callBase = llvm::dyn_cast<llvm::CallBase>(&inst);
         if (callBase == nullptr) {
           continue;
         }
@@ -277,7 +303,6 @@ std::unique_ptr<LoopNestingGraph> LoopNestingGraph::buildFromAnalyses(
     }
   }
 
-  (void)graph->getEntryNode(entryFunction);
   return graph;
 }
 

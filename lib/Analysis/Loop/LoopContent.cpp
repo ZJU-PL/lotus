@@ -3,17 +3,30 @@
  */
 #include "Analysis/Loop/LoopContent.h"
 
+#include "Analysis/CFG/Dominator.h"
+#include "Analysis/Loop/Classification/SCCDAGAttrs.h"
+#include "Analysis/Loop/Dependence/LoopCarriedDependencies.h"
+#include "Analysis/Loop/Dependence/LoopDependenceBuilder.h"
+#include "Analysis/Loop/Dependence/LoopDependenceGraph.h"
+#include "Analysis/Loop/Dependence/LoopSCCDAG.h"
+#include "Analysis/Loop/LoopEnvironment.h"
+#include "Analysis/Loop/Memory/LoopIterationSpaceAnalysis.h"
+#include "Analysis/Loop/Memory/MemoryCloningAnalysis.h"
+#include "Analysis/Loop/Scalar/InductionVariables.h"
+#include "Analysis/Loop/Scalar/LoopInvariants.h"
+
+#include <iterator>
+
 namespace lotus {
 namespace analysis {
 namespace loop {
 
-namespace {
-
-} // namespace
-
 LoopContent::LoopContent(LoopTree *loopNode) : loop{loopNode} {}
 
+LoopContent::~LoopContent() = default;
+
 void LoopContent::invalidateAnalysesAfterDependenceGraph(void) {
+  this->memoryCloningAnalysis.reset();
   this->invalidateAnalysesAfterScalarAnalyses();
 }
 
@@ -28,19 +41,20 @@ void LoopContent::invalidateAnalysesAfterScalarAnalyses(void) {
 }
 
 void LoopContent::materializeDependenceGraph(pdg::ProgramGraph &pdg) {
-  auto bundle = LoopLDGBuilder::buildBaseLoopDependenceGraph(this->loop, pdg);
+  auto bundle =
+      LoopDependenceBuilder::buildBaseLoopDependenceGraph(this->loop, pdg);
   this->dependenceGraph = std::move(bundle.graph);
   this->sccdag = std::move(bundle.sccdag);
   this->dependenceGraphDebugDumps = std::move(bundle.debugSnapshots);
-  this->memoryCloningAnalysis.reset();
   this->invalidateAnalysesAfterDependenceGraph();
 }
 
-void LoopContent::buildEnvironment(const std::set<Value *> &excludeValues) {
+void LoopContent::buildEnvironment(
+    const std::set<llvm::Value *> &excludeValues) {
   assert(this->dependenceGraph != nullptr);
-  this->environment.reset(new LoopEnvironment(
+  this->environment = std::make_unique<LoopEnvironment>(
       this->dependenceGraph.get(),
-      this->getLoopStructure()->getLoopExitBasicBlocks(), excludeValues));
+      this->getLoopStructure()->getLoopExitBasicBlocks(), excludeValues);
 }
 
 void LoopContent::materializeEnvironment(void) {
@@ -62,7 +76,7 @@ void LoopContent::materializeEnvironmentFromMemoryCloning(void) {
     return;
   }
 
-  std::set<Value *> excludeValues;
+  std::set<llvm::Value *> excludeValues;
   if (this->memoryCloningAnalysis != nullptr) {
     for (auto *memoryObject :
          this->memoryCloningAnalysis->getClonableMemoryObjects()) {
@@ -78,72 +92,89 @@ void LoopContent::materializeEnvironmentFromMemoryCloning(void) {
 }
 
 void LoopContent::materializeInductionVariables(
-    llvm::ScalarEvolution &SE, llvm::LoopInfo &LI,
-    LoopLDGBuilderOptions const &options) {
-  auto loopInternalGraph =
-      LoopLDGBuilder::createInternalSubgraph(*this->dependenceGraph);
-  assert(loopInternalGraph != nullptr);
-  this->ivDependenceGraph =
-      loopInternalGraph->createSubgraph(/*includeControl=*/true,
-                                        /*includeVariable=*/true,
-                                        /*includeMemory=*/false);
-  assert(this->ivDependenceGraph != nullptr);
-  this->ivSCCDAG.reset(new LoopSCCDAG(*this->ivDependenceGraph));
+    llvm::ScalarEvolution &SE,
+    llvm::LoopInfo &LI,
+    const LoopDependenceBuilderOptions &options) {
+  if (this->ivDependenceGraph == nullptr || this->ivSCCDAG == nullptr) {
+    auto loopInternalGraph =
+        LoopDependenceBuilder::createInternalSubgraph(*this->dependenceGraph);
+    assert(loopInternalGraph != nullptr);
+    this->ivDependenceGraph =
+        loopInternalGraph->createSubgraph(/*includeControl=*/true,
+                                          /*includeVariable=*/true,
+                                          /*includeMemory=*/false);
+    assert(this->ivDependenceGraph != nullptr);
+    this->ivSCCDAG = std::make_unique<LoopSCCDAG>(*this->ivDependenceGraph);
+  }
 
-  this->inductionVariables.reset(new InductionVariableManager(
+  this->inductionVariables = std::make_unique<InductionVariableManager>(
       this->loop, *this->invariantManager, SE, LI, *this->ivSCCDAG,
-      *this->environment, options.enableExtendedIVRecognition));
+      *this->environment, options.enableExtendedIVRecognition);
+}
+
+void LoopContent::materializeScalarAnalyses(llvm::ScalarEvolution &SE,
+                                            llvm::LoopInfo &LI,
+                                            const noelle::DominatorSummary &DS) {
+  this->materializeScalarAnalyses(SE, LI, DS, LoopDependenceBuilderOptions{});
 }
 
 void LoopContent::materializeScalarAnalyses(
-    llvm::ScalarEvolution &SE, llvm::LoopInfo &LI,
+    llvm::ScalarEvolution &SE,
+    llvm::LoopInfo &LI,
     const noelle::DominatorSummary &DS,
-    LoopLDGBuilderOptions options) {
+    const LoopDependenceBuilderOptions &options) {
   assert(this->dependenceGraph != nullptr);
 
-  auto refined = LoopLDGBuilder::refineLoopDependenceGraph(
+  auto refined = LoopDependenceBuilder::refineLoopDependenceGraph(
       std::move(this->dependenceGraph), SE, LI, DS, options);
   this->dependenceGraph = std::move(refined.graph);
   this->sccdag = std::move(refined.sccdag);
-  if (!this->dependenceGraphDebugDumps.empty()) {
-    auto existingBaseSnapshots = std::move(this->dependenceGraphDebugDumps);
-    this->dependenceGraphDebugDumps = std::move(existingBaseSnapshots);
-    this->dependenceGraphDebugDumps.insert(
-        this->dependenceGraphDebugDumps.end(),
-        std::make_move_iterator(refined.debugSnapshots.begin()),
-        std::make_move_iterator(refined.debugSnapshots.end()));
-  } else {
-    this->dependenceGraphDebugDumps = std::move(refined.debugSnapshots);
-  }
+  this->dependenceGraphDebugDumps.insert(
+      this->dependenceGraphDebugDumps.end(),
+      std::make_move_iterator(refined.debugSnapshots.begin()),
+      std::make_move_iterator(refined.debugSnapshots.end()));
 
-  this->memoryCloningAnalysis.reset(new MemoryCloningAnalysis(
-      this->getLoopStructure(), const_cast<noelle::DominatorSummary &>(DS),
-      this->dependenceGraph.get()));
   this->invalidateAnalysesAfterScalarAnalyses();
+  if (refined.memoryCloningAnalysis != nullptr) {
+    this->memoryCloningAnalysis = std::move(refined.memoryCloningAnalysis);
+  } else {
+    this->memoryCloningAnalysis = std::make_unique<MemoryCloningAnalysis>(
+        this->getLoopStructure(), DS, this->dependenceGraph.get());
+  }
+  this->ivDependenceGraph = std::move(refined.ivGraph);
+  this->ivSCCDAG = std::move(refined.ivSCCDAG);
+
   this->materializeEnvironmentFromMemoryCloning();
-  this->invariantManager.reset(new InvariantManager(
-      this->getLoopStructure(), this->dependenceGraph.get()));
+  this->invariantManager = std::make_unique<InvariantManager>(
+      this->getLoopStructure(), this->dependenceGraph.get());
   this->materializeInductionVariables(SE, LI, options);
 }
 
 void LoopContent::materializeIterationSpaceAnalysis(llvm::ScalarEvolution &SE) {
   assert(this->inductionVariables != nullptr);
-  this->iterationSpaceAnalysis.reset(new LoopIterationSpaceAnalysis(
-      this->loop, *this->inductionVariables, SE));
+  this->iterationSpaceAnalysis = std::make_unique<LoopIterationSpaceAnalysis>(
+      this->loop, *this->inductionVariables, SE);
+}
+
+void LoopContent::materializeMemoryCloningAnalysis(
+    const noelle::DominatorSummary &DS) {
+  assert(this->dependenceGraph != nullptr);
+  if (this->memoryCloningAnalysis == nullptr) {
+    this->memoryCloningAnalysis = std::make_unique<MemoryCloningAnalysis>(
+        this->getLoopStructure(), DS, this->dependenceGraph.get());
+  }
 }
 
 void LoopContent::materializeSCCAttrs(bool enableFloatAsReal,
-                                      noelle::DominatorSummary &DS) {
+                                      const noelle::DominatorSummary &DS) {
   assert(this->dependenceGraph != nullptr);
   assert(this->sccdag != nullptr);
   assert(this->inductionVariables != nullptr);
-  if (this->memoryCloningAnalysis == nullptr) {
-    this->memoryCloningAnalysis.reset(new MemoryCloningAnalysis(
-        this->getLoopStructure(), DS, this->dependenceGraph.get()));
-  }
-  this->sccAttrs.reset(new SCCDAGAttrs(
+  this->materializeMemoryCloningAnalysis(DS);
+  this->sccAttrs = std::make_unique<SCCDAGAttrs>(
       enableFloatAsReal, this->dependenceGraph.get(), this->sccdag.get(),
-      this->loop, *this->inductionVariables, DS));
+      this->loop, *this->inductionVariables, DS,
+      this->memoryCloningAnalysis.get());
 }
 
 } // namespace loop

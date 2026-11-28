@@ -10,6 +10,7 @@
 #include "llvm/Support/SourceMgr.h"
 
 #include "Analysis/Loop/FunctionLoopAnalyses.h"
+#include "Analysis/Loop/Memory/LoopIterationSpaceAnalysis.h"
 #include "IR/PDG/Construction/ControlDependencyGraph.h"
 #include "IR/PDG/Construction/DataDependencyGraph.h"
 #include "IR/PDG/Construction/ProgramDependencyGraph.h"
@@ -64,7 +65,7 @@ static Values collectDisjointAccesses(FunctionLoopAnalyses &analyses,
   auto *content = analyses.getLoopContent(*loop);
   auto *iteration = content->getLoopIterationSpaceAnalysis();
   auto *ls = content->getLoopStructure();
-  std::vector<Instruction *> accesses;
+  std::vector<llvm::Instruction *> accesses;
   for (auto *bb : ls->getBasicBlocks()) {
     for (auto &inst : *bb) {
       if (llvm::isa<llvm::LoadInst>(&inst) ||

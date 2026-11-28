@@ -1,4 +1,4 @@
-/** @file LoopStructure.h @brief Loop structure analysis for identifying loop components and properties. */
+/** @file LoopStructure.h @brief Loop CFG structure descriptor for loop analyses. */
 /*
  * Copyright 2026 Lotus contributors
  *
@@ -22,15 +22,69 @@
  */
 #pragma once
 
-#include "Analysis/DebugInfo/MetadataManager/LoopStructure.h"
+#include <cstdint>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace llvm {
+class BasicBlock;
+class Function;
+class Instruction;
+class Loop;
+class Value;
+class raw_ostream;
+} // namespace llvm
 
 namespace lotus {
 namespace analysis {
 namespace loop {
 
-using LoopStructure = noelle::LoopStructure;
+class LoopStructure {
+public:
+  explicit LoopStructure(llvm::Loop *loop);
+
+  uint64_t getID(void) const;
+  void setID(uint64_t id);
+  bool doesHaveID(void) const;
+
+  llvm::Function *getFunction(void) const;
+  llvm::BasicBlock *getHeader(void) const;
+  llvm::BasicBlock *getPreHeader(void) const;
+  llvm::Instruction *getEntryInstruction(void) const;
+  llvm::BasicBlock *getSuccessorWithinLoopOfTheHeader(void) const;
+
+  /// Return the nesting level of the loop (1 means outermost loop).
+  uint32_t getNestingLevel(void) const;
+
+  const std::unordered_set<llvm::BasicBlock *> &getLatches(void) const;
+  const std::unordered_set<llvm::BasicBlock *> &getBasicBlocks(void) const;
+  std::unordered_set<llvm::Instruction *> getInstructions(void) const;
+  uint64_t getNumberOfInstructions(void) const;
+
+  const std::vector<llvm::BasicBlock *> &getLoopExitBasicBlocks(void) const;
+  bool isALoopExit(llvm::Instruction *instruction) const;
+  const std::vector<std::pair<llvm::BasicBlock *, llvm::BasicBlock *>> &
+  getLoopExitEdges(void) const;
+  uint64_t numberOfExitBasicBlocks(void) const;
+
+  bool isLoopInvariant(llvm::Value *value) const;
+  bool isIncluded(llvm::BasicBlock *bb) const;
+  bool isIncluded(llvm::Instruction *instruction) const;
+
+  void print(llvm::raw_ostream &stream) const;
+
+private:
+  llvm::BasicBlock *header{nullptr};
+  llvm::BasicBlock *preHeader{nullptr};
+  uint32_t depth{0};
+  std::unordered_set<llvm::Instruction *> invariants;
+  std::unordered_set<llvm::BasicBlock *> latchBBs;
+  std::unordered_set<llvm::BasicBlock *> bbs;
+  std::vector<llvm::BasicBlock *> exitBlocks;
+  std::vector<std::pair<llvm::BasicBlock *, llvm::BasicBlock *>> exitEdges;
+};
 
 } // namespace loop
 } // namespace analysis
 } // namespace lotus
-

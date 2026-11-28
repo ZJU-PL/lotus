@@ -1,4 +1,4 @@
-/** @file LoopNestingGraph.h @brief Loop nesting graph for analyzing loop hierarchy and transitions. */
+/** @file LoopNestingGraph.h @brief Interprocedural loop nesting and call transition graph. */
 /*
  * Copyright 2026 Lotus contributors
  *
@@ -23,7 +23,20 @@
 #pragma once
 
 #include "Analysis/Loop/FunctionLoopAnalyses.h"
-#include "IR/PDG/Construction/PDGCallGraph.h"
+
+#include <map>
+#include <memory>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace llvm {
+class CallBase;
+class Function;
+class Instruction;
+class Module;
+} // namespace llvm
 
 namespace lotus {
 namespace analysis {
@@ -36,13 +49,13 @@ class LoopNestingGraphLoopLoopEdge;
 
 class LoopNestingGraphInstructionNode {
 public:
-  explicit LoopNestingGraphInstructionNode(CallBase *instruction)
+  explicit LoopNestingGraphInstructionNode(llvm::CallBase *instruction)
       : instruction{instruction} {}
 
-  CallBase *getInstruction(void) const { return this->instruction; }
+  llvm::CallBase *getInstruction(void) const { return this->instruction; }
 
 private:
-  CallBase *instruction;
+  llvm::CallBase *instruction;
 };
 
 class LoopNestingGraphLoopNode {
@@ -79,9 +92,10 @@ protected:
 
 class LoopNestingGraphInstructionLoopEdge : public LoopNestingGraphEdge {
 public:
-  LoopNestingGraphInstructionLoopEdge(LoopNestingGraphInstructionNode *instruction,
-                                      LoopNestingGraphLoopNode *loop,
-                                      bool must)
+  LoopNestingGraphInstructionLoopEdge(
+      LoopNestingGraphInstructionNode *instruction,
+      LoopNestingGraphLoopNode *loop,
+      bool must)
       : LoopNestingGraphEdge(must), instruction{instruction}, loop{loop} {}
 
   LoopNestingGraphInstructionNode *getInstructionNode(void) const {
@@ -116,31 +130,41 @@ private:
 class LoopNestingGraph {
 public:
   explicit LoopNestingGraph(std::vector<LoopStructure *> const &loops);
+  ~LoopNestingGraph();
+
+  LoopNestingGraph(LoopNestingGraph &&) noexcept = default;
+  LoopNestingGraph &operator=(LoopNestingGraph &&) noexcept = default;
+  LoopNestingGraph(const LoopNestingGraph &) = delete;
+  LoopNestingGraph &operator=(const LoopNestingGraph &) = delete;
 
   std::unordered_set<LoopNestingGraphLoopNode *> getLoopNodes(void) const;
   std::unordered_set<LoopNestingGraphEdge *> getEdges(void) const;
   LoopNestingGraphLoopNode *getLoopNode(LoopStructure *loop) const;
-  LoopNestingGraphLoopNode *getEntryNode(Function *entryFunction) const;
+  LoopNestingGraphLoopNode *getEntryNode(llvm::Function *entryFunction) const;
 
   void createEdge(LoopStructure *from,
-                  CallBase *callInst,
+                  llvm::CallBase *callInst,
                   LoopStructure *child,
                   bool isMust);
 
-  static std::unique_ptr<LoopNestingGraph>
-  buildFromAnalyses(std::vector<FunctionLoopAnalyses *> const &analyses,
-                    llvm::Module &module,
-                    Function *entryFunction);
+  static std::unique_ptr<LoopNestingGraph> buildFromAnalyses(
+      std::vector<FunctionLoopAnalyses *> const &analyses,
+      llvm::Module &module,
+      llvm::Function *entryFunction);
 
 private:
+  std::vector<std::unique_ptr<LoopNestingGraphLoopNode>> ownedLoopNodes;
+  std::vector<std::unique_ptr<LoopNestingGraphInstructionNode>>
+      ownedInstructionNodes;
+  std::vector<std::unique_ptr<LoopNestingGraphEdge>> ownedEdges;
   std::unordered_map<LoopStructure *, LoopNestingGraphLoopNode *> loops;
-  std::unordered_map<Instruction *, LoopNestingGraphInstructionNode *>
+  std::unordered_map<llvm::Instruction *, LoopNestingGraphInstructionNode *>
       instructionNodes;
   std::map<LoopNestingGraphLoopNode *, std::set<LoopNestingGraphEdge *>> edges;
 
   LoopNestingGraphLoopLoopEdge *fetchOrCreateEdge(
       LoopNestingGraphLoopNode *fromNode,
-      CallBase *callInst,
+      llvm::CallBase *callInst,
       LoopStructure *child,
       bool isMust);
 };
@@ -148,4 +172,3 @@ private:
 } // namespace loop
 } // namespace analysis
 } // namespace lotus
-

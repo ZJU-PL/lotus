@@ -3,6 +3,6 @@ add_library(CanaryProfile STATIC
 )
 
 target_link_libraries(CanaryProfile
-    CanaryDebugInfo
+    CanaryLoopStructure
     LLVMAnalysis
 )
