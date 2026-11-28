@@ -1,0 +1,299 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sparse-Subset CFL Saturation &mdash; Lotus Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=411a527d"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="POCR Migration Matrix" href="pocr_migration.html" />
+    <link rel="prev" title="CERT-CFL: Cardinality-Certified Exact Solving" href="cert_cfl.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Lotus
+              <img src="../../_static/logo.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/architecture.html">Architecture &amp; Major Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/quickstart.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/major_components.html">Major Components Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/installation.html">Installation Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/tutorials.html">Tutorials and Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/bug_detection.html">Bug Detection with Lotus</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/pdg_query_language.html">PDG Query Language (Cypher)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/property_based_slicing.html">Property-Based Slicing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/verification_backends.html">Verification Driver Abstraction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/instrumentation_passes.html">Instrumentation Passes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../user_guide/troubleshooting.html">Troubleshooting and FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tools/index.html">Command-Line Tools Reference</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Core Components</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../alias/index.html">Alias Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../analysis/index.html">Analysis Framework</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../annotation/index.html">Annotations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../apps/index.html">Applications</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Context-Free Language Analysis</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../cfl_components.html">CFL Reachability Components</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="index.html">Classical CFL Engines</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="classical.html">Classical Grammar-Driven CFL Reachability</a></li>
+<li class="toctree-l3"><a class="reference internal" href="subcubic_aa.html">Subcubic PEG Alias Analysis</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cat_ieoce.html">CAT and IEOCE Engines</a></li>
+<li class="toctree-l3"><a class="reference internal" href="pearl_stg_sqid.html">Paper Engines: PEARL, Stg, and Sqid</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cert_cfl.html">CERT-CFL: Cardinality-Certified Exact Solving</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">Sparse-Subset CFL Saturation</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#paper">Paper</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#problem-and-key-idea">Problem and key idea</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#three-primitives">Three primitives</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#parameters">Parameters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#lotus-implementation">Lotus implementation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#backend-contract">Backend contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#validation">Validation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="pocr_migration.html">POCR Migration Matrix</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../certificates/index.html">CFL Reachability Certificates</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../conditional_dyck.html">Conditional Dyck Reachability (ConCRA)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../dynamic_dyck.html">Dynamic Bidirected Dyck Reachability</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../indexing/index.html">CFL Indexing (CSIndex)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../interleaved_dyck/index.html">Interleaved-Dyck Reachability</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../concurrency/index.html">Concurrency Analysis</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../dataflow/index.html">Data Flow Analysis Frameworks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../ir/index.html">Intermediate Representations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../optimization/index.html">Optimization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../security/index.html">Security Components</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../solvers/index.html">Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../symbolic_execution/index.html">Symbolic Execution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../transform/index.html">Transforms</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../utils/index.html">Utilities</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../verification/index.html">Verification</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../checker/index.html">Checker Framework</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Developer Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../developer/developer_guide.html">Developer Guide</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Lotus</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Context-Free Language Analysis</a></li>
+          <li class="breadcrumb-item"><a href="index.html">Classical CFL Engines</a></li>
+      <li class="breadcrumb-item active">Sparse-Subset CFL Saturation</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/cfl/classical/sparse_subset.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="sparse-subset-cfl-saturation">
+<h1>Sparse-Subset CFL Saturation<a class="headerlink" href="#sparse-subset-cfl-saturation" title="Link to this heading"></a></h1>
+<section id="paper">
+<h2>Paper<a class="headerlink" href="#paper" title="Link to this heading"></a></h2>
+<p>Lotus implements the all-pairs saturation construction from <em>Beating
+Rytter’s Bound: All-Pairs CFL Reachability in
+:math:`O(n^3 (loglog n)^2/log^2 n)` Time</em>.</p>
+<p>The implementation is self-contained. It uses the Lotus <code class="docutils literal notranslate"><span class="pre">Grammar</span></code>,
+<code class="docutils literal notranslate"><span class="pre">LabeledGraph</span></code>, and <code class="docutils literal notranslate"><span class="pre">Relation</span></code> interfaces and does not depend on an
+external artifact.</p>
+</section>
+<section id="problem-and-key-idea">
+<h2>Problem and key idea<a class="headerlink" href="#problem-and-key-idea" title="Link to this heading"></a></h2>
+<p>A worklist solver derives one labeled fact at a time, so a production such as
+<code class="docutils literal notranslate"><span class="pre">C</span> <span class="pre">-&gt;</span> <span class="pre">A</span> <span class="pre">B</span></code> re-derives many identical pivot combinations whenever several
+<code class="docutils literal notranslate"><span class="pre">B</span></code> facts leave the same node. The paper instead solves each binary
+production as an <strong>incremental set-pair</strong> problem:</p>
+<ul class="simple">
+<li><p>one family of node sets per production endpoint, maintained for the
+<code class="docutils literal notranslate"><span class="pre">B</span></code>-side (rows) and for the <code class="docutils literal notranslate"><span class="pre">C</span></code>-side (columns), and</p></li>
+<li><p>an exact reporting primitive that returns a whole set difference for a
+probe pair instead of enumerating single pairs.</p></li>
+</ul>
+<p>For a production <code class="docutils literal notranslate"><span class="pre">C</span> <span class="pre">-&gt;</span> <span class="pre">A</span> <span class="pre">B</span></code> the engine keeps two growing families and
+answers the two orientations of the paper’s report:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>B(u, v) fact  -&gt;  report R_C[v, :] \ R_A[u, :]
+C(v, x) fact  -&gt;  report R_B[:, v] \ R_A[:, x]
+</pre></div>
+</div>
+<p>A report is complete before the facts it returns are inserted, so every
+realization of the paper’s invariants sees the same Y family it was counted
+against.</p>
+</section>
+<section id="three-primitives">
+<h2>Three primitives<a class="headerlink" href="#three-primitives" title="Link to this heading"></a></h2>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">BitPlaneCounters</span></code></dt><dd><p>Stores exact unsigned lane counters in bit planes and implements lane-wise
+vector addition with bit-sliced full-adder carry propagation, so a carry
+cannot leak into a neighbouring lane. It is used both for sparse-subset
+vectors and for the two orientation-specific intersection-count arrays.
+Exceeding the declared per-lane width raises <code class="docutils literal notranslate"><span class="pre">std::overflow_error</span></code>
+rather than silently saturating.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">SparseSubsetTable</span></code></dt><dd><p>Stores <code class="docutils literal notranslate"><span class="pre">V_S</span></code> for every non-empty subset of at most <code class="docutils literal notranslate"><span class="pre">s</span></code> coordinates in
+each length-<code class="docutils literal notranslate"><span class="pre">L</span></code> block of a monotonically growing Boolean matrix. A
+coordinate incidence list updates exactly those stored vectors that
+contain a newly set entry, so a 0 to 1 update never rescans the matrix. A
+query splits its sorted, duplicate-free coordinate batch at block
+boundaries and into pieces of at most <code class="docutils literal notranslate"><span class="pre">s</span></code> coordinates, then adds the
+precomputed vectors; each returned vector is exact, not Booleanized.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">TwoSidedSetPair</span></code></dt><dd><p>Maintains both growing families, their snapshots, pending lists, the
+sparse tables for the two snapshot matrices, <code class="docutils literal notranslate"><span class="pre">c_X</span></code>, <code class="docutils literal notranslate"><span class="pre">I_col</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">I_row</span></code>. Promotion runs in both directions once a pending list reaches
+the threshold <code class="docutils literal notranslate"><span class="pre">D</span></code>; <code class="docutils literal notranslate"><span class="pre">Report</span></code> and <code class="docutils literal notranslate"><span class="pre">Count</span></code> then combine the group counters
+with the exact pending-list corrections for the facts not yet promoted.
+Groups are aligned to sparse-table blocks using the paper’s
+padded-universe convention, so every block belongs to exactly one report
+group.</p>
+</dd>
+</dl>
+</section>
+<section id="parameters">
+<h2>Parameters<a class="headerlink" href="#parameters" title="Link to this heading"></a></h2>
+<p>For a caller-supplied <code class="docutils literal notranslate"><span class="pre">epsilon</span></code> in <code class="docutils literal notranslate"><span class="pre">(0,</span> <span class="pre">1)</span></code> the engine uses</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>lambda = ceil(log2 n)              D = ceil(n / lambda^2)
+g      = lambda                    eta = epsilon / 4
+s      = max(1, floor(eta log2(n) / log2(e ceil(n/D))))
+L      = s ceil(n/D)
+</pre></div>
+</div>
+<p>and pads the internal universe to a multiple of <code class="docutils literal notranslate"><span class="pre">g</span> <span class="pre">L</span></code>. The pathological
+small-<code class="docutils literal notranslate"><span class="pre">n</span></code> cases keep the block/group alignment invariant by clamping <code class="docutils literal notranslate"><span class="pre">s</span></code>,
+<code class="docutils literal notranslate"><span class="pre">L</span></code>, and <code class="docutils literal notranslate"><span class="pre">D</span></code> below. <code class="docutils literal notranslate"><span class="pre">SolverSession</span></code> fixes <code class="docutils literal notranslate"><span class="pre">epsilon</span> <span class="pre">=</span> <span class="pre">0.25</span></code>; direct
+callers of <code class="docutils literal notranslate"><span class="pre">engines::sparse_subset::solveAllPairs</span></code> may pass another value and
+get <code class="docutils literal notranslate"><span class="pre">std::invalid_argument</span></code> for anything outside <code class="docutils literal notranslate"><span class="pre">(0,</span> <span class="pre">1)</span></code>.</p>
+</section>
+<section id="lotus-implementation">
+<h2>Lotus implementation<a class="headerlink" href="#lotus-implementation" title="Link to this heading"></a></h2>
+<dl class="simple">
+<dt>Public API</dt><dd><p><code class="docutils literal notranslate"><span class="pre">include/CFL/Classical/Solvers/Engines/SparseSubset/SparseSubsetCFL.h</span></code>
+(entry point) and <code class="docutils literal notranslate"><span class="pre">SparseSubsetTabulation.h</span></code> (the three primitives).</p>
+</dd>
+<dt>Algorithm</dt><dd><p><code class="docutils literal notranslate"><span class="pre">lib/CFL/Classical/Solvers/Engines/SparseSubset/SparseSubsetCFL.cpp</span></code>.</p>
+</dd>
+<dt>Integration</dt><dd><p><code class="docutils literal notranslate"><span class="pre">SolverBackend</span></code> value parsed from <code class="docutils literal notranslate"><span class="pre">--solver</span> <span class="pre">sparse-subset</span></code> in the
+classical, alias, and value-flow drivers. The backend occupies a private
+enum value next to the last public one, so
+<code class="docutils literal notranslate"><span class="pre">CFL/Classical/Solvers/SolverSession.h</span></code> is unchanged;
+<code class="docutils literal notranslate"><span class="pre">solverBackendName</span></code> reports <code class="docutils literal notranslate"><span class="pre">&quot;sparse-subset&quot;</span></code>.</p>
+</dd>
+</dl>
+<p><code class="docutils literal notranslate"><span class="pre">solveAllPairs</span></code> validates the grammar, creates row and column
+<code class="docutils literal notranslate"><span class="pre">TwoSidedSetPair</span></code> instances for every binary production, and seeds the
+terminal edges followed by the nullable self-facts. New facts are forwarded to
+the affected instances at insertion time, before they are queued, so a report
+always sees the facts that were already inserted. Unary productions are closed
+on the worklist. The returned <code class="docutils literal notranslate"><span class="pre">Relation</span></code> contains every terminal and
+nonterminal fact.</p>
+</section>
+<section id="backend-contract">
+<h2>Backend contract<a class="headerlink" href="#backend-contract" title="Link to this heading"></a></h2>
+<p>The engine is a <strong>batch all-pairs</strong> backend.</p>
+<ul class="simple">
+<li><p>A session recomputes the whole fixed point after each graph update. It does
+not reuse a previous relation incrementally, so <code class="docutils literal notranslate"><span class="pre">addTerminalEdge</span></code> /
+<code class="docutils literal notranslate"><span class="pre">addNode</span></code> followed by <code class="docutils literal notranslate"><span class="pre">solve</span></code> cost a full saturation. A <code class="docutils literal notranslate"><span class="pre">solve</span></code> with no
+pending change returns the previous snapshots and zero work counters without
+dispatching the engine.</p></li>
+<li><p>The result is the complete grammar-relative relation. <code class="docutils literal notranslate"><span class="pre">--result-scope</span></code>
+filtering and the POCR <code class="docutils literal notranslate"><span class="pre">Insert</span></code>/<code class="docutils literal notranslate"><span class="pre">Follow</span></code> projection do not restrict what
+the engine computes, so <code class="docutils literal notranslate"><span class="pre">--unidirectional</span></code> does not change its answers.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">processed_items</span></code> reports the number of facts in the recomputed relation;
+<code class="docutils literal notranslate"><span class="pre">added_edges</span></code> is the delta against the relation it replaced.</p></li>
+</ul>
+</section>
+<section id="validation">
+<h2>Validation<a class="headerlink" href="#validation" title="Link to this heading"></a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">tests/unit/CFL/Classical/SparseSubsetEngineTest.cpp</span></code> covers the three
+primitives directly, including overflow and misuse diagnostics, a seeded
+randomized differential test of <code class="docutils literal notranslate"><span class="pre">report</span></code>/<code class="docutils literal notranslate"><span class="pre">count</span></code>/<code class="docutils literal notranslate"><span class="pre">subset</span></code> against a
+naive set model, and a full-relation comparison against the
+<code class="docutils literal notranslate"><span class="pre">sparse-bitvector</span></code> backend for closure, nullable seeds, isolated nodes, and
+incremental updates. <code class="docutils literal notranslate"><span class="pre">tests/regress/CFL/Classical</span></code> runs the CLI drivers with
+<code class="docutils literal notranslate"><span class="pre">--solver</span> <span class="pre">sparse-subset</span></code> and compares the relation size against the
+reference backends.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="cert_cfl.html" class="btn btn-neutral float-left" title="CERT-CFL: Cardinality-Certified Exact Solving" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="pocr_migration.html" class="btn btn-neutral float-right" title="POCR Migration Matrix" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, ZJU Programming Languages and Automated Reasoning Group.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
