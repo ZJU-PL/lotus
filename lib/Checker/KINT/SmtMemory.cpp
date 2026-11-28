@@ -46,7 +46,7 @@ z3::expr SmtMemory::addrAdd(const z3::expr &addr, uint64_t byteOffset) const {
 z3::expr SmtMemory::loadBytes(const z3::expr &addr, unsigned numBytes,
                               bool littleEndian) const {
   if (numBytes == 0) {
-    return m_ctx.bv_val(0, 0);
+    return m_ctx.bv_val(0, 8);
   }
 
   // Build a bit-vector of width numBytes*8 from bytes in memory.
@@ -130,6 +130,8 @@ void SmtMemory::memmoveBytes(const z3::expr &dst, const z3::expr &src,
 
 z3::expr SmtMemory::loadInt(const z3::expr &addr, unsigned bitWidth,
                             unsigned storeBytes, bool littleEndian) const {
+  if (bitWidth == 0 || storeBytes == 0)
+    return m_ctx.bv_val(0, bitWidth == 0 ? 1 : bitWidth);
   // Load storeBytes bytes, then truncate to bitWidth (LLVM i1 uses 1 byte store
   // size).
   z3::expr bytes = loadBytes(addr, storeBytes, littleEndian);
@@ -144,6 +146,8 @@ z3::expr SmtMemory::loadInt(const z3::expr &addr, unsigned bitWidth,
 void SmtMemory::storeInt(const z3::expr &addr, const z3::expr &value,
                          unsigned bitWidth, unsigned storeSizeBytes,
                          bool littleEndian) {
+  if (storeSizeBytes == 0)
+    return;
   // Extend/truncate to store size in bytes, then write bytes.
   const unsigned storeBits = storeSizeBytes * 8;
   z3::expr v = value;

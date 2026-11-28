@@ -65,9 +65,31 @@ inline const char *bugTypeToString(interr t) {
 inline std::optional<uint64_t> getConstantU64(const llvm::Value *v) {
   if (!v)
     return std::nullopt;
-  if (const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(v))
-    return ci->getZExtValue();
+  if (const auto *ci = llvm::dyn_cast<llvm::ConstantInt>(v)) {
+    if (ci->getValue().getActiveBits() <= 64)
+      return ci->getZExtValue();
+  }
   return std::nullopt;
+}
+
+inline std::optional<uint64_t>
+getTypeAllocSizeSafe(const llvm::DataLayout *dl, llvm::Type *ty) {
+  if (!dl || !ty || !ty->isSized())
+    return std::nullopt;
+  llvm::TypeSize ts = dl->getTypeAllocSize(ty);
+  if (ts.isScalable())
+    return std::nullopt;
+  return ts.getFixedSize();
+}
+
+inline std::optional<uint64_t>
+getTypeStoreSizeSafe(const llvm::DataLayout *dl, llvm::Type *ty) {
+  if (!dl || !ty || !ty->isSized())
+    return std::nullopt;
+  llvm::TypeSize ts = dl->getTypeStoreSize(ty);
+  if (ts.isScalable())
+    return std::nullopt;
+  return ts.getFixedSize();
 }
 
 inline z3::expr boolToBv1(const z3::expr &b) {
@@ -132,7 +154,9 @@ inline bool computeWithOverflow(
     const llvm::WithOverflowInst *woi, z3::solver &solver,
     const std::function<z3::expr(const llvm::Value *)> &getInt,
     z3::expr &outResult, z3::expr &outOverflowBool) {
-  if (!woi)
+  if (!woi || woi->arg_size() < 2 ||
+      !woi->getArgOperand(0)->getType()->isIntegerTy() ||
+      !woi->getArgOperand(1)->getType()->isIntegerTy())
     return false;
   auto lhs = getInt(woi->getArgOperand(0));
   auto rhs = getInt(woi->getArgOperand(1));

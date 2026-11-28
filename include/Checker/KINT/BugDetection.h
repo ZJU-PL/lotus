@@ -95,6 +95,12 @@ public:
     m_current_path = path;
   }
   void addPathPoint(const PathPoint &point) { m_current_path.push_back(point); }
+  void truncateCurrentPath(size_t depth) {
+    if (m_current_path.size() > depth)
+      m_current_path.erase(m_current_path.begin() +
+                               static_cast<std::ptrdiff_t>(depth),
+                           m_current_path.end());
+  }
   void clearCurrentPath() { m_current_path.clear(); }
   const std::vector<PathPoint> &getCurrentPath() const {
     return m_current_path;
@@ -102,6 +108,8 @@ public:
   void clearState() {
     m_current_path.clear();
     m_bug_paths.clear();
+    m_sym_ids.clear();
+    m_next_sym_id = 0;
   }
 
   // Get bug paths
@@ -137,6 +145,10 @@ private:
 
   // Helper to record a bug with its path
   void recordBugWithPath(const Instruction *inst, interr type);
+
+  uint64_t getStableSymId(const Value *v);
+  DenseMap<const Value *, uint64_t> m_sym_ids;
+  uint64_t m_next_sym_id = 0;
 };
 
 } // namespace kint

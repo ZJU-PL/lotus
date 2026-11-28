@@ -24,6 +24,7 @@ bool MKintPass::canSummarizeFunction(const Function &F) const {
         if (!callee && !isa<IntrinsicInst>(call))
           return false;
         if (callee && callee->isDeclaration() && !isAllocatorLike(callee) &&
+            !isKnownReadOnlyLibcCall(callee->getName()) &&
             callee->getName() != "memset" && callee->getName() != "__memset" &&
             callee->getName() != "memcpy" && callee->getName() != "__memcpy" &&
             callee->getName() != "memmove" &&
@@ -52,52 +53,58 @@ bool MKintPass::classifyPointerReturn(const Function &F, const Value *&root,
   if (!F.getReturnType()->isPointerTy())
     return true;
 
+  SmallPtrSet<const Value *, 16> visiting;
   auto resolveRoot = [&](const Value *value, const auto &self) -> const Value * {
     if (!value)
       return nullptr;
-    if (const auto *arg = dyn_cast<Argument>(value))
-      return arg;
-    if (const auto *gv = dyn_cast<GlobalVariable>(value))
-      return gv;
-    if (const auto *call = dyn_cast<CallInst>(value)) {
+    if (!visiting.insert(value).second)
+      return nullptr;
+    auto cleanup = [&]() { visiting.erase(value); };
+    const Value *result = nullptr;
+    if (const auto *arg = dyn_cast<Argument>(value)) {
+      result = arg;
+    } else if (const auto *gv = dyn_cast<GlobalVariable>(value)) {
+      result = gv;
+    } else if (const auto *call = dyn_cast<CallInst>(value)) {
       if (isAllocatorLike(call->getCalledFunction()))
-        return call;
-    }
-    if (const auto *fi = dyn_cast<FreezeInst>(value))
-      return self(fi->getOperand(0), self);
-    if (const auto *bc = dyn_cast<BitCastInst>(value))
-      return self(bc->getOperand(0), self);
-    if (const auto *gep = dyn_cast<GetElementPtrInst>(value))
-      return self(gep->getPointerOperand(), self);
-    if (const auto *sel = dyn_cast<SelectInst>(value)) {
+        result = call;
+    } else if (const auto *fi = dyn_cast<FreezeInst>(value)) {
+      result = self(fi->getOperand(0), self);
+    } else if (const auto *bc = dyn_cast<BitCastOperator>(value)) {
+      result = self(bc->getOperand(0), self);
+    } else if (const auto *gep = dyn_cast<GEPOperator>(value)) {
+      result = self(gep->getPointerOperand(), self);
+    } else if (const auto *sel = dyn_cast<SelectInst>(value)) {
       const Value *t = self(sel->getTrueValue(), self);
       const Value *f = self(sel->getFalseValue(), self);
       if (t && t == f)
-        return t;
-      return nullptr;
-    }
-    if (const auto *phi = dyn_cast<PHINode>(value)) {
+        result = t;
+    } else if (const auto *phi = dyn_cast<PHINode>(value)) {
       const Value *common = nullptr;
       bool seen = false;
+      bool ok = true;
       for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
         const Value *incomingRoot = self(phi->getIncomingValue(i), self);
-        if (!incomingRoot)
-          return nullptr;
+        if (!incomingRoot) {
+          ok = false;
+          break;
+        }
         if (!seen) {
           common = incomingRoot;
           seen = true;
         } else if (common != incomingRoot) {
-          return nullptr;
+          ok = false;
+          break;
         }
       }
-      return common;
-    }
-    if (const auto *itp = dyn_cast<IntToPtrInst>(value)) {
+      if (ok)
+        result = common;
+    } else if (const auto *itp = dyn_cast<IntToPtrInst>(value)) {
       if (const auto *pti = dyn_cast<PtrToIntInst>(itp->getOperand(0)))
-        return self(pti->getOperand(0), self);
-      return nullptr;
+        result = self(pti->getOperand(0), self);
     }
-    return nullptr;
+    cleanup();
+    return result;
   };
 
   for (const auto &bb : F) {
@@ -275,6 +282,10 @@ bool MKintPass::collectModifiedBoundaryObjects(Function &F,
       const auto name = callee->getName();
       if (name == "memset" || name == "__memset" || name == "memcpy" ||
           name == "__memcpy" || name == "memmove" || name == "__memmove") {
+        if (call->arg_size() < 1 || !markPointer(call->getArgOperand(0))) {
+          m_summary_failure_reason = "unsupported libc memory op target";
+          return false;
+        }
         continue;
       }
       if (name == "free") {
@@ -296,7 +307,8 @@ bool MKintPass::collectModifiedBoundaryObjects(Function &F,
       if (isAllocatorLike(callee))
         continue;
       if (callee->isDeclaration()) {
-        if (!call->doesNotAccessMemory() && !call->onlyReadsMemory()) {
+        if (!isKnownReadOnlyLibcCall(name) && !call->doesNotAccessMemory() &&
+            !call->onlyReadsMemory()) {
           m_summary_failure_reason = "unsupported external side-effecting call";
           return false;
         }
@@ -452,11 +464,11 @@ const FunctionSummary *MKintPass::buildSummary(Function &F) {
   if (InterprocSummaryMode == SummaryMode::Off)
     return nullptr;
 
-  auto it = m_summary_cache.find(&F);
-  if (it == m_summary_cache.end()) {
-    it = m_summary_cache.insert({&F, SummaryCacheEntry(&F)}).first;
+  auto &entryPtr = m_summary_cache[&F];
+  if (!entryPtr) {
+    entryPtr = std::make_unique<SummaryCacheEntry>(&F);
   }
-  SummaryCacheEntry &entry = it->second;
+  SummaryCacheEntry &entry = *entryPtr;
   if (entry.summary.availability == SummaryAvailability::Available)
     return &entry.summary;
   if (entry.summary.availability == SummaryAvailability::Unsupported &&
@@ -468,7 +480,7 @@ const FunctionSummary *MKintPass::buildSummary(Function &F) {
     entry.summary.unsupported_reason = "recursive summary dependency";
     return &entry.summary;
   }
-  if (!canSummarizeFunction(F)) {
+  if (F.empty() || !canSummarizeFunction(F)) {
     entry.summary.availability = SummaryAvailability::Unsupported;
     entry.summary.unsupported_reason = "unsupported function shape";
     return &entry.summary;
@@ -482,37 +494,128 @@ const FunctionSummary *MKintPass::buildSummary(Function &F) {
     return &entry.summary;
   }
 
+  ensureBackedges(F);
+
   auto &ctx = m_solver.value().ctx();
-  auto old_solver = std::move(m_solver);
-  auto old_smt_mem = std::move(m_smt_mem);
-  auto old_v2sym = std::move(m_v2sym);
-  auto old_bbpaths = std::move(m_bbpaths);
-  auto old_obj_base = std::move(m_obj_base);
-  auto old_obj_size = std::move(m_obj_size);
-  auto old_obj_list = std::move(m_obj_list);
-  auto old_obj_mem = std::move(m_obj_mem);
-  auto old_obj_alias = std::move(m_obj_alias);
-  auto old_int_alias = std::move(m_int_alias);
-  auto old_ptr_offset = std::move(m_ptr_offset);
-  auto old_int_offset = std::move(m_int_offset);
-  auto old_obj_freed = std::move(m_obj_freed);
-  auto old_object_frames = std::move(m_object_frames);
-  auto old_sym_change_log = std::move(m_sym_change_log);
-  auto old_sym_change_frames = std::move(m_sym_change_frames);
-  auto old_path_constraints = std::move(m_path_constraints);
-  auto old_constraint_frames = std::move(m_constraint_frames);
-  auto old_universal_vars = std::move(m_universal_vars);
-  auto old_universal_ids = std::move(m_universal_var_ids);
-  FunctionSummary *old_building_summary = m_building_summary;
-  const auto old_timeout = m_function_timeout;
-  const auto old_path_limit = m_path_limit;
-  const auto old_paths_explored = m_paths_explored;
-  const auto old_path_limit_hit = m_path_limit_hit;
-  const auto old_timeout_hit = m_timeout_hit;
-  const auto old_summary_backedge_hit = m_summary_backedge_hit;
-  const auto old_function_start_time = m_function_start_time;
-  auto *old_aa = m_aa;
-  auto *old_mssa = m_mssa;
+  struct StateGuard {
+    MKintPass &self;
+    SummaryCacheEntry &entry;
+    std::optional<z3::solver> old_solver;
+    std::unique_ptr<SmtMemory> old_smt_mem;
+    DenseMap<const Value *, std::optional<z3::expr>> old_v2sym;
+    std::map<const BasicBlock *, SmallVector<BasicBlock *, 2>> old_bbpaths;
+    DenseMap<const Value *, std::optional<z3::expr>> old_obj_base;
+    DenseMap<const Value *, std::optional<z3::expr>> old_obj_size;
+    std::vector<const Value *> old_obj_list;
+    DenseMap<const Value *, std::optional<z3::expr>> old_obj_mem;
+    DenseMap<const Value *, const Value *> old_obj_alias;
+    DenseMap<const Value *, const Value *> old_int_alias;
+    DenseMap<const Value *, std::optional<z3::expr>> old_ptr_offset;
+    DenseMap<const Value *, std::optional<z3::expr>> old_int_offset;
+    DenseSet<const Value *> old_obj_freed;
+    DenseSet<const Value *> old_obj_size_known;
+    std::vector<ObjChange> old_obj_change_log;
+    std::vector<size_t> old_obj_change_frames;
+    std::vector<SymChange> old_sym_change_log;
+    std::vector<size_t> old_sym_change_frames;
+    std::vector<z3::expr> old_path_constraints;
+    std::vector<size_t> old_constraint_frames;
+    std::vector<z3::expr> old_universal_vars;
+    std::unordered_set<Z3_ast> old_universal_ids;
+    DenseMap<std::pair<const BasicBlock *, const BasicBlock *>, unsigned>
+        old_backedge_counts;
+    FunctionSummary *old_building_summary;
+    unsigned old_timeout;
+    unsigned old_path_limit;
+    uint64_t old_paths_explored;
+    bool old_path_limit_hit;
+    bool old_timeout_hit;
+    bool old_loop_cut_hit;
+    bool old_in_main_entry;
+    bool old_summary_backedge_hit;
+    std::chrono::time_point<std::chrono::steady_clock> old_function_start_time;
+    llvm::AAResults *old_aa;
+    llvm::MemorySSA *old_mssa;
+    bool old_summary_failed;
+    std::string old_summary_failure_reason;
+
+    StateGuard(MKintPass &s, SummaryCacheEntry &e)
+        : self(s), entry(e), old_solver(std::move(s.m_solver)),
+          old_smt_mem(std::move(s.m_smt_mem)), old_v2sym(std::move(s.m_v2sym)),
+          old_bbpaths(std::move(s.m_bbpaths)),
+          old_obj_base(std::move(s.m_obj_base)),
+          old_obj_size(std::move(s.m_obj_size)),
+          old_obj_list(std::move(s.m_obj_list)),
+          old_obj_mem(std::move(s.m_obj_mem)),
+          old_obj_alias(std::move(s.m_obj_alias)),
+          old_int_alias(std::move(s.m_int_alias)),
+          old_ptr_offset(std::move(s.m_ptr_offset)),
+          old_int_offset(std::move(s.m_int_offset)),
+          old_obj_freed(std::move(s.m_obj_freed)),
+          old_obj_size_known(std::move(s.m_obj_size_known)),
+          old_obj_change_log(std::move(s.m_obj_change_log)),
+          old_obj_change_frames(std::move(s.m_obj_change_frames)),
+          old_sym_change_log(std::move(s.m_sym_change_log)),
+          old_sym_change_frames(std::move(s.m_sym_change_frames)),
+          old_path_constraints(std::move(s.m_path_constraints)),
+          old_constraint_frames(std::move(s.m_constraint_frames)),
+          old_universal_vars(std::move(s.m_universal_vars)),
+          old_universal_ids(std::move(s.m_universal_var_ids)),
+          old_backedge_counts(std::move(s.m_backedge_counts)),
+          old_building_summary(s.m_building_summary),
+          old_timeout(s.m_function_timeout), old_path_limit(s.m_path_limit),
+          old_paths_explored(s.m_paths_explored),
+          old_path_limit_hit(s.m_path_limit_hit),
+          old_timeout_hit(s.m_timeout_hit),
+          old_loop_cut_hit(s.m_loop_cut_hit),
+          old_in_main_entry(s.m_in_main_entry),
+          old_summary_backedge_hit(s.m_summary_backedge_hit),
+          old_function_start_time(s.m_function_start_time), old_aa(s.m_aa),
+          old_mssa(s.m_mssa), old_summary_failed(s.m_summary_failed),
+          old_summary_failure_reason(std::move(s.m_summary_failure_reason)) {}
+
+    ~StateGuard() {
+      entry.building = false;
+      self.m_solver = std::move(old_solver);
+      self.m_smt_mem = std::move(old_smt_mem);
+      self.m_v2sym = std::move(old_v2sym);
+      self.m_bbpaths = std::move(old_bbpaths);
+      self.m_obj_base = std::move(old_obj_base);
+      self.m_obj_size = std::move(old_obj_size);
+      self.m_obj_list = std::move(old_obj_list);
+      self.m_obj_mem = std::move(old_obj_mem);
+      self.m_obj_alias = std::move(old_obj_alias);
+      self.m_int_alias = std::move(old_int_alias);
+      self.m_ptr_offset = std::move(old_ptr_offset);
+      self.m_int_offset = std::move(old_int_offset);
+      self.m_obj_freed = std::move(old_obj_freed);
+      self.m_obj_size_known = std::move(old_obj_size_known);
+      self.m_obj_change_log = std::move(old_obj_change_log);
+      self.m_obj_change_frames = std::move(old_obj_change_frames);
+      self.m_sym_change_log = std::move(old_sym_change_log);
+      self.m_sym_change_frames = std::move(old_sym_change_frames);
+      self.m_path_constraints = std::move(old_path_constraints);
+      self.m_constraint_frames = std::move(old_constraint_frames);
+      self.m_universal_vars = std::move(old_universal_vars);
+      self.m_universal_var_ids = std::move(old_universal_ids);
+      self.m_backedge_counts = std::move(old_backedge_counts);
+      self.m_building_summary = old_building_summary;
+      self.m_function_timeout = old_timeout;
+      self.m_path_limit = old_path_limit;
+      self.m_paths_explored = old_paths_explored;
+      self.m_path_limit_hit = old_path_limit_hit;
+      self.m_timeout_hit = old_timeout_hit;
+      self.m_loop_cut_hit = old_loop_cut_hit;
+      self.m_in_main_entry = old_in_main_entry;
+      self.m_summary_backedge_hit = old_summary_backedge_hit;
+      self.m_function_start_time = old_function_start_time;
+      self.m_aa = old_aa;
+      self.m_mssa = old_mssa;
+      self.m_summary_failed = old_summary_failed;
+      self.m_summary_failure_reason = std::move(old_summary_failure_reason);
+    }
+  };
+  StateGuard guard(*this, entry);
 
   m_solver = z3::solver(ctx);
   m_smt_mem = std::make_unique<SmtMemory>(ctx, m_ptr_bits);
@@ -527,15 +630,18 @@ const FunctionSummary *MKintPass::buildSummary(Function &F) {
   m_ptr_offset.clear();
   m_int_offset.clear();
   m_obj_freed.clear();
-  m_object_frames.clear();
+  m_obj_size_known.clear();
+  m_obj_change_log.clear();
+  m_obj_change_frames.clear();
   m_sym_change_log.clear();
   m_sym_change_frames.clear();
   m_path_constraints.clear();
   m_constraint_frames.clear();
   m_universal_vars.clear();
   m_universal_var_ids.clear();
-  if (m_bug_detection)
-    m_bug_detection->clearCurrentPath();
+  m_backedge_counts.clear();
+  m_in_main_entry = false;
+  m_loop_cut_hit = false;
 
   entry.building = true;
   entry.summary = FunctionSummary(&F);
@@ -597,7 +703,8 @@ const FunctionSummary *MKintPass::buildSummary(Function &F) {
     } else if (arg.getType()->isPointerTy()) {
       entry.summary.pointer_args.push_back(&arg);
       auto sizeSym = ctx.bv_const((argName + ".size").c_str(), m_ptr_bits);
-      ensureObject(&arg, argName + ".obj", sizeSym, false);
+      ensureObject(&arg, argName + ".obj", sizeSym, /*sizeKnown=*/false,
+                   /*hasRealSize=*/false);
       z3::expr sym = m_obj_base[&arg].value();
       entry.summary.arg_symbols[&arg] = sym;
       setSym(&arg, sym);
@@ -613,9 +720,7 @@ const FunctionSummary *MKintPass::buildSummary(Function &F) {
 
     if (kind == SummaryObjectKind::Global && !m_obj_base.count(obj)) {
       const auto *gv = cast<GlobalVariable>(obj);
-      const uint64_t bytes = m_dl->getTypeAllocSize(gv->getValueType());
-      ensureObject(gv, ("summary.global." + gv->getName()).str(),
-                   ctx.bv_val(bytes, m_ptr_bits), true);
+      ensureGlobalObject(gv);
     }
     unsigned argIndex = ~0U;
     if (const auto *arg = dyn_cast<Argument>(obj))
@@ -639,39 +744,6 @@ const FunctionSummary *MKintPass::buildSummary(Function &F) {
     entry.summary.unsupported_reason =
         m_summary_failure_reason.empty() ? "summary modifies collection failed"
                                          : m_summary_failure_reason;
-    entry.building = false;
-    m_solver = std::move(old_solver);
-    m_smt_mem = std::move(old_smt_mem);
-    m_v2sym = std::move(old_v2sym);
-    m_bbpaths = std::move(old_bbpaths);
-    m_obj_base = std::move(old_obj_base);
-    m_obj_size = std::move(old_obj_size);
-    m_obj_list = std::move(old_obj_list);
-    m_obj_mem = std::move(old_obj_mem);
-    m_obj_alias = std::move(old_obj_alias);
-    m_int_alias = std::move(old_int_alias);
-    m_ptr_offset = std::move(old_ptr_offset);
-    m_int_offset = std::move(old_int_offset);
-    m_obj_freed = std::move(old_obj_freed);
-    m_object_frames = std::move(old_object_frames);
-    m_sym_change_log = std::move(old_sym_change_log);
-    m_sym_change_frames = std::move(old_sym_change_frames);
-    m_path_constraints = std::move(old_path_constraints);
-    m_constraint_frames = std::move(old_constraint_frames);
-    m_universal_vars = std::move(old_universal_vars);
-    m_universal_var_ids = std::move(old_universal_ids);
-    m_building_summary = old_building_summary;
-    m_function_timeout = old_timeout;
-    m_path_limit = old_path_limit;
-    m_paths_explored = old_paths_explored;
-    m_path_limit_hit = old_path_limit_hit;
-    m_timeout_hit = old_timeout_hit;
-    m_summary_backedge_hit = old_summary_backedge_hit;
-    m_function_start_time = old_function_start_time;
-    m_aa = old_aa;
-    m_mssa = old_mssa;
-    m_summary_failed = false;
-    m_summary_failure_reason.clear();
     return &entry.summary;
   }
 
@@ -690,9 +762,12 @@ const FunctionSummary *MKintPass::buildSummary(Function &F) {
 
   for (auto &bb : F) {
     for (const auto *pred : predecessors(&bb)) {
-      if (m_backedges[&bb].contains(pred) || &bb == pred)
+      const bool isBackedge = m_backedges[&bb].contains(pred) || &bb == pred;
+      if (isBackedge && m_max_loop_unroll == 0)
         continue;
-      m_bbpaths[pred].push_back(&bb);
+      auto &succs = m_bbpaths[pred];
+      if (std::find(succs.begin(), succs.end(), &bb) == succs.end())
+        succs.push_back(&bb);
     }
   }
 
@@ -752,40 +827,6 @@ const FunctionSummary *MKintPass::buildSummary(Function &F) {
                                            ? "summary construction failed"
                                            : m_summary_failure_reason;
   }
-  entry.building = false;
-
-  m_solver = std::move(old_solver);
-  m_smt_mem = std::move(old_smt_mem);
-  m_v2sym = std::move(old_v2sym);
-  m_bbpaths = std::move(old_bbpaths);
-  m_obj_base = std::move(old_obj_base);
-  m_obj_size = std::move(old_obj_size);
-  m_obj_list = std::move(old_obj_list);
-  m_obj_mem = std::move(old_obj_mem);
-  m_obj_alias = std::move(old_obj_alias);
-  m_int_alias = std::move(old_int_alias);
-  m_ptr_offset = std::move(old_ptr_offset);
-  m_int_offset = std::move(old_int_offset);
-  m_obj_freed = std::move(old_obj_freed);
-  m_object_frames = std::move(old_object_frames);
-  m_sym_change_log = std::move(old_sym_change_log);
-  m_sym_change_frames = std::move(old_sym_change_frames);
-  m_path_constraints = std::move(old_path_constraints);
-  m_constraint_frames = std::move(old_constraint_frames);
-  m_universal_vars = std::move(old_universal_vars);
-  m_universal_var_ids = std::move(old_universal_ids);
-  m_building_summary = old_building_summary;
-  m_function_timeout = old_timeout;
-  m_path_limit = old_path_limit;
-  m_paths_explored = old_paths_explored;
-  m_path_limit_hit = old_path_limit_hit;
-  m_timeout_hit = old_timeout_hit;
-  m_summary_backedge_hit = old_summary_backedge_hit;
-  m_function_start_time = old_function_start_time;
-  m_aa = old_aa;
-  m_mssa = old_mssa;
-  m_summary_failed = false;
-  m_summary_failure_reason.clear();
 
   return &entry.summary;
 }
@@ -807,41 +848,94 @@ SummaryAvailability MKintPass::applySummary(CallInst *call, BasicBlock *cur,
   z3::expr_vector to(ctx);
 
   for (const auto &arg : summary->integer_args) {
+    if (arg->getArgNo() >= call->arg_size())
+      return SummaryAvailability::Unsupported;
+    Value *actual = call->getArgOperand(arg->getArgNo());
+    if (!actual || !actual->getType()->isIntegerTy())
+      return SummaryAvailability::Unsupported;
     auto it = summary->arg_symbols.find(arg);
     if (it == summary->arg_symbols.end() || !it->second.has_value())
       return SummaryAvailability::Unsupported;
+    if (actual->getType()->getIntegerBitWidth() !=
+        it->second.value().get_sort().bv_size())
+      return SummaryAvailability::Unsupported;
     from.push_back(it->second.value());
-    to.push_back(getIntExpr(call->getArgOperand(arg->getArgNo()), cur, pred));
+    to.push_back(getIntExpr(actual, cur, pred));
   }
   for (const auto &arg : summary->pointer_args) {
+    if (arg->getArgNo() >= call->arg_size())
+      return SummaryAvailability::Unsupported;
+    Value *actual = call->getArgOperand(arg->getArgNo());
+    if (!actual || !actual->getType()->isPointerTy())
+      return SummaryAvailability::Unsupported;
     auto it = summary->arg_symbols.find(arg);
     if (it == summary->arg_symbols.end() || !it->second.has_value())
       return SummaryAvailability::Unsupported;
     from.push_back(it->second.value());
-    to.push_back(getPtrExpr(call->getArgOperand(arg->getArgNo()), cur, pred));
+    to.push_back(getPtrExpr(actual, cur, pred));
   }
+  if (summary->integer_return_symbol.has_value()) {
+    if (!call->getType()->isIntegerTy() ||
+        call->getType()->getIntegerBitWidth() !=
+            summary->integer_return_symbol.value().get_sort().bv_size())
+      return SummaryAvailability::Unsupported;
+  }
+  if (summary->pointer_return_symbol.has_value()) {
+    if (!call->getType()->isPointerTy())
+      return SummaryAvailability::Unsupported;
+    if (const auto *arg =
+            dyn_cast_or_null<Argument>(summary->pointer_return_root)) {
+      if (arg->getArgNo() >= call->arg_size() ||
+          !call->getArgOperand(arg->getArgNo())->getType()->isPointerTy())
+        return SummaryAvailability::Unsupported;
+    }
+  }
+
+  const uint64_t callId = getStableValueId(call);
   auto mapBindingObject =
       [&](const SummaryObjectBinding &binding) -> const Value * {
     switch (binding.kind) {
-    case SummaryObjectKind::Argument:
+    case SummaryObjectKind::Argument: {
       if (binding.arg_index >= call->arg_size())
         return nullptr;
-      return getObjectForPtr(call->getArgOperand(binding.arg_index));
-    case SummaryObjectKind::Global:
-      return resolveAliasedObject(binding.root);
+      Value *actual = call->getArgOperand(binding.arg_index);
+      if (!actual || !actual->getType()->isPointerTy())
+        return nullptr;
+      const Value *obj = getObjectForPtr(actual);
+      if (!obj) {
+        const Value *under =
+            llvm::getUnderlyingObject(actual->stripPointerCasts());
+        if (const auto *gv = dyn_cast_or_null<GlobalVariable>(under)) {
+          ensureGlobalObject(gv);
+          obj = gv;
+        } else if (const auto *ai = dyn_cast_or_null<AllocaInst>(under)) {
+          ensureAllocaObject(ai, cur, pred);
+          obj = ai;
+        }
+      }
+      return obj;
+    }
+    case SummaryObjectKind::Global: {
+      const Value *resolved = resolveAliasedObject(binding.root);
+      if (const auto *gv = dyn_cast_or_null<GlobalVariable>(resolved)) {
+        ensureGlobalObject(gv);
+      }
+      return resolved;
+    }
     case SummaryObjectKind::EscapedReturn: {
       if (!call->getType()->isPointerTy())
         return nullptr;
       if (!m_obj_base.count(call)) {
         const auto id =
             g_summary_expr_id.fetch_add(1, std::memory_order_relaxed);
-        z3::expr sizeExpr = ctx.bv_const(("%summary.call.size." +
-                                          std::to_string((uintptr_t)call) +
-                                          "." + std::to_string(id))
-                                             .c_str(),
-                                         m_ptr_bits);
-        ensureObject(call, "summary.escape." + std::to_string((uintptr_t)call),
-                     sizeExpr, /*sizeKnown=*/false);
+        z3::expr sizeExpr = ctx.bv_const(
+            ("%summary.call.size." + std::to_string(callId) + "." +
+             std::to_string(id))
+                .c_str(),
+            m_ptr_bits);
+        ensureObject(call, "summary.escape." + std::to_string(callId), sizeExpr,
+                     /*sizeKnown=*/false,
+                     /*hasRealSize=*/binding.size_out_symbol.has_value());
       }
       return call;
     }
@@ -917,8 +1011,8 @@ SummaryAvailability MKintPass::applySummary(CallInst *call, BasicBlock *cur,
     if (objBinding.mem_out.has_value()) {
       const auto id = g_summary_expr_id.fetch_add(1, std::memory_order_relaxed);
       z3::expr postMem =
-          ctx.constant(("%summary.call.mem." + std::to_string((uintptr_t)call) +
-                        "." + std::to_string(id))
+          ctx.constant(("%summary.call.mem." + std::to_string(callId) + "." +
+                        std::to_string(id))
                            .c_str(),
                        ctx.array_sort(ctx.bv_sort(m_ptr_bits), ctx.bv_sort(8)));
       from.push_back(objBinding.mem_out.value());
@@ -930,8 +1024,8 @@ SummaryAvailability MKintPass::applySummary(CallInst *call, BasicBlock *cur,
   if (summary->integer_return_symbol.has_value()) {
     const auto id = g_summary_expr_id.fetch_add(1, std::memory_order_relaxed);
     z3::expr retSym =
-        ctx.bv_const(("%summary.call.ret." + std::to_string((uintptr_t)call) +
-                      "." + std::to_string(id))
+        ctx.bv_const(("%summary.call.ret." + std::to_string(callId) + "." +
+                      std::to_string(id))
                          .c_str(),
                      call->getType()->getIntegerBitWidth());
     from.push_back(summary->integer_return_symbol.value());
@@ -940,28 +1034,27 @@ SummaryAvailability MKintPass::applySummary(CallInst *call, BasicBlock *cur,
   }
 
   if (summary->pointer_return_symbol.has_value()) {
-    if (!call->getType()->isPointerTy())
-      return SummaryAvailability::Unsupported;
     z3::expr retPtr = ctx.bv_const(
-        ("%summary.call.ptr." + std::to_string((uintptr_t)call)).c_str(),
-        m_ptr_bits);
+        ("%summary.call.ptr." + std::to_string(callId)).c_str(), m_ptr_bits);
     if (summary->pointer_return_root) {
       if (isa<CallInst>(summary->pointer_return_root)) {
         if (!m_obj_base.count(call) || !m_obj_base[call].has_value())
           return SummaryAvailability::Unsupported;
         retPtr = m_obj_base[call].value();
-        m_ptr_offset[call] = ctx.bv_val(0, m_ptr_bits);
+        setPtrOffset(call, ctx.bv_val(0, m_ptr_bits));
       } else if (const auto *arg =
                      dyn_cast<Argument>(summary->pointer_return_root)) {
         const Value *mappedRoot =
             getObjectForPtr(call->getArgOperand(arg->getArgNo()));
         if (mappedRoot)
-          m_obj_alias[call] = mappedRoot;
+          setObjAlias(call, mappedRoot);
         if (auto off = getPointerOffset(call->getArgOperand(arg->getArgNo())))
-          m_ptr_offset[call] = off;
-      } else if (isa<GlobalVariable>(summary->pointer_return_root)) {
-        m_obj_alias[call] = summary->pointer_return_root;
-        m_ptr_offset[call] = ctx.bv_val(0, m_ptr_bits);
+          setPtrOffset(call, off);
+      } else if (const auto *gv =
+                     dyn_cast<GlobalVariable>(summary->pointer_return_root)) {
+        ensureGlobalObject(gv);
+        setObjAlias(call, gv);
+        setPtrOffset(call, ctx.bv_val(0, m_ptr_bits));
       }
     }
     from.push_back(summary->pointer_return_symbol.value());
@@ -978,7 +1071,7 @@ SummaryAvailability MKintPass::applySummary(CallInst *call, BasicBlock *cur,
   // incoming state, expose fresh post-state symbols for modified visible
   // memory before constraining them with summary postconditions.
   for (const auto &update : memUpdates)
-    m_obj_mem[update.first] = update.second;
+    setObjMem(update.first, update.second);
 
   addConstraint(
       conjunctSummaryExprs(summary->exit_constraints).substitute(from, to));
@@ -998,7 +1091,11 @@ bool MKintPass::recordSummaryCase(ReturnInst *ret, BasicBlock *cur,
   z3::expr clause = buildPathConstraintConjunction();
   if (m_building_summary->integer_return_symbol.has_value()) {
     Value *retValue = ret->getReturnValue();
-    if (!retValue || !retValue->getType()->isIntegerTy()) {
+    if (!retValue || !retValue->getType()->isIntegerTy() ||
+        retValue->getType()->getIntegerBitWidth() !=
+            m_building_summary->integer_return_symbol.value()
+                .get_sort()
+                .bv_size()) {
       m_summary_failure_reason = "non-integer return in integer summary";
       return false;
     }

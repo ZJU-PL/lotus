@@ -66,10 +66,18 @@ static Function *resolveCalledFunction(const CallBase *call) {
   return nullptr;
 }
 
+static std::string demangleIfNeeded(StringRef name) {
+  if (name.startswith("_Z") || name.startswith("__Z") ||
+      name.startswith("?")) {
+    return DemangleUtils::demangle(name.str());
+  }
+  return name.str();
+}
+
 static std::optional<size_t> getSinkArgIndex(const Function *callee) {
   if (!callee)
     return std::nullopt;
-  const auto dname = DemangleUtils::demangle(callee->getName().str());
+  const auto dname = demangleIfNeeded(callee->getName());
   const auto *it = std::find_if(MKINT_SINKS.begin(), MKINT_SINKS.end(),
                          [&dname](const auto &s) { return dname == s.first; });
   if (it == MKINT_SINKS.end())
@@ -92,9 +100,10 @@ static bool isDirectSinkUse(const Value *source, const User *user,
   return true;
 }
 
-static bool isSinkReachableImpl(Instruction *inst,
-                                SetVector<Function *> &taint_funcs,
-                                SmallPtrSetImpl<const Instruction *> &visiting) {
+static bool isSinkReachableImpl(
+    Instruction *inst, SetVector<Function *> &taint_funcs,
+    SmallPtrSetImpl<const Instruction *> &visiting,
+    SmallPtrSetImpl<const Function *> &visiting_funcs) {
   if (inst == nullptr)
     return false;
   if (!visiting.insert(inst).second)
@@ -116,7 +125,9 @@ static bool isSinkReachableImpl(Instruction *inst,
       for (auto *user : gv->users()) {
         if (auto *user_inst = dyn_cast<Instruction>(user)) {
           if (user != store)
-            you_see_sink |= isSinkReachableImpl(user_inst, taint_funcs, visiting);
+            you_see_sink |=
+                isSinkReachableImpl(user_inst, taint_funcs, visiting,
+                                    visiting_funcs);
         }
       }
 
@@ -131,10 +142,27 @@ static bool isSinkReachableImpl(Instruction *inst,
     if (auto *call = dyn_cast<CallBase>(inst)) {
       if (auto *f = resolveCalledFunction(call)) {
         // if func's impl is known, approximate taint flow through its arguments.
-        if (!f->isDeclaration() && TaintAnalysis().taint_bcast_sink(
-                                      f->args(), taint_funcs)) {
-          you_see_sink = true;
-          taint_funcs.insert(f);
+        if (!f->isDeclaration() && visiting_funcs.insert(f).second) {
+          bool arg_reaches_sink = false;
+          for (auto &arg : f->args()) {
+            for (auto *arg_user : arg.users()) {
+              if (isDirectSinkUse(&arg, arg_user, taint_funcs)) {
+                arg_reaches_sink = true;
+              }
+              if (auto *arg_user_inst = dyn_cast<Instruction>(arg_user)) {
+                if (isSinkReachableImpl(arg_user_inst, taint_funcs, visiting,
+                                        visiting_funcs)) {
+                  markTaintImpl(*arg_user_inst);
+                  arg_reaches_sink = true;
+                }
+              }
+            }
+          }
+          visiting_funcs.erase(f);
+          if (arg_reaches_sink) {
+            you_see_sink = true;
+            taint_funcs.insert(f);
+          }
         }
       }
     }
@@ -144,7 +172,9 @@ static bool isSinkReachableImpl(Instruction *inst,
         you_see_sink = true;
       }
       if (auto *user_inst = dyn_cast<Instruction>(user)) {
-        you_see_sink |= isSinkReachableImpl(user_inst, taint_funcs, visiting);
+        you_see_sink |=
+            isSinkReachableImpl(user_inst, taint_funcs, visiting,
+                                visiting_funcs);
       }
     }
 
@@ -176,7 +206,7 @@ void TaintAnalysis::mark_taint(Instruction &inst,
 }
 
 bool TaintAnalysis::is_taint_src(StringRef sv) {
-  const auto demangled_name = DemangleUtils::demangle(sv.str());
+  const auto demangled_name = demangleIfNeeded(sv);
   const auto name = StringRef(demangled_name);
   return name.startswith("sys_") || name.startswith("__mkint_ann_");
 }
@@ -216,7 +246,7 @@ SmallVector<Function *, 2> TaintAnalysis::get_sink_fns(Instruction *inst) {
       Function *callee = resolveCalledFunction(call);
       if (!callee)
         continue;
-      auto dname = DemangleUtils::demangle(callee->getName().str());
+      auto dname = demangleIfNeeded(callee->getName());
       if (std::find_if(MKINT_SINKS.begin(), MKINT_SINKS.end(),
                        [&dname](const auto &s) { return dname == s.first; }) !=
           MKINT_SINKS.end()) {
@@ -230,7 +260,8 @@ SmallVector<Function *, 2> TaintAnalysis::get_sink_fns(Instruction *inst) {
 bool TaintAnalysis::is_sink_reachable(Instruction *inst,
                                       SetVector<Function *> &taint_funcs) {
   SmallPtrSet<const Instruction *, 32> visiting;
-  return isSinkReachableImpl(inst, taint_funcs, visiting);
+  SmallPtrSet<const Function *, 16> visiting_funcs;
+  return isSinkReachableImpl(inst, taint_funcs, visiting, visiting_funcs);
 }
 
 bool TaintAnalysis::taint_bcast_sink(
@@ -301,25 +332,27 @@ void TaintAnalysis::mark_func_sinks(Function &F,
 
   for (auto &inst : instructions(F)) {
     if (auto *call = dyn_cast<CallBase>(&inst)) {
+      auto *called_fn = resolveCalledFunction(call);
+      if (!called_fn)
+        continue;
+      const auto demangled_func_name = demangleIfNeeded(called_fn->getName());
       // call in MKINT_SINKS
       for (const auto &sink_pair : MKINT_SINKS) {
         const char *name = sink_pair.first;
         size_t idx = sink_pair.second;
-        if (auto *called_fn = resolveCalledFunction(call)) {
-          const auto demangled_func_name =
-              DemangleUtils::demangle(called_fn->getName().str());
-          if (demangled_func_name == name) {
+        if (demangled_func_name == name) {
+          if (idx < call->arg_size()) {
             if (auto *arg =
                     dyn_cast_or_null<Instruction>(call->getArgOperand(idx))) {
               MKINT_LOG() << "Taint Analysis -> sink: argument [" << idx
                           << "] of " << demangled_func_name;
               mark_sink(*arg, name);
             }
-            break;
-          } else if (StringRef(demangled_func_name).startswith(name)) {
-            MKINT_WARN() << "Are you missing the sink? [demangled_func_name]: "
-                         << demangled_func_name << "; [name]: " << name;
           }
+          break;
+        } else if (StringRef(demangled_func_name).startswith(name)) {
+          MKINT_WARN() << "Are you missing the sink? [demangled_func_name]: "
+                       << demangled_func_name << "; [name]: " << name;
         }
       }
     }

@@ -95,6 +95,9 @@ BugDetection::mark_err(I &inst) {
   mark_err<err_t>(&inst);
 }
 
+template void BugDetection::mark_err<interr::ARRAY_OOB, Instruction *>(
+    Instruction *inst);
+
 void BugDetection::binary_check(
     BinaryOperator *op, z3::solver &solver,
     const DenseMap<const Value *, std::optional<z3::expr>> &v2sym,
@@ -108,19 +111,57 @@ void BugDetection::binary_check(
   // Skip checks if all checkers are disabled
   if (!CheckIntOverflow && !CheckDivByZero && !CheckBadShift)
     return;
+  if (!op || !op->getType()->isIntegerTy())
+    return;
 
   const auto &lhs_bv = this->v2sym(op->getOperand(0), v2sym, solver);
   const auto &rhs_bv = this->v2sym(op->getOperand(1), v2sym, solver);
   const auto rhs_bits = rhs_bv.get_sort().bv_size();
 
-  // Always check both signed and unsigned overflow regardless of nsw/nuw flags
-  // These flags only promise no overflow in well-defined code, but we're
-  // detecting potential bugs
-  const bool preferSigned = false;
-  const bool preferUnsigned = false;
+  // Respect LLVM nsw/nuw signedness semantics to avoid false positives such as
+  // flagging well-defined signed `-1 + 1` or `1 - 2` (`add/sub nsw`) as
+  // unsigned overflow, or `0x7fffffffu + 1u` (`add nuw`/wrapping unsigned) as
+  // signed overflow.
+  bool checkUnsigned = false;
+  bool checkSigned = false;
+  if (auto *ofop = dyn_cast<OverflowingBinaryOperator>(op)) {
+    const bool nsw = ofop->hasNoSignedWrap();
+    const bool nuw = ofop->hasNoUnsignedWrap();
+    if (nsw && nuw) {
+      checkSigned = true;
+      checkUnsigned = true;
+    } else if (nsw) {
+      checkSigned = true;
+    } else {
+      // nuw-only or unsigned/wrapping arithmetic (Clang emits nsw on signed C
+      // integer arithmetic).
+      checkUnsigned = true;
+    }
+  } else {
+    checkUnsigned = true;
+  }
+  const bool mustDump = static_cast<bool>(dump);
+
+  const auto alreadyRecorded = [&](interr et) -> bool {
+    if (mustDump)
+      return false;
+    switch (et) {
+    case interr::INT_OVERFLOW:
+      return overflow_insts.count(op) > 0;
+    case interr::BAD_SHIFT:
+      return bad_shift_insts.count(op) > 0;
+    case interr::DIV_BY_ZERO:
+      return div_zero_insts.count(op) > 0;
+    default:
+      return false;
+    }
+  };
 
   const auto check =
       [&](interr et, bool is_signed, const z3::expr &bugCond) {
+        if (alreadyRecorded(et)) {
+          return;
+        }
         if (robust_mode && robustFilter && !robustFilter(et)) {
           return;
         }
@@ -131,7 +172,10 @@ void BugDetection::binary_check(
           solver.add(bugCond);
           sat = (solver.check() == z3::sat);
           if (sat) {
-            model = std::make_unique<z3::model>(solver.get_model());
+            const auto cfg = mkint::Logger::getInstance().getConfig();
+            if (!cfg.quiet && cfg.logLevel <= mkint::LogLevel::WARNING) {
+              model = std::make_unique<z3::model>(solver.get_model());
+            }
           }
           solver.pop();
         } else {
@@ -202,11 +246,11 @@ void BugDetection::binary_check(
     if (!CheckIntOverflow)
       break;
 
-    if (!preferSigned) {
+    if (checkUnsigned) {
       check(interr::INT_OVERFLOW, false,
             !z3::bvadd_no_overflow(lhs_bv, rhs_bv, false));
     }
-    if (!preferUnsigned) {
+    if (checkSigned) {
       check(interr::INT_OVERFLOW, true,
             (!z3::bvadd_no_overflow(lhs_bv, rhs_bv, true) ||
              !z3::bvadd_no_underflow(lhs_bv, rhs_bv)));
@@ -217,11 +261,11 @@ void BugDetection::binary_check(
     if (!CheckIntOverflow)
       break;
 
-    if (!preferSigned) {
+    if (checkUnsigned) {
       check(interr::INT_OVERFLOW, false,
             !z3::bvsub_no_underflow(lhs_bv, rhs_bv, false));
     }
-    if (!preferUnsigned) {
+    if (checkSigned) {
       check(interr::INT_OVERFLOW, true,
             (!z3::bvsub_no_underflow(lhs_bv, rhs_bv, true) ||
              !z3::bvsub_no_overflow(lhs_bv, rhs_bv)));
@@ -232,11 +276,11 @@ void BugDetection::binary_check(
     if (!CheckIntOverflow)
       break;
 
-    if (!preferSigned) {
+    if (checkUnsigned) {
       check(interr::INT_OVERFLOW, false,
             !z3::bvmul_no_overflow(lhs_bv, rhs_bv, false));
     }
-    if (!preferUnsigned) {
+    if (checkSigned) {
       check(interr::INT_OVERFLOW, true,
             (!z3::bvmul_no_overflow(lhs_bv, rhs_bv, true) ||
              !z3::bvmul_no_underflow(lhs_bv, rhs_bv)));
@@ -271,8 +315,11 @@ void BugDetection::binary_check(
     if (!CheckBadShift)
       break;
 
+    // Shift amounts in LLVM are interpreted as unsigned values: any shift
+    // amount >= bitwidth (including negative signed values whose high bit is
+    // set) produces poison.
     check(interr::BAD_SHIFT, false,
-          rhs_bv >= solver.ctx().bv_val(rhs_bits, rhs_bits));
+          z3::uge(rhs_bv, solver.ctx().bv_val(rhs_bits, rhs_bits)));
     break;
 
   case Instruction::And:
@@ -281,6 +328,15 @@ void BugDetection::binary_check(
   default:
     break;
   }
+}
+
+uint64_t BugDetection::getStableSymId(const Value *v) {
+  auto it = m_sym_ids.find(v);
+  if (it != m_sym_ids.end())
+    return it->second;
+  const uint64_t id = ++m_next_sym_id;
+  m_sym_ids[v] = id;
+  return id;
 }
 
 z3::expr BugDetection::binary_op_propagate(
@@ -320,8 +376,11 @@ z3::expr BugDetection::binary_op_propagate(
     break;
   }
 
-  MKINT_CHECK_ABORT(false) << "unsupported binary op: " << *op;
-  return lhs; // dummy
+  MKINT_WARN() << "unsupported binary op; using fresh symbol: " << *op;
+  const unsigned bw =
+      op->getType()->isIntegerTy() ? op->getType()->getIntegerBitWidth() : 1;
+  const std::string fallback = "%binop." + std::to_string(getStableSymId(op));
+  return solver.ctx().bv_const(fallback.c_str(), bw);
 }
 
 z3::expr BugDetection::v2sym(
@@ -329,10 +388,10 @@ z3::expr BugDetection::v2sym(
     const DenseMap<const Value *, std::optional<z3::expr>> &v2sym_map,
     z3::solver &solver) {
   auto it = v2sym_map.find(v);
-  if (it != v2sym_map.end())
+  if (it != v2sym_map.end() && it->second.has_value())
     return it->second.value();
 
-  auto *lconst = dyn_cast<ConstantInt>(v);
+  auto *lconst = dyn_cast_or_null<ConstantInt>(v);
   if (lconst != nullptr) {
     return bvValFromAPInt(solver.ctx(), lconst->getValue());
   }
@@ -344,7 +403,7 @@ z3::expr BugDetection::v2sym(
     bw = v->getType()->getIntegerBitWidth();
   }
   const std::string name =
-      "%sym.missing." + std::to_string(reinterpret_cast<uintptr_t>(v));
+      "%sym.missing." + std::to_string(getStableSymId(v));
   MKINT_WARN() << "unsupported value -> symbol mapping; using fresh symbol: "
                << name;
   return solver.ctx().bv_const(name.c_str(), bw);
@@ -370,8 +429,10 @@ z3::expr BugDetection::cast_op_propagate(
     CastInst *op,
     const DenseMap<const Value *, std::optional<z3::expr>> &v2sym,
     z3::solver &solver) {
-  const uint32_t bits = op->getType()->getIntegerBitWidth();
-  const std::string fallback_sym = "%cast." + std::to_string(op->getValueID());
+  const uint32_t bits =
+      op->getType()->isIntegerTy() ? op->getType()->getIntegerBitWidth() : 1;
+  const std::string fallback_sym =
+      "%cast." + std::to_string(getStableSymId(op));
 
   // Guard: source operand must be an integer type for Trunc/ZExt/SExt.
   // Non-integer sources (e.g. FPToSI, PtrToInt, BitCast) are handled by

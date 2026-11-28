@@ -14,6 +14,9 @@ extern llvm::cl::opt<unsigned> FunctionTimeout;
 extern llvm::cl::opt<unsigned> MaxPathsPerFunction;
 extern llvm::cl::opt<unsigned> SummaryTimeout;
 extern llvm::cl::opt<unsigned> SummaryMaxPathsPerFunction;
+// Maximum number of times each loop backedge may be traversed along a single
+// path (under-approximating loop unrolling in Incorrectness Logic style).
+extern llvm::cl::opt<unsigned> MaxLoopUnroll;
 // Analyze every function initialized by range analysis instead of only entry
 // points selected by taint/main discovery.
 extern llvm::cl::opt<bool> AnalyzeAllFunctions;

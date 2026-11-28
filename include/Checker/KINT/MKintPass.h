@@ -9,6 +9,8 @@
 #include "Checker/KINT/SummaryEncoding.h"
 
 #include <chrono>
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <set>
 #include <unordered_set>
@@ -21,6 +23,7 @@
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/Operator.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/Support/Casting.h>
 #include <z3++.h>
@@ -60,6 +63,8 @@ private:
   int m_arrayOOBTypeId;
   int m_deadBranchTypeId;
   void backedge_analysis(const Function &F);
+  void ensureBackedges(const Function &F);
+  void resetSmtState();
   void smt_solving(Module &M);
   void path_solving(BasicBlock *cur, BasicBlock *pred);
   static std::string get_bb_label(const BasicBlock *bb);
@@ -83,6 +88,7 @@ private:
   const Value *getPointerOrigin(const Value *v) const;
   std::optional<z3::expr> getPointerOffset(const Value *v) const;
   void finalizeSummaryContract(FunctionSummary &summary);
+  uint64_t getStableValueId(const Value *v);
 
   // SMT helpers (memory + symbol management)
   void pushSymFrame();
@@ -90,6 +96,21 @@ private:
   void pushObjectFrame();
   void popObjectFrame();
   void setSym(const Value *v, const z3::expr &e);
+  void eraseSym(const Value *v);
+  void setObjBase(const Value *k, const std::optional<z3::expr> &v);
+  void setObjSize(const Value *k, const std::optional<z3::expr> &v);
+  void pushObjList(const Value *v);
+  void setObjMem(const Value *k, const std::optional<z3::expr> &v);
+  void setObjAlias(const Value *k, const Value *v);
+  void setIntAlias(const Value *k, const Value *v);
+  void setPtrOffset(const Value *k, const std::optional<z3::expr> &v);
+  void setIntOffset(const Value *k, const std::optional<z3::expr> &v);
+  void markObjFreed(const Value *k);
+  void markObjSizeKnown(const Value *k);
+  bool tryInitializeGlobalMemory(const GlobalVariable *gv);
+  static bool isKnownReadOnlyLibcCall(StringRef name);
+  static bool isKnownArgMemOnlyLibcCall(StringRef name);
+  static bool isKnownNoReturnLibcCall(StringRef name);
   void pushConstraintFrame();
   void popConstraintFrame();
   void addConstraint(const z3::expr &e);
@@ -102,6 +123,9 @@ private:
   bool isRobustBugEnabled(interr type) const;
   void parseRobustBugFilter(const std::string &csv);
   const Value *getObjectForPtr(const Value *ptr) const;
+  bool ensureGlobalObject(const GlobalVariable *gv);
+  bool ensureAllocaObject(const AllocaInst *ai, BasicBlock *cur,
+                          BasicBlock *pred);
   z3::expr loadBytesFromMem(const z3::expr &mem, const z3::expr &offset,
                             unsigned numBytes, bool littleEndian) const;
   z3::expr storeBytesToMem(const z3::expr &mem, const z3::expr &offset,
@@ -115,14 +139,15 @@ private:
   z3::expr getValueExpr(const Value *v, BasicBlock *cur, BasicBlock *pred);
   z3::expr getIntExpr(const Value *v, BasicBlock *cur, BasicBlock *pred);
   z3::expr getPtrExpr(const Value *v, BasicBlock *cur, BasicBlock *pred);
-  z3::expr gepOffsetBytes(const GetElementPtrInst *gep, BasicBlock *cur,
+  z3::expr gepOffsetBytes(const GEPOperator *gep, BasicBlock *cur,
                           BasicBlock *pred);
   bool maybeCheckOOB(const Instruction *at, const Value *ptrOperand,
                      uint64_t accessBytes, BasicBlock *cur, BasicBlock *pred);
   bool addWellDefinedConstraints(BinaryOperator *op, BasicBlock *cur,
                                  BasicBlock *pred);
   void ensureObject(const Value *obj, const std::string &hintName,
-                    const z3::expr &sizeBytes, bool sizeKnown);
+                    const z3::expr &sizeBytes, bool sizeKnown,
+                    bool hasRealSize = true);
   bool isLittleEndian() const;
   z3::expr conjunctSummaryExprs(const std::vector<z3::expr> &exprs) const;
   z3::expr disjunctSummaryExprs(const std::vector<z3::expr> &exprs) const;
@@ -133,16 +158,39 @@ private:
   MapVector<Function *, std::vector<CallInst *>> m_func2tsrc;
   SetVector<Function *> m_taint_funcs;
   DenseMap<const BasicBlock *, SetVector<const BasicBlock *>> m_backedges;
+  DenseSet<const Function *> m_backedges_computed;
   SetVector<StringRef> m_callback_tsrc_fn;
 
   // Error checking
+  struct BranchFeasibility {
+    bool feasible_true = false;
+    bool feasible_false = false;
+    bool unsat_true = false;
+    bool unsat_false = false;
+  };
+  DenseMap<ICmpInst *, BranchFeasibility> m_branch_feasibility;
   std::map<ICmpInst *, bool> m_impossible_branches;
   std::set<GetElementPtrInst *> m_gep_oob;
+  std::set<const Instruction *> m_oob_insts;
   std::set<Instruction *> m_overflow_insts;
   std::set<Instruction *> m_bad_shift_insts;
   std::set<Instruction *> m_div_zero_insts;
 
-  // SMT solving
+  // Stable deterministic value IDs (avoids raw pointer addresses in Z3 names)
+  DenseMap<const Value *, uint64_t> m_value_ids;
+  uint64_t m_next_value_id = 0;
+  uint64_t m_fresh_sym_counter = 0;
+  bool m_in_main_entry = false;
+  bool m_has_global_ctors = false;
+  bool m_loop_cut_hit = false;
+  unsigned m_max_loop_unroll = 3;
+  DenseMap<std::pair<const BasicBlock *, const BasicBlock *>, unsigned>
+      m_backedge_counts;
+
+  // SMT solving — NOTE: m_ctx MUST be declared BEFORE every member that holds
+  // z3::expr, z3::solver, SmtMemory, or FunctionSummary so Z3 objects are
+  // destroyed before m_ctx.
+  std::unique_ptr<z3::context> m_ctx;
   std::optional<z3::solver> m_solver;
   std::unique_ptr<SmtMemory> m_smt_mem;
   DenseMap<const Value *, std::optional<z3::expr>> m_v2sym;
@@ -184,18 +232,30 @@ private:
   DenseMap<const Value *, std::optional<z3::expr>> m_ptr_offset;
   DenseMap<const Value *, std::optional<z3::expr>> m_int_offset;
   DenseSet<const Value *> m_obj_freed;
-  struct ObjectStateFrame {
-    DenseMap<const Value *, std::optional<z3::expr>> obj_base;
-    DenseMap<const Value *, std::optional<z3::expr>> obj_size;
-    std::vector<const Value *> obj_list;
-    DenseMap<const Value *, std::optional<z3::expr>> obj_mem;
-    DenseMap<const Value *, const Value *> obj_alias;
-    DenseMap<const Value *, const Value *> int_alias;
-    DenseMap<const Value *, std::optional<z3::expr>> ptr_offset;
-    DenseMap<const Value *, std::optional<z3::expr>> int_offset;
-    DenseSet<const Value *> obj_freed;
+  DenseSet<const Value *> m_obj_size_known;
+
+  enum class ObjChangeKind : uint8_t {
+    ObjBase,
+    ObjSize,
+    ObjListPush,
+    ObjMem,
+    ObjAlias,
+    IntAlias,
+    PtrOffset,
+    IntOffset,
+    ObjFreed,
+    ObjSizeKnown,
   };
-  std::vector<ObjectStateFrame> m_object_frames;
+  struct ObjChange {
+    ObjChangeKind kind;
+    const Value *key = nullptr;
+    bool hadOld = false;
+    std::optional<z3::expr> oldExpr;
+    const Value *oldPtr = nullptr;
+  };
+  std::vector<ObjChange> m_obj_change_log;
+  std::vector<size_t> m_obj_change_frames;
+
   struct SymChange {
     const Value *key = nullptr;
     bool hadOld = false;
@@ -203,7 +263,10 @@ private:
   };
   std::vector<SymChange> m_sym_change_log;
   std::vector<size_t> m_sym_change_frames;
-  DenseMap<const Function *, SummaryCacheEntry> m_summary_cache;
+  // Heap-allocated entries guarantee pointer/reference stability across
+  // recursive buildSummary() insertions.
+  DenseMap<const Function *, std::unique_ptr<SummaryCacheEntry>>
+      m_summary_cache;
   Module *m_module = nullptr;
   FunctionSummary *m_building_summary = nullptr;
   bool m_summary_failed = false;

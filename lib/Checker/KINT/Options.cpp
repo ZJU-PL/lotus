@@ -32,6 +32,12 @@ llvm::cl::opt<unsigned> SummaryMaxPathsPerFunction(
                    "interprocedural summary (0 = no limit)"),
     llvm::cl::init(64), llvm::cl::cat(PerformanceCategory),
     llvm::cl::sub(lotus::checker::tooling::kintSubCommand()));
+llvm::cl::opt<unsigned> MaxLoopUnroll(
+    "kint.max-loop-unroll",
+    llvm::cl::desc("Maximum backedge traversals per loop edge along a path "
+                   "(under-approximating loop unrolling; 0 = no unrolling)"),
+    llvm::cl::init(3), llvm::cl::cat(PerformanceCategory),
+    llvm::cl::sub(lotus::checker::tooling::kintSubCommand()));
 llvm::cl::opt<bool> AnalyzeAllFunctions(
     "kint.analyze-all-functions",
     llvm::cl::desc("Run SMT bug checks for all functions initialized by range "

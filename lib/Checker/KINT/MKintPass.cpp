@@ -105,6 +105,43 @@ void MKintPass::backedge_analysis(const Function &F) {
   }
 }
 
+void MKintPass::ensureBackedges(const Function &F) {
+  if (F.isDeclaration() || F.empty())
+    return;
+  if (m_backedges_computed.insert(&F).second) {
+    backedge_analysis(F);
+  }
+}
+
+void MKintPass::resetSmtState() {
+  // Destroy every Z3-holding member BEFORE releasing m_ctx.
+  m_summary_cache.clear();
+  m_building_summary = nullptr;
+  m_obj_change_log.clear();
+  m_obj_change_frames.clear();
+  m_sym_change_log.clear();
+  m_sym_change_frames.clear();
+  m_path_constraints.clear();
+  m_constraint_frames.clear();
+  m_universal_vars.clear();
+  m_universal_var_ids.clear();
+  m_obj_base.clear();
+  m_obj_size.clear();
+  m_obj_list.clear();
+  m_obj_mem.clear();
+  m_obj_alias.clear();
+  m_int_alias.clear();
+  m_ptr_offset.clear();
+  m_int_offset.clear();
+  m_obj_freed.clear();
+  m_obj_size_known.clear();
+  m_v2sym.clear();
+  m_bbpaths.clear();
+  m_smt_mem.reset();
+  m_solver.reset();
+  m_ctx.reset();
+}
+
 PreservedAnalyses MKintPass::run(Module &M, ModuleAnalysisManager &MAM) {
   MKINT_LOG() << "Running MKint pass on module " << M.getName();
 
@@ -118,6 +155,7 @@ PreservedAnalyses MKintPass::run(Module &M, ModuleAnalysisManager &MAM) {
   m_robust_universal_inline_asm = RobustUniversalInlineAsm;
   m_summary_timeout = SummaryTimeout;
   m_summary_path_limit = SummaryMaxPathsPerFunction;
+  m_max_loop_unroll = MaxLoopUnroll;
   parseRobustBugFilter(RobustChecks);
 
   // Print checker configuration
@@ -155,48 +193,40 @@ PreservedAnalyses MKintPass::run(Module &M, ModuleAnalysisManager &MAM) {
     MKINT_WARN() << "Select one or more checkers with --checks=<id[,id...]>";
   }
 
-  // FIXME: This is a hack.
-  auto *ctx = new z3::context; // let it leak.
-  m_solver = z3::solver(*ctx);
+  resetSmtState();
+  m_ctx = std::make_unique<z3::context>();
+  m_solver = z3::solver(*m_ctx);
   m_dl = &M.getDataLayout();
   m_ptr_bits = m_dl->getPointerSizeInBits(0);
-  m_smt_mem = std::make_unique<SmtMemory>(*ctx, m_ptr_bits);
+  if (m_ptr_bits == 0)
+    m_ptr_bits = 64;
+  m_smt_mem = std::make_unique<SmtMemory>(*m_ctx, m_ptr_bits);
   m_module = &M;
   m_func2tsrc.clear();
   m_taint_funcs.clear();
   m_backedges.clear();
+  m_backedges_computed.clear();
   m_callback_tsrc_fn.clear();
+  m_branch_feasibility.clear();
   m_impossible_branches.clear();
   m_gep_oob.clear();
+  m_oob_insts.clear();
   m_overflow_insts.clear();
   m_bad_shift_insts.clear();
   m_div_zero_insts.clear();
+  m_value_ids.clear();
+  m_next_value_id = 0;
+  m_fresh_sym_counter = 0;
+  m_in_main_entry = false;
+  m_has_global_ctors = (M.getGlobalVariable("llvm.global_ctors") != nullptr);
+  m_loop_cut_hit = false;
+  m_backedge_counts.clear();
   if (m_bug_detection) {
     m_bug_detection->clearState();
   }
-  m_obj_base.clear();
-  m_obj_size.clear();
-  m_obj_list.clear();
-  m_obj_mem.clear();
-  m_obj_alias.clear();
-  m_int_alias.clear();
-  m_ptr_offset.clear();
-  m_int_offset.clear();
-  m_obj_freed.clear();
-  m_object_frames.clear();
-  m_bbpaths.clear();
-  m_v2sym.clear();
   m_aa = nullptr;
   m_mssa = nullptr;
   m_fam = nullptr;
-  m_sym_change_log.clear();
-  m_sym_change_frames.clear();
-  m_path_constraints.clear();
-  m_constraint_frames.clear();
-  m_universal_vars.clear();
-  m_universal_var_ids.clear();
-  m_summary_cache.clear();
-  m_building_summary = nullptr;
   m_summary_failed = false;
   m_summary_failure_reason.clear();
 
@@ -214,21 +244,15 @@ PreservedAnalyses MKintPass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   // Also add main function to analysis if it exists and is not already in
   // taint_funcs
-  for (auto &F : M) {
-    if (!F.isDeclaration()) {
-      backedge_analysis(F);
-      // Add main function to analysis if it's not already there
-      if (F.getName() == "main" && !m_taint_funcs.contains(&F)) {
-        m_taint_funcs.insert(&F);
-        MKINT_LOG() << "Added main function to analysis";
-      }
+  if (Function *mainFn = M.getFunction("main")) {
+    if (!mainFn->isDeclaration() && !m_taint_funcs.contains(mainFn)) {
+      m_taint_funcs.insert(mainFn);
+      MKINT_LOG() << "Added main function to analysis";
     }
   }
 
-  MKINT_LOG() << "Module after taint:";
-  MKINT_LOG() << M;
+  MKINT_DEBUG() << "Module after taint has " << M.size() << " functions.";
 
-  const DataLayout &DL = M.getDataLayout();
   auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
   m_fam = &FAM;
 
@@ -237,6 +261,14 @@ PreservedAnalyses MKintPass::run(Module &M, ModuleAnalysisManager &MAM) {
   m_bug_detection->mark_errors(m_impossible_branches, m_gep_oob,
                                m_overflow_insts, m_bad_shift_insts,
                                m_div_zero_insts);
+  if (CheckArrayOOB) {
+    for (const auto *inst : m_oob_insts) {
+      if (inst && !isa<GetElementPtrInst>(inst)) {
+        BugDetection::mark_err<interr::ARRAY_OOB>(
+            const_cast<Instruction *>(inst));
+      }
+    }
+  }
 
   // Report bugs to BugReportMgr (shared pattern)
   reportBugsToManager();
@@ -267,11 +299,15 @@ void MKintPass::smt_solving(Module &M) {
   for (auto *F : m_taint_funcs)
     funcs_to_analyze.insert(F);
 
-  buildSummaries(M);
+  // Summaries are built lazily on demand in applySummary() and cached in
+  // m_summary_cache; avoid eager whole-module summary construction over
+  // uncalled functions.
 
   for (auto *F : funcs_to_analyze) {
-    if (F->isDeclaration())
+    if (F->isDeclaration() || F->empty())
       continue;
+
+    ensureBackedges(*F);
 
     // Reset per-function SMT state (kept inside the solver push/pop).
     m_bbpaths.clear();
@@ -286,13 +322,18 @@ void MKintPass::smt_solving(Module &M) {
     m_ptr_offset.clear();
     m_int_offset.clear();
     m_obj_freed.clear();
-    m_object_frames.clear();
+    m_obj_size_known.clear();
+    m_obj_change_log.clear();
+    m_obj_change_frames.clear();
     m_sym_change_log.clear();
     m_sym_change_frames.clear();
     m_path_constraints.clear();
     m_constraint_frames.clear();
     m_universal_vars.clear();
     m_universal_var_ids.clear();
+    m_branch_feasibility.clear();
+    m_backedge_counts.clear();
+    m_in_main_entry = (F->getName() == "main");
     if (m_bug_detection) {
       m_bug_detection->clearCurrentPath();
     }
@@ -302,6 +343,7 @@ void MKintPass::smt_solving(Module &M) {
     m_paths_explored = 0;
     m_path_limit_hit = false;
     m_timeout_hit = false;
+    m_loop_cut_hit = false;
     m_summary_backedge_hit = false;
     MKINT_LOG() << "Beginning analysis of function " << F->getName();
 
@@ -322,56 +364,21 @@ void MKintPass::smt_solving(Module &M) {
       m_mssa = nullptr;
     }
 
-    // Seed global objects (base address + size) so pointer arithmetic and
-    // loads/stores have a model.
-    for (auto &GV : M.globals()) {
-      const uint64_t bytes = m_dl->getTypeAllocSize(GV.getValueType());
-      ensureObject(&GV, ("global." + GV.getName()).str(),
-                   m_solver.value().ctx().bv_val(bytes, m_ptr_bits),
-                   /*sizeKnown=*/true);
-    }
+    // Globals and stack allocas are materialized lazily on first access
+    // (ensureGlobalObject / ensureAllocaObject), avoiding O(G^2) pairwise
+    // disjointness constraints over untouched module globals.
 
-    // Seed stack objects (allocas) with constant sizes when possible.
+    // Build deduplicated CFG successor list. Include backedges when bounded
+    // loop unrolling is enabled (enforced per edge in path_solving).
     for (auto &bb : F->getBasicBlockList()) {
-      for (auto &inst : bb) {
-        if (auto *ai = dyn_cast<AllocaInst>(&inst)) {
-          const uint64_t elemBytes =
-              m_dl->getTypeAllocSize(ai->getAllocatedType());
-          z3::expr sizeBytesExpr =
-              m_solver.value().ctx().bv_val(elemBytes, m_ptr_bits);
-          bool known = true;
-          if (ai->isArrayAllocation()) {
-            if (auto *ci = dyn_cast<ConstantInt>(ai->getArraySize())) {
-              sizeBytesExpr = m_solver.value().ctx().bv_val(
-                  elemBytes * ci->getZExtValue(), m_ptr_bits);
-            } else {
-              auto countExpr =
-                  getIntExpr(ai->getArraySize(), &F->getEntryBlock(), nullptr);
-              const unsigned cbw = countExpr.get_sort().bv_size();
-              if (cbw < m_ptr_bits)
-                countExpr = z3::zext(countExpr, m_ptr_bits - cbw);
-              else if (cbw > m_ptr_bits)
-                countExpr = countExpr.extract(m_ptr_bits - 1, 0);
-              sizeBytesExpr = countExpr * m_solver.value().ctx().bv_val(
-                                              elemBytes, m_ptr_bits);
-              known = countExpr.is_numeral();
-            }
-          }
-          ensureObject(ai,
-                       ("alloca." + F->getName().str() + "." +
-                        std::to_string((uintptr_t)ai)),
-                       sizeBytesExpr, known);
-        }
-      }
-    }
-
-    // Get a path tree.
-    for (auto &bb : F->getBasicBlockList()) {
-      for (const auto &pred : predecessors(&bb)) {
-        if (m_backedges[&bb].contains(pred) || &bb == pred)
+      for (const auto *pred : predecessors(&bb)) {
+        const bool isBackedge = m_backedges[&bb].contains(pred) || &bb == pred;
+        if (isBackedge && m_max_loop_unroll == 0)
           continue;
 
-        m_bbpaths[pred].push_back(&bb);
+        auto &succs = m_bbpaths[pred];
+        if (std::find(succs.begin(), succs.end(), &bb) == succs.end())
+          succs.push_back(&bb);
       }
     }
 
@@ -392,7 +399,8 @@ void MKintPass::smt_solving(Module &M) {
       } else if (arg.getType()->isPointerTy()) {
         const auto sizev = m_solver.value().ctx().bv_const(
             (arg_name + ".size").c_str(), m_ptr_bits);
-        ensureObject(&arg, arg_name + ".obj", sizev, /*sizeKnown=*/false);
+        ensureObject(&arg, arg_name + ".obj", sizev, /*sizeKnown=*/false,
+                     /*hasRealSize=*/false);
         setSym(&arg, m_obj_base[&arg].value());
       }
     }
@@ -404,6 +412,21 @@ void MKintPass::smt_solving(Module &M) {
     popObjectFrame();
     popConstraintFrame();
     m_solver.value().pop();
+
+    // Dead-branch is a universal property ("no feasible path can take this
+    // branch"): only report it when exploration of F completed without hitting
+    // timeout, path limit, or loop-unroll truncation.
+    if (!m_timeout_hit && !m_path_limit_hit && !m_loop_cut_hit) {
+      for (const auto &kv : m_branch_feasibility) {
+        ICmpInst *cmp = kv.first;
+        const BranchFeasibility &bf = kv.second;
+        if (bf.unsat_true && !bf.feasible_true) {
+          m_impossible_branches[cmp] = true;
+        } else if (bf.unsat_false && !bf.feasible_false) {
+          m_impossible_branches[cmp] = false;
+        }
+      }
+    }
 
     // Report analysis time
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
