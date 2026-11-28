@@ -114,6 +114,20 @@ static bool maybeMarkBytesInitialized(AbductiveDomain &astate,
   return true;
 }
 
+static bool isPackedStructPaddingField(const llvm::StructType *ST,
+                                       unsigned field_idx) {
+  if (!ST || !ST->isPacked() || ST->getNumElements() < 2 ||
+      field_idx >= ST->getNumElements()) {
+    return false;
+  }
+  const auto *AT = llvm::dyn_cast<llvm::ArrayType>(ST->getElementType(field_idx));
+  if (!AT || !AT->getElementType()->isIntegerTy(8)) {
+    return false;
+  }
+  const uint64_t n = AT->getNumElements();
+  return n >= 1 && n <= 7;
+}
+
 static bool maybeMarkStructInitialized(AbductiveDomain &astate,
                                        AbstractValue struct_av,
                                        const llvm::StructType *ST,
@@ -133,7 +147,12 @@ static bool maybeMarkStructInitialized(AbductiveDomain &astate,
       (DL && ST->isSized())
           ? DL->getStructLayout(const_cast<llvm::StructType *>(ST))
           : nullptr;
+  unsigned non_padding_fields = 0;
   for (unsigned i = 0; i < num_elems; ++i) {
+    if (isPackedStructPaddingField(ST, i)) {
+      continue;
+    }
+    ++non_padding_fields;
     uint64_t field_off = SL ? SL->getElementOffset(i) : 0;
     const Address *edge =
         astate.getPostHeap().findEdge(c_struct, Access::field(i, field_off));
@@ -174,6 +193,9 @@ static bool maybeMarkStructInitialized(AbductiveDomain &astate,
       }
       return false;
     }
+  }
+  if (non_padding_fields == 0) {
+    return false;
   }
   astate.getPostAttrs().remove(c_struct, Attribute::Uninitialized);
   astate.markWrittenTo(c_struct, loc);
@@ -661,16 +683,33 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
 
     Address base = *base_opt;
     AbstractValue cur = base.addr;
-    // Reuse base_canon from above (already computed for null/invalid checks)
-    bool base_is_uninitialized =
-        astate.getPostAttrs().has(base_canon, Attribute::Uninitialized);
-
     // Best-effort: DataLayout lets us compute element stride for array
     // indexing. Stride is stored into the access key to avoid collapsing
     // different element types onto the same access path.
     const llvm::DataLayout *DL = (loc && loc->getModule())
                                      ? &loc->getModule()->getDataLayout()
                                      : nullptr;
+
+    // Before propagating `Uninitialized` from an aggregate/array base onto a
+    // freshly materialized GEP child (such as `arr[idx]` after all elements
+    // `arr[0..N-1]` were initialized via constant indices or an out-param
+    // callee), check if the entire aggregate/array is already initialized.
+    if (astate.getPostAttrs().has(base_canon, Attribute::Uninitialized)) {
+      if (const auto *AI =
+              llvm::dyn_cast_or_null<llvm::AllocaInst>(base_canon.getValue())) {
+        if (const auto *AT =
+                llvm::dyn_cast<llvm::ArrayType>(AI->getAllocatedType())) {
+          maybeMarkArrayInitialized(astate, base_canon, AT, DL, loc);
+        } else if (const auto *ST =
+                       llvm::dyn_cast<llvm::StructType>(AI->getAllocatedType())) {
+          maybeMarkStructInitialized(astate, base_canon, ST, DL, loc);
+        }
+      }
+    }
+
+    // Reuse base_canon from above (already computed for null/invalid checks)
+    bool base_is_uninitialized =
+        astate.getPostAttrs().has(base_canon, Attribute::Uninitialized);
 
     // Bounds tracking: use allocation root size + signed offset when known so
     // one-past-the-end pointers (`end = buff + N`) stepped back (`end - 1`)
@@ -1308,19 +1347,35 @@ OperationResult PulseOperations::writeDeref(AbductiveDomain &astate,
   // If writing a struct field via GEP (including nested GEP/bitcast chains
   // such as ABI `coerce.dive`), propagate initialization to enclosing structs
   // whenever all fields of a struct have now been initialized.
+  // NOTE: Do NOT call `stripPointerCasts()` here — LLVM strips zero-offset GEPs
+  // (`gep %S, %x, 0, 0`), which would erase the entire `coerce.dive` chain!
   if (const auto *SI = llvm::dyn_cast_or_null<llvm::StoreInst>(loc)) {
     const llvm::DataLayout *DL =
         SI->getModule() ? &SI->getModule()->getDataLayout() : nullptr;
+    auto stripNonGepCasts = [](const llvm::Value *v) {
+      while (v) {
+        if (const auto *BC = llvm::dyn_cast<llvm::BitCastOperator>(v)) {
+          v = BC->getOperand(0);
+        } else if (const auto *ASC =
+                       llvm::dyn_cast<llvm::AddrSpaceCastOperator>(v)) {
+          v = ASC->getOperand(0);
+        } else {
+          break;
+        }
+      }
+      return v;
+    };
     llvm::SmallVector<const llvm::GEPOperator *, 6> gep_chain;
-    const llvm::Value *cur_p = SI->getPointerOperand()->stripPointerCasts();
+    const llvm::Value *cur_p = stripNonGepCasts(SI->getPointerOperand());
     while (const auto *GEP = llvm::dyn_cast<llvm::GEPOperator>(cur_p)) {
       gep_chain.push_back(GEP);
       if (gep_chain.size() >= 6)
         break;
-      cur_p = GEP->getPointerOperand()->stripPointerCasts();
+      cur_p = stripNonGepCasts(GEP->getPointerOperand());
     }
     if (!gep_chain.empty()) {
-      const llvm::Value *root_v = gep_chain.back()->getPointerOperand()->stripPointerCasts();
+      const llvm::Value *root_v =
+          stripNonGepCasts(gep_chain.back()->getPointerOperand());
       const Address *root_slot = astate.getPostStack().find(root_v);
       if (!root_slot) {
         root_slot = astate.getPostStack().find(gep_chain.back()->getPointerOperand());

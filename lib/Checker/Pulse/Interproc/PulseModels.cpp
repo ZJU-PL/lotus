@@ -230,31 +230,187 @@ PulseModels::PulseModels(PulseChecker &checker)
   registerCppModels();
 }
 
+static std::string stripTemplateArgsAndParams(const std::string &demangled) {
+  std::string out;
+  out.reserve(demangled.size());
+  int angle_depth = 0;
+  for (size_t i = 0; i < demangled.size(); ++i) {
+    char c = demangled[i];
+    if (c == '<') {
+      if (angle_depth == 0 && out.size() >= 8 &&
+          out.compare(out.size() - 8, 8, "operator") == 0) {
+        out.push_back(c);
+      } else {
+        ++angle_depth;
+      }
+    } else if (c == '>' && angle_depth > 0) {
+      --angle_depth;
+    } else if (c == '(' && angle_depth == 0) {
+      if (out.size() >= 8 &&
+          out.compare(out.size() - 8, 8, "operator") == 0) {
+        out.push_back(c);
+      } else {
+        break;
+      }
+    } else if (angle_depth == 0) {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+static bool extractDemangledOwnerAndMethod(const std::string &demangled,
+                                           std::string &out_owner_tail,
+                                           std::string &out_method) {
+  std::string stripped = stripTemplateArgsAndParams(demangled);
+  // Drop leading return type (separated by last space outside operator name).
+  size_t op_pos = stripped.find("operator");
+  size_t space_search_end = (op_pos != std::string::npos) ? op_pos : stripped.size();
+  size_t sp = stripped.rfind(' ', space_search_end);
+  if (sp != std::string::npos && sp + 1 < stripped.size()) {
+    stripped = stripped.substr(sp + 1);
+  }
+  size_t last_sep = stripped.rfind("::");
+  if (last_sep == std::string::npos) {
+    return false;
+  }
+  out_method = stripped.substr(last_sep + 2);
+  std::string owner_path = stripped.substr(0, last_sep);
+  size_t prev_sep = owner_path.rfind("::");
+  out_owner_tail = (prev_sep == std::string::npos)
+                       ? owner_path
+                       : owner_path.substr(prev_sep + 2);
+  return !out_owner_tail.empty() && !out_method.empty();
+}
+
+static bool ownerMatchesExpectedClass(const std::string &owner_tail,
+                                      const std::string &class_substr) {
+  std::string cls = class_substr;
+  while (!cls.empty() && (cls.back() == '<' || cls.back() == ':')) {
+    cls.pop_back();
+  }
+  if (cls.empty()) {
+    return true;
+  }
+  if (owner_tail == cls) {
+    return true;
+  }
+  if (cls == "std") {
+    return owner_tail == "std" || owner_tail == "__1" || owner_tail == "__cxx11";
+  }
+  if (cls == "map") {
+    return owner_tail == "map" || owner_tail == "unordered_map" ||
+           owner_tail == "multimap" || owner_tail == "unordered_multimap";
+  }
+  if (cls == "string_view") {
+    return owner_tail == "string_view" || owner_tail == "basic_string_view";
+  }
+  return false;
+}
+
+static bool methodMatchesExpected(const std::string &method,
+                                  const std::string &method_substr) {
+  std::string m = method_substr;
+  if (m.size() >= 2 && m[0] == ':' && m[1] == ':') {
+    m = m.substr(2);
+  }
+  while (!m.empty() && m.back() == '<') {
+    m.pop_back();
+  }
+  if (m.empty()) {
+    return true;
+  }
+  if (method == m) {
+    return true;
+  }
+  if (m == "string_view" && method == "basic_string_view") {
+    return true;
+  }
+  if (m == "basic_string_view" && method == "string_view") {
+    return true;
+  }
+  return false;
+}
+
+static std::string inferOwnerFromGlob(const std::string &glob) {
+  if (glob.find("unique_ptr") != std::string::npos)
+    return "unique_ptr";
+  if (glob.find("shared_ptr") != std::string::npos)
+    return "shared_ptr";
+  if (glob.find("weak_ptr") != std::string::npos)
+    return "weak_ptr";
+  if (glob.find("vector") != std::string::npos)
+    return "vector";
+  if (glob.find("optional") != std::string::npos)
+    return "optional";
+  if (glob.find("string_view") != std::string::npos)
+    return "string_view";
+  if (glob.find("basic_string") != std::string::npos)
+    return "basic_string";
+  if (glob.find("map") != std::string::npos)
+    return "map";
+  if (glob.find("mutex") != std::string::npos)
+    return "mutex";
+  if (glob.find("lock_guard") != std::string::npos)
+    return "lock_guard";
+  if (glob.find("make_unique") != std::string::npos ||
+      glob.find("make_shared") != std::string::npos ||
+      glob.find("4move") != std::string::npos ||
+      glob.find("7forward") != std::string::npos ||
+      glob.find("3get") != std::string::npos)
+    return "std";
+  return "";
+}
+
 const PulseModel *
-PulseModels::findModelByName(const std::string &funcName) const {
+PulseModels::findModelByName(const std::string &funcName,
+                             bool allow_pattern_models) const {
+  auto it = models_.find(funcName);
+  if (it != models_.end()) {
+    return &it->second;
+  }
+
+  if (!allow_pattern_models) {
+    return nullptr;
+  }
+
+  auto dit = decl_models_.find(funcName);
+  if (dit != decl_models_.end()) {
+    return &dit->second;
+  }
+
   auto cit = name_model_cache_.find(funcName);
   if (cit != name_model_cache_.end()) {
     return cit->second;
   }
 
-  auto it = models_.find(funcName);
-  if (it != models_.end()) {
-    name_model_cache_.emplace(funcName, &it->second);
-    return &it->second;
-  }
-
   const std::string demangled = llvm::demangle(funcName);
-  const std::string demangled_no_args =
-      demangled.substr(0, demangled.find('('));
+  const bool demangle_ok = (demangled != funcName);
+  std::string owner_tail;
+  std::string method_name;
+  const bool parsed_demangled =
+      demangle_ok &&
+      extractDemangledOwnerAndMethod(demangled, owner_tail, method_name);
 
   for (const auto &pm : pattern_models_) {
+    // Prevent template arguments (e.g. `__normal_iterator<unique_ptr<T>*>`)
+    // from falsely matching a model intended for a different owning class.
+    if (parsed_demangled) {
+      std::string expected_cls =
+          !pm.class_substr.empty() ? pm.class_substr : inferOwnerFromGlob(pm.mangled_glob);
+      if (!expected_cls.empty() &&
+          !ownerMatchesExpectedClass(owner_tail, expected_cls)) {
+        continue;
+      }
+    }
     if (!pm.mangled_glob.empty() && globMatch(pm.mangled_glob, funcName)) {
       name_model_cache_.emplace(funcName, &pm.model);
       return &pm.model;
     }
-    if (!pm.class_substr.empty() && !pm.method_substr.empty()) {
-      if (demangled_no_args.find(pm.class_substr) != std::string::npos &&
-          demangled_no_args.find(pm.method_substr) != std::string::npos) {
+    if (parsed_demangled && !pm.class_substr.empty() &&
+        !pm.method_substr.empty()) {
+      if (ownerMatchesExpectedClass(owner_tail, pm.class_substr) &&
+          methodMatchesExpected(method_name, pm.method_substr)) {
         name_model_cache_.emplace(funcName, &pm.model);
         return &pm.model;
       }
@@ -273,7 +429,11 @@ const PulseModel *PulseModels::findModel(const llvm::Function *func) const {
   if (it != fn_model_cache_.end()) {
     return it->second;
   }
-  const PulseModel *found = findModelByName(func->getName().str());
+  // Exact runtime/C/POSIX models (malloc/free/_Znwm/_ZdlPv/etc.) always apply.
+  // High-level C++ STL pattern stubs only apply to external declarations so
+  // defined STL template methods use their exact LLVM IR struct/heap layout.
+  const PulseModel *found =
+      findModelByName(func->getName().str(), func->isDeclaration());
   fn_model_cache_.emplace(func, found);
   return found;
 }
@@ -537,7 +697,57 @@ void PulseModels::registerStandardModels() {
   models_["bzero"] = [this](PulseChecker &, const llvm::CallBase *call,
                             ExecutionDomain &state,
                             const llvm::BasicBlock *pred) {
-    return modelMemset(call, state, pred);
+    return modelBzero(call, state, pred);
+  };
+  decl_models_["bcmp"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                ExecutionDomain &state,
+                                const llvm::BasicBlock *pred) {
+    return modelStrcmp(call, state, pred, true, false, true);
+  };
+  decl_models_["strndup"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred) {
+    return modelStrdup(call, state, pred);
+  };
+  decl_models_["strrchr"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred) {
+    return modelStrchr(call, state, pred);
+  };
+  decl_models_["memchr"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                  ExecutionDomain &state,
+                                  const llvm::BasicBlock *pred) {
+    return modelMemchr(call, state, pred);
+  };
+  decl_models_["vsprintf"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                    ExecutionDomain &state,
+                                    const llvm::BasicBlock *pred) {
+    return modelSprintf(call, state, pred, false);
+  };
+  decl_models_["vsnprintf"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                     ExecutionDomain &state,
+                                     const llvm::BasicBlock *pred) {
+    return modelSprintf(call, state, pred, true);
+  };
+  decl_models_["popen"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                 ExecutionDomain &state,
+                                 const llvm::BasicBlock *pred) {
+    auto checked = modelCheckedPtrCall(call, state, pred, {0, 1}, {}, {});
+    if (checked.states.empty() || !checked.states.front().isContinueProgram()) {
+      return checked;
+    }
+    return modelFileOpen(call, checked.states.front(), pred,
+                         AllocatorKind::FileHandle);
+  };
+  decl_models_["pclose"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                  ExecutionDomain &state,
+                                  const llvm::BasicBlock *pred) {
+    return modelFileClose(call, state, pred);
+  };
+  decl_models_["tmpfile"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred) {
+    return modelFileOpen(call, state, pred, AllocatorKind::FileHandle);
   };
 
   // I/O
@@ -549,6 +759,26 @@ void PulseModels::registerStandardModels() {
   models_["write"] = [this](PulseChecker &, const llvm::CallBase *call,
                             ExecutionDomain &state,
                             const llvm::BasicBlock *pred) {
+    return modelWrite(call, state, pred);
+  };
+  decl_models_["pread"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                 ExecutionDomain &state,
+                                 const llvm::BasicBlock *pred) {
+    return modelRead(call, state, pred);
+  };
+  decl_models_["pwrite"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                  ExecutionDomain &state,
+                                  const llvm::BasicBlock *pred) {
+    return modelWrite(call, state, pred);
+  };
+  decl_models_["recv"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                ExecutionDomain &state,
+                                const llvm::BasicBlock *pred) {
+    return modelRead(call, state, pred);
+  };
+  decl_models_["send"] = [this](PulseChecker &, const llvm::CallBase *call,
+                                ExecutionDomain &state,
+                                const llvm::BasicBlock *pred) {
     return modelWrite(call, state, pred);
   };
   models_["fread"] = [this](PulseChecker &, const llvm::CallBase *call,
@@ -571,6 +801,124 @@ void PulseModels::registerStandardModels() {
                            const llvm::BasicBlock *pred) {
     return modelGets(call, state, pred);
   };
+
+  // Declaration-only standard C/POSIX library models: check pointer validity
+  // and mark output buffers initialized without calling declareUnknownValues().
+  auto regChecked = [&](std::initializer_list<const char *> names,
+                        std::vector<unsigned> read_args,
+                        std::vector<unsigned> nullable_args,
+                        std::vector<unsigned> out_args, int oob_buf = -1,
+                        int oob_len = -1, bool ret_nonnull = false,
+                        int vararg_out_start = -1) {
+    PulseModel m = [this, read_args = std::move(read_args),
+                    nullable_args = std::move(nullable_args),
+                    out_args = std::move(out_args), oob_buf, oob_len,
+                    ret_nonnull, vararg_out_start](
+                       PulseChecker &, const llvm::CallBase *call,
+                       ExecutionDomain &state, const llvm::BasicBlock *pred) {
+      return modelCheckedPtrCall(call, state, pred, read_args, nullable_args,
+                                 out_args, oob_buf, oob_len, ret_nonnull,
+                                 vararg_out_start);
+    };
+    for (const char *name : names) {
+      decl_models_[name] = m;
+    }
+  };
+
+  // Stdio stream & string I/O
+  regChecked({"printf", "vprintf", "puts"}, {0}, {}, {});
+  regChecked({"fprintf", "vfprintf"}, {0, 1}, {}, {});
+  regChecked({"fputs"}, {0, 1}, {}, {});
+  regChecked({"fputc", "putc", "ungetc"}, {1}, {}, {});
+  regChecked({"fgetc", "getc", "feof", "ferror", "clearerr", "fileno", "fseek",
+              "fseeko", "ftell", "ftello", "rewind", "setbuf", "setvbuf"},
+             {0}, {}, {});
+  regChecked({"fflush", "perror"}, {}, {0}, {});
+  regChecked({"fgetpos"}, {0}, {}, {1});
+  regChecked({"freopen"}, {1, 2}, {0}, {});
+  regChecked({"sscanf", "__isoc99_sscanf", "fscanf", "__isoc99_fscanf"},
+             {0, 1}, {}, {}, -1, -1, false, 2);
+  regChecked({"scanf", "__isoc99_scanf"}, {0}, {}, {}, -1, -1, false, 1);
+
+  // String & memory helpers
+  regChecked({"strpbrk", "strspn", "strcspn"}, {0, 1}, {}, {});
+  regChecked({"stpcpy", "stpncpy"}, {1}, {}, {0}, -1, -1, true);
+  regChecked({"strlcpy", "strlcat"}, {1}, {}, {0}, 0, 2);
+  regChecked({"mempcpy"}, {1}, {}, {0}, 0, 2, true);
+  regChecked({"atoi", "atol", "atoll", "atof", "getenv", "access", "unlink",
+              "rmdir", "chdir", "mkdir", "chmod", "chown", "truncate", "remove",
+              "mkfifo"},
+             {0}, {}, {});
+  regChecked({"strtol", "strtoul", "strtoll", "strtoull", "strtod", "strtof",
+              "strtold"},
+             {0}, {1}, {1});
+  regChecked({"rename", "link", "symlink"}, {0, 1}, {}, {});
+  regChecked({"strerror"}, {}, {}, {}, -1, -1, true);
+  regChecked({"strerror_r"}, {}, {}, {1}, 1, 2);
+
+  // POSIX stat/time/path/signal/out-param helpers
+  regChecked({"stat", "lstat", "stat64", "lstat64"}, {0}, {}, {1});
+  regChecked({"fstat", "fstat64"}, {}, {}, {1});
+  regChecked({"__xstat", "__lxstat"}, {1}, {}, {2});
+  regChecked({"__fxstat"}, {}, {}, {2});
+  regChecked({"gettimeofday"}, {}, {0, 1}, {0, 1});
+  regChecked({"clock_gettime"}, {}, {}, {1});
+  regChecked({"time"}, {}, {0}, {0});
+  regChecked({"localtime_r", "gmtime_r"}, {0}, {}, {1});
+  regChecked({"readlink"}, {0}, {}, {1}, 1, 2);
+  regChecked({"getcwd"}, {}, {0}, {0}, 0, 1);
+  regChecked({"sigemptyset", "sigfillset", "sigaddset", "sigdelset"}, {}, {},
+             {0});
+  regChecked({"sigismember"}, {0}, {}, {});
+  regChecked({"sigaction", "sigprocmask"}, {}, {1, 2}, {2});
+  regChecked({"frexp", "modf"}, {}, {}, {1});
+  regChecked({"wait"}, {}, {0}, {0});
+  regChecked({"waitpid"}, {}, {1}, {1});
+  regChecked({"fcntl", "ioctl"}, {}, {}, {}, -1, -1, false, 2);
+
+  // Thread-local errno / ctype table accessors (return non-null derefable cell
+  // without heap-allocation leak tracking).
+  PulseModel locModel = [this](PulseChecker &, const llvm::CallBase *call,
+                               ExecutionDomain &state,
+                               const llvm::BasicBlock *pred) {
+    return modelErrnoOrCtypeLoc(call, state, pred);
+  };
+  for (const char *name : {"__errno_location", "__error", "__ctype_b_loc",
+                           "__ctype_tolower_loc", "__ctype_toupper_loc"}) {
+    decl_models_[name] = locModel;
+  }
+
+  // Pure scalar / ctype / math / OS-query functions with no heap side effects.
+  PulseModel pureModel = [this](PulseChecker &, const llvm::CallBase *call,
+                                ExecutionDomain &state,
+                                const llvm::BasicBlock *pred) {
+    return modelPureFunction(call, state, pred);
+  };
+  for (const char *name :
+       {"putchar",    "getchar",  "tolower",  "toupper",  "isalpha",  "isdigit",
+        "isspace",    "isalnum",  "isxdigit", "isprint",  "iscntrl",  "ispunct",
+        "islower",    "isupper",  "isgraph",  "isblank",  "isascii",  "toascii",
+        "abs",        "labs",     "llabs",    "imaxabs",  "sin",      "cos",
+        "tan",        "asin",     "acos",     "atan",     "atan2",    "sinh",
+        "cosh",       "tanh",     "asinh",    "acosh",    "atanh",    "exp",
+        "exp2",       "expm1",    "log",      "log2",     "log10",    "log1p",
+        "pow",        "sqrt",     "cbrt",     "hypot",    "ceil",     "floor",
+        "trunc",      "round",    "lround",   "llround",  "rint",     "lrint",
+        "llrint",     "nearbyint","fabs",     "fmod",     "remainder","copysign",
+        "fmax",       "fmin",     "fdim",     "fma",      "ldexp",    "scalbn",
+        "ilogb",      "logb",     "sinf",     "cosf",     "tanf",     "asinf",
+        "acosf",      "atanf",    "atan2f",   "expf",     "logf",     "log10f",
+        "powf",       "sqrtf",    "ceilf",    "floorf",   "fabsf",    "fmodf",
+        "roundf",     "truncf",   "isnan",    "isinf",    "isfinite", "__isnan",
+        "__isinf",    "__finite", "isatty",   "getpid",   "getppid",  "getuid",
+        "geteuid",    "getgid",   "getegid",  "sysconf",  "pathconf", "fpathconf",
+        "umask",      "lseek",    "lseek64",  "ftruncate","ftruncate64",
+        "fsync",      "fdatasync","clock",    "difftime", "sleep",    "usleep",
+        "alarm",      "rand",     "srand",    "random",   "srandom",  "drand48",
+        "srand48",    "getpwuid", "getgrgid", "getpwnam", "getgrnam", "localtime",
+        "gmtime",     "ctime",    "asctime",  "mktime",   "fork",     "vfork"}) {
+    decl_models_[name] = pureModel;
+  }
 
   // Locking
   models_["pthread_mutex_lock"] =
@@ -617,6 +965,51 @@ void PulseModels::registerCppModels() {
   }
   for (const char *name : {"_ZdaPv", "_ZdaPvm", "_ZdaPvj"}) {
     models_[name] = cppDeleteArray;
+  }
+
+  // Standard C++ libstdc++/libc++ exception-throwing runtime helpers
+  PulseModel cppThrow = [this](PulseChecker &, const llvm::CallBase *call,
+                               ExecutionDomain &state,
+                               const llvm::BasicBlock *pred) {
+    return modelCxaThrow(call, state, pred);
+  };
+  for (const char *name : {"__cxa_rethrow", "_ZSt17__throw_bad_allocv",
+                           "_ZSt28__throw_bad_array_new_lengthv",
+                           "_ZSt20__throw_length_errorPKc",
+                           "_ZSt19__throw_logic_errorPKc",
+                           "_ZSt20__throw_out_of_rangePKc",
+                           "_ZSt24__throw_out_of_range_fmtPKcz",
+                           "_ZSt16__throw_bad_castv",
+                           "_ZSt25__throw_bad_function_callv"}) {
+    models_[name] = cppThrow;
+  }
+
+  // C++ static-local guard, trivial allocator, and RB-tree traversal runtime
+  // helpers (declaration-only).
+  decl_models_["__cxa_guard_acquire"] =
+      [this](PulseChecker &, const llvm::CallBase *call, ExecutionDomain &state,
+             const llvm::BasicBlock *pred) {
+        return modelCheckedPtrCall(call, state, pred, {}, {}, {0});
+      };
+  for (const char *name : {"__cxa_guard_release", "__cxa_guard_abort",
+                           "_ZNSaIcEC1Ev", "_ZNSaIcEC2Ev", "_ZNSaIcED1Ev",
+                           "_ZNSaIcED2Ev"}) {
+    decl_models_[name] = [this](PulseChecker &, const llvm::CallBase *call,
+                                ExecutionDomain &state,
+                                const llvm::BasicBlock *pred) {
+      return modelCheckedPtrCall(call, state, pred, {}, {}, {0});
+    };
+  }
+  for (const char *name :
+       {"_ZSt18_Rb_tree_incrementPSt18_Rb_tree_node_base",
+        "_ZSt18_Rb_tree_incrementPKSt18_Rb_tree_node_base",
+        "_ZSt18_Rb_tree_decrementPSt18_Rb_tree_node_base",
+        "_ZSt18_Rb_tree_decrementPKSt18_Rb_tree_node_base"}) {
+    decl_models_[name] = [this](PulseChecker &, const llvm::CallBase *call,
+                                ExecutionDomain &state,
+                                const llvm::BasicBlock *pred) {
+      return modelCheckedPtrCall(call, state, pred, {0}, {}, {}, -1, -1, true);
+    };
   }
 
   // std::move / std::forward (identity pass-through)
@@ -777,13 +1170,13 @@ void PulseModels::registerCppModels() {
          return modelStdUniquePtrMove(call, state, pred);
        }});
   pattern_models_.push_back(
-      {"", "", "_ZN*unique_ptr*C1EO*",
+      {"", "", "_ZN*unique_ptr*C1*EO*",
        [this](PulseChecker &, const llvm::CallBase *call,
               ExecutionDomain &state, const llvm::BasicBlock *pred) {
          return modelStdUniquePtrMove(call, state, pred);
        }});
   pattern_models_.push_back(
-      {"", "", "_ZN*unique_ptr*C2EO*",
+      {"", "", "_ZN*unique_ptr*C2*EO*",
        [this](PulseChecker &, const llvm::CallBase *call,
               ExecutionDomain &state, const llvm::BasicBlock *pred) {
          return modelStdUniquePtrMove(call, state, pred);
@@ -1249,7 +1642,13 @@ ModelResult PulseModels::modelPosixMemalign(const llvm::CallBase *call,
     if (auto sz = getConstUInt64(call->getArgOperand(2))) {
       astate->setAllocationSize(mem, *sz);
     }
-    ops_.writeDeref(*astate, *out_opt, Address(mem), call);
+    OperationResult wres = ops_.writeDeref(*astate, *out_opt, Address(mem), call);
+    if (wres != OperationResult::Success) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, wres, *out_opt, call,
+          "Invalid output pointer in posix_memalign")});
+    }
+    markBufferInitialized(*astate, out_opt->addr, call);
   }
   AbstractValue zero = factory_.createFresh(call);
   (void)astate->getPathFormula().addBounds(zero, 0, 0);
@@ -1424,6 +1823,88 @@ ModelResult PulseModels::modelRealloc(const llvm::CallBase *call,
   auto ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   auto size_opt = getConstUInt64(call->getArgOperand(1));
 
+  if (ptr_opt) {
+    AbstractValue canon_ptr = astate->getCanonical(ptr_opt->addr);
+    const bool is_null =
+        astate->getPathFormula().isNull(canon_ptr) ||
+        (astate->getPostAttrs().has(canon_ptr, Attribute::Null) &&
+         !astate->getPathFormula().isNonNull(canon_ptr));
+    if (!is_null) {
+      if (astate->getPostAttrs().has(canon_ptr, Attribute::Stack) ||
+          astate->getPostAttrs().has(canon_ptr, Attribute::Global)) {
+        Trace trace = Trace::fromValueHistory(ptr_opt->history);
+        trace.addEvent(call, "Invalid realloc: non-heap pointer");
+        if (LatentIssue::isManifest(OperationResult::InvalidAccess, *astate,
+                                    canon_ptr)) {
+          std::string msg = "Invalid realloc of ";
+          msg += astate->getPostAttrs().has(canon_ptr, Attribute::Stack)
+                     ? "stack"
+                     : "global";
+          msg += " memory";
+          auto diag = std::make_unique<InvalidFree>(
+              call, canon_ptr, msg,
+              "Only pass heap pointers (or NULL) to realloc.",
+              std::move(trace));
+          DiagnosticManager::getInstance().report(std::move(diag));
+          return ModelResult::success({ExecutionDomain::abortProgram(
+              std::make_unique<AbductiveDomain>(astate->clone()),
+              OperationResult::InvalidAccess, Trace())});
+        }
+        return ModelResult::success({ExecutionDomain::latentAbortProgram(
+            std::make_unique<AbductiveDomain>(astate->clone()), nullptr,
+            OperationResult::InvalidAccess, std::move(trace))});
+      }
+
+      AbstractValue alloc_root = astate->getAllocationRoot(canon_ptr);
+      if (!(alloc_root == canon_ptr) &&
+          astate->getAllocationOffset(canon_ptr).value_or(1) != 0 &&
+          (astate->getPostAttrs().has(alloc_root, Attribute::Allocated) ||
+           astate->getAllocationInfo(alloc_root).has_value())) {
+        Trace trace = Trace::fromValueHistory(ptr_opt->history);
+        trace.addEvent(
+            call, "Invalid realloc: interior pointer not at start of allocation");
+        if (LatentIssue::isManifest(OperationResult::InvalidAccess, *astate,
+                                    canon_ptr)) {
+          auto diag = std::make_unique<InvalidFree>(
+              call, canon_ptr, "Invalid realloc of interior pointer",
+              "Pass the original pointer returned by malloc/realloc.",
+              std::move(trace));
+          DiagnosticManager::getInstance().report(std::move(diag));
+          return ModelResult::success({ExecutionDomain::abortProgram(
+              std::make_unique<AbductiveDomain>(astate->clone()),
+              OperationResult::InvalidAccess, Trace())});
+        }
+        return ModelResult::success({ExecutionDomain::latentAbortProgram(
+            std::make_unique<AbductiveDomain>(astate->clone()), nullptr,
+            OperationResult::InvalidAccess, std::move(trace))});
+      }
+
+      if (astate->getPostAttrs().has(canon_ptr, Attribute::Invalid)) {
+        Trace trace = Trace::fromValueHistory(ptr_opt->history);
+        trace.addEvent(call, "Use after free: realloc of already freed pointer");
+        if (auto inv_info = astate->getInvalidationInfo(canon_ptr)) {
+          trace.addEvent(inv_info->second, "Freed here");
+        }
+        if (LatentIssue::isManifest(OperationResult::UseAfterFree, *astate,
+                                    canon_ptr)) {
+          auto diag = std::make_unique<AccessToInvalidAddress>(
+              call, "Use after free in realloc",
+              "Passing already freed memory to realloc",
+              "Ensure memory is not freed before calling realloc",
+              IssueType::UseAfterFree, std::move(trace),
+              InvalidationKind::Realloc);
+          DiagnosticManager::getInstance().report(std::move(diag));
+          return ModelResult::success({ExecutionDomain::abortProgram(
+              std::make_unique<AbductiveDomain>(astate->clone()),
+              OperationResult::UseAfterFree, Trace())});
+        }
+        return ModelResult::success({ExecutionDomain::latentAbortProgram(
+            std::make_unique<AbductiveDomain>(astate->clone()), nullptr,
+            OperationResult::UseAfterFree, std::move(trace))});
+      }
+    }
+  }
+
   // realloc(ptr, 0) frees ptr and returns NULL.
   if (size_opt && *size_opt == 0) {
     if (ptr_opt) {
@@ -1513,6 +1994,8 @@ ModelResult PulseModels::modelFileClose(const llvm::CallBase *call,
     return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
   auto ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   if (!ptr_opt)
     return ModelResult::success(std::move(state));
@@ -1523,8 +2006,23 @@ ModelResult PulseModels::modelFileClose(const llvm::CallBase *call,
         checker_, *astate, OperationResult::UseAfterFree, *ptr_opt, call,
         "Closing already closed resource")});
   }
+  if (call->getArgOperand(0)->getType()->isPointerTy() &&
+      (astate->getPathFormula().isNull(canon) ||
+       (astate->getPostAttrs().has(canon, Attribute::Null) &&
+        !astate->getPathFormula().isNonNull(canon)))) {
+    return ModelResult::success({reportModelAccessError(
+        checker_, *astate, OperationResult::NullDereference, *ptr_opt, call,
+        "Closing null file/directory handle")});
+  }
 
   ops_.invalidate(*astate, *ptr_opt, call, InvalidationKind::FClose);
+  if (call->getType()->isIntegerTy()) {
+    AbstractValue ret_val = factory_.createFresh(call);
+    astate->getPathFormula().addIntegerConstraint(ret_val);
+    astate->getPathFormula().setBitWidth(ret_val,
+                                         call->getType()->getIntegerBitWidth());
+    astate->getPostStack().add(call, Address(ret_val));
+  }
   return ModelResult::success(std::move(state));
 }
 
@@ -1611,6 +2109,16 @@ ModelResult PulseModels::modelStdVectorPushBack(const llvm::CallBase *call,
   AbstractValue new_buf = factory_.createFresh(call);
   ops_.allocate(*astate, new_buf, call, AllocatorKind::Stack);
   astate->getPostHeap().addEdge(this_av, data_field, Address(new_buf));
+  if (call->arg_size() >= 2 && call->getArgOperand(1)->getType()->isPointerTy()) {
+    if (auto elem_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred)) {
+      AbstractValue elem_c = astate->getCanonical(elem_opt->addr);
+      astate->getPostHeap().addEdge(new_buf, Access(AccessKind::Dereference),
+                                    *elem_opt);
+      if (Address *sp = readSmartPtrSlot(*astate, elem_c)) {
+        astate->getPostHeap().addEdge(new_buf, Access::field(1, 0), *sp);
+      }
+    }
+  }
   astate->markWrittenTo(this_av, call);
   return ModelResult::success(std::move(state));
 }
@@ -2422,9 +2930,20 @@ ModelResult PulseModels::modelStrcmp(const llvm::CallBase *call,
 
   auto s0_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   auto s1_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
+  if (is_memcmp && call->arg_size() >= 3) {
+    if (s0_opt) {
+      checkLengthAgainstAllocation(*astate, *s0_opt, call->getArgOperand(2),
+                                   call, "memcmp reads beyond first buffer");
+    }
+    if (s1_opt) {
+      checkLengthAgainstAllocation(*astate, *s1_opt, call->getArgOperand(2),
+                                   call, "memcmp reads beyond second buffer");
+    }
+  }
   if (s0_opt) {
     auto r0 = ops_.readDeref(*astate, *s0_opt, call);
-    if (r0.first != OperationResult::Success) {
+    if (r0.first != OperationResult::Success &&
+        (!is_memcmp || r0.first != OperationResult::UninitializedRead)) {
       return ModelResult::success({reportModelAccessError(
           checker_, *astate, r0.first, *s0_opt, call,
           "Invalid first pointer in string/memory compare")});
@@ -2432,7 +2951,8 @@ ModelResult PulseModels::modelStrcmp(const llvm::CallBase *call,
   }
   if (s1_opt) {
     auto r1 = ops_.readDeref(*astate, *s1_opt, call);
-    if (r1.first != OperationResult::Success) {
+    if (r1.first != OperationResult::Success &&
+        (!is_memcmp || r1.first != OperationResult::UninitializedRead)) {
       return ModelResult::success({reportModelAccessError(
           checker_, *astate, r1.first, *s1_opt, call,
           "Invalid second pointer in string/memory compare")});
@@ -2536,6 +3056,16 @@ ModelResult PulseModels::modelMemset(const llvm::CallBase *call,
     return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+  auto len_const = getConstUInt64(call->getArgOperand(2));
+  if (len_const && *len_const == 0) {
+    if (auto dest_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred)) {
+      astate->getPostStack().add(call, *dest_opt);
+    }
+    return ModelResult::success(std::move(state));
+  }
+  const bool len_nonzero = (len_const && *len_const > 0);
   auto dest_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   auto value_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
 
@@ -2543,11 +3073,269 @@ ModelResult PulseModels::modelMemset(const llvm::CallBase *call,
     checkLengthAgainstAllocation(*astate, *dest_opt, call->getArgOperand(2),
                                  call,
                                  "memset writes beyond destination buffer");
-    ops_.writeDeref(*astate, *dest_opt, *value_opt, call);
+    OperationResult wres = ops_.writeDeref(*astate, *dest_opt, *value_opt, call);
+    if (len_nonzero && (wres == OperationResult::NullDereference ||
+                        wres == OperationResult::UseAfterFree ||
+                        wres == OperationResult::OutOfBounds)) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, wres, *dest_opt, call,
+          "Invalid destination pointer in memset")});
+    }
     markBufferInitialized(*astate, dest_opt->addr, call);
     astate->getPostStack().add(call, *dest_opt);
   }
 
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelBzero(const llvm::CallBase *call,
+                                    ExecutionDomain &state,
+                                    const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 2)
+    return ModelResult::success(std::move(state));
+
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+  auto len_const = getConstUInt64(call->getArgOperand(1));
+  if (len_const && *len_const == 0) {
+    return ModelResult::success(std::move(state));
+  }
+  const bool len_nonzero = (len_const && *len_const > 0);
+  auto dest_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  if (dest_opt) {
+    checkLengthAgainstAllocation(*astate, *dest_opt, call->getArgOperand(1),
+                                 call, "bzero writes beyond destination buffer");
+    AbstractValue zero = factory_.createFresh(call);
+    astate->getPathFormula().addIntegerConstraint(zero);
+    (void)astate->getPathFormula().addBounds(zero, 0, 0);
+    OperationResult wres =
+        ops_.writeDeref(*astate, *dest_opt, Address(zero), call);
+    if (len_nonzero && (wres == OperationResult::NullDereference ||
+                        wres == OperationResult::UseAfterFree ||
+                        wres == OperationResult::OutOfBounds)) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, wres, *dest_opt, call,
+          "Invalid destination pointer in bzero")});
+    }
+    markBufferInitialized(*astate, dest_opt->addr, call);
+  }
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelMemchr(const llvm::CallBase *call,
+                                     ExecutionDomain &state,
+                                     const llvm::BasicBlock *pred) {
+  if (call->arg_size() < 3)
+    return ModelResult::success(std::move(state));
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+
+  auto len_const = getConstUInt64(call->getArgOperand(2));
+  if (len_const && *len_const == 0) {
+    AbstractValue null_val = factory_.createFresh(call);
+    astate->getPostAttrs().add(null_val, Attribute::Null);
+    (void)astate->getPathFormula().addNull(null_val);
+    astate->getPostStack().add(call, Address(null_val));
+    return ModelResult::success(std::move(state));
+  }
+  auto ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
+  if (ptr_opt) {
+    checkLengthAgainstAllocation(*astate, *ptr_opt, call->getArgOperand(2),
+                                 call, "memchr reads beyond source buffer");
+    if (!len_const || *len_const > 0) {
+      OperationResult r = ops_.checkAddrAccess(*astate, *ptr_opt, call);
+      if (r == OperationResult::NullDereference ||
+          r == OperationResult::UseAfterFree ||
+          r == OperationResult::OutOfBounds) {
+        return ModelResult::success({reportModelAccessError(
+            checker_, *astate, r, *ptr_opt, call,
+            "Invalid pointer in memchr")});
+      }
+    }
+  }
+  AbstractValue ret_val = factory_.createFresh(call);
+  astate->getPostStack().add(call, Address(ret_val));
+  if (ptr_opt) {
+    TaintOperations::propagate(*astate, astate->getCanonical(ptr_opt->addr),
+                               ret_val, call);
+  }
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelCheckedPtrCall(
+    const llvm::CallBase *call, ExecutionDomain &state,
+    const llvm::BasicBlock *pred, const std::vector<unsigned> &read_ptr_args,
+    const std::vector<unsigned> &nullable_ptr_args,
+    const std::vector<unsigned> &out_ptr_args, int oob_buf_arg, int oob_len_arg,
+    bool returns_nonnull_ptr, int vararg_out_start) {
+  auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+
+  if (oob_buf_arg >= 0 && oob_len_arg >= 0 &&
+      static_cast<unsigned>(oob_buf_arg) < call->arg_size() &&
+      static_cast<unsigned>(oob_len_arg) < call->arg_size()) {
+    if (auto buf_opt = ops_.eval(*astate, call->getArgOperand(oob_buf_arg),
+                                 call, pred)) {
+      AbstractValue bc = astate->getCanonical(buf_opt->addr);
+      const bool is_null =
+          astate->getPathFormula().isNull(bc) ||
+          (astate->getPostAttrs().has(bc, Attribute::Null) &&
+           !astate->getPathFormula().isNonNull(bc));
+      if (!is_null) {
+        checkLengthAgainstAllocation(*astate, *buf_opt,
+                                     call->getArgOperand(oob_len_arg), call,
+                                     "Library call accesses beyond buffer");
+      }
+    }
+  }
+
+  for (unsigned idx : read_ptr_args) {
+    if (idx >= call->arg_size())
+      continue;
+    if (!call->getArgOperand(idx)->getType()->isPointerTy())
+      continue;
+    auto arg_opt = ops_.eval(*astate, call->getArgOperand(idx), call, pred);
+    if (!arg_opt)
+      continue;
+    OperationResult r = ops_.checkAddrAccess(*astate, *arg_opt, call);
+    if (r == OperationResult::NullDereference ||
+        r == OperationResult::UseAfterFree ||
+        r == OperationResult::OutOfBounds) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, r, *arg_opt, call,
+          "Invalid pointer argument in library call")});
+    }
+  }
+
+  for (unsigned idx : nullable_ptr_args) {
+    if (idx >= call->arg_size())
+      continue;
+    if (!call->getArgOperand(idx)->getType()->isPointerTy())
+      continue;
+    auto arg_opt = ops_.eval(*astate, call->getArgOperand(idx), call, pred);
+    if (!arg_opt)
+      continue;
+    AbstractValue c = astate->getCanonical(arg_opt->addr);
+    if (astate->getPostAttrs().has(c, Attribute::Invalid)) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, OperationResult::UseAfterFree, *arg_opt, call,
+          "Use of freed pointer in library call")});
+    }
+  }
+
+  auto initOutArg = [&](unsigned idx) -> std::optional<ExecutionDomain> {
+    if (idx >= call->arg_size())
+      return std::nullopt;
+    const llvm::Value *arg = call->getArgOperand(idx);
+    if (!arg->getType()->isPointerTy())
+      return std::nullopt;
+    const bool is_nullable =
+        std::find(nullable_ptr_args.begin(), nullable_ptr_args.end(), idx) !=
+        nullable_ptr_args.end();
+    auto arg_opt = ops_.eval(*astate, arg, call, pred);
+    if (!arg_opt)
+      return std::nullopt;
+    AbstractValue c = astate->getCanonical(arg_opt->addr);
+    const bool is_null =
+        astate->getPathFormula().isNull(c) ||
+        (astate->getPostAttrs().has(c, Attribute::Null) &&
+         !astate->getPathFormula().isNonNull(c));
+    if (is_null) {
+      if (is_nullable)
+        return std::nullopt;
+      return reportModelAccessError(
+          checker_, *astate, OperationResult::NullDereference, *arg_opt, call,
+          "Null output pointer in library call");
+    }
+    if (astate->getPostAttrs().has(c, Attribute::Invalid)) {
+      return reportModelAccessError(
+          checker_, *astate, OperationResult::UseAfterFree, *arg_opt, call,
+          "Invalid output pointer in library call");
+    }
+    AbstractValue fresh = factory_.createFresh(call);
+    (void)ops_.writeDeref(*astate, *arg_opt, Address(fresh), call);
+    markBufferInitialized(*astate, c, call);
+    return std::nullopt;
+  };
+
+  for (unsigned idx : out_ptr_args) {
+    if (auto err = initOutArg(idx)) {
+      return ModelResult::success({std::move(*err)});
+    }
+  }
+  if (vararg_out_start >= 0) {
+    for (unsigned idx = static_cast<unsigned>(vararg_out_start);
+         idx < call->arg_size(); ++idx) {
+      const llvm::Value *arg = call->getArgOperand(idx);
+      if (!arg->getType()->isPointerTy())
+        continue;
+      if (auto arg_opt = ops_.eval(*astate, arg, call, pred)) {
+        AbstractValue c = astate->getCanonical(arg_opt->addr);
+        if (!astate->getPathFormula().isNull(c) &&
+            !astate->getPostAttrs().has(c, Attribute::Null) &&
+            !astate->getPostAttrs().has(c, Attribute::Invalid)) {
+          AbstractValue fresh = factory_.createFresh(call);
+          (void)ops_.writeDeref(*astate, *arg_opt, Address(fresh), call);
+          markBufferInitialized(*astate, c, call);
+        }
+      }
+    }
+  }
+
+  if (!call->getType()->isVoidTy()) {
+    AbstractValue ret_val = factory_.createFresh(call);
+    if (call->getType()->isIntegerTy()) {
+      astate->getPathFormula().addIntegerConstraint(ret_val);
+      astate->getPathFormula().setBitWidth(
+          ret_val, call->getType()->getIntegerBitWidth());
+    } else if (call->getType()->isPointerTy() && returns_nonnull_ptr) {
+      astate->addNonNull(ret_val);
+    }
+    astate->getPostStack().add(call, Address(ret_val));
+  }
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelErrnoOrCtypeLoc(const llvm::CallBase *call,
+                                              ExecutionDomain &state,
+                                              const llvm::BasicBlock *pred) {
+  (void)pred;
+  auto *astate = state.getAstate();
+  if (!astate || call->getType()->isVoidTy())
+    return ModelResult::success(std::move(state));
+
+  AbstractValue ptr_val = factory_.createFresh(call);
+  AbstractValue cell_val = factory_.createFresh(call);
+  astate->addNonNull(ptr_val);
+  astate->getPostHeap().addEdge(ptr_val, Access(AccessKind::Dereference),
+                                Address(cell_val));
+  astate->getPostStack().add(call, Address(ptr_val));
+  return ModelResult::success(std::move(state));
+}
+
+ModelResult PulseModels::modelPureFunction(const llvm::CallBase *call,
+                                           ExecutionDomain &state,
+                                           const llvm::BasicBlock *pred) {
+  auto *astate = state.getAstate();
+  if (!astate || call->getType()->isVoidTy())
+    return ModelResult::success(std::move(state));
+
+  AbstractValue ret_val = factory_.createFresh(call);
+  if (call->getType()->isIntegerTy()) {
+    astate->getPathFormula().addIntegerConstraint(ret_val);
+    astate->getPathFormula().setBitWidth(ret_val,
+                                         call->getType()->getIntegerBitWidth());
+  }
+  for (unsigned i = 0; i < call->arg_size(); ++i) {
+    if (auto arg_opt = ops_.eval(*astate, call->getArgOperand(i), call, pred)) {
+      TaintOperations::propagate(*astate, astate->getCanonical(arg_opt->addr),
+                                 ret_val, call);
+    }
+  }
+  astate->getPostStack().add(call, Address(ret_val));
   return ModelResult::success(std::move(state));
 }
 
@@ -2558,18 +3346,44 @@ ModelResult PulseModels::modelRead(const llvm::CallBase *call,
     return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+  if (auto fd_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred)) {
+    AbstractValue fd_c = astate->getCanonical(fd_opt->addr);
+    if (astate->getPostAttrs().has(fd_c, Attribute::Invalid)) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, OperationResult::UseAfterFree, *fd_opt, call,
+          "Reading from already closed file descriptor")});
+    }
+  }
   auto buf_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
+  auto len_const = getConstUInt64(call->getArgOperand(2));
+  const bool len_nonzero = (!len_const || *len_const > 0);
 
   if (buf_opt) {
     checkLengthAgainstAllocation(*astate, *buf_opt, call->getArgOperand(2),
                                  call, "read writes beyond destination buffer");
-    AbstractValue dummy = factory_.createFresh(call);
-    ops_.writeDeref(*astate, *buf_opt, Address(dummy), call);
-    markBufferInitialized(*astate, buf_opt->addr, call);
-
-    AbstractValue ret_val = factory_.createFresh(call);
-    astate->getPostStack().add(call, Address(ret_val));
+    if (len_nonzero) {
+      AbstractValue dummy = factory_.createFresh(call);
+      OperationResult wres =
+          ops_.writeDeref(*astate, *buf_opt, Address(dummy), call);
+      if (wres == OperationResult::NullDereference ||
+          wres == OperationResult::UseAfterFree ||
+          wres == OperationResult::OutOfBounds) {
+        return ModelResult::success({reportModelAccessError(
+            checker_, *astate, wres, *buf_opt, call,
+            "Invalid destination buffer in read")});
+      }
+      markBufferInitialized(*astate, buf_opt->addr, call);
+    }
   }
+  AbstractValue ret_val = factory_.createFresh(call);
+  if (call->getType()->isIntegerTy()) {
+    astate->getPathFormula().addIntegerConstraint(ret_val);
+    astate->getPathFormula().setBitWidth(ret_val,
+                                         call->getType()->getIntegerBitWidth());
+  }
+  astate->getPostStack().add(call, Address(ret_val));
 
   return ModelResult::success(std::move(state));
 }
@@ -2581,17 +3395,41 @@ ModelResult PulseModels::modelWrite(const llvm::CallBase *call,
     return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
+  if (auto fd_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred)) {
+    AbstractValue fd_c = astate->getCanonical(fd_opt->addr);
+    if (astate->getPostAttrs().has(fd_c, Attribute::Invalid)) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, OperationResult::UseAfterFree, *fd_opt, call,
+          "Writing to already closed file descriptor")});
+    }
+  }
   auto buf_opt = ops_.eval(*astate, call->getArgOperand(1), call, pred);
+  auto len_const = getConstUInt64(call->getArgOperand(2));
+  const bool len_nonzero = (!len_const || *len_const > 0);
 
   if (buf_opt) {
     checkLengthAgainstAllocation(*astate, *buf_opt, call->getArgOperand(2),
                                  call, "write reads beyond source buffer");
-    auto read_res = ops_.readDeref(*astate, *buf_opt, call);
-    if (read_res.first == OperationResult::Success) {
-      AbstractValue ret_val = factory_.createFresh(call);
-      astate->getPostStack().add(call, Address(ret_val));
+    if (len_nonzero) {
+      OperationResult r = ops_.checkAddrAccess(*astate, *buf_opt, call);
+      if (r == OperationResult::NullDereference ||
+          r == OperationResult::UseAfterFree ||
+          r == OperationResult::OutOfBounds) {
+        return ModelResult::success({reportModelAccessError(
+            checker_, *astate, r, *buf_opt, call,
+            "Invalid source buffer in write")});
+      }
     }
   }
+  AbstractValue ret_val = factory_.createFresh(call);
+  if (call->getType()->isIntegerTy()) {
+    astate->getPathFormula().addIntegerConstraint(ret_val);
+    astate->getPathFormula().setBitWidth(ret_val,
+                                         call->getType()->getIntegerBitWidth());
+  }
+  astate->getPostStack().add(call, Address(ret_val));
 
   return ModelResult::success(std::move(state));
 }
@@ -2603,12 +3441,25 @@ ModelResult PulseModels::modelFread(const llvm::CallBase *call,
     return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
   auto stream_opt = ops_.eval(*astate, call->getArgOperand(3), call, pred);
   auto ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
 
-  if (stream_opt && ptr_opt) {
+  if (stream_opt) {
+    OperationResult sr = ops_.checkAddrAccess(*astate, *stream_opt, call);
+    if (sr == OperationResult::NullDereference ||
+        sr == OperationResult::UseAfterFree) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, sr, *stream_opt, call,
+          "Invalid FILE stream in fread")});
+    }
+  }
+  if (ptr_opt) {
     auto size_opt = getConstUInt64(call->getArgOperand(1));
     auto count_opt = getConstUInt64(call->getArgOperand(2));
+    const bool zero_bytes =
+        (size_opt && *size_opt == 0) || (count_opt && *count_opt == 0);
     if (size_opt && count_opt) {
       if (auto total_opt = mulConstU64(*size_opt, *count_opt)) {
         AbstractValue canon = astate->getCanonical(ptr_opt->addr);
@@ -2620,15 +3471,27 @@ ModelResult PulseModels::modelFread(const llvm::CallBase *call,
         }
       }
     }
-    auto stream_read = ops_.readDeref(*astate, *stream_opt, call);
-    if (stream_read.first == OperationResult::Success) {
+    if (!zero_bytes) {
       AbstractValue dummy = factory_.createFresh(call);
-      ops_.writeDeref(*astate, *ptr_opt, Address(dummy), call);
+      OperationResult wres =
+          ops_.writeDeref(*astate, *ptr_opt, Address(dummy), call);
+      if (wres == OperationResult::NullDereference ||
+          wres == OperationResult::UseAfterFree ||
+          wres == OperationResult::OutOfBounds) {
+        return ModelResult::success({reportModelAccessError(
+            checker_, *astate, wres, *ptr_opt, call,
+            "Invalid destination buffer in fread")});
+      }
       markBufferInitialized(*astate, ptr_opt->addr, call);
-      AbstractValue ret_val = factory_.createFresh(call);
-      astate->getPostStack().add(call, Address(ret_val));
     }
   }
+  AbstractValue ret_val = factory_.createFresh(call);
+  if (call->getType()->isIntegerTy()) {
+    astate->getPathFormula().addIntegerConstraint(ret_val);
+    astate->getPathFormula().setBitWidth(ret_val,
+                                         call->getType()->getIntegerBitWidth());
+  }
+  astate->getPostStack().add(call, Address(ret_val));
 
   return ModelResult::success(std::move(state));
 }
@@ -2640,12 +3503,25 @@ ModelResult PulseModels::modelFwrite(const llvm::CallBase *call,
     return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
   auto stream_opt = ops_.eval(*astate, call->getArgOperand(3), call, pred);
   auto ptr_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
 
-  if (stream_opt && ptr_opt) {
+  if (stream_opt) {
+    OperationResult sr = ops_.checkAddrAccess(*astate, *stream_opt, call);
+    if (sr == OperationResult::NullDereference ||
+        sr == OperationResult::UseAfterFree) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, sr, *stream_opt, call,
+          "Invalid FILE stream in fwrite")});
+    }
+  }
+  if (ptr_opt) {
     auto size_opt = getConstUInt64(call->getArgOperand(1));
     auto count_opt = getConstUInt64(call->getArgOperand(2));
+    const bool zero_bytes =
+        (size_opt && *size_opt == 0) || (count_opt && *count_opt == 0);
     if (size_opt && count_opt) {
       if (auto total_opt = mulConstU64(*size_opt, *count_opt)) {
         AbstractValue canon = astate->getCanonical(ptr_opt->addr);
@@ -2657,14 +3533,24 @@ ModelResult PulseModels::modelFwrite(const llvm::CallBase *call,
         }
       }
     }
-    auto stream_read = ops_.readDeref(*astate, *stream_opt, call);
-    auto ptr_read = ops_.readDeref(*astate, *ptr_opt, call);
-    if (stream_read.first == OperationResult::Success &&
-        ptr_read.first == OperationResult::Success) {
-      AbstractValue ret_val = factory_.createFresh(call);
-      astate->getPostStack().add(call, Address(ret_val));
+    if (!zero_bytes) {
+      OperationResult pr = ops_.checkAddrAccess(*astate, *ptr_opt, call);
+      if (pr == OperationResult::NullDereference ||
+          pr == OperationResult::UseAfterFree ||
+          pr == OperationResult::OutOfBounds) {
+        return ModelResult::success({reportModelAccessError(
+            checker_, *astate, pr, *ptr_opt, call,
+            "Invalid source buffer in fwrite")});
+      }
     }
   }
+  AbstractValue ret_val = factory_.createFresh(call);
+  if (call->getType()->isIntegerTy()) {
+    astate->getPathFormula().addIntegerConstraint(ret_val);
+    astate->getPathFormula().setBitWidth(ret_val,
+                                         call->getType()->getIntegerBitWidth());
+  }
+  astate->getPostStack().add(call, Address(ret_val));
 
   return ModelResult::success(std::move(state));
 }
@@ -2676,20 +3562,36 @@ ModelResult PulseModels::modelFgets(const llvm::CallBase *call,
     return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
   auto str_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
   auto stream_opt = ops_.eval(*astate, call->getArgOperand(2), call, pred);
 
-  if (str_opt && stream_opt) {
+  if (stream_opt) {
+    OperationResult sr = ops_.checkAddrAccess(*astate, *stream_opt, call);
+    if (sr == OperationResult::NullDereference ||
+        sr == OperationResult::UseAfterFree) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, sr, *stream_opt, call,
+          "Invalid FILE stream in fgets")});
+    }
+  }
+  if (str_opt) {
     checkLengthAgainstAllocation(*astate, *str_opt, call->getArgOperand(1),
                                  call,
                                  "fgets writes beyond destination buffer");
-    auto stream_read = ops_.readDeref(*astate, *stream_opt, call);
-    if (stream_read.first == OperationResult::Success) {
-      AbstractValue dummy = factory_.createFresh(call);
-      ops_.writeDeref(*astate, *str_opt, Address(dummy), call);
-      markBufferInitialized(*astate, str_opt->addr, call);
-      astate->getPostStack().add(call, *str_opt);
+    AbstractValue dummy = factory_.createFresh(call);
+    OperationResult wres =
+        ops_.writeDeref(*astate, *str_opt, Address(dummy), call);
+    if (wres == OperationResult::NullDereference ||
+        wres == OperationResult::UseAfterFree ||
+        wres == OperationResult::OutOfBounds) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, wres, *str_opt, call,
+          "Invalid destination buffer in fgets")});
     }
+    markBufferInitialized(*astate, str_opt->addr, call);
+    astate->getPostStack().add(call, *str_opt);
   }
 
   return ModelResult::success(std::move(state));
@@ -2702,11 +3604,21 @@ ModelResult PulseModels::modelGets(const llvm::CallBase *call,
     return ModelResult::success(std::move(state));
 
   auto *astate = state.getAstate();
+  if (!astate)
+    return ModelResult::success(std::move(state));
   auto str_opt = ops_.eval(*astate, call->getArgOperand(0), call, pred);
 
   if (str_opt) {
     AbstractValue dummy = factory_.createFresh(call);
-    ops_.writeDeref(*astate, *str_opt, Address(dummy), call);
+    OperationResult wres =
+        ops_.writeDeref(*astate, *str_opt, Address(dummy), call);
+    if (wres == OperationResult::NullDereference ||
+        wres == OperationResult::UseAfterFree ||
+        wres == OperationResult::OutOfBounds) {
+      return ModelResult::success({reportModelAccessError(
+          checker_, *astate, wres, *str_opt, call,
+          "Invalid destination buffer in gets")});
+    }
     markBufferInitialized(*astate, str_opt->addr, call);
     astate->getPostStack().add(call, *str_opt);
   }

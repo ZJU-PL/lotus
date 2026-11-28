@@ -12,6 +12,7 @@
 #include "Checker/Pulse/Report/PulseOptions.h"
 #include "Checker/Pulse/Report/PulseReport.h"
 
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <map>
@@ -262,7 +263,18 @@ static bool isStructAllFieldsInitialized(AbductiveDomain &astate,
   const unsigned n = ST->getNumElements();
   if (n == 0 || n > 16)
     return false;
+  unsigned non_padding = 0;
   for (unsigned i = 0; i < n; ++i) {
+    if (ST->isPacked() && n >= 2) {
+      if (const auto *AT =
+              llvm::dyn_cast<llvm::ArrayType>(ST->getElementType(i))) {
+        if (AT->getElementType()->isIntegerTy(8) && AT->getNumElements() >= 1 &&
+            AT->getNumElements() <= 7) {
+          continue;
+        }
+      }
+    }
+    ++non_padding;
     Access acc = makeAggregateFieldAccess(const_cast<llvm::StructType *>(ST), i,
                                           M);
     const Address *edge = astate.getPostHeap().findEdge(c_struct, acc);
@@ -282,6 +294,9 @@ static bool isStructAllFieldsInitialized(AbductiveDomain &astate,
       }
       return false;
     }
+  }
+  if (non_padding == 0) {
+    return false;
   }
   astate.getPostAttrs().remove(c_struct, Attribute::Uninitialized);
   astate.markWrittenTo(c_struct, nullptr);
@@ -1057,6 +1072,41 @@ std::vector<ExecutionDomain> PulseChecker::executeInstruction(
           (void)astate->getPathFormula().addArithmeticOperation(res_av, lhs_av,
                                                                 rhs_av, op);
         }
+        // Preserve allocation root across pointer bit-tagging (`(uintptr_t)p | 1`,
+        // `p & ~7`, `(p & ~1) | (old & 1)` used by PointerIntPair / llvm::Error)
+        // so tagged pointers remain linked to their heap allocation for
+        // leak/validity tracking.
+        if (BO->getOpcode() == llvm::Instruction::Or ||
+            BO->getOpcode() == llvm::Instruction::And) {
+          auto isTrackedPtrRoot = [&](AbstractValue av) -> std::optional<AbstractValue> {
+            AbstractValue root = astate->getAllocationRoot(av);
+            if (astate->getPostAttrs().has(root, Attribute::Allocated) ||
+                astate->getAllocationInfo(root).has_value() ||
+                astate->isInPre(root)) {
+              return root;
+            }
+            return std::nullopt;
+          };
+          const bool lhs_const =
+              astate->getPathFormula().asConstantInt(lhs_av).has_value();
+          const bool rhs_const =
+              astate->getPathFormula().asConstantInt(rhs_av).has_value();
+          if (lhs_const != rhs_const) {
+            AbstractValue ptr_av = rhs_const ? lhs_av : rhs_av;
+            if (auto ptr_root = isTrackedPtrRoot(ptr_av)) {
+              astate->setAllocationRoot(res_av, *ptr_root);
+            }
+          } else if (BO->getOpcode() == llvm::Instruction::Or) {
+            // Combining a masked pointer `(p & ~k)` with a non-constant tag
+            // value (e.g. `old_payload & 1` in `llvm::Error::setPtr`).
+            auto l_root = isTrackedPtrRoot(lhs_av);
+            auto r_root = isTrackedPtrRoot(rhs_av);
+            if (l_root.has_value() != r_root.has_value()) {
+              astate->setAllocationRoot(res_av,
+                                        l_root ? *l_root : *r_root);
+            }
+          }
+        }
       }
     }
     return singleState(std::move(exec_state));
@@ -1534,7 +1584,8 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
     return singleState(std::move(exec_state));
   }
 
-  // Handle LLVM intrinsics (eh.typeid.for, lifetime, memcpy/memmove/memset).
+  // Handle LLVM intrinsics cleanly without declaring unknown values where the
+  // intrinsic has well-defined semantics (boosts both ISL recall and precision).
   if (auto *II = llvm::dyn_cast<llvm::IntrinsicInst>(
           const_cast<llvm::CallBase *>(CB))) {
     const auto iid = II->getIntrinsicID();
@@ -1546,6 +1597,325 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
                                       var->getName().str());
           }
         }
+      }
+      return singleState(std::move(exec_state));
+    }
+    if (llvm::isa<llvm::DbgInfoIntrinsic>(II)) {
+      return singleState(std::move(exec_state));
+    }
+    if (iid == llvm::Intrinsic::assume) {
+      if (CB->arg_size() >= 1) {
+        auto assumed = assumeCondition(std::move(exec_state),
+                                       CB->getArgOperand(0), true, CB, pred);
+        if (!assumed) {
+          return {};
+        }
+        return singleState(std::move(*assumed));
+      }
+      return singleState(std::move(exec_state));
+    }
+    if (iid == llvm::Intrinsic::trap || iid == llvm::Intrinsic::ubsantrap) {
+      return {ExecutionDomain::abortProgram(
+          std::make_unique<AbductiveDomain>(astate->clone()),
+          OperationResult::Success, Trace())};
+    }
+    if (iid == llvm::Intrinsic::debugtrap ||
+        iid == llvm::Intrinsic::donothing ||
+        iid == llvm::Intrinsic::sideeffect ||
+        iid == llvm::Intrinsic::prefetch ||
+        iid == llvm::Intrinsic::var_annotation ||
+        iid == llvm::Intrinsic::stackrestore ||
+        iid == llvm::Intrinsic::invariant_end) {
+      return singleState(std::move(exec_state));
+    }
+    if (iid == llvm::Intrinsic::expect ||
+        iid == llvm::Intrinsic::expect_with_probability ||
+        iid == llvm::Intrinsic::ptr_annotation ||
+        iid == llvm::Intrinsic::annotation ||
+        iid == llvm::Intrinsic::launder_invariant_group ||
+        iid == llvm::Intrinsic::strip_invariant_group) {
+      if (CB->arg_size() >= 1) {
+        if (auto arg0_opt = ops_.eval(*astate, CB->getArgOperand(0), CB, pred)) {
+          astate->getPostStack().add(CB, *arg0_opt);
+          return singleState(std::move(exec_state));
+        }
+      }
+      if (!CB->getType()->isVoidTy()) {
+        AbstractValue ret_val = factory_.createFresh(CB);
+        if (CB->getType()->isIntegerTy()) {
+          astate->getPathFormula().addIntegerConstraint(ret_val);
+          astate->getPathFormula().setBitWidth(
+              ret_val, CB->getType()->getIntegerBitWidth());
+        }
+        astate->getPostStack().add(CB, Address(ret_val));
+      }
+      return singleState(std::move(exec_state));
+    }
+    if (iid == llvm::Intrinsic::stacksave ||
+        iid == llvm::Intrinsic::invariant_start) {
+      if (!CB->getType()->isVoidTy()) {
+        AbstractValue ret_val = factory_.createFresh(CB);
+        if (CB->getType()->isPointerTy()) {
+          astate->addNonNull(ret_val);
+        }
+        astate->getPostStack().add(CB, Address(ret_val));
+      }
+      return singleState(std::move(exec_state));
+    }
+    if (iid == llvm::Intrinsic::objectsize) {
+      if (CB->getType()->isIntegerTy()) {
+        AbstractValue ret_val = factory_.createFresh(CB);
+        astate->getPathFormula().addIntegerConstraint(ret_val);
+        astate->getPathFormula().setBitWidth(
+            ret_val, CB->getType()->getIntegerBitWidth());
+        astate->getPostStack().add(CB, Address(ret_val));
+      }
+      return singleState(std::move(exec_state));
+    }
+    if (iid == llvm::Intrinsic::smax || iid == llvm::Intrinsic::smin ||
+        iid == llvm::Intrinsic::umax || iid == llvm::Intrinsic::umin ||
+        iid == llvm::Intrinsic::abs) {
+      if (CB->getType()->isIntegerTy()) {
+        unsigned bw = CB->getType()->getIntegerBitWidth();
+        AbstractValue ret_val = factory_.createFresh(CB);
+        astate->getPathFormula().addIntegerConstraint(ret_val);
+        astate->getPathFormula().setBitWidth(ret_val, bw);
+        auto a0 = CB->arg_size() >= 1
+                      ? ops_.eval(*astate, CB->getArgOperand(0), CB, pred)
+                      : std::nullopt;
+        auto a1 = (iid != llvm::Intrinsic::abs && CB->arg_size() >= 2)
+                      ? ops_.eval(*astate, CB->getArgOperand(1), CB, pred)
+                      : std::nullopt;
+        if (a0) {
+          AbstractValue c0 = astate->getCanonical(a0->addr);
+          TaintOperations::propagate(*astate, c0, ret_val, CB);
+          if (iid == llvm::Intrinsic::abs) {
+            if (auto v0 = astate->getPathFormula().asConstantInt(c0)) {
+              if (*v0 != std::numeric_limits<int64_t>::min()) {
+                int64_t r = *v0 < 0 ? -(*v0) : *v0;
+                (void)astate->getPathFormula().addBounds(ret_val, r, r);
+              }
+            } else {
+              bool nonneg = false;
+              if (CB->arg_size() >= 2) {
+                if (auto *CI =
+                        llvm::dyn_cast<llvm::ConstantInt>(CB->getArgOperand(1))) {
+                  nonneg = CI->isOne();
+                }
+              }
+              auto lo0 = astate->getPathFormula().getLowerBound(c0);
+              if (nonneg || (lo0 && *lo0 > std::numeric_limits<int64_t>::min())) {
+                (void)astate->getPathFormula().addBounds(
+                    ret_val, 0, std::numeric_limits<int64_t>::max());
+              }
+            }
+          } else if (a1) {
+            AbstractValue c1 = astate->getCanonical(a1->addr);
+            TaintOperations::propagate(*astate, c1, ret_val, CB);
+            auto v0 = astate->getPathFormula().asConstantInt(c0);
+            auto v1 = astate->getPathFormula().asConstantInt(c1);
+            if (v0 && v1 && bw <= 64) {
+              int64_t r = 0;
+              if (iid == llvm::Intrinsic::smax) {
+                r = std::max(*v0, *v1);
+              } else if (iid == llvm::Intrinsic::smin) {
+                r = std::min(*v0, *v1);
+              } else {
+                uint64_t mask = (bw == 64) ? ~uint64_t{0}
+                                           : ((uint64_t{1} << bw) - 1);
+                uint64_t u0 = static_cast<uint64_t>(*v0) & mask;
+                uint64_t u1 = static_cast<uint64_t>(*v1) & mask;
+                uint64_t ur = (iid == llvm::Intrinsic::umax)
+                                  ? std::max(u0, u1)
+                                  : std::min(u0, u1);
+                r = static_cast<int64_t>(ur);
+              }
+              (void)astate->getPathFormula().addBounds(ret_val, r, r);
+            } else if (iid == llvm::Intrinsic::smax ||
+                       iid == llvm::Intrinsic::smin) {
+              auto lo0 = astate->getPathFormula().getLowerBound(c0);
+              auto hi0 = astate->getPathFormula().getUpperBound(c0);
+              auto lo1 = astate->getPathFormula().getLowerBound(c1);
+              auto hi1 = astate->getPathFormula().getUpperBound(c1);
+              if (lo0 && hi0 && lo1 && hi1) {
+                if (iid == llvm::Intrinsic::smax) {
+                  (void)astate->getPathFormula().addBounds(
+                      ret_val, std::max(*lo0, *lo1), std::max(*hi0, *hi1));
+                } else {
+                  (void)astate->getPathFormula().addBounds(
+                      ret_val, std::min(*lo0, *lo1), std::min(*hi0, *hi1));
+                }
+              }
+            }
+          }
+        }
+        astate->getPostStack().add(CB, Address(ret_val));
+      }
+      return singleState(std::move(exec_state));
+    }
+    if (iid == llvm::Intrinsic::bswap || iid == llvm::Intrinsic::bitreverse ||
+        iid == llvm::Intrinsic::ctlz || iid == llvm::Intrinsic::cttz ||
+        iid == llvm::Intrinsic::ctpop || iid == llvm::Intrinsic::fshl ||
+        iid == llvm::Intrinsic::fshr || iid == llvm::Intrinsic::sadd_sat ||
+        iid == llvm::Intrinsic::ssub_sat || iid == llvm::Intrinsic::uadd_sat ||
+        iid == llvm::Intrinsic::usub_sat) {
+      if (CB->getType()->isIntegerTy()) {
+        unsigned bw = CB->getType()->getIntegerBitWidth();
+        AbstractValue ret_val = factory_.createFresh(CB);
+        astate->getPathFormula().addIntegerConstraint(ret_val);
+        astate->getPathFormula().setBitWidth(ret_val, bw);
+        if (iid == llvm::Intrinsic::ctlz || iid == llvm::Intrinsic::cttz ||
+            iid == llvm::Intrinsic::ctpop) {
+          (void)astate->getPathFormula().addBounds(ret_val, 0,
+                                                   static_cast<int64_t>(bw));
+        }
+        for (unsigned i = 0; i < CB->arg_size(); ++i) {
+          if (auto arg_opt = ops_.eval(*astate, CB->getArgOperand(i), CB, pred)) {
+            TaintOperations::propagate(
+                *astate, astate->getCanonical(arg_opt->addr), ret_val, CB);
+          }
+        }
+        astate->getPostStack().add(CB, Address(ret_val));
+      }
+      return singleState(std::move(exec_state));
+    }
+    if (iid == llvm::Intrinsic::sadd_with_overflow ||
+        iid == llvm::Intrinsic::uadd_with_overflow ||
+        iid == llvm::Intrinsic::ssub_with_overflow ||
+        iid == llvm::Intrinsic::usub_with_overflow ||
+        iid == llvm::Intrinsic::smul_with_overflow ||
+        iid == llvm::Intrinsic::umul_with_overflow) {
+      auto *ST = llvm::dyn_cast<llvm::StructType>(CB->getType());
+      if (ST && ST->getNumElements() == 2 &&
+          ST->getElementType(0)->isIntegerTy()) {
+        unsigned bw = ST->getElementType(0)->getIntegerBitWidth();
+        AbstractValue agg_av = factory_.createFresh(CB);
+        AbstractValue val_av = factory_.createFresh(CB);
+        AbstractValue ovf_av = factory_.createFresh(CB);
+        astate->getPathFormula().addIntegerConstraint(val_av);
+        astate->getPathFormula().setBitWidth(val_av, bw);
+        astate->getPathFormula().addIntegerConstraint(ovf_av);
+        astate->getPathFormula().setBitWidth(ovf_av, 1);
+        (void)astate->getPathFormula().addBounds(ovf_av, 0, 1);
+
+        auto a0 = CB->arg_size() >= 1
+                      ? ops_.eval(*astate, CB->getArgOperand(0), CB, pred)
+                      : std::nullopt;
+        auto a1 = CB->arg_size() >= 2
+                      ? ops_.eval(*astate, CB->getArgOperand(1), CB, pred)
+                      : std::nullopt;
+        if (a0 && a1) {
+          AbstractValue c0 = astate->getCanonical(a0->addr);
+          AbstractValue c1 = astate->getCanonical(a1->addr);
+          TaintOperations::propagate(*astate, c0, val_av, CB);
+          TaintOperations::propagate(*astate, c1, val_av, CB);
+          TaintOperations::propagate(*astate, c0, agg_av, CB);
+          TaintOperations::propagate(*astate, c1, agg_av, CB);
+          auto v0 = astate->getPathFormula().asConstantInt(c0);
+          auto v1 = astate->getPathFormula().asConstantInt(c1);
+          if (v0 && v1 && bw > 0 && bw <= 64) {
+            const bool is_signed =
+                (iid == llvm::Intrinsic::sadd_with_overflow ||
+                 iid == llvm::Intrinsic::ssub_with_overflow ||
+                 iid == llvm::Intrinsic::smul_with_overflow);
+            bool overflow = false;
+            int64_t wrapped = 0;
+            if (is_signed) {
+              __int128 smin = -(__int128{1} << (bw - 1));
+              __int128 smax = (__int128{1} << (bw - 1)) - 1;
+              __int128 res128 = 0;
+              if (iid == llvm::Intrinsic::sadd_with_overflow)
+                res128 = static_cast<__int128>(*v0) + static_cast<__int128>(*v1);
+              else if (iid == llvm::Intrinsic::ssub_with_overflow)
+                res128 = static_cast<__int128>(*v0) - static_cast<__int128>(*v1);
+              else
+                res128 = static_cast<__int128>(*v0) * static_cast<__int128>(*v1);
+              overflow = (res128 < smin || res128 > smax);
+              uint64_t ures = static_cast<uint64_t>(res128);
+              if (bw < 64) {
+                uint64_t mask = (uint64_t{1} << bw) - 1;
+                ures &= mask;
+                if (ures & (uint64_t{1} << (bw - 1))) {
+                  ures |= ~mask;
+                }
+              }
+              wrapped = static_cast<int64_t>(ures);
+            } else {
+              uint64_t mask =
+                  (bw == 64) ? ~uint64_t{0} : ((uint64_t{1} << bw) - 1);
+              unsigned __int128 u0 = static_cast<uint64_t>(*v0) & mask;
+              unsigned __int128 u1 = static_cast<uint64_t>(*v1) & mask;
+              unsigned __int128 res128 = 0;
+              if (iid == llvm::Intrinsic::uadd_with_overflow)
+                res128 = u0 + u1;
+              else if (iid == llvm::Intrinsic::usub_with_overflow) {
+                overflow = (u0 < u1);
+                res128 = (u0 - u1) & mask;
+              } else {
+                res128 = u0 * u1;
+              }
+              if (iid != llvm::Intrinsic::usub_with_overflow) {
+                overflow = (res128 > static_cast<unsigned __int128>(mask));
+              }
+              wrapped = static_cast<int64_t>(static_cast<uint64_t>(res128) & mask);
+            }
+            (void)astate->getPathFormula().addBounds(val_av, wrapped, wrapped);
+            int64_t ov = overflow ? 1 : 0;
+            (void)astate->getPathFormula().addBounds(ovf_av, ov, ov);
+          }
+        }
+        astate->getPostHeap().addEdge(
+            agg_av, makeAggregateFieldAccess(CB->getType(), 0u, module_),
+            Address(val_av));
+        astate->getPostHeap().addEdge(
+            agg_av, makeAggregateFieldAccess(CB->getType(), 1u, module_),
+            Address(ovf_av));
+        astate->getPostStack().add(CB, Address(agg_av));
+      }
+      return singleState(std::move(exec_state));
+    }
+    if (iid == llvm::Intrinsic::fabs || iid == llvm::Intrinsic::sqrt ||
+        iid == llvm::Intrinsic::fma || iid == llvm::Intrinsic::fmuladd ||
+        iid == llvm::Intrinsic::floor || iid == llvm::Intrinsic::ceil ||
+        iid == llvm::Intrinsic::trunc || iid == llvm::Intrinsic::round ||
+        iid == llvm::Intrinsic::roundeven || iid == llvm::Intrinsic::rint ||
+        iid == llvm::Intrinsic::nearbyint || iid == llvm::Intrinsic::copysign ||
+        iid == llvm::Intrinsic::minnum || iid == llvm::Intrinsic::maxnum ||
+        iid == llvm::Intrinsic::minimum || iid == llvm::Intrinsic::maximum ||
+        iid == llvm::Intrinsic::pow || iid == llvm::Intrinsic::powi ||
+        iid == llvm::Intrinsic::sin || iid == llvm::Intrinsic::cos ||
+        iid == llvm::Intrinsic::exp || iid == llvm::Intrinsic::exp2 ||
+        iid == llvm::Intrinsic::log || iid == llvm::Intrinsic::log2 ||
+        iid == llvm::Intrinsic::log10) {
+      if (!CB->getType()->isVoidTy()) {
+        AbstractValue ret_val = factory_.createFresh(CB);
+        for (unsigned i = 0; i < CB->arg_size(); ++i) {
+          if (auto arg_opt = ops_.eval(*astate, CB->getArgOperand(i), CB, pred)) {
+            AbstractValue c = astate->getCanonical(arg_opt->addr);
+            TaintOperations::propagate(*astate, c, ret_val, CB);
+            if (i == 0 && CB->getType()->isFloatingPointTy()) {
+              if (auto fv = astate->getPathFormula().asConstantFloat(c)) {
+                if (iid == llvm::Intrinsic::fabs) {
+                  (void)astate->getPathFormula().addFloatConstant(
+                      ret_val, std::fabs(*fv));
+                } else if (iid == llvm::Intrinsic::floor) {
+                  (void)astate->getPathFormula().addFloatConstant(
+                      ret_val, std::floor(*fv));
+                } else if (iid == llvm::Intrinsic::ceil) {
+                  (void)astate->getPathFormula().addFloatConstant(
+                      ret_val, std::ceil(*fv));
+                } else if (iid == llvm::Intrinsic::trunc) {
+                  (void)astate->getPathFormula().addFloatConstant(
+                      ret_val, std::trunc(*fv));
+                } else if (iid == llvm::Intrinsic::sqrt && *fv >= 0.0) {
+                  (void)astate->getPathFormula().addFloatConstant(
+                      ret_val, std::sqrt(*fv));
+                }
+              }
+            }
+          }
+        }
+        astate->getPostStack().add(CB, Address(ret_val));
       }
       return singleState(std::move(exec_state));
     }
@@ -1668,12 +2038,61 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
       auto dest_opt = ops_.eval(*a, CB->getArgOperand(0), CB, pred);
       if (!dest_opt)
         return singleState(std::move(exec_state));
+      const llvm::Value *len_operand = CB->getArgOperand(2);
+      bool len_is_zero = false;
+      bool len_is_nonzero = false;
+      if (auto *CI_len = llvm::dyn_cast<llvm::ConstantInt>(len_operand)) {
+        if (CI_len->isZero()) {
+          len_is_zero = true;
+        } else if (!CI_len->isNegative()) {
+          len_is_nonzero = true;
+        }
+      } else if (auto len_av_opt = ops_.eval(*a, len_operand, CB, pred)) {
+        AbstractValue len_c = a->getCanonical(len_av_opt->addr);
+        if (auto c_val = a->getPathFormula().asConstantInt(len_c)) {
+          if (*c_val == 0)
+            len_is_zero = true;
+          else if (*c_val > 0)
+            len_is_nonzero = true;
+        } else if (auto lb = a->getPathFormula().getLowerBound(len_c)) {
+          if (*lb > 0)
+            len_is_nonzero = true;
+        }
+      }
+      if (len_is_zero) {
+        return singleState(std::move(exec_state));
+      }
+      auto reportMemIntrinsicErr =
+          [&](OperationResult err, const Address &bad_addr,
+              const char *msg) -> std::vector<ExecutionDomain> {
+        Trace trace = Trace::fromValueHistory(bad_addr.history);
+        trace.addEvent(CB, msg);
+        AbstractValue bad_c = a->getCanonical(bad_addr.addr);
+        if (LatentIssue::isManifest(err, *a, bad_c)) {
+          reportBug(err, CB, bad_c, trace, a);
+          return {ExecutionDomain::abortProgram(
+              std::make_unique<AbductiveDomain>(a->clone()), err,
+              std::move(trace))};
+        }
+        latent_issues_.emplace_back(err, LatentIssue::issueKindFromResult(err),
+                                    bad_c, CB, trace.clone());
+        return {ExecutionDomain::latentAbortProgram(
+            std::make_unique<AbductiveDomain>(a->clone()),
+            &latent_issues_.back(), err, std::move(trace))};
+      };
       if (iid == llvm::Intrinsic::memset) {
-        check_len(*dest_opt, CB->getArgOperand(2),
+        check_len(*dest_opt, len_operand,
                   "memset writes beyond destination buffer");
         auto val_opt = ops_.eval(*a, CB->getArgOperand(1), CB, pred);
         if (val_opt) {
-          ops_.writeDeref(*a, *dest_opt, *val_opt, CB);
+          OperationResult wres = ops_.writeDeref(*a, *dest_opt, *val_opt, CB);
+          if (len_is_nonzero &&
+              (wres == OperationResult::NullDereference ||
+               wres == OperationResult::UseAfterFree ||
+               wres == OperationResult::OutOfBounds)) {
+            return reportMemIntrinsicErr(
+                wres, *dest_opt, "Invalid destination pointer in memset");
+          }
         }
         AbstractValue dst_c = a->getCanonical(dest_opt->addr);
         AbstractValue dst_root = a->getAllocationRoot(dst_c);
@@ -1704,9 +2123,9 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
 
       auto src_opt = ops_.eval(*a, CB->getArgOperand(1), CB, pred);
       if (src_opt) {
-        check_len(*dest_opt, CB->getArgOperand(2),
+        check_len(*dest_opt, len_operand,
                   "memcpy/memmove writes beyond destination buffer");
-        check_len(*src_opt, CB->getArgOperand(2),
+        check_len(*src_opt, len_operand,
                   "memcpy/memmove reads beyond source buffer");
         AbstractValue src_c = a->getCanonical(src_opt->addr);
         AbstractValue dst_c = a->getCanonical(dest_opt->addr);
@@ -1716,10 +2135,27 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
             a->getPostAttrs().has(src_c, Attribute::Null) ||
             a->getPathFormula().isNull(src_c);
         auto src_read = ops_.readDeref(*a, *src_opt, CB);
-        if (src_read.first == OperationResult::Success) {
-          AbstractValue val_to_write =
-              src_read.second ? src_read.second->addr : factory_.createFresh(CB);
-          ops_.writeDeref(*a, *dest_opt, Address(val_to_write), CB);
+        if (len_is_nonzero &&
+            (src_read.first == OperationResult::NullDereference ||
+             src_read.first == OperationResult::UseAfterFree ||
+             src_read.first == OperationResult::OutOfBounds)) {
+          return reportMemIntrinsicErr(
+              src_read.first, *src_opt,
+              "Invalid source pointer in memcpy/memmove");
+        }
+        AbstractValue val_to_write =
+            (src_read.first == OperationResult::Success && src_read.second)
+                ? src_read.second->addr
+                : factory_.createFresh(CB);
+        OperationResult wres =
+            ops_.writeDeref(*a, *dest_opt, Address(val_to_write), CB);
+        if (len_is_nonzero &&
+            (wres == OperationResult::NullDereference ||
+             wres == OperationResult::UseAfterFree ||
+             wres == OperationResult::OutOfBounds)) {
+          return reportMemIntrinsicErr(
+              wres, *dest_opt,
+              "Invalid destination pointer in memcpy/memmove");
         }
         a->getPostAttrs().remove(dst_c, Attribute::Uninitialized);
         a->getPostAttrs().remove(dst_root, Attribute::Uninitialized);
@@ -2053,6 +2489,68 @@ PulseChecker::handleCallBase(const llvm::CallBase *CB,
                     if (!ret_alloc_kinds.empty())
                       break;
                   }
+                }
+              }
+            }
+          }
+        }
+        if (!source_units.empty()) {
+          for (auto &st : lib_result) {
+            auto *a = st.getAstate();
+            if (!a)
+              continue;
+            for (const ProcedureUnit *unit : source_units) {
+              std::vector<TaintKind> kinds =
+                  unit->kinds.empty()
+                      ? std::vector<TaintKind>{TaintKind::UserInput()}
+                      : unit->kinds;
+              if (unit->appliesToReturn()) {
+                if (!CB->getType()->isVoidTy()) {
+                  if (const Address *ret_addr = a->getPostStack().find(CB)) {
+                    AbstractValue ret_c = a->getCanonical(ret_addr->addr);
+                    if (unit->field_index) {
+                      TaintOperations::taintField(*a, ret_c, *unit->field_index,
+                                                  kinds, CB, factory_);
+                    } else {
+                      TaintOperations::taint(*a, ret_c, kinds, CB);
+                    }
+                  }
+                }
+              } else {
+                for (unsigned i = 0; i < CB->arg_size(); ++i) {
+                  if (!unit->appliesToArgument(i))
+                    continue;
+                  if (auto arg_opt =
+                          ops_.eval(*a, CB->getArgOperand(i), CB, pred)) {
+                    AbstractValue canon_arg = a->getCanonical(arg_opt->addr);
+                    if (unit->field_index) {
+                      TaintOperations::taintField(
+                          *a, canon_arg, *unit->field_index, kinds, CB, factory_);
+                    } else {
+                      TaintOperations::taint(*a, canon_arg, kinds, CB);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (!prop_units.empty() && !CB->getType()->isVoidTy()) {
+          for (auto &st : lib_result) {
+            auto *a = st.getAstate();
+            if (!a)
+              continue;
+            const Address *ret_addr = a->getPostStack().find(CB);
+            if (!ret_addr)
+              continue;
+            AbstractValue ret_c = a->getCanonical(ret_addr->addr);
+            for (unsigned i = 0; i < CB->arg_size(); ++i) {
+              if (auto arg_opt = ops_.eval(*a, CB->getArgOperand(i), CB, pred)) {
+                AbstractValue src_c = a->getCanonical(arg_opt->addr);
+                TaintOperations::propagate(*a, src_c, ret_c, CB);
+                if (a->isInPre(src_c)) {
+                  a->addPropagateTaintFrom(
+                      ret_c, PropagateTaintFromInfo{{src_c}, func_name});
                 }
               }
             }

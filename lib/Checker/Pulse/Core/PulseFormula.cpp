@@ -1392,44 +1392,49 @@ PulseFormula::andCalleeFormula(const PulseFormula &caller,
   // values + literal callee constants through callee SSA arithmetic definitions
   // (never branch assumptions), so conditions on derived callee locals like
   // `n1 = n - 1; n1 == 0` are soundly discharged when caller passes `n = 1`.
-  std::set<AbstractValue> caller_cond_vars;
-  for (const auto &ckv : caller.conditions_) {
-    if (!ckv.first.is_ground) {
-      collectConditionVars(ckv.first, caller_cond_vars);
-    }
-  }
-  std::set<AbstractValue> callee_cond_vars;
-  for (const auto &ckv : substituted_callee.conditions_) {
-    if (!ckv.first.is_ground) {
-      collectConditionVars(ckv.first, callee_cond_vars);
-    }
-  }
+  // Fast-skip when the callee has no branch conditions or no arithmetic/linear
+  // constraints (plain caller constants are already handled by
+  // `caller.isConditionImpliedByFacts`).
   std::map<AbstractValue, int64_t> ground_consts;
-  auto seedGroundConst = [&](const PulseFormula &src,
-                             const std::set<AbstractValue> &guarded_vars) {
-    for (const auto &bkv : src.lower_bounds_) {
-      AbstractValue rep = src.findRepReadOnly(bkv.first);
-      auto uit = src.upper_bounds_.find(rep);
-      if (uit == src.upper_bounds_.end() || uit->second != bkv.second) {
-        continue;
-      }
-      if (guarded_vars.count(rep) > 0) {
-        continue;
-      }
-      ground_consts.emplace(caller.findRepReadOnly(rep), bkv.second);
-    }
-    for (AbstractValue nv : src.null_values_) {
-      AbstractValue rep = src.findRepReadOnly(nv);
-      if (guarded_vars.count(rep) == 0) {
-        ground_consts.emplace(caller.findRepReadOnly(rep), 0);
+  if (!substituted_callee.conditions_.empty() &&
+      (!substituted_callee.arithmetic_ops_.empty() ||
+       !substituted_callee.linear_constraints_.empty())) {
+    std::set<AbstractValue> caller_cond_vars;
+    for (const auto &ckv : caller.conditions_) {
+      if (!ckv.first.is_ground) {
+        collectConditionVars(ckv.first, caller_cond_vars);
       }
     }
-  };
-  seedGroundConst(caller, caller_cond_vars);
-  seedGroundConst(substituted_callee, callee_cond_vars);
-  if ((!substituted_callee.arithmetic_ops_.empty() ||
-       !substituted_callee.linear_constraints_.empty()) &&
-      !ground_consts.empty()) {
+    std::set<AbstractValue> callee_cond_vars;
+    for (const auto &ckv : substituted_callee.conditions_) {
+      if (!ckv.first.is_ground) {
+        collectConditionVars(ckv.first, callee_cond_vars);
+      }
+    }
+    auto seedGroundConst = [&](const PulseFormula &src,
+                               const std::set<AbstractValue> &guarded_vars) {
+      for (const auto &bkv : src.lower_bounds_) {
+        AbstractValue rep = src.findRepReadOnly(bkv.first);
+        auto uit = src.upper_bounds_.find(rep);
+        if (uit == src.upper_bounds_.end() || uit->second != bkv.second) {
+          continue;
+        }
+        if (guarded_vars.count(rep) > 0) {
+          continue;
+        }
+        ground_consts.emplace(caller.findRepReadOnly(rep), bkv.second);
+      }
+      for (AbstractValue nv : src.null_values_) {
+        AbstractValue rep = src.findRepReadOnly(nv);
+        if (guarded_vars.count(rep) == 0) {
+          ground_consts.emplace(caller.findRepReadOnly(rep), 0);
+        }
+      }
+    };
+    seedGroundConst(caller, caller_cond_vars);
+    seedGroundConst(substituted_callee, callee_cond_vars);
+  }
+  if (!ground_consts.empty()) {
     bool changed = true;
     for (unsigned iter = 0; changed && iter < 16; ++iter) {
       changed = false;

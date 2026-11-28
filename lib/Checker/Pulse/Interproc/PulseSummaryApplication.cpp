@@ -362,6 +362,49 @@ static void applyPostCondition(
       caller_astate.getPostHeap().addEdge(caller_from, caller_acc,
                                           caller_target_addr);
 
+      // Propagate caller allocation root/offset onto materialized sub-objects
+      // and mirror array-decay (`&arr[0]` at offset 0) element writes onto the
+      // underlying array allocation root so subsequent `arr[k]` accesses see
+      // callee writes cleanly.
+      AbstractValue from_root = caller_astate.getAllocationRoot(caller_from);
+      auto from_off = caller_astate.getAllocationOffset(caller_from);
+      if (caller_acc.kind == AccessKind::ArrayIndex) {
+        const bool is_decay_at_zero =
+            !(from_root == caller_from) && from_off && *from_off == 0;
+        if (is_decay_at_zero) {
+          caller_astate.getPostHeap().addEdge(from_root, caller_acc,
+                                              caller_target_addr);
+        }
+        if (caller_acc.const_index && caller_acc.stride_bytes > 0) {
+          __int128 delta = static_cast<__int128>(*caller_acc.const_index) *
+                           static_cast<__int128>(caller_acc.stride_bytes);
+          __int128 abs_off = static_cast<__int128>(from_off.value_or(0)) + delta;
+          if (abs_off >= std::numeric_limits<int64_t>::min() &&
+              abs_off <= std::numeric_limits<int64_t>::max()) {
+            caller_astate.setAllocationRoot(caller_target, from_root);
+            caller_astate.setAllocationOffset(caller_target,
+                                              static_cast<int64_t>(abs_off));
+          }
+        } else if (!caller_acc.const_index &&
+                   callee_post->hasWrittenTo(formal_target_canon)) {
+          caller_astate.getPostAttrs().remove(caller_from,
+                                              Attribute::Uninitialized);
+          caller_astate.getPostAttrs().remove(from_root,
+                                              Attribute::Uninitialized);
+        }
+      } else if (caller_acc.kind == AccessKind::Field) {
+        caller_astate.setAllocationRoot(caller_target, from_root);
+        if (from_off) {
+          __int128 abs_off = static_cast<__int128>(*from_off) +
+                             static_cast<__int128>(caller_acc.field_byte_offset);
+          if (abs_off >= std::numeric_limits<int64_t>::min() &&
+              abs_off <= std::numeric_limits<int64_t>::max()) {
+            caller_astate.setAllocationOffset(caller_target,
+                                              static_cast<int64_t>(abs_off));
+          }
+        }
+      }
+
       if (written || !pre_edge) {
         caller_astate.getPostAttrs().remove(caller_from,
                                             Attribute::Uninitialized);
@@ -469,8 +512,10 @@ static void applyPostCondition(
     auto c_addr = subst.substitute(callee_post->getCanonical(kv.first));
     auto c_root = subst.substitute(callee_post->getCanonical(kv.second));
     if (c_addr && c_root) {
-      caller_astate.setAllocationRoot(caller_astate.getCanonical(*c_addr),
-                                      caller_astate.getCanonical(*c_root));
+      AbstractValue caller_addr = caller_astate.getCanonical(*c_addr);
+      AbstractValue caller_root =
+          caller_astate.getAllocationRoot(caller_astate.getCanonical(*c_root));
+      caller_astate.setAllocationRoot(caller_addr, caller_root);
     }
   }
   for (const auto &kv : callee_post->getAllocationOffsets()) {

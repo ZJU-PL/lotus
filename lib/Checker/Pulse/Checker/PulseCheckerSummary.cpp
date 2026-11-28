@@ -623,18 +623,72 @@ void PulseChecker::createSummary(
   PulseSummary &summary = *summary_ptr;
   TransitiveInfo merged_transitive;
 
+  // Prioritize exact witness states (`!hasUnknownValues() && !isOverApproximated()`)
+  // before imprecise ones so unknown/over-approximated paths never evict exact
+  // witnesses from callee summaries.
+  auto stateQualityTier = [](const AbductiveDomain *astate) -> unsigned {
+    if (!astate)
+      return 4u;
+    const bool unk = astate->hasUnknownValues();
+    const bool over = astate->isOverApproximated();
+    if (!unk && !over)
+      return 0u;
+    if (!over)
+      return 1u;
+    if (!unk)
+      return 2u;
+    return 3u;
+  };
+
+  std::vector<size_t> ordered_latent_indices;
+  ordered_latent_indices.reserve(latent_exit_states.size());
+  for (size_t i = 0; i < latent_exit_states.size(); ++i) {
+    const auto &ls = latent_exit_states[i];
+    if (!ls.isStopped())
+      continue;
+    if (!ls.isLatentAbortProgram() && !ls.isLatentInvalidAccess())
+      continue;
+    if (!ls.getAstate())
+      continue;
+    ordered_latent_indices.push_back(i);
+  }
+  std::stable_sort(ordered_latent_indices.begin(), ordered_latent_indices.end(),
+                   [&](size_t a, size_t b) {
+                     return stateQualityTier(latent_exit_states[a].getAstate()) <
+                            stateQualityTier(latent_exit_states[b].getAstate());
+                   });
+
+  std::vector<size_t> ordered_exit_indices;
+  ordered_exit_indices.reserve(exit_states.size());
+  for (size_t i = 0; i < exit_states.size(); ++i) {
+    const auto &es = exit_states[i];
+    if (es.isAbortProgram() || es.isLatentAbortProgram() ||
+        es.isLatentInvalidAccess() || es.isLatentSpecializedTypeIssue()) {
+      continue;
+    }
+    if (!es.getAstate())
+      continue;
+    ordered_exit_indices.push_back(i);
+  }
+  std::stable_sort(ordered_exit_indices.begin(), ordered_exit_indices.end(),
+                   [&](size_t a, size_t b) {
+                     return stateQualityTier(exit_states[a].getAstate()) <
+                            stateQualityTier(exit_states[b].getAstate());
+                   });
+
+  // Never let latent entries completely starve normal return summaries when
+  // normal exit states exist (otherwise callers calling with valid arguments
+  // get empty summary application and fall back to declareUnknownValues()).
+  const unsigned kMaxLatentEntries =
+      ordered_exit_indices.empty() ? kMaxDisjuncts
+                                   : std::min(kMaxDisjuncts, 6u);
   unsigned latent_added = 0;
-  for (const auto &latent_state : latent_exit_states) {
-    if (!latent_state.isStopped())
-      continue;
-    if (!latent_state.isLatentAbortProgram() &&
-        !latent_state.isLatentInvalidAccess())
-      continue;
-    if (summary.getPrePostList().size() >= kMaxDisjuncts)
+  for (size_t idx : ordered_latent_indices) {
+    const auto &latent_state = latent_exit_states[idx];
+    if (latent_added >= kMaxLatentEntries ||
+        summary.getPrePostList().size() >= kMaxDisjuncts)
       break;
     const AbductiveDomain *astate = latent_state.getAstate();
-    if (!astate)
-      continue;
 
     const auto &stopped = latent_state.getStoppedExecution();
     SummaryEntry::LatentIssueSummary latent;
@@ -667,6 +721,24 @@ void PulseChecker::createSummary(
     AbductiveDomain pruned = pruneForSummary(
         F, *astate, std::nullopt, false, latent.address,
         /*keep_non_ground_conditions=*/true);
+
+    bool dup_latent = false;
+    for (const auto &existing : summary.getPrePostList()) {
+      const auto &ex_lat = existing.getLatentIssue();
+      if (!ex_lat.has_value())
+        continue;
+      if (ex_lat->diagnostic == latent.diagnostic &&
+          ex_lat->is_latent_invalid_access == latent.is_latent_invalid_access &&
+          existing.getPost() &&
+          AbductiveDomain::leq(pruned, *existing.getPost())) {
+        dup_latent = true;
+        break;
+      }
+    }
+    if (dup_latent) {
+      continue;
+    }
+
     PulseFormula formula = pruned.getPathFormula().clone();
     merged_transitive =
         TransitiveInfo::merge(merged_transitive, pruned.getTransitiveInfo());
@@ -681,20 +753,12 @@ void PulseChecker::createSummary(
   bool has_any_entry = latent_added > 0;
   const unsigned kMaxSummaryNormalEntries = std::min(kMaxDisjuncts, 10u);
   const unsigned max_normal_entries =
-      kMaxSummaryNormalEntries > latent_added
-          ? (kMaxSummaryNormalEntries - latent_added)
-          : 0u;
+      kMaxSummaryNormalEntries > 0 ? kMaxSummaryNormalEntries : 0u;
   const bool run_leak_check = (spec_key == nullptr);
 
-  for (const auto &exit_state : exit_states) {
-    if (exit_state.isAbortProgram() || exit_state.isLatentAbortProgram() ||
-        exit_state.isLatentInvalidAccess() ||
-        exit_state.isLatentSpecializedTypeIssue()) {
-      continue;
-    }
+  for (size_t idx : ordered_exit_indices) {
+    const auto &exit_state = exit_states[idx];
     const AbductiveDomain *astate = exit_state.getAstate();
-    if (!astate)
-      continue;
 
     has_any_entry = true;
     const bool is_exception = exit_state.isExceptionRaised();

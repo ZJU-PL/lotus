@@ -927,19 +927,41 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
       }
     }
     if (!l_dropped.empty() || !r_dropped.empty()) {
-      bool has_complement = false;
+      std::set<AbstractValue> comp_vars;
       for (const auto &la : l_dropped) {
         for (const auto &ra : r_dropped) {
           if (areComplementary(la, ra)) {
-            has_complement = true;
+            if (la.lhs.getId() != 0)
+              comp_vars.insert(la.lhs);
+            if (!la.const_rhs && la.rhs.getId() != 0)
+              comp_vars.insert(la.rhs);
+          }
+        }
+      }
+      if (comp_vars.empty()) {
+        over_approx = true;
+      } else {
+        auto atomCoveredByCompVars = [&](const PathConditionAtom &a) {
+          if (a.lhs.getId() != 0 && comp_vars.count(a.lhs) == 0)
+            return false;
+          if (!a.const_rhs && a.rhs.getId() != 0 && comp_vars.count(a.rhs) == 0)
+            return false;
+          return true;
+        };
+        for (const auto &la : l_dropped) {
+          if (!atomCoveredByCompVars(la)) {
+            over_approx = true;
             break;
           }
         }
-        if (has_complement)
-          break;
-      }
-      if (!has_complement) {
-        over_approx = true;
+        if (!over_approx) {
+          for (const auto &ra : r_dropped) {
+            if (!atomCoveredByCompVars(ra)) {
+              over_approx = true;
+              break;
+            }
+          }
+        }
       }
     }
   }
@@ -990,6 +1012,59 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
       rhs_ref_count[rhs.getCanonical(*kv.second.second)]++;
   }
 
+  // Track allocation roots reachable via non-stack heap/pre/global memory
+  // before vs after join so dropping a one-sided heap edge (e.g. `ref[i] = mem`
+  // in a 2D-array allocation loop) never invents a spurious manifest MemoryLeak.
+  auto collectEscapedHeapRoots = [](const AbductiveDomain &dom) {
+    std::set<AbstractValue> visited;
+    std::deque<AbstractValue> q;
+    for (const auto &skv : dom.getPostStack().getMap()) {
+      AbstractValue c = dom.getCanonical(skv.second.addr);
+      if (visited.insert(c).second) {
+        q.push_back(c);
+      }
+    }
+    for (const auto &akv : dom.getPostAttrs().getAttrs()) {
+      if (akv.second.count(Attribute::Global) > 0) {
+        AbstractValue c = dom.getCanonical(akv.first);
+        if (visited.insert(c).second) {
+          q.push_back(c);
+        }
+      }
+    }
+    std::set<AbstractValue> escaped_roots;
+    const auto &edges = dom.getPostHeap().getEdges();
+    while (!q.empty()) {
+      AbstractValue cur = q.front();
+      q.pop_front();
+      AbstractValue from_root = dom.getAllocationRoot(cur);
+      const bool from_is_stack =
+          dom.getPostAttrs().has(from_root, Attribute::Stack);
+      auto it = edges.find(cur);
+      if (it == edges.end()) {
+        continue;
+      }
+      for (const auto &acc_kv : it->second) {
+        AbstractValue tgt_c = dom.getCanonical(acc_kv.second.addr);
+        AbstractValue tgt_root = dom.getAllocationRoot(tgt_c);
+        if (!from_is_stack && !(tgt_root == from_root)) {
+          escaped_roots.insert(tgt_c);
+          escaped_roots.insert(tgt_root);
+        }
+        if (visited.insert(tgt_c).second) {
+          q.push_back(tgt_c);
+        }
+      }
+    }
+    return escaped_roots;
+  };
+  const std::set<AbstractValue> lhs_escaped_roots =
+      collectEscapedHeapRoots(lhs);
+  const std::set<AbstractValue> rhs_escaped_roots =
+      collectEscapedHeapRoots(rhs);
+  const std::set<AbstractValue> joined_escaped_roots =
+      collectEscapedHeapRoots(joined);
+
   for (const auto &kv : join_state.rev_subst) {
     AbstractValue v_join = kv.first;
     const auto &l_opt = kv.second.first;
@@ -1033,6 +1108,13 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
           !rhs.getPostAttrs().has(rc, Attribute::Invalid) &&
           lhs_ref_count[lc] == 1 && rhs_ref_count[rc] == 1) {
         joined.setAllocationInfo(v_join, *l_ai);
+        if (joined_escaped_roots.count(v_join) == 0 &&
+            (lhs_escaped_roots.count(lc) > 0 ||
+             rhs_escaped_roots.count(rc) > 0)) {
+          joined.setUnknownEffect(
+              v_join,
+              UnknownEffectInfo{"join_dropped_heap_edge", nullptr, ValueHistory()});
+        }
       }
 
       // Preserve allocation root and offset when both sides agree.

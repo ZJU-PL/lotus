@@ -3325,3 +3325,447 @@ TEST_F(PulseCheckerTest,
         << "disable_smt=" << disable_smt;
   }
 }
+
+TEST_F(PulseCheckerTest,
+       ISLPrecisionSTLModelsArrayDecayCoerceDiveSearchLoopAndTaggedLeakBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    auto module = parseModule(context, R"(
+      %Iter = type { i32* }
+      %NodeBase = type { i8* }
+      %NodeIter = type { %NodeBase }
+      %PackedPair = type <{ i32, i8, [3 x i8] }>
+
+      @g_found = global i32 7, align 4
+
+      declare i8* @malloc(i64)
+
+      ; 1. Defined C++ template method whose template args contain unique_ptr
+      ;    and vector MUST NOT be hijacked by modelStdUniquePtrCtor.
+      define void @_ZN9__gnu_cxx17__normal_iteratorIPSt10unique_ptrIiSt14default_deleteIiEESt6vectorIS4_SaIS4_EEEC2ERKS5_(%Iter* %this, i32** %__i) {
+      entry:
+        %f = getelementptr inbounds %Iter, %Iter* %this, i32 0, i32 0
+        %v = load i32*, i32** %__i, align 8
+        store i32* %v, i32** %f, align 8
+        ret void
+      }
+
+      define i32* @iter_plus_no_stack_escape(%Iter* %this, i64 %n) {
+      entry:
+        %retval = alloca %Iter, align 8
+        %ref.tmp = alloca i32*, align 8
+        %cur = getelementptr inbounds %Iter, %Iter* %this, i32 0, i32 0
+        %p0 = load i32*, i32** %cur, align 8
+        %p1 = getelementptr inbounds i32, i32* %p0, i64 %n
+        store i32* %p1, i32** %ref.tmp, align 8
+        call void @_ZN9__gnu_cxx17__normal_iteratorIPSt10unique_ptrIiSt14default_deleteIiEESt6vectorIS4_SaIS4_EEEC2ERKS5_(%Iter* %retval, i32** %ref.tmp)
+        %dive = getelementptr inbounds %Iter, %Iter* %retval, i32 0, i32 0
+        %ret = load i32*, i32** %dive, align 8
+        ret i32* %ret
+      }
+
+      ; 2. Array-decay out-param full init (constant + loop read) vs partial init.
+      define void @init_vec3(float* %out) {
+      entry:
+        %p0 = getelementptr inbounds float, float* %out, i64 0
+        store float 1.0, float* %p0, align 4
+        %p1 = getelementptr inbounds float, float* %out, i64 1
+        store float 2.0, float* %p1, align 4
+        %p2 = getelementptr inbounds float, float* %out, i64 2
+        store float 3.0, float* %p2, align 4
+        ret void
+      }
+
+      define void @init_vec2_partial(float* %out) {
+      entry:
+        %p0 = getelementptr inbounds float, float* %out, i64 0
+        store float 1.0, float* %p0, align 4
+        %p1 = getelementptr inbounds float, float* %out, i64 1
+        store float 2.0, float* %p1, align 4
+        ret void
+      }
+
+      define float @caller_vec3_full_and_loop(i64 %idx) {
+      entry:
+        %arr = alloca [3 x float], align 4
+        %decay = getelementptr inbounds [3 x float], [3 x float]* %arr, i64 0, i64 0
+        call void @init_vec3(float* %decay)
+        %e1 = getelementptr inbounds [3 x float], [3 x float]* %arr, i64 0, i64 1
+        %v1 = load float, float* %e1, align 4
+        %es = getelementptr inbounds [3 x float], [3 x float]* %arr, i64 0, i64 %idx
+        %vs = load float, float* %es, align 4
+        %sum = fadd float %v1, %vs
+        ret float %sum
+      }
+
+      define float @caller_vec2_partial_still_reports() {
+      entry:
+        %arr = alloca [3 x float], align 4
+        %decay = getelementptr inbounds [3 x float], [3 x float]* %arr, i64 0, i64 0
+        call void @init_vec2_partial(float* %decay)
+        %e2 = getelementptr inbounds [3 x float], [3 x float]* %arr, i64 0, i64 2
+        %v2 = load float, float* %e2, align 4
+        ret float %v2
+      }
+
+      ; 3. Packed struct ABI tail padding + nested zero-offset coerce.dive chain.
+      define i64 @packed_pair_abi_load_no_fp() {
+      entry:
+        %p = alloca %PackedPair, align 4
+        %f0 = getelementptr inbounds %PackedPair, %PackedPair* %p, i32 0, i32 0
+        store i32 42, i32* %f0, align 4
+        %f1 = getelementptr inbounds %PackedPair, %PackedPair* %p, i32 0, i32 1
+        store i8 1, i8* %f1, align 1
+        %bc = bitcast %PackedPair* %p to i64*
+        %v = load i64, i64* %bc, align 4
+        ret i64 %v
+      }
+
+      define i1 @iter_base_ne(%NodeBase* %a, %NodeBase* %b) {
+      entry:
+        %pa = getelementptr inbounds %NodeBase, %NodeBase* %a, i32 0, i32 0
+        %va = load i8*, i8** %pa, align 8
+        %pb = getelementptr inbounds %NodeBase, %NodeBase* %b, i32 0, i32 0
+        %vb = load i8*, i8** %pb, align 8
+        %ne = icmp ne i8* %va, %vb
+        ret i1 %ne
+      }
+
+      define i1 @nested_coerce_dive_init_no_fp(i8* %x, i8* %y) {
+      entry:
+        %it1 = alloca %NodeIter, align 8
+        %d1 = getelementptr inbounds %NodeIter, %NodeIter* %it1, i32 0, i32 0
+        %d2 = getelementptr inbounds %NodeBase, %NodeBase* %d1, i32 0, i32 0
+        store i8* %x, i8** %d2, align 8
+        %it2 = alloca %NodeIter, align 8
+        %e1 = getelementptr inbounds %NodeIter, %NodeIter* %it2, i32 0, i32 0
+        %e2 = getelementptr inbounds %NodeBase, %NodeBase* %e1, i32 0, i32 0
+        store i8* %y, i8** %e2, align 8
+        %b1 = bitcast %NodeIter* %it1 to %NodeBase*
+        %b2 = bitcast %NodeIter* %it2 to %NodeBase*
+        %r = call i1 @iter_base_ne(%NodeBase* %b1, %NodeBase* %b2)
+        ret i1 %r
+      }
+
+      ; 4. Search loop with early-return guard must not yield manifest null.
+      define i32* @search_table(i32* %arr, i32 %n, i32 %key) {
+      entry:
+        br label %loop
+      loop:
+        %i = phi i32 [ 0, %entry ], [ %next, %inc ]
+        %cond = icmp slt i32 %i, %n
+        br i1 %cond, label %body, label %not_found
+      body:
+        %idx = sext i32 %i to i64
+        %ep = getelementptr inbounds i32, i32* %arr, i64 %idx
+        %ev = load i32, i32* %ep, align 4
+        %hit = icmp eq i32 %ev, %key
+        br i1 %hit, label %found, label %inc
+      found:
+        ret i32* @g_found
+      inc:
+        %next = add i32 %i, 1
+        br label %loop
+      not_found:
+        ret i32* null
+      }
+
+      define i32 @caller_search_table(i32* %arr, i32 %n, i32 %key) {
+      entry:
+        %p = call i32* @search_table(i32* %arr, i32 %n, i32 %key)
+        %v = load i32, i32* %p, align 4
+        ret i32 %v
+      }
+
+      ; 5. 2D array allocator + pointer bit-tagging return -> 0 false leaks,
+      ;    while genuine unescaped malloc -> 1 MemoryLeak.
+      define i8** @alloc_2d_no_leak(i32 %d1) {
+      entry:
+        %mem = call i8* @malloc(i64 64)
+        %raw = call i8* @malloc(i64 32)
+        %ref = bitcast i8* %raw to i8**
+        br label %loop
+      loop:
+        %i = phi i32 [ 0, %entry ], [ %next, %body ]
+        %c = icmp slt i32 %i, %d1
+        br i1 %c, label %body, label %done
+      body:
+        %idx = sext i32 %i to i64
+        %elem = getelementptr inbounds i8, i8* %mem, i64 %idx
+        %slot = getelementptr inbounds i8*, i8** %ref, i64 %idx
+        store i8* %elem, i8** %slot, align 8
+        %next = add i32 %i, 1
+        br label %loop
+      done:
+        ret i8** %ref
+      }
+
+      define i8* @tagged_ptr_return_no_leak() {
+      entry:
+        %p = call i8* @malloc(i64 16)
+        %pi = ptrtoint i8* %p to i64
+        %tagged_i = or i64 %pi, 1
+        %tagged_p = inttoptr i64 %tagged_i to i8*
+        ret i8* %tagged_p
+      }
+
+      define void @llvm_error_setptr_no_leak(i8** %slot, i64 %old_bits) {
+      entry:
+        %p = call i8* @malloc(i64 16)
+        %pi = ptrtoint i8* %p to i64
+        %masked = and i64 %pi, -2
+        %tag = and i64 %old_bits, 1
+        %combined = or i64 %masked, %tag
+        %tp = inttoptr i64 %combined to i8*
+        store i8* %tp, i8** %slot, align 8
+        ret void
+      }
+
+      define i32 @genuine_leak_still_reports() {
+      entry:
+        %p = call i8* @malloc(i64 16)
+        store i8 1, i8* %p, align 1
+        ret i32 0
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::StackVariableAddressEscape),
+              0u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::UninitializedRead), 1u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::NullDereference), 0u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::MemoryLeak), 1u)
+        << "disable_smt=" << disable_smt;
+  }
+}
+
+TEST_F(PulseCheckerTest,
+       ISLRecallIntrinsicsStdLibChecksAndSummaryPriorityBothModes) {
+  // Verifies ISL-sound recall improvements without sacrificing precision across
+  // both SMT-enabled and SMT-disabled modes:
+  // 1) LLVM intrinsics (expect, assume, smax, uadd.with.overflow, fabs) do not
+  //    set unknown_values; bugs after them are caught, and llvm.assume prunes
+  //    infeasible FPs.
+  // 2) Standard C/POSIX declarations (printf, __errno_location, sqrt, bzero,
+  //    fflush(NULL)) do not blind Pulse, while real bugs (realloc of freed /
+  //    stack ptr, fclose(NULL), memcmp OOB, llvm.memset on freed ptr) are
+  //    caught and zero-length memcpy(NULL, src, 0) / fflush(NULL) have 0 FPs.
+  // 3) Summary prioritization keeps exact normal return paths even when a
+  //    callee also produces latent paths or imprecise paths.
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    auto module = parseModule(context, R"(
+      %struct.FILE = type opaque
+
+      declare i8* @malloc(i64)
+      declare i8* @realloc(i8*, i64)
+      declare void @free(i8*)
+      declare i32 @fclose(%struct.FILE*)
+      declare i32 @fflush(%struct.FILE*)
+      declare i32 @printf(i8*, ...)
+      declare i32* @__errno_location()
+      declare double @sqrt(double)
+      declare void @bzero(i8*, i64)
+      declare i32 @memcmp(i8*, i8*, i64)
+      declare i64 @llvm.expect.i64(i64, i64)
+      declare void @llvm.assume(i1)
+      declare i32 @llvm.smax.i32(i32, i32)
+      declare { i32, i1 } @llvm.uadd.with.overflow.i32(i32, i32)
+      declare double @llvm.fabs.f64(double)
+      declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)
+      declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)
+
+      @.fmt = private constant [4 x i8] c"%d\0A\00"
+
+      define i32 @uaf_after_expect_printf_errno_math() {
+      entry:
+        %p = call i8* @malloc(i64 16)
+        %e = call i64 @llvm.expect.i64(i64 1, i64 1)
+        %m = call i32 @llvm.smax.i32(i32 3, i32 7)
+        %ov = call { i32, i1 } @llvm.uadd.with.overflow.i32(i32 %m, i32 2)
+        %sum = extractvalue { i32, i1 } %ov, 0
+        %f = call double @llvm.fabs.f64(double -4.0)
+        %sq = call double @sqrt(double %f)
+        %ep = call i32* @__errno_location()
+        store i32 0, i32* %ep, align 4
+        %fmt = getelementptr inbounds [4 x i8], [4 x i8]* @.fmt, i64 0, i64 0
+        %pr = call i32 (i8*, ...) @printf(i8* %fmt, i32 %sum)
+        call void @free(i8* %p)
+        %b = load i8, i8* %p, align 1
+        %bi = sext i8 %b to i32
+        ret i32 %bi
+      }
+
+      define i8 @assume_prunes_false_npd(i8* %p) {
+      entry:
+        %nn = icmp ne i8* %p, null
+        call void @llvm.assume(i1 %nn)
+        %is_null = icmp eq i8* %p, null
+        br i1 %is_null, label %dead, label %live
+      dead:
+        %bad = load i8, i8* null, align 1
+        ret i8 %bad
+      live:
+        ret i8 0
+      }
+
+      define void @realloc_uaf_bug() {
+      entry:
+        %p = call i8* @malloc(i64 16)
+        call void @free(i8* %p)
+        %q = call i8* @realloc(i8* %p, i64 32)
+        call void @free(i8* %q)
+        ret void
+      }
+
+      define void @realloc_stack_invalid_free_bug() {
+      entry:
+        %buf = alloca [16 x i8], align 1
+        %p = getelementptr inbounds [16 x i8], [16 x i8]* %buf, i64 0, i64 0
+        %q = call i8* @realloc(i8* %p, i64 32)
+        call void @free(i8* %q)
+        ret void
+      }
+
+      define i32 @fclose_null_bug() {
+      entry:
+        %r = call i32 @fclose(%struct.FILE* null)
+        ret i32 %r
+      }
+
+      define void @memset_freed_uaf_bug() {
+      entry:
+        %p = call i8* @malloc(i64 16)
+        call void @free(i8* %p)
+        call void @llvm.memset.p0i8.i64(i8* %p, i8 0, i64 16, i1 false)
+        ret void
+      }
+
+      define i32 @memcmp_oob_bug() {
+      entry:
+        %a = alloca [8 x i8], align 1
+        %b = alloca [32 x i8], align 1
+        %pa = getelementptr inbounds [8 x i8], [8 x i8]* %a, i64 0, i64 0
+        %pb = getelementptr inbounds [32 x i8], [32 x i8]* %b, i64 0, i64 0
+        call void @bzero(i8* %pa, i64 8)
+        call void @bzero(i8* %pb, i64 32)
+        %cmp = call i32 @memcmp(i8* %pa, i8* %pb, i64 32)
+        ret i32 %cmp
+      }
+
+      define i8 @safe_zero_memcpy_and_fflush_null_and_bzero_init() {
+      entry:
+        %buf = alloca [8 x i8], align 1
+        %p = getelementptr inbounds [8 x i8], [8 x i8]* %buf, i64 0, i64 0
+        call void @bzero(i8* %p, i64 8)
+        call void @llvm.memcpy.p0i8.p0i8.i64(i8* null, i8* %p, i64 0, i1 false)
+        %fl = call i32 @fflush(%struct.FILE* null)
+        %v = load i8, i8* %p, align 1
+        ret i8 %v
+      }
+
+      declare void @mystery_side_effect(i32)
+
+      define i8* @callee_with_unknown_and_exact_paths(i32 %mode, i8* %p) {
+      entry:
+        switch i32 %mode, label %unknown_path [
+          i32 0, label %exact_ok
+          i32 1, label %u1
+          i32 2, label %u2
+          i32 3, label %u3
+          i32 4, label %u4
+          i32 5, label %u5
+          i32 6, label %u6
+          i32 7, label %u7
+          i32 8, label %u8
+          i32 9, label %u9
+          i32 10, label %u10
+        ]
+      u1:
+        call void @mystery_side_effect(i32 1)
+        ret i8* %p
+      u2:
+        call void @mystery_side_effect(i32 2)
+        ret i8* %p
+      u3:
+        call void @mystery_side_effect(i32 3)
+        ret i8* %p
+      u4:
+        call void @mystery_side_effect(i32 4)
+        ret i8* %p
+      u5:
+        call void @mystery_side_effect(i32 5)
+        ret i8* %p
+      u6:
+        call void @mystery_side_effect(i32 6)
+        ret i8* %p
+      u7:
+        call void @mystery_side_effect(i32 7)
+        ret i8* %p
+      u8:
+        call void @mystery_side_effect(i32 8)
+        ret i8* %p
+      u9:
+        call void @mystery_side_effect(i32 9)
+        ret i8* %p
+      u10:
+        call void @mystery_side_effect(i32 10)
+        ret i8* %p
+      unknown_path:
+        call void @mystery_side_effect(i32 99)
+        ret i8* %p
+      exact_ok:
+        ret i8* %p
+      }
+
+      define i8 @caller_uses_exact_summary_path_and_catches_uaf() {
+      entry:
+        %p = call i8* @malloc(i64 8)
+        %q = call i8* @callee_with_unknown_and_exact_paths(i32 0, i8* %p)
+        call void @free(i8* %q)
+        %v = load i8, i8* %p, align 1
+        ret i8 %v
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    // 4 UAF: uaf_after_expect_printf_errno_math + realloc_uaf_bug +
+    //        memset_freed_uaf_bug + caller_uses_exact_summary_path_and_catches_uaf
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::UseAfterFree), 4u)
+        << "disable_smt=" << disable_smt;
+    // 1 InvalidFree: realloc_stack_invalid_free_bug
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::InvalidFree), 1u)
+        << "disable_smt=" << disable_smt;
+    // 1 NPD: fclose_null_bug (zero FPs from assume_prunes_false_npd, zero-len memcpy, fflush(NULL))
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::NullDereference), 1u)
+        << "disable_smt=" << disable_smt;
+    // 1 OOB: memcmp_oob_bug
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::OutOfBounds), 1u)
+        << "disable_smt=" << disable_smt;
+    // 0 Uninit: bzero properly initializes %buf
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::UninitializedRead), 0u)
+        << "disable_smt=" << disable_smt;
+    // 0 MemoryLeak: no spurious leak from __errno_location or realloc
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::MemoryLeak), 0u)
+        << "disable_smt=" << disable_smt;
+  }
+}

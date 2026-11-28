@@ -63,6 +63,9 @@ private:
   AbstractValueFactory &factory_;
 
   std::map<std::string, PulseModel> models_;
+  // External-declaration-only C/POSIX/runtime models (never override a
+  // user-defined function body in the module).
+  std::map<std::string, PulseModel> decl_models_;
 
   struct PatternModel {
     std::string class_substr;
@@ -79,7 +82,8 @@ private:
   void registerStandardModels();
   void registerCppModels();
 
-  const PulseModel *findModelByName(const std::string &funcName) const;
+  const PulseModel *findModelByName(const std::string &funcName,
+                                    bool allow_pattern_models = true) const;
   const PulseModel *findModel(const llvm::Function *func) const;
 
   // Memory & resource models
@@ -136,6 +140,25 @@ private:
                            const llvm::BasicBlock *pred);
   ModelResult modelMemset(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
+  ModelResult modelBzero(const llvm::CallBase *call, ExecutionDomain &state,
+                         const llvm::BasicBlock *pred);
+  ModelResult modelMemchr(const llvm::CallBase *call, ExecutionDomain &state,
+                          const llvm::BasicBlock *pred);
+  ModelResult modelCheckedPtrCall(const llvm::CallBase *call,
+                                  ExecutionDomain &state,
+                                  const llvm::BasicBlock *pred,
+                                  const std::vector<unsigned> &read_ptr_args,
+                                  const std::vector<unsigned> &nullable_ptr_args,
+                                  const std::vector<unsigned> &out_ptr_args,
+                                  int oob_buf_arg = -1, int oob_len_arg = -1,
+                                  bool returns_nonnull_ptr = false,
+                                  int vararg_out_start = -1);
+  ModelResult modelErrnoOrCtypeLoc(const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred);
+  ModelResult modelPureFunction(const llvm::CallBase *call,
+                                ExecutionDomain &state,
+                                const llvm::BasicBlock *pred);
   ModelResult modelRead(const llvm::CallBase *call, ExecutionDomain &state,
                         const llvm::BasicBlock *pred);
   ModelResult modelWrite(const llvm::CallBase *call, ExecutionDomain &state,
