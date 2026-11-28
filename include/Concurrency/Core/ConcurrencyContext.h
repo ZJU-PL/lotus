@@ -69,6 +69,12 @@ struct ModuleConcurrencySummary {
  */
 class ConcurrencyContext {
 public:
+  /// Result of AA-augmented indirect call target resolution at a call site.
+  struct ResolvedCallees {
+    std::vector<const llvm::Function *> targets;
+    bool has_unresolved = false;
+  };
+
   explicit ConcurrencyContext(
       llvm::Module &module,
       lotus::AliasAnalysisWrapper *borrowed_aa = nullptr);
@@ -94,6 +100,33 @@ public:
 
   /// Lazily build and return the module's LLVM CallGraph.
   llvm::CallGraph &getCallGraph();
+
+  /// Resolve possible defined callees for a direct or indirect call site using
+  /// IR def-use tracking, LLVM CallGraph, and (when available) alias analysis
+  /// points-to sets filtered by compatible call signature.
+  const ResolvedCallees &resolveCallees(const llvm::CallBase *call);
+
+  /// Resolve possible defined target functions for an arbitrary function-valued
+  /// operand (such as an indirect thread-fork start routine) using IR def-use
+  /// tracking and alias analysis points-to sets.
+  ResolvedCallees resolveFunctionTargets(const llvm::Value *fnVal) const;
+
+  /// Return true if @p module contains any thread/task/kernel creation site or
+  /// an address-taken thread-creation API declaration.
+  static bool moduleHasPotentialThreadCreation(const llvm::Module &module,
+                                               ThreadAPI *api);
+
+  /// Cached check of whether this context's module may create concurrent
+  /// threads or tasks.
+  bool hasPotentialThreadCreation();
+
+  /// Return true if @p func is a well-known external runtime/libc function that
+  /// never acquires/releases user locks or spawns user threads.
+  static bool isKnownSyncFreeExternalFunction(const llvm::Function *func);
+
+  /// Return true if @p func is a well-known external function that never
+  /// captures/publishes pointer arguments into thread-shared state.
+  static bool isKnownNonCapturingExternalFunction(const llvm::Function *func);
 
   /// Lazily scan the module once and return the concurrency summary.
   const ModuleConcurrencySummary &getSummary();
@@ -133,6 +166,8 @@ private:
       m_post_dom_trees;
   std::unordered_map<const llvm::Function *, std::unique_ptr<llvm::LoopInfo>>
       m_loop_infos;
+  std::unordered_map<const llvm::CallBase *, ResolvedCallees>
+      m_resolved_callees;
 };
 
 } // namespace concurrency

@@ -10,10 +10,12 @@
 
 #pragma once
 
+#include "Concurrency/API/ThreadAPI.h"
+#include "Concurrency/ConcurrencyFacade.h"
 #include "Concurrency/LockSet/LockSetAnalysis.h"
 #include "Concurrency/MHP/IMHPAnalysis.h"
+#include "Concurrency/OpenMP/OpenMPTaskGraph.h"
 #include "Concurrency/Thread/Sharing/EscapeAnalysis.h"
-#include "Concurrency/API/ThreadAPI.h"
 
 #include <llvm/IR/Module.h>
 #include <llvm/Support/raw_ostream.h>
@@ -47,6 +49,28 @@ public:
                             lotus::EscapeAnalysis *escapeAnalysis,
                             ThreadAPI *threadAPI);
 
+  struct ExtendedSummaries {
+    bool hasOpenMP = false;
+    OpenMP::OpenMPTaskGraph::AnalysisSummary openMP;
+    bool hasMPI = false;
+    ConcurrencyFacade::MPISummary mpi;
+    bool hasCUDA = false;
+    ConcurrencyFacade::CUDASummary cuda;
+    bool hasLinuxKernel = false;
+    ConcurrencyFacade::LinuxKernelSummary linuxKernel;
+    bool hasSparse = false;
+    size_t sparseInterferenceEdges = 0;
+    size_t sparseLockSpanPrunedPairs = 0;
+    size_t sparsePointsToFacts = 0;
+    size_t sparseMemoryRegions = 0;
+    size_t sparseOriginalNodes = 0;
+    size_t sparseSlicedNodes = 0;
+  };
+
+  void setExtendedSummaries(ExtendedSummaries summaries) {
+    m_extended = std::move(summaries);
+  }
+
   /**
    * @brief Dump analysis results to output stream
    *
@@ -78,6 +102,7 @@ private:
   mhp::LockSetAnalysis *m_locksetAnalysis;
   lotus::EscapeAnalysis *m_escapeAnalysis;
   ThreadAPI *m_threadAPI;
+  ExtendedSummaries m_extended;
 };
 
 } // namespace concurrency

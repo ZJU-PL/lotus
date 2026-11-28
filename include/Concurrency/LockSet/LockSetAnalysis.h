@@ -49,6 +49,10 @@ namespace lotus {
 class AliasAnalysisWrapper;
 } // namespace lotus
 
+namespace concurrency {
+class ConcurrencyContext;
+} // namespace concurrency
+
 namespace llvm {
 class CallGraph;
 } // namespace llvm
@@ -99,6 +103,11 @@ public:
   explicit LockSetAnalysis(llvm::Module &module);
 
   /**
+   * @brief Construct lock set analysis sharing a ConcurrencyContext
+   */
+  explicit LockSetAnalysis(concurrency::ConcurrencyContext &context);
+
+  /**
    * @brief Construct lock set analysis for a single function
    * @param func The function to analyze
    */
@@ -111,6 +120,8 @@ public:
    */
   void analyze();
 
+  void setContext(concurrency::ConcurrencyContext *context);
+
   /**
    * @brief Set alias analysis wrapper for better precision
    * @param aa_wrapper Alias analysis wrapper instance
@@ -118,6 +129,7 @@ public:
   void setAliasAnalysis(lotus::AliasAnalysisWrapper *aa_wrapper) {
     m_alias_analysis = aa_wrapper;
     m_canonical_lock_cache.clear();
+    m_access_path_lock_reps.clear();
   }
 
   /**
@@ -380,6 +392,7 @@ private:
   llvm::Module *m_module;
   llvm::Function *m_single_function; // For single-function analysis
   ThreadAPI *m_thread_api;
+  concurrency::ConcurrencyContext *m_context = nullptr;
   lotus::AliasAnalysisWrapper *m_alias_analysis;
   llvm::CallGraph *m_call_graph; // For interprocedural analysis
   std::unique_ptr<llvm::CallGraph> m_owned_call_graph;
@@ -520,6 +533,8 @@ private:
       m_summary_lock_projections;
 
   mutable llvm::DenseMap<const llvm::Value *, LockID> m_canonical_lock_cache;
+  mutable std::map<std::pair<const llvm::Value *, int64_t>, LockID>
+      m_access_path_lock_reps;
 
   // Pre-scanned lock metadata (computed once per analyze() call)
   unsigned m_recursive_acquire_limit = 1;

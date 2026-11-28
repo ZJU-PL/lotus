@@ -807,4 +807,128 @@ TEST_F(ValueFlowTest, ThreadOverlayPrunesFlowShadowedInsideTheSinkSpan) {
   EXPECT_GE(stats.spanPrunedPairs, 1u);
 }
 
+TEST_F(ValueFlowTest,
+       ForkFlowKillsOverwrittenSingletonStoreKeepsConditionalAndJoinHandoff) {
+  auto module = parseModule(R"(
+    @slot = global i8* null
+    @branch_slot = global i8* null
+    @handoff = global i8* null
+    @x = global i8 0
+    @y = global i8 0
+    @a = global i8 0
+    @b = global i8 0
+    @z = global i8 0
+
+    declare i32 @pthread_create(i8*, i8*, i8* (i8*)*, i8*)
+    declare i32 @pthread_join(i8*, i8**)
+
+    define i8* @worker1(i8* %arg) {
+    entry:
+      %p = load i8*, i8** @slot
+      store i8* @z, i8** @handoff
+      ret i8* %p
+    }
+
+    define i8* @worker2(i8* %arg) {
+    entry:
+      %q = load i8*, i8** @branch_slot
+      %h = load i8*, i8** @handoff
+      ret i8* %q
+    }
+
+    define i32 @main(i1 %cond) {
+    entry:
+      %t1 = alloca i8
+      %t2 = alloca i8
+      store i8* @x, i8** @slot
+      store i8* @y, i8** @slot
+      store i8* @a, i8** @branch_slot
+      br i1 %cond, label %then, label %after_branch
+
+    then:
+      store i8* @b, i8** @branch_slot
+      br label %after_branch
+
+    after_branch:
+      call i32 @pthread_create(i8* %t1, i8* null, i8* (i8*)* @worker1, i8* null)
+      call i32 @pthread_join(i8* %t1, i8** null)
+      call i32 @pthread_create(i8* %t2, i8* null, i8* (i8*)* @worker2, i8* null)
+      call i32 @pthread_join(i8* %t2, i8** null)
+      ret i32 0
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+
+  auto built = buildThreadGraph(*module);
+  ASSERT_NE(built->graph, nullptr);
+
+  ThreadCreationTree tree(*module, *ThreadAPI::getThreadAPI(), 2);
+  FixedMHP sequential(false);
+  ThreadAwareSVFGBuilder overlay(*built->graph, sequential, nullptr, nullptr,
+                                 &tree);
+  const auto &stats = overlay.build();
+  EXPECT_GT(stats.forkMemoryEdges, 0u);
+  EXPECT_GT(stats.joinMemoryEdges, 0u);
+
+  Function &mainFn = *module->getFunction("main");
+  const StoreInst *storeX = nthStore(mainFn, 0);
+  const StoreInst *storeY = nthStore(mainFn, 1);
+  const StoreInst *storeA = nthStore(mainFn, 2);
+  const StoreInst *storeB = nthStore(mainFn, 3);
+  ASSERT_NE(storeX, nullptr);
+  ASSERT_NE(storeY, nullptr);
+  ASSERT_NE(storeA, nullptr);
+  ASSERT_NE(storeB, nullptr);
+
+  auto *storeXNode = findAccessNode<StoreSVFGNode>(*built->graph, storeX);
+  auto *storeYNode = findAccessNode<StoreSVFGNode>(*built->graph, storeY);
+  auto *storeANode = findAccessNode<StoreSVFGNode>(*built->graph, storeA);
+  auto *storeBNode = findAccessNode<StoreSVFGNode>(*built->graph, storeB);
+  ASSERT_NE(storeXNode, nullptr);
+  ASSERT_NE(storeYNode, nullptr);
+  ASSERT_NE(storeANode, nullptr);
+  ASSERT_NE(storeBNode, nullptr);
+
+  auto hasCallAInToFunction = [&](SVFGNode *src, const Function *callee) {
+    for (SVFGEdge *edge : src->getOutEdges()) {
+      if (edge->getEdgeKind() != SVFGEdgeK::CallAIn)
+        continue;
+      auto *fin = dyn_cast<FormalInSVFGNode>(edge->getDstNode());
+      if (fin && fin->getFunction() == callee)
+        return true;
+    }
+    return false;
+  };
+
+  const Function *worker1 = module->getFunction("worker1");
+  const Function *worker2 = module->getFunction("worker2");
+  // Overwritten singleton store @x must NOT leak into worker1's FormalIn,
+  // while the killing store @y MUST flow into worker1.
+  EXPECT_FALSE(hasCallAInToFunction(storeXNode, worker1));
+  EXPECT_TRUE(hasCallAInToFunction(storeYNode, worker1));
+  // Both dominating store @a and non-dominating conditional branch store @b
+  // MUST reach worker2's FormalIn.
+  EXPECT_TRUE(hasCallAInToFunction(storeANode, worker2));
+  EXPECT_TRUE(hasCallAInToFunction(storeBNode, worker2));
+
+  // Join of worker1 must feed ActualOut -> worker2's FormalIn (join -> fork).
+  const CallBase *firstJoin = nullptr;
+  for (Instruction &inst : instructions(mainFn)) {
+    if (auto *call = dyn_cast<CallBase>(&inst)) {
+      if (call->getCalledFunction() &&
+          call->getCalledFunction()->getName() == "pthread_join") {
+        firstJoin = call;
+        break;
+      }
+    }
+  }
+  ASSERT_NE(firstJoin, nullptr);
+  bool sawJoinToFork = false;
+  for (SVFGNode *aout : built->graph->getActualOuts(firstJoin)) {
+    if (hasCallAInToFunction(aout, worker2))
+      sawJoinToFork = true;
+  }
+  EXPECT_TRUE(sawJoinToFork);
+}
+
 } // namespace

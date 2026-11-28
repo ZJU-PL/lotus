@@ -70,9 +70,66 @@ lotus::AliasAnalysisWrapper *MHPAnalysis::getAliasAnalysis() const {
 }
 
 namespace {
-bool isLikelyThreadEntryCandidate(const Function &func) {
+bool isOnlyUsedInVTableOrTypeInfo(const Function &func) {
+  bool sawNonCallUse = false;
+  std::deque<const Value *> worklist;
+  std::unordered_set<const Value *> visited;
+  for (const Use &u : func.uses()) {
+    const User *user = u.getUser();
+    if (const auto *cb = dyn_cast<CallBase>(user)) {
+      if (cb->isCallee(&u)) {
+        continue;
+      }
+    }
+    sawNonCallUse = true;
+    if (visited.insert(user).second) {
+      worklist.push_back(user);
+    }
+  }
+  if (!sawNonCallUse) {
+    return true;
+  }
+  while (!worklist.empty()) {
+    const Value *cur = worklist.front();
+    worklist.pop_front();
+    if (const auto *gv = dyn_cast<GlobalVariable>(cur)) {
+      StringRef name = gv->getName();
+      if (name.startswith("_ZTV") || name.startswith("_ZTI") ||
+          name.startswith("_ZTC") || name.startswith("_ZTS")) {
+        continue;
+      }
+      return false;
+    }
+    if (isa<ConstantAggregate>(cur) || isa<ConstantExpr>(cur)) {
+      if (cur->use_empty()) {
+        return false;
+      }
+      for (const User *u : cur->users()) {
+        if (visited.insert(u).second) {
+          worklist.push_back(u);
+        }
+      }
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+bool isLikelyThreadEntryCandidate(const Function &func,
+                                  bool pthreadOnlyForks = false) {
   if (func.isDeclaration() || func.arg_size() > 1) {
     return false;
+  }
+  if (isOnlyUsedInVTableOrTypeInfo(func)) {
+    return false;
+  }
+  if (pthreadOnlyForks) {
+    if (func.arg_size() != 1) {
+      return false;
+    }
+    return func.getFunctionType()->getParamType(0)->isPointerTy() &&
+           func.getReturnType()->isPointerTy();
   }
   if (func.arg_size() == 1 &&
       !func.getFunctionType()->getParamType(0)->isPointerTy()) {
@@ -123,6 +180,11 @@ void MHPAnalysis::analyze() {
   m_has_unresolved_fork = false;
   m_has_multi_context_nodes = false;
   m_single_main_thread_only = false;
+  m_module_may_spawn_threads =
+      m_context
+          ? m_context->hasPotentialThreadCreation()
+          : concurrency::ConcurrencyContext::moduleHasPotentialThreadCreation(
+                m_module, m_thread_api);
   m_pending_joins.clear();
   m_pending_detaches.clear();
   m_multi_instance_threads.clear();
@@ -131,6 +193,10 @@ void MHPAnalysis::analyze() {
   m_openmp_task_exclusions.clear();
   m_openmp_semantics = std::make_unique<OpenMP::OpenMPSemantics>(m_module);
   m_openmp_semantics->analyze();
+  if (!m_openmp_semantics->getTasks().empty() ||
+      !m_openmp_semantics->getSemanticEntities().empty()) {
+    m_module_may_spawn_threads = true;
+  }
   m_next_thread_id = 1;
   m_region_analysis.reset();
   m_lockset.reset();
@@ -185,10 +251,17 @@ void MHPAnalysis::analyze() {
   buildThreadFlowGraph();
   {
     const Function *main_fn = m_module.getFunction("main");
+    if (!main_fn || main_fn->isDeclaration()) {
+      main_fn = m_module.getFunction("MAIN__");
+    }
+    const bool unresolved_may_spawn_defined =
+        m_has_unresolved_fork && !m_thread_entry_candidates.empty();
     m_single_main_thread_only =
-        m_tfg && !m_has_unresolved_fork && m_multi_instance_threads.empty() &&
-        m_tfg->getAllThreads().size() <= 1 && main_fn &&
-        !main_fn->isDeclaration();
+        m_tfg && !unresolved_may_spawn_defined &&
+        m_multi_instance_threads.empty() &&
+        m_tfg->getAllThreads().size() <= 1 &&
+        ((main_fn && !main_fn->isDeclaration()) ||
+         (!m_module_may_spawn_threads && !has_locks && !has_joins));
   }
   ++m_analysis_generation;
 
@@ -308,7 +381,9 @@ void MHPAnalysis::computeSyncRelevantFunctions() {
 
 CallContextID MHPAnalysis::chooseCalleeContext(ThreadID tid,
                                                const Function *target,
-                                               SyncNode *call_node) {
+                                               SyncNode *call_node,
+                                               bool force_merged,
+                                               size_t queued_node_estimate) {
   ThreadFuncKey key{tid, target};
   auto shared_it = m_func_shared_context.find(key);
   if (shared_it != m_func_shared_context.end()) {
@@ -322,10 +397,11 @@ CallContextID MHPAnalysis::chooseCalleeContext(ThreadID tid,
   const size_t max_depth =
       sync_relevant ? (kMaxContextDepth + 2) : kMaxContextDepth;
   const bool within_node_budget =
-      m_tfg->getAllNodes().size() < kMaxClonedTFGNodes;
+      (m_tfg->getAllNodes().size() + queued_node_estimate) <
+      kMaxClonedTFGNodes;
 
   size_t &ctx_count = m_func_context_count[key];
-  if (within_node_budget && current_depth < max_depth &&
+  if (!force_merged && within_node_budget && current_depth < max_depth &&
       ctx_count < max_contexts) {
     ++ctx_count;
     return call_node->getNodeID();
@@ -340,9 +416,12 @@ CallContextID MHPAnalysis::chooseCalleeContext(ThreadID tid,
 void MHPAnalysis::buildThreadFlowGraph() {
   errs() << "Building Thread Flow Graph...\n";
 
-  // Find main function
+  // Find main function (with Fortran MAIN__ fallback).
   Function *main_func = m_module.getFunction("main");
-  if (!main_func) {
+  if (!main_func || main_func->isDeclaration()) {
+    main_func = m_module.getFunction("MAIN__");
+  }
+  if (!main_func || main_func->isDeclaration()) {
     errs() << "Warning: No main function found\n";
     return;
   }
@@ -598,309 +677,472 @@ void MHPAnalysis::lowerOpenMPTasks(const OpenMP::OpenMPSemantics &semantics) {
   }
 }
 
-void MHPAnalysis::processFunction(const Function *func, ThreadID tid,
-                                  CallContextID ctx) {
-  if (!func || func->isDeclaration())
+void MHPAnalysis::processFunction(const Function *root_func, ThreadID root_tid,
+                                  CallContextID root_ctx) {
+  if (!root_func || root_func->isDeclaration())
     return;
 
-  auto &active_stack = m_active_call_stack_by_thread[tid];
-  if (std::find(active_stack.begin(), active_stack.end(), func) !=
-      active_stack.end()) {
-    return;
-  }
-
-  // Avoid re-processing functions for the same thread context
-  if (m_visited_functions_by_thread[tid][ctx].count(func)) {
-    return;
-  }
-  m_visited_functions_by_thread[tid][ctx].insert(func);
-  active_stack.push_back(func);
-
-  // --- Pass 1: Create all nodes for this function ---
-  DenseMap<const Instruction *, SyncNode *> local_nodes;
-  local_nodes.reserve(func->getInstructionCount());
-  for (const BasicBlock &bb : *func) {
-    for (const Instruction &inst : bb) {
-      mapInstructionToThread(&inst, tid);
-      SyncNodeType node_type = SyncNodeType::REGULAR_INST;
-
-      if (const CallBase *cb = dyn_cast<CallBase>(&inst)) {
-        ThreadAPI::TD_TYPE type = m_thread_api->getType(cb);
-        if (type == ThreadAPI::TD_BAR_INIT && cb->arg_size() >= 3) {
-          if (const Value *barrier = m_thread_api->getBarrierVal(&inst)) {
-            if (const auto *count =
-                    dyn_cast<ConstantInt>(cb->getArgOperand(2))) {
-              const Value *key = barrier->stripPointerCasts();
-              const size_t value = static_cast<size_t>(count->getZExtValue());
-              size_t &init_sites = m_barrier_init_sites[key];
-              ++init_sites;
-              auto expected = m_barrier_expected_counts.find(key);
-              if (init_sites > 1 ||
-                  (expected != m_barrier_expected_counts.end() &&
-                   expected->second != value)) {
-                m_uncertain_barrier_counts.insert(key);
-                m_barrier_expected_counts.erase(key);
-              } else {
-                m_barrier_expected_counts[key] = value;
-              }
-            }
-          }
-        }
-        if (m_thread_api->isTDFork(&inst)) {
-          node_type = SyncNodeType::THREAD_FORK;
-        } else if (m_thread_api->isTDJoin(&inst)) {
-          node_type = SyncNodeType::THREAD_JOIN;
-        } else if (m_thread_api->isTDAcquire(&inst)) {
-          node_type = SyncNodeType::LOCK_ACQUIRE;
-        } else if (m_thread_api->isTDRelease(&inst)) {
-          node_type = SyncNodeType::LOCK_RELEASE;
-        } else if (m_thread_api->isTDExit(&inst)) {
-          node_type = SyncNodeType::THREAD_EXIT;
-        } else if (m_thread_api->isTDCondWait(&inst)) {
-          node_type = SyncNodeType::COND_WAIT;
-        } else if (m_thread_api->isTDCondBroadcast(&inst)) {
-          node_type = SyncNodeType::COND_BROADCAST;
-        } else if (m_thread_api->isTDCondSignal(&inst)) {
-          node_type = SyncNodeType::COND_SIGNAL;
-        } else if (type == ThreadAPI::TD_LATCH_ARRIVE_WAIT ||
-                   type == ThreadAPI::TD_BARRIER_ARRIVE ||
-                   m_thread_api->isTDBarWait(&inst)) {
-          node_type = SyncNodeType::BARRIER_WAIT;
-        }
-      }
-      SyncNode *created = m_tfg->createNode(&inst, node_type, tid, ctx);
-      local_nodes[&inst] = created;
-    }
-  }
-
-  // --- Pass 2: Add edges and handle synchronization logic ---
-  // Set entry node to first instruction in entry block
-  SyncNode *entry_node = nullptr;
-  if (!func->empty() && !func->front().empty()) {
-    entry_node = local_nodes.lookup(&func->front().front());
-    if (entry_node && ctx == 0) {
-      m_tfg->setThreadEntryNode(tid, entry_node);
-    }
-  }
-
-  // Lazily index indirect call targets from LLVM CallGraph once per function
-  // so functions with many indirect calls do not scan *cgNode quadratically.
-  bool indirect_targets_indexed = false;
-  DenseMap<const CallBase *, SmallVector<CallGraphNode *, 4>>
-      indirect_cg_targets;
-  auto ensureIndirectTargetsIndexed = [&]() {
-    if (indirect_targets_indexed) {
-      return;
-    }
-    indirect_targets_indexed = true;
-    if (!m_call_graph) {
-      return;
-    }
-    if (CallGraphNode *cgNode = (*m_call_graph)[func]) {
-      for (auto &callRecord : *cgNode) {
-        if (!callRecord.first.hasValue()) {
-          continue;
-        }
-        if (const auto *record_cb = dyn_cast_or_null<CallBase>(*callRecord.first)) {
-          indirect_cg_targets[record_cb].push_back(callRecord.second);
-        }
-      }
-    }
+  enum class WorkKind { Enter, Exit };
+  struct WorkItem {
+    WorkKind kind = WorkKind::Enter;
+    const Function *func = nullptr;
+    ThreadID tid = 0;
+    CallContextID ctx = 0;
+  };
+  struct PendingCallEdge {
+    SyncNode *call_node = nullptr;
+    ThreadID tid = 0;
+    const Function *callee = nullptr;
+    CallContextID callee_ctx = 0;
+    SyncNode *normal_ret = nullptr;
+    SyncNode *unwind_ret = nullptr;
+  };
+  struct PendingForkEdge {
+    SyncNode *fork_node = nullptr;
+    ThreadID child_tid = 0;
+  };
+  struct DeferredJoin {
+    const Instruction *inst = nullptr;
+    SyncNode *node = nullptr;
+    ThreadID tid = 0;
   };
 
-  for (const BasicBlock &bb : *func) {
-    SyncNode *prev_node = nullptr;
-    for (const Instruction &inst : bb) {
-      SyncNode *node = local_nodes.lookup(&inst);
-      if (!node) {
-        prev_node = nullptr;
-        continue;
+  struct FrameKey {
+    const Function *func = nullptr;
+    ThreadID tid = 0;
+    CallContextID ctx = 0;
+    bool operator==(const FrameKey &o) const {
+      return func == o.func && tid == o.tid && ctx == o.ctx;
+    }
+  };
+  struct FrameKeyHash {
+    size_t operator()(const FrameKey &k) const {
+      size_t h = std::hash<const void *>{}(k.func);
+      h ^= std::hash<ThreadID>{}(k.tid) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+           (h >> 2);
+      h ^= std::hash<CallContextID>{}(k.ctx) + 0x9e3779b97f4a7c15ULL +
+           (h << 6) + (h >> 2);
+      return h;
+    }
+  };
+  DenseMap<const Function *, size_t> func_inst_count_cache;
+  auto getFuncInstCount = [&](const Function *fn) -> size_t {
+    if (!fn) {
+      return 0;
+    }
+    auto it = func_inst_count_cache.find(fn);
+    if (it != func_inst_count_cache.end()) {
+      return it->second;
+    }
+    size_t count = 0;
+    for (const BasicBlock &bb : *fn) {
+      count += bb.size();
+    }
+    func_inst_count_cache.try_emplace(fn, count);
+    return count;
+  };
+
+  std::unordered_set<FrameKey, FrameKeyHash> queued_frames;
+  std::vector<WorkItem> work_stack;
+  size_t queued_node_estimate = getFuncInstCount(root_func);
+  queued_frames.insert({root_func, root_tid, root_ctx});
+  work_stack.push_back({WorkKind::Enter, root_func, root_tid, root_ctx});
+  std::vector<PendingCallEdge> pending_calls;
+  std::vector<PendingForkEdge> pending_forks;
+  std::vector<DeferredJoin> deferred_joins;
+
+  while (!work_stack.empty()) {
+    WorkItem item = work_stack.back();
+    work_stack.pop_back();
+
+    const Function *func = item.func;
+    const ThreadID tid = item.tid;
+    const CallContextID ctx = item.ctx;
+
+    if (item.kind == WorkKind::Exit) {
+      auto &active_stack = m_active_call_stack_by_thread[tid];
+      if (!active_stack.empty() && active_stack.back() == func) {
+        active_stack.pop_back();
       }
+      continue;
+    }
 
-      // Add intra-block edges
-      if (prev_node) {
-        m_tfg->addIntraThreadEdge(prev_node, node);
-      }
-      prev_node = node;
+    if (!func || func->isDeclaration())
+      continue;
+    const size_t func_insts = getFuncInstCount(func);
+    queued_node_estimate =
+        (queued_node_estimate >= func_insts) ? (queued_node_estimate - func_insts) : 0;
 
-      // Add inter-block (CFG) edges
-      if (inst.isTerminator()) {
-        for (const BasicBlock *succ : successors(inst.getParent())) {
-          if (!succ->empty()) {
-            SyncNode *succ_node = local_nodes.lookup(&succ->front());
-            if (succ_node)
-              m_tfg->addIntraThreadEdge(node, succ_node);
-          }
-        }
-      }
+    auto &active_stack = m_active_call_stack_by_thread[tid];
+    if (std::find(active_stack.begin(), active_stack.end(), func) !=
+        active_stack.end()) {
+      continue;
+    }
 
-      // Handle synchronization logic for special instructions
-      if (const CallBase *cb = dyn_cast<CallBase>(&inst)) {
-        switch (node->getType()) {
-        case SyncNodeType::THREAD_FORK:
-          handleThreadFork(&inst, node, tid);
-          break;
-        case SyncNodeType::THREAD_JOIN:
-          handleThreadJoin(&inst, node, tid);
-          break;
-        case SyncNodeType::LOCK_ACQUIRE:
-          handleLockAcquire(&inst, node);
-          break;
-        case SyncNodeType::LOCK_RELEASE:
-          handleLockRelease(&inst, node);
-          break;
-        case SyncNodeType::COND_WAIT:
-          handleCondWait(&inst, node);
-          break;
-        case SyncNodeType::COND_SIGNAL:
-        case SyncNodeType::COND_BROADCAST:
-          handleCondSignal(&inst, node);
-          break;
-        case SyncNodeType::BARRIER_WAIT:
-          handleBarrier(&inst, node);
-          break;
-        case SyncNodeType::THREAD_EXIT:
-          break;
-        default: {
-          const ThreadAPI::TD_TYPE type = m_thread_api->getType(cb);
-          if (type == ThreadAPI::TD_DETACH) {
-            handleThreadDetach(&inst);
-            break;
-          }
-          if (m_thread_api->isCUDAKernelCallImmediatelyAfterLaunch(&inst)) {
-            break;
-          }
-          // Handle both direct and indirect calls
-          const Function *callee = m_thread_api->getCallee(cb);
-          auto wireCallee = [&](const Function *target) -> bool {
-            if (!target || target->isDeclaration()) {
-              return false;
-            }
-            const auto &active = m_active_call_stack_by_thread[tid];
-            if (std::find(active.begin(), active.end(), target) !=
-                active.end()) {
-              // Do not connect a recursive call to an unrelated invocation.
-              // The body remains conservatively unexpanded until a balanced
-              // recursion summary is available.
-              return false;
-            }
-            const CallContextID callee_ctx =
-                chooseCalleeContext(tid, target, node);
-            m_has_multi_context_nodes = true;
-            processFunction(target, tid, callee_ctx);
-            SyncNode *callee_entry =
-                m_tfg->getNode(&target->front().front(), tid, callee_ctx);
-            if (!callee_entry) {
-              return false;
-            }
-            m_tfg->addCallEdge(node, callee_entry);
+    // Avoid re-processing functions for the same thread context
+    if (m_visited_functions_by_thread[tid][ctx].count(func)) {
+      continue;
+    }
+    m_visited_functions_by_thread[tid][ctx].insert(func);
+    active_stack.push_back(func);
+    work_stack.push_back({WorkKind::Exit, func, tid, ctx});
 
-            std::vector<SyncNode *> callee_exits =
-                m_tfg->getFunctionExitNodes(tid, target, callee_ctx);
-            if (callee_exits.empty()) {
-              return true;
-            }
-            auto wireExitsTo = [&](const Instruction *return_inst,
-                                   bool exceptional) {
-              if (!return_inst) {
-                return;
-              }
-              SyncNode *return_site = local_nodes.lookup(return_inst);
-              if (!return_site) {
-                return;
-              }
-              for (SyncNode *callee_exit : callee_exits) {
-                const Instruction *exit_inst = callee_exit->getInstruction();
-                if (!exit_inst || (exceptional != isa<ResumeInst>(exit_inst))) {
-                  continue;
-                }
-                m_tfg->addRetEdge(callee_exit, return_site);
-              }
-            };
+    SmallVector<WorkItem, 8> children_to_visit;
 
-            const Instruction *next_inst = inst.getNextNode();
-            if (next_inst) {
-              if (SyncNode *return_site = local_nodes.lookup(next_inst)) {
-                for (SyncNode *callee_exit : callee_exits) {
-                  if (!isa<ResumeInst>(callee_exit->getInstruction())) {
-                    m_tfg->addRetEdge(callee_exit, return_site);
+    // Scope local_nodes and indirect_cg_targets so all per-function temporary
+    // maps are destroyed BEFORE descending into callee/child frames.
+    {
+      // --- Pass 1: Create all nodes for this function ---
+      DenseMap<const Instruction *, SyncNode *> local_nodes;
+      local_nodes.reserve(func_insts);
+      for (const BasicBlock &bb : *func) {
+        for (const Instruction &inst : bb) {
+          mapInstructionToThread(&inst, tid);
+          SyncNodeType node_type = SyncNodeType::REGULAR_INST;
+
+          if (const CallBase *cb = dyn_cast<CallBase>(&inst)) {
+            ThreadAPI::TD_TYPE type = m_thread_api->getType(cb);
+            if (type == ThreadAPI::TD_BAR_INIT && cb->arg_size() >= 3) {
+              if (const Value *barrier = m_thread_api->getBarrierVal(&inst)) {
+                if (const auto *count =
+                        dyn_cast<ConstantInt>(cb->getArgOperand(2))) {
+                  const Value *key = barrier->stripPointerCasts();
+                  const size_t value =
+                      static_cast<size_t>(count->getZExtValue());
+                  size_t &init_sites = m_barrier_init_sites[key];
+                  ++init_sites;
+                  auto expected = m_barrier_expected_counts.find(key);
+                  if (init_sites > 1 ||
+                      (expected != m_barrier_expected_counts.end() &&
+                       expected->second != value)) {
+                    m_uncertain_barrier_counts.insert(key);
+                    m_barrier_expected_counts.erase(key);
+                  } else {
+                    m_barrier_expected_counts[key] = value;
                   }
                 }
               }
-            } else if (const auto *invoke = dyn_cast<InvokeInst>(&inst)) {
-              if (invoke->getNormalDest() && !invoke->getNormalDest()->empty()) {
-                wireExitsTo(&invoke->getNormalDest()->front(), false);
-              }
-              if (invoke->getUnwindDest() && !invoke->getUnwindDest()->empty()) {
-                wireExitsTo(&invoke->getUnwindDest()->front(), true);
-              }
             }
-            return true;
-          };
-
-          if (type == ThreadAPI::TD_CALL_ONCE) {
-            for (unsigned idx = 1; idx < cb->arg_size(); ++idx) {
-              const Value *arg = cb->getArgOperand(idx);
-              if (!arg) {
-                continue;
-              }
-              if (const auto *callable =
-                      dyn_cast<Function>(arg->stripPointerCasts())) {
-                wireCallee(callable);
-                break;
-              }
+            if (m_thread_api->isTDFork(&inst)) {
+              node_type = SyncNodeType::THREAD_FORK;
+            } else if (m_thread_api->isTDJoin(&inst)) {
+              node_type = SyncNodeType::THREAD_JOIN;
+            } else if (m_thread_api->isTDAcquire(&inst)) {
+              node_type = SyncNodeType::LOCK_ACQUIRE;
+            } else if (m_thread_api->isTDRelease(&inst)) {
+              node_type = SyncNodeType::LOCK_RELEASE;
+            } else if (m_thread_api->isTDExit(&inst)) {
+              node_type = SyncNodeType::THREAD_EXIT;
+            } else if (m_thread_api->isTDCondWait(&inst)) {
+              node_type = SyncNodeType::COND_WAIT;
+            } else if (m_thread_api->isTDCondBroadcast(&inst)) {
+              node_type = SyncNodeType::COND_BROADCAST;
+            } else if (m_thread_api->isTDCondSignal(&inst)) {
+              node_type = SyncNodeType::COND_SIGNAL;
+            } else if (type == ThreadAPI::TD_LATCH_ARRIVE_WAIT ||
+                       type == ThreadAPI::TD_BARRIER_ARRIVE ||
+                       m_thread_api->isTDBarWait(&inst)) {
+              node_type = SyncNodeType::BARRIER_WAIT;
             }
           }
-
-          if (!callee) {
-            bool resolved_indirect_target = false;
-            bool has_unresolved_indirect_target = false;
-            ensureIndirectTargetsIndexed();
-            auto cg_it = indirect_cg_targets.find(cb);
-            if (cg_it != indirect_cg_targets.end()) {
-              for (CallGraphNode *calleeNode : cg_it->second) {
-                if (!calleeNode) {
-                  has_unresolved_indirect_target = true;
-                  continue;
-                }
-                Function *possibleCallee = calleeNode->getFunction();
-                if (!possibleCallee || possibleCallee->isDeclaration()) {
-                  has_unresolved_indirect_target = true;
-                  continue;
-                }
-                if (wireCallee(possibleCallee)) {
-                  resolved_indirect_target = true;
-                } else {
-                  has_unresolved_indirect_target = true;
-                }
-              }
-            }
-            if (!resolved_indirect_target || has_unresolved_indirect_target) {
-              // Conservatively assume an unresolved indirect call could hide a
-              // thread entry and avoid proving non-overlap through optimistic
-              // single-thread reasoning.
-              enableIndirectForkConservatism();
-            }
-          } else if (!callee->isDeclaration()) {
-            // Direct call to a defined function
-            wireCallee(callee);
-          }
-          break;
-        }
+          SyncNode *created = m_tfg->createNode(&inst, node_type, tid, ctx);
+          local_nodes[&inst] = created;
         }
       }
 
-      if (isa<ReturnInst>(inst) || isa<ResumeInst>(inst) ||
-          node->getType() == SyncNodeType::THREAD_EXIT) {
-        m_tfg->setFunctionExitNode(tid, func, node, ctx);
-        if (ctx == 0 && m_tfg->getThreadEntry(tid) == func) {
-          m_tfg->setThreadExitNode(tid, node);
+      // --- Pass 2: Add edges and handle synchronization logic ---
+      SyncNode *entry_node = nullptr;
+      if (!func->empty() && !func->front().empty()) {
+        entry_node = local_nodes.lookup(&func->front().front());
+        if (entry_node && ctx == 0) {
+          m_tfg->setThreadEntryNode(tid, entry_node);
         }
+      }
+
+      bool indirect_targets_indexed = false;
+      DenseMap<const CallBase *, SmallVector<CallGraphNode *, 4>>
+          indirect_cg_targets;
+      auto ensureIndirectTargetsIndexed = [&]() {
+        if (indirect_targets_indexed) {
+          return;
+        }
+        indirect_targets_indexed = true;
+        if (!m_call_graph) {
+          return;
+        }
+        if (CallGraphNode *cgNode = (*m_call_graph)[func]) {
+          for (auto &callRecord : *cgNode) {
+            if (!callRecord.first.hasValue()) {
+              continue;
+            }
+            if (const auto *record_cb =
+                    dyn_cast_or_null<CallBase>(*callRecord.first)) {
+              indirect_cg_targets[record_cb].push_back(callRecord.second);
+            }
+          }
+        }
+      };
+
+      for (const BasicBlock &bb : *func) {
+        SyncNode *prev_node = nullptr;
+        for (const Instruction &inst : bb) {
+          SyncNode *node = local_nodes.lookup(&inst);
+          if (!node) {
+            prev_node = nullptr;
+            continue;
+          }
+
+          if (prev_node) {
+            m_tfg->addIntraThreadEdge(prev_node, node);
+          }
+          prev_node = node;
+
+          if (inst.isTerminator()) {
+            for (const BasicBlock *succ : successors(inst.getParent())) {
+              if (!succ->empty()) {
+                SyncNode *succ_node = local_nodes.lookup(&succ->front());
+                if (succ_node)
+                  m_tfg->addIntraThreadEdge(node, succ_node);
+              }
+            }
+          }
+
+          if (const CallBase *cb = dyn_cast<CallBase>(&inst)) {
+            switch (node->getType()) {
+            case SyncNodeType::THREAD_FORK: {
+              std::vector<std::pair<const Function *, ThreadID>> spawns;
+              handleThreadFork(&inst, node, tid, &spawns);
+              for (const auto &sp : spawns) {
+                pending_forks.push_back({node, sp.second});
+                if (queued_frames.insert({sp.first, sp.second, 0}).second) {
+                  queued_node_estimate += getFuncInstCount(sp.first);
+                  children_to_visit.push_back(
+                      {WorkKind::Enter, sp.first, sp.second, 0});
+                }
+              }
+              break;
+            }
+            case SyncNodeType::THREAD_JOIN:
+              deferred_joins.push_back({&inst, node, tid});
+              break;
+            case SyncNodeType::LOCK_ACQUIRE:
+              handleLockAcquire(&inst, node);
+              break;
+            case SyncNodeType::LOCK_RELEASE:
+              handleLockRelease(&inst, node);
+              break;
+            case SyncNodeType::COND_WAIT:
+              handleCondWait(&inst, node);
+              break;
+            case SyncNodeType::COND_SIGNAL:
+            case SyncNodeType::COND_BROADCAST:
+              handleCondSignal(&inst, node);
+              break;
+            case SyncNodeType::BARRIER_WAIT:
+              handleBarrier(&inst, node);
+              break;
+            case SyncNodeType::THREAD_EXIT:
+              break;
+            default: {
+              const ThreadAPI::TD_TYPE type = m_thread_api->getType(cb);
+              if (type == ThreadAPI::TD_DETACH) {
+                handleThreadDetach(&inst);
+                break;
+              }
+              if (m_thread_api->isCUDAKernelCallImmediatelyAfterLaunch(&inst)) {
+                break;
+              }
+              const Function *callee = m_thread_api->getCallee(cb);
+
+              auto enqueueCallee = [&](const Function *target,
+                                       bool force_merged = false) -> bool {
+                if (!target || target->isDeclaration()) {
+                  return false;
+                }
+                const auto &active = m_active_call_stack_by_thread[tid];
+                if (std::find(active.begin(), active.end(), target) !=
+                    active.end()) {
+                  return false;
+                }
+                const CallContextID callee_ctx = chooseCalleeContext(
+                    tid, target, node, force_merged, queued_node_estimate);
+                m_has_multi_context_nodes = true;
+
+                SyncNode *normal_ret = nullptr;
+                SyncNode *unwind_ret = nullptr;
+                if (const Instruction *next_inst = inst.getNextNode()) {
+                  normal_ret = local_nodes.lookup(next_inst);
+                } else if (const auto *invoke = dyn_cast<InvokeInst>(&inst)) {
+                  if (invoke->getNormalDest() &&
+                      !invoke->getNormalDest()->empty()) {
+                    normal_ret =
+                        local_nodes.lookup(&invoke->getNormalDest()->front());
+                  }
+                  if (invoke->getUnwindDest() &&
+                      !invoke->getUnwindDest()->empty()) {
+                    unwind_ret =
+                        local_nodes.lookup(&invoke->getUnwindDest()->front());
+                  }
+                }
+                pending_calls.push_back(
+                    {node, tid, target, callee_ctx, normal_ret, unwind_ret});
+                if (!m_visited_functions_by_thread[tid][callee_ctx].count(
+                        target) &&
+                    queued_frames.insert({target, tid, callee_ctx}).second) {
+                  queued_node_estimate += getFuncInstCount(target);
+                  children_to_visit.push_back(
+                      {WorkKind::Enter, target, tid, callee_ctx});
+                }
+                return true;
+              };
+
+              if (type == ThreadAPI::TD_CALL_ONCE) {
+                for (unsigned idx = 1; idx < cb->arg_size(); ++idx) {
+                  const Value *arg = cb->getArgOperand(idx);
+                  if (!arg) {
+                    continue;
+                  }
+                  if (const auto *callable =
+                          dyn_cast<Function>(arg->stripPointerCasts())) {
+                    enqueueCallee(callable);
+                    break;
+                  }
+                }
+              }
+
+              if (!callee) {
+                if (!m_module_may_spawn_threads) {
+                  // Single-threaded modules without any thread creation sites
+                  // cannot hide a fork behind an indirect call.
+                  break;
+                }
+                bool resolved_indirect_target = false;
+                bool has_unresolved_indirect_target = false;
+                if (m_context) {
+                  const auto resolved = m_context->resolveCallees(cb);
+                  if (!resolved.has_unresolved) {
+                    // Closed indirect call: wire all resolved targets so we
+                    // avoid false conservatism.
+                    for (const Function *possibleCallee : resolved.targets) {
+                      if (enqueueCallee(possibleCallee)) {
+                        resolved_indirect_target = true;
+                      } else {
+                        has_unresolved_indirect_target = true;
+                      }
+                    }
+                    if (!resolved.targets.empty()) {
+                      resolved_indirect_target = true;
+                    }
+                  } else {
+                    // Open/unresolved indirect call: conservatism will activate,
+                    // so wire sync-relevant targets to keep all fork/join/lock
+                    // edges without creating dense non-sync call-graph cliques.
+                    has_unresolved_indirect_target = true;
+                    for (const Function *possibleCallee : resolved.targets) {
+                      if (m_sync_relevant_functions.count(possibleCallee)) {
+                        if (enqueueCallee(possibleCallee,
+                                          /*force_merged=*/true)) {
+                          resolved_indirect_target = true;
+                        }
+                      }
+                    }
+                  }
+                } else {
+                  ensureIndirectTargetsIndexed();
+                  auto cg_it = indirect_cg_targets.find(cb);
+                  if (cg_it != indirect_cg_targets.end()) {
+                    for (CallGraphNode *calleeNode : cg_it->second) {
+                      if (!calleeNode) {
+                        has_unresolved_indirect_target = true;
+                        continue;
+                      }
+                      Function *possibleCallee = calleeNode->getFunction();
+                      if (!possibleCallee || possibleCallee->isDeclaration()) {
+                        if (!possibleCallee ||
+                            !concurrency::ConcurrencyContext::
+                                isKnownSyncFreeExternalFunction(
+                                    possibleCallee)) {
+                          has_unresolved_indirect_target = true;
+                        }
+                        continue;
+                      }
+                      if (enqueueCallee(possibleCallee)) {
+                        resolved_indirect_target = true;
+                      } else {
+                        has_unresolved_indirect_target = true;
+                      }
+                    }
+                  }
+                }
+                if (!resolved_indirect_target ||
+                    has_unresolved_indirect_target) {
+                  enableIndirectForkConservatism();
+                }
+              } else if (!callee->isDeclaration()) {
+                enqueueCallee(callee);
+              }
+              break;
+            }
+            }
+          }
+
+          if (isa<ReturnInst>(inst) || isa<ResumeInst>(inst) ||
+              node->getType() == SyncNodeType::THREAD_EXIT) {
+            m_tfg->setFunctionExitNode(tid, func, node, ctx);
+            if (ctx == 0 && m_tfg->getThreadEntry(tid) == func) {
+              m_tfg->setThreadExitNode(tid, node);
+            }
+          }
+        }
+      }
+    }
+
+    // Push children in reverse order to preserve deterministic DFS order.
+    for (auto it = children_to_visit.rbegin(); it != children_to_visit.rend();
+         ++it) {
+      work_stack.push_back(*it);
+    }
+  }
+
+  // Wire all deferred fork, call, return, and join edges now that every
+  // reachable function/thread in this traversal has materialized its nodes.
+  for (const PendingForkEdge &pf : pending_forks) {
+    if (SyncNode *entry = m_tfg->getThreadEntryNode(pf.child_tid)) {
+      m_tfg->addInterThreadEdge(pf.fork_node, entry);
+    }
+  }
+
+  for (const PendingCallEdge &pc : pending_calls) {
+    if (!pc.callee || pc.callee->empty() || pc.callee->front().empty()) {
+      continue;
+    }
+    SyncNode *callee_entry =
+        m_tfg->getNode(&pc.callee->front().front(), pc.tid, pc.callee_ctx);
+    if (!callee_entry) {
+      continue;
+    }
+    m_tfg->addCallEdge(pc.call_node, callee_entry);
+
+    std::vector<SyncNode *> callee_exits =
+        m_tfg->getFunctionExitNodes(pc.tid, pc.callee, pc.callee_ctx);
+    for (SyncNode *callee_exit : callee_exits) {
+      const Instruction *exit_inst = callee_exit->getInstruction();
+      if (!exit_inst) {
+        continue;
+      }
+      if (isa<ResumeInst>(exit_inst)) {
+        if (pc.unwind_ret) {
+          m_tfg->addRetEdge(callee_exit, pc.unwind_ret);
+        }
+      } else if (pc.normal_ret) {
+        m_tfg->addRetEdge(callee_exit, pc.normal_ret);
       }
     }
   }
 
-  active_stack.pop_back();
+  for (const DeferredJoin &dj : deferred_joins) {
+    handleThreadJoin(dj.inst, dj.node, dj.tid);
+  }
 }
 
 void MHPAnalysis::processInstruction(const Instruction * /*inst*/,
@@ -910,8 +1152,9 @@ void MHPAnalysis::processInstruction(const Instruction * /*inst*/,
   // Currently unused but kept for future extensibility
 }
 
-void MHPAnalysis::handleThreadFork(const Instruction *fork_inst, SyncNode *node,
-                                   ThreadID parent_tid) {
+void MHPAnalysis::handleThreadFork(
+    const Instruction *fork_inst, SyncNode *node, ThreadID parent_tid,
+    std::vector<std::pair<const Function *, ThreadID>> *deferred_spawns) {
   // Allocate new thread ID
   ThreadID new_tid = allocateThreadID();
 
@@ -933,36 +1176,93 @@ void MHPAnalysis::handleThreadFork(const Instruction *fork_inst, SyncNode *node,
   m_fork_to_thread[fork_inst].insert(new_tid);
   m_fork_node_to_thread[node] = new_tid;
 
-  // Track pthread_t value for this thread
-  // The first argument to pthread_create is the pthread_t* where the thread ID
-  // is stored
   const Value *pthread_ptr = m_thread_api->getForkedThread(fork_inst);
   if (pthread_ptr) {
-    // Map this pthread_t pointer to the thread ID
-    // We need to track both the pointer and any loads from it
     m_pthread_value_to_threads[pthread_ptr].insert(new_tid);
     m_thread_to_pthread_value[new_tid] = pthread_ptr;
-
-    // Also track the store if it exists (for later load tracking)
-    // In a more sophisticated implementation, we'd do def-use chain analysis
   }
 
-  // Get the forked function
-  const Value *forked_fun_val = m_thread_api->getForkedFun(fork_inst);
-  if (const Function *forked_fun = dyn_cast_or_null<Function>(forked_fun_val)) {
-    m_tfg->addThread(new_tid, forked_fun);
-
-    // Process the forked function
-    processFunction(forked_fun, new_tid, 0);
-
-    // Add inter-thread edge from fork to new thread entry
-    SyncNode *new_thread_entry = m_tfg->getThreadEntryNode(new_tid);
-    if (new_thread_entry) {
-      m_tfg->addInterThreadEdge(node, new_thread_entry);
+  auto findAncestorThreadForEntry = [&](const Function *target) -> ThreadID {
+    ThreadID anc = parent_tid;
+    std::unordered_set<ThreadID> seen;
+    while (seen.insert(anc).second) {
+      if (m_tfg->getThreadEntry(anc) == target) {
+        return anc;
+      }
+      auto pIt = m_thread_parents.find(anc);
+      if (pIt == m_thread_parents.end()) {
+        break;
+      }
+      anc = pIt->second;
     }
+    return kUnknownThread;
+  };
+
+  auto launchTarget = [&](const Function *target, ThreadID target_tid) {
+    if (!target || target->isDeclaration()) {
+      return;
+    }
+    // Guard against recursive thread creation cycles (direct or indirect):
+    // mark the ancestor thread multi-instance and link back to its entry
+    // instead of spawning an unbounded chain of synthetic ThreadIDs.
+    const ThreadID recursiveAnc = findAncestorThreadForEntry(target);
+    if (recursiveAnc != kUnknownThread) {
+      m_multi_instance_threads.insert(recursiveAnc);
+      m_multi_instance_threads.insert(target_tid);
+      if (SyncNode *entry = m_tfg->getThreadEntryNode(recursiveAnc)) {
+        m_tfg->addInterThreadEdge(node, entry);
+      }
+      return;
+    }
+    m_tfg->addThread(target_tid, target);
+    if (deferred_spawns) {
+      deferred_spawns->emplace_back(target, target_tid);
+    } else {
+      processFunction(target, target_tid, 0);
+      if (SyncNode *entry = m_tfg->getThreadEntryNode(target_tid)) {
+        m_tfg->addInterThreadEdge(node, entry);
+      }
+    }
+  };
+
+  // Get the forked function (direct or statically/AA-resolved indirect target).
+  const Value *forked_fun_val = m_thread_api->getForkedFun(fork_inst);
+  if (const Function *forked_fun = dyn_cast_or_null<Function>(
+          forked_fun_val ? forked_fun_val->stripPointerCasts() : nullptr)) {
+    launchTarget(forked_fun, new_tid);
   } else {
-    enableIndirectForkConservatism();
-    m_multi_instance_threads.insert(new_tid);
+    concurrency::ConcurrencyContext::ResolvedCallees resolved;
+    if (m_context) {
+      resolved = m_context->resolveFunctionTargets(forked_fun_val);
+    } else {
+      concurrency::ConcurrencyContext localCtx(m_module, m_alias_analysis);
+      resolved = localCtx.resolveFunctionTargets(forked_fun_val);
+    }
+    if (!resolved.targets.empty() &&
+        (!resolved.has_unresolved || resolved.targets.size() <= 4)) {
+      for (size_t idx = 0; idx < resolved.targets.size(); ++idx) {
+        const Function *target = resolved.targets[idx];
+        ThreadID target_tid = (idx == 0) ? new_tid : allocateThreadID();
+        if (idx > 0) {
+          if (multi_instance) {
+            m_multi_instance_threads.insert(target_tid);
+          }
+          m_thread_fork_sites[target_tid] = fork_inst;
+          m_thread_parents[target_tid] = parent_tid;
+          m_thread_children[parent_tid].push_back(target_tid);
+          m_fork_to_thread[fork_inst].insert(target_tid);
+          if (pthread_ptr) {
+            m_pthread_value_to_threads[pthread_ptr].insert(target_tid);
+            m_thread_to_pthread_value[target_tid] = pthread_ptr;
+          }
+        }
+        launchTarget(target, target_tid);
+      }
+    }
+    if (resolved.targets.empty() || resolved.has_unresolved) {
+      enableIndirectForkConservatism();
+      m_multi_instance_threads.insert(new_tid);
+    }
   }
 }
 
@@ -972,23 +1272,114 @@ void MHPAnalysis::enableIndirectForkConservatism() {
   }
   m_has_unresolved_fork = true;
 
+  // Distinguish modules where every fork site has a statically known target
+  // (and no fork API itself has its address taken) from modules with an
+  // unresolved indirect fork start routine. In the former case, an unresolved
+  // indirect call can only reach the known fork sites and therefore only spawn
+  // those known thread-entry targets (and their reachable callees) — avoiding
+  // marking every C++ vtable method/destructor as a spurious thread entry.
+  bool has_indirect_or_addr_taken_fork = false;
+  std::deque<const Function *> seed_targets;
+  std::unordered_set<const Function *> marked_funcs;
+
+  auto markFunctionUnknown = [&](const Function *fn) {
+    if (!fn || fn->isDeclaration() || !marked_funcs.insert(fn).second) {
+      return;
+    }
+    m_thread_entry_candidates.insert(fn);
+    for (const Instruction &inst : instructions(*fn)) {
+      m_inst_to_thread[&inst] = kUnknownThread;
+    }
+  };
+
+  for (const Function &func : m_module) {
+    if (func.isDeclaration()) {
+      if (func.hasAddressTaken()) {
+        const ThreadAPI::TD_TYPE ty = m_thread_api->getType(&func);
+        if (ty == ThreadAPI::TD_FORK || ty == ThreadAPI::TD_OMP_TASK ||
+            ty == ThreadAPI::TD_OMP_TASKLOOP) {
+          has_indirect_or_addr_taken_fork = true;
+        }
+      }
+      continue;
+    }
+    for (const Instruction &inst : instructions(func)) {
+      const auto *cb = dyn_cast<CallBase>(&inst);
+      if (!cb || !m_thread_api->isTDFork(cb)) {
+        continue;
+      }
+      const Value *forked = m_thread_api->getForkedFun(cb);
+      if (const auto *direct = dyn_cast_or_null<Function>(
+              forked ? forked->stripPointerCasts() : nullptr)) {
+        if (!direct->isDeclaration()) {
+          seed_targets.push_back(direct);
+        } else {
+          has_indirect_or_addr_taken_fork = true;
+        }
+      } else {
+        has_indirect_or_addr_taken_fork = true;
+      }
+    }
+  }
+
+  if (m_openmp_semantics) {
+    for (const auto &task : m_openmp_semantics->getTasks()) {
+      if (task && task->task_function && !task->task_function->isDeclaration()) {
+        seed_targets.push_back(task->task_function);
+      }
+    }
+  }
+
+  if (!has_indirect_or_addr_taken_fork && !seed_targets.empty()) {
+    while (!seed_targets.empty()) {
+      const Function *cur = seed_targets.front();
+      seed_targets.pop_front();
+      if (!cur || cur->isDeclaration() || marked_funcs.count(cur)) {
+        continue;
+      }
+      markFunctionUnknown(cur);
+      for (const Instruction &inst : instructions(*cur)) {
+        if (const auto *cb = dyn_cast<CallBase>(&inst)) {
+          if (const Function *callee = m_thread_api->getCallee(cb)) {
+            if (!callee->isDeclaration() && !marked_funcs.count(callee)) {
+              seed_targets.push_back(callee);
+            }
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  bool has_non_pthread_fork = false;
+  for (const Function &func : m_module) {
+    if (func.isDeclaration()) {
+      continue;
+    }
+    for (const Instruction &inst : instructions(func)) {
+      const auto *cb = dyn_cast<CallBase>(&inst);
+      if (!cb || !m_thread_api->isTDFork(cb)) {
+        continue;
+      }
+      const Function *callee = m_thread_api->getCallee(cb);
+      if (!callee || callee->getName() != "pthread_create") {
+        has_non_pthread_fork = true;
+      }
+    }
+  }
+  const bool pthread_only_forks =
+      !has_non_pthread_fork &&
+      (!m_openmp_semantics || m_openmp_semantics->getTasks().empty());
+
   for (Function &func : m_module) {
     if (func.isDeclaration()) {
       continue;
     }
-    if (!func.hasAddressTaken() || !isLikelyThreadEntryCandidate(func)) {
+    if (!func.hasAddressTaken() ||
+        !isLikelyThreadEntryCandidate(func, pthread_only_forks)) {
       continue;
     }
-
-    m_thread_entry_candidates.insert(&func);
-    for (Instruction &inst : instructions(func)) {
-      auto it = m_inst_to_thread.find(&inst);
-      if (it == m_inst_to_thread.end()) {
-        m_inst_to_thread[&inst] = kUnknownThread;
-      } else if (it->second != kUnknownThread) {
-        it->second = kUnknownThread;
-      }
-    }
+    markFunctionUnknown(&func);
   }
 }
 
@@ -1295,9 +1686,16 @@ void MHPAnalysis::finalizeBarrierPhases() {
 
 void MHPAnalysis::analyzeLockSets() {
   errs() << "Analyzing Lock Sets...\n";
-  m_lockset = std::make_unique<LockSetAnalysis>(m_module);
-  m_lockset->setAliasAnalysis(m_alias_analysis);
-  m_lockset->setCallGraph(m_call_graph);
+  if (m_context) {
+    m_lockset = std::make_unique<LockSetAnalysis>(*m_context);
+    if (m_alias_analysis) {
+      m_lockset->setAliasAnalysis(m_alias_analysis);
+    }
+  } else {
+    m_lockset = std::make_unique<LockSetAnalysis>(m_module);
+    m_lockset->setAliasAnalysis(m_alias_analysis);
+    m_lockset->setCallGraph(m_call_graph);
+  }
   m_lockset->analyze();
 }
 

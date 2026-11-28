@@ -13,6 +13,8 @@
 
 namespace concurrency {
 
+class ConcurrencyContext;
+
 /**
  * @brief Specialized checker for lock usage errors
  *
@@ -35,10 +37,13 @@ public:
    */
   std::vector<ConcurrencyBugReport> checkLockMisuse();
 
+  void setContext(ConcurrencyContext *context) { m_context = context; }
+
 private:
   llvm::Module &m_module;
   mhp::LockSetAnalysis *m_locksetAnalysis;
   ThreadAPI *m_threadAPI;
+  ConcurrencyContext *m_context = nullptr;
 
   // Helper methods
   std::string getInstructionLocation(const llvm::Instruction *inst) const;

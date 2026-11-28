@@ -4,11 +4,14 @@
  */
 #include "Checker/Concurrency/LockMismatchChecker.h"
 
+#include "Concurrency/Core/ConcurrencyContext.h"
 #include "Concurrency/LockSet/RAIILockTracker.h"
 
 #include <deque>
 #include <unordered_set>
 
+#include <llvm/Analysis/ValueTracking.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
@@ -36,7 +39,8 @@ std::vector<const CallBase *> collectDirectCallSites(const Function &target) {
         if (cb->isCallee(&use) &&
             (cb->getCalledFunction() == &target ||
              (cb->getCalledOperand() &&
-              cb->getCalledOperand()->stripPointerCasts() == &target))) {
+              cb->getCalledOperand()->stripPointerCastsAndAliases() ==
+                  &target))) {
           sites.push_back(cb);
         }
       } else if (const auto *ce = dyn_cast<ConstantExpr>(user)) {
@@ -49,6 +53,80 @@ std::vector<const CallBase *> collectDirectCallSites(const Function &target) {
     }
   }
   return sites;
+}
+
+bool isRecursiveMutexType(const ThreadAPI *api, const Instruction *inst) {
+  if (!api || !inst) {
+    return false;
+  }
+  if (const auto *cb = dyn_cast<CallBase>(inst)) {
+    if (const Function *callee = api->getCallee(cb)) {
+      if (api->semanticTagStartsWith(callee, "recursive") ||
+          callee->getName().contains_insensitive("recursive_mutex") ||
+          callee->getName().contains_insensitive("recursive_timed_mutex")) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool isParameterDerivedLock(const Value *lock, const Function &func) {
+  if (!lock) {
+    return false;
+  }
+  std::deque<const Value *> worklist;
+  std::unordered_set<const Value *> visited;
+  auto push = [&](const Value *v) {
+    if (!v)
+      return;
+    v = v->stripPointerCasts();
+    if (visited.insert(v).second)
+      worklist.push_back(v);
+  };
+  push(lock);
+
+  unsigned steps = 0;
+  while (!worklist.empty() && ++steps <= 64) {
+    const Value *cur = worklist.front();
+    worklist.pop_front();
+    if (const auto *arg = dyn_cast<Argument>(cur)) {
+      if (arg->getParent() == &func)
+        return true;
+      continue;
+    }
+    const Value *base = getUnderlyingObject(cur);
+    if (base && base != cur) {
+      push(base);
+    }
+    if (const auto *load = dyn_cast<LoadInst>(cur)) {
+      push(load->getPointerOperand());
+      continue;
+    }
+    // Handle -O0 parameter-spill allocas (e.g. `store %this, %this.addr`).
+    if (const auto *alloca = dyn_cast<AllocaInst>(cur)) {
+      if (alloca->getFunction() == &func) {
+        for (const User *u : alloca->users()) {
+          if (const auto *st = dyn_cast<StoreInst>(u)) {
+            if (st->getPointerOperand()->stripPointerCasts() == alloca) {
+              push(st->getValueOperand());
+            }
+          }
+        }
+      }
+      continue;
+    }
+    if (const auto *phi = dyn_cast<PHINode>(cur)) {
+      for (const Value *inc : phi->incoming_values())
+        push(inc);
+      continue;
+    }
+    if (const auto *sel = dyn_cast<SelectInst>(cur)) {
+      push(sel->getTrueValue());
+      push(sel->getFalseValue());
+    }
+  }
+  return false;
 }
 
 } // namespace
@@ -65,25 +143,43 @@ std::vector<ConcurrencyBugReport> LockMismatchChecker::checkLockMisuse() {
   if (!m_locksetAnalysis)
     return reports;
 
+  const bool moduleHasLocks = !m_locksetAnalysis->getAllLocks().empty();
+
   for (Function &func : m_module) {
     if (func.isDeclaration())
       continue;
 
     unsigned totalAcq = 0, totalRel = 0;
     bool hasRAIICtor = false;
+    std::unordered_set<LockID> locallyAcquiredLocks;
+    std::unordered_set<LockID> locallyAcquiredByNonTryLock;
+    std::unordered_set<LockID> locallyAcquiredParamLocks;
+
     for (inst_iterator J = inst_begin(func), E = inst_end(func); J != E; ++J) {
-      if (m_threadAPI->isTDAcquire(&*J))
+      const Instruction *I = &*J;
+      if (m_threadAPI->isTDAcquire(I)) {
         ++totalAcq;
-      else if (m_threadAPI->isTDRelease(&*J))
+        const Value *rawLock = m_threadAPI->getAnalysisLockIdentity(I);
+        if (LockID l = m_locksetAnalysis->getLockValue(I)) {
+          LockID canon = m_locksetAnalysis->getCanonicalLock(l);
+          locallyAcquiredLocks.insert(canon);
+          if (!m_threadAPI->isTryLock(I)) {
+            locallyAcquiredByNonTryLock.insert(canon);
+          }
+          if ((rawLock && isParameterDerivedLock(rawLock, func)) ||
+              isParameterDerivedLock(l, func)) {
+            locallyAcquiredParamLocks.insert(canon);
+          }
+        }
+      } else if (m_threadAPI->isTDRelease(I)) {
         ++totalRel;
-      if (!hasRAIICtor && RAIILock::RAIILockTracker::isRAIILockConstructor(&*J))
+      }
+      if (!hasRAIICtor && RAIILock::RAIILockTracker::isRAIILockConstructor(I))
         hasRAIICtor = true;
     }
 
-    if (totalAcq == 0 && totalRel == 0 && !hasRAIICtor) {
-      // Fast-path: still check returns only if the module has any locks at all.
-      if (m_locksetAnalysis->getAllLocks().empty())
-        continue;
+    if (totalAcq == 0 && totalRel == 0 && !hasRAIICtor && !moduleHasLocks) {
+      continue;
     }
 
     bool directCallSitesCollected = false;
@@ -96,194 +192,257 @@ std::vector<ConcurrencyBugReport> LockMismatchChecker::checkLockMisuse() {
       return directCallSites;
     };
 
+    auto callerMayHoldLock = [&](LockID calleeLock) -> bool {
+      struct CallerStep {
+        const Function *fn;
+        LockID lock;
+        unsigned depth;
+      };
+      constexpr unsigned kMaxCallerDepth = 6;
+      std::deque<CallerStep> worklist;
+      std::unordered_set<const Function *> visitedFuncs;
+      worklist.push_back({&func, calleeLock, 0});
+      visitedFuncs.insert(&func);
+
+      while (!worklist.empty()) {
+        CallerStep cur = worklist.front();
+        worklist.pop_front();
+        if (cur.depth >= kMaxCallerDepth) {
+          continue;
+        }
+        const std::vector<const CallBase *> sites =
+            (cur.fn == &func) ? getDirectCallSites()
+                              : collectDirectCallSites(*cur.fn);
+        for (const CallBase *CB : sites) {
+          LockID projected =
+              m_locksetAnalysis->projectLockAtCall(CB, cur.fn, cur.lock);
+          if (projected && m_locksetAnalysis->mayHoldLock(CB, projected)) {
+            return true;
+          }
+          if (m_locksetAnalysis->mayHoldLock(CB, cur.lock)) {
+            return true;
+          }
+          const Function *callerFn = CB->getFunction();
+          if (callerFn && visitedFuncs.insert(callerFn).second) {
+            LockID nextLock = projected ? projected : cur.lock;
+            worklist.push_back({callerFn, nextLock, cur.depth + 1});
+          }
+        }
+      }
+      return false;
+    };
+
     for (inst_iterator I = inst_begin(func), E = inst_end(func); I != E; ++I) {
       Instruction *inst = &*I;
 
       if (m_threadAPI->isTDRelease(inst)) {
-        // Check for Unlock without Lock
-        LockID lock = m_threadAPI->getAnalysisLockIdentity(inst);
+        LockID lock = m_locksetAnalysis->getLockValue(inst);
+        if (!lock)
+          lock = m_threadAPI->getAnalysisLockIdentity(inst);
         if (!lock)
           continue;
-        lock = lock->stripPointerCasts();
+        lock = m_locksetAnalysis->getCanonicalLock(lock);
+        if (!lock)
+          continue;
 
-        if (!m_locksetAnalysis->mustHoldLock(inst, lock)) {
-          if (m_locksetAnalysis->mayHoldLock(inst, lock)) {
-            // Skip "potential" report to avoid false positives (must empty at
-            // merge, may non-empty).
-          } else {
-            // Skip if a matching acquire appears earlier in the same block
-            // (analysis may not propagate).
-            bool sameBlockAcquire = false;
-            if (totalAcq == 2 && totalRel == 2)
-              sameBlockAcquire = true; // deadlock_safe pattern: lock(A),
-                                       // lock(B), unlock(B), unlock(A)
-            StringRef fn = inst->getFunction()->getName();
-            if (fn.contains("_acquire_AB") ||
-                fn.contains_insensitive("acquire"))
-              sameBlockAcquire = true; // thread routines that acquire locks
-            for (Instruction *prev = inst->getPrevNode(); prev;
-                 prev = prev->getPrevNode()) {
-              if (m_threadAPI->isTDRelease(prev)) {
-                LockID prevLock = m_threadAPI->getAnalysisLockIdentity(prev);
-                if (prevLock && prevLock->stripPointerCasts() == lock)
-                  break; // saw release of same lock first
-              }
-              if (m_threadAPI->isTDAcquire(prev)) {
-                LockID prevLock = m_threadAPI->getAnalysisLockIdentity(prev);
-                if (prevLock && prevLock->stripPointerCasts() == lock) {
-                  sameBlockAcquire = true;
-                  break;
-                }
-              }
-            }
-            // Skip if function has balanced acquire/release of this lock.
-            if (!sameBlockAcquire) {
-              auto sameLockValue = [](const Value *a, const Value *b) {
-                if (!a || !b)
-                  return false;
-                a = a->stripPointerCasts();
-                b = b->stripPointerCasts();
-                if (a == b)
-                  return true;
-                const GlobalValue *ga = dyn_cast<GlobalValue>(a);
-                const GlobalValue *gb = dyn_cast<GlobalValue>(b);
-                return ga && gb && ga->getName() == gb->getName();
-              };
-              unsigned acqInFunc = 0, relInFunc = 0;
-              for (inst_iterator J = inst_begin(func), JE = inst_end(func);
-                   J != JE; ++J) {
-                Instruction *o = &*J;
-                if (m_threadAPI->isTDAcquire(o)) {
-                  LockID lockVal = m_threadAPI->getAnalysisLockIdentity(o);
-                  if (sameLockValue(lockVal, lock))
-                    ++acqInFunc;
-                } else if (m_threadAPI->isTDRelease(o)) {
-                  LockID lockVal = m_threadAPI->getAnalysisLockIdentity(o);
-                  if (sameLockValue(lockVal, lock))
-                    ++relInFunc;
-                }
-              }
-              if (acqInFunc > 0 && acqInFunc == relInFunc)
-                sameBlockAcquire = true;
-            }
-            if (!sameBlockAcquire) {
-              // Interprocedural helper-unlock pattern: if any caller reaches
-              // this callee while possibly holding the lock, treat this unlock
-              // as contextually matched.
-              for (const CallBase *CB : getDirectCallSites()) {
-                if (m_locksetAnalysis->mayHoldLock(CB, lock)) {
-                  sameBlockAcquire = true;
-                  break;
-                }
-              }
-            }
-            if (!sameBlockAcquire) {
-              auto calleeAcquiresLock = [this, lock](const Function *callee) {
-                if (!callee || callee->isDeclaration())
-                  return false;
-                for (const Instruction &CI : instructions(callee)) {
-                  if (!m_threadAPI->isTDAcquire(&CI))
-                    continue;
-                  LockID L = m_threadAPI->getAnalysisLockIdentity(&CI);
-                  if (!L)
-                    continue;
-                  if (L->stripPointerCasts() == lock)
-                    return true;
-                }
-                return false;
-              };
-              // Fallback when lockset propagation is imprecise: if a caller has
-              // an earlier helper call that acquires this lock before invoking
-              // the unlock helper, treat it as matched.
-              for (const CallBase *CB : getDirectCallSites()) {
-                for (const Instruction *Prev = CB->getPrevNode(); Prev;
-                     Prev = Prev->getPrevNode()) {
-                  const auto *PrevCB = dyn_cast<CallBase>(Prev);
-                  if (!PrevCB)
-                    continue;
-                  if (calleeAcquiresLock(PrevCB->getCalledFunction())) {
-                    sameBlockAcquire = true;
-                    break;
-                  }
-                }
-                if (sameBlockAcquire)
-                  break;
-              }
-            }
-            if (!sameBlockAcquire) {
-              ConcurrencyBugReport report(
-                  ConcurrencyBugType::LOCK_MISMATCH,
-                  "Unlock called without holding the lock",
-                  BugDescription::BI_HIGH, BugDescription::BC_ERROR);
-              report.addStep(inst, "Unlock operation");
-              reports.push_back(report);
-            }
-          }
+        // Skip polymorphic/API unlock wrappers: a single unlock of a
+        // parameter-derived lock with no local acquires in an address-taken or
+        // externally visible helper with no direct call sites in the module.
+        const bool isUnlockWrapper =
+            totalAcq == 0 && totalRel == 1 &&
+            isParameterDerivedLock(lock, func) &&
+            (func.hasAddressTaken() ||
+             (!func.hasLocalLinkage() && getDirectCallSites().empty()));
+
+        // Report unlock-without-lock only when LockSetAnalysis proves the lock
+        // is not even in the may-lockset here AND no caller holds the lock when
+        // invoking this helper function.
+        if (!isUnlockWrapper && !m_locksetAnalysis->mayHoldLock(inst, lock) &&
+            !callerMayHoldLock(lock)) {
+          ConcurrencyBugReport report(ConcurrencyBugType::LOCK_MISMATCH,
+                                      "Unlock called without holding the lock",
+                                      BugDescription::BI_HIGH,
+                                      BugDescription::BC_ERROR);
+          report.addStep(inst, "Unlock operation without matching held lock");
+          reports.push_back(std::move(report));
         }
       } else if (m_threadAPI->isTDAcquire(inst)) {
-        // Check for Double Lock
-        LockID lock = m_threadAPI->getAnalysisLockIdentity(inst);
+        // Non-blocking try-locks and shared read-locks do not self-deadlock on
+        // re-acquisition in the same way as exclusive non-recursive locks.
+        if (m_threadAPI->isTryLock(inst) ||
+            (m_threadAPI->isReadLockAcquire(inst) &&
+             !m_threadAPI->isWriteLockAcquire(inst))) {
+          continue;
+        }
+        if (isRecursiveMutexType(m_threadAPI, inst)) {
+          continue;
+        }
+
+        LockID lock = m_locksetAnalysis->getLockValue(inst);
+        if (!lock)
+          lock = m_threadAPI->getAnalysisLockIdentity(inst);
         if (!lock)
           continue;
-        lock = lock->stripPointerCasts();
+        lock = m_locksetAnalysis->getCanonicalLock(lock);
+        if (!lock)
+          continue;
 
         if (m_locksetAnalysis->mustHoldLock(inst, lock)) {
-          // Skip only when balanced and multiple distinct locks (nested
-          // pattern); report when same lock acquired twice.
-          LockSet distinctLocks =
-              m_locksetAnalysis->getAllLocksInFunction(&func);
-          bool skipDoubleLock =
-              (distinctLocks.size() >= 2 && totalAcq == totalRel);
-          if (!skipDoubleLock) {
+          ConcurrencyBugReport report(
+              ConcurrencyBugType::LOCK_MISMATCH,
+              "Double lock: attempting to acquire a lock already held",
+              BugDescription::BI_HIGH, BugDescription::BC_ERROR);
+          report.addStep(inst, "Second acquisition of already-held lock");
+          reports.push_back(std::move(report));
+        }
+      }
+    }
+
+    // Check for Lock Leaks at function exits (normal returns and exceptional
+    // unwinds), including path-sensitive early-return leaks even after Clang
+    // return-block merging.
+    if (moduleHasLocks) {
+      std::vector<const Instruction *> normalReturns;
+      std::vector<const Instruction *> unwindExits;
+      for (const BasicBlock &bb : func) {
+        const Instruction *term = bb.getTerminator();
+        if (!term)
+          continue;
+        if (isa<ReturnInst>(term)) {
+          normalReturns.push_back(term);
+        } else if (isa<ResumeInst>(term)) {
+          unwindExits.push_back(term);
+        } else if (const auto *cr = dyn_cast<CleanupReturnInst>(term)) {
+          if (cr->unwindsToCaller())
+            unwindExits.push_back(term);
+        }
+      }
+
+      // A function is an intentional lock-acquire wrapper if it performs no
+      // releases, has callers (direct or vtable/address-taken on a parameter
+      // lock), and either unconditionally holds `lock` at all normal returns
+      // OR conditionally acquires a parameter-derived lock (e.g.,
+      // __gthread_mutex_lock / SmartMutex::lock).
+      auto isIntentionalAcquireWrapper = [&](LockID lock) -> bool {
+        if (totalRel > 0 || normalReturns.empty())
+          return false;
+        LockID canon = m_locksetAnalysis->getCanonicalLock(lock);
+        bool paramLock = isParameterDerivedLock(lock, func);
+        if (!paramLock && canon) {
+          for (LockID pl : locallyAcquiredParamLocks) {
+            if (m_locksetAnalysis->locksMustMatch(canon, pl)) {
+              paramLock = true;
+              break;
+            }
+          }
+        }
+        StringRef fn = func.getName();
+        const bool lockNamed = fn.contains_insensitive("lock") ||
+                               fn.contains_insensitive("acquire") ||
+                               fn.contains_insensitive("mutex") ||
+                               fn.contains_insensitive("enter") ||
+                               fn.contains_insensitive("guard");
+        if (paramLock &&
+            (!getDirectCallSites().empty() || func.hasAddressTaken() ||
+             func.hasStructRetAttr() || lockNamed)) {
+          return true;
+        }
+        for (const Instruction *ret : normalReturns) {
+          if (!m_locksetAnalysis->mustHoldLock(ret, lock))
+            return false;
+        }
+        if (!getDirectCallSites().empty() || func.hasStructRetAttr())
+          return true;
+        return lockNamed;
+      };
+
+      // A function whose only acquisition of `lock` is a non-blocking try_lock
+      // (with no releases and a status return value) intentionally returns with
+      // the lock held on success and unlocked on failure.
+      auto isIntentionalTryLockWrapper = [&](LockID lock) -> bool {
+        if (totalRel > 0 || func.getReturnType()->isVoidTy())
+          return false;
+        LockID canon = m_locksetAnalysis->getCanonicalLock(lock);
+        if (!canon)
+          return false;
+        for (LockID nonTry : locallyAcquiredByNonTryLock) {
+          if (m_locksetAnalysis->locksMustMatch(canon, nonTry))
+            return false;
+        }
+        return true;
+      };
+
+      auto isLocallyAcquired = [&](LockID lock) -> bool {
+        LockID canon = m_locksetAnalysis->getCanonicalLock(lock);
+        if (!canon)
+          return false;
+        for (LockID local : locallyAcquiredLocks) {
+          if (m_locksetAnalysis->locksMustMatch(canon, local))
+            return true;
+        }
+        return false;
+      };
+
+      for (const Instruction *term : normalReturns) {
+        LockSet mustHeld = m_locksetAnalysis->getMustLockSetAt(term);
+        LockSet mayHeld = m_locksetAnalysis->getMayLockSetAt(term);
+
+        for (LockID lock : mayHeld) {
+          if (!lock || !isLocallyAcquired(lock))
+            continue;
+          if (isIntentionalAcquireWrapper(lock) ||
+              isIntentionalTryLockWrapper(lock))
+            continue;
+
+          if (mustHeld.count(lock) != 0) {
             ConcurrencyBugReport report(
                 ConcurrencyBugType::LOCK_MISMATCH,
-                "Double lock: attempting to acquire a lock already held",
+                "Lock leak: function returns with lock held",
                 BugDescription::BI_HIGH, BugDescription::BC_ERROR);
-            report.addStep(inst, "Second lock acquisition");
-            reports.push_back(report);
+            report.addStep(term, "Function returns while definitely holding lock");
+            reports.push_back(std::move(report));
+            continue;
           }
+
+          // Merged-return early-exit leak detection: if `lock` is in mayHeld
+          // at a return block AND at least one incoming predecessor edge enters
+          // the return block while definitely holding `lock`, that path leaked
+          // the lock without unlocking.
+          const BasicBlock *retBB = term->getParent();
+          bool hasLeakingPredecessor = false;
+          for (const BasicBlock *pred : predecessors(retBB)) {
+            const Instruction *predTerm = pred ? pred->getTerminator() : nullptr;
+            if (predTerm && m_locksetAnalysis->mustHoldLock(predTerm, lock)) {
+              hasLeakingPredecessor = true;
+              break;
+            }
+          }
+          if (hasLeakingPredecessor) {
+            ConcurrencyBugReport report(
+                ConcurrencyBugType::LOCK_MISMATCH,
+                "Lock leak: function may return with lock held on an early-exit path",
+                BugDescription::BI_MEDIUM, BugDescription::BC_WARNING);
+            report.addStep(term, "Function return reachable with leaked lock");
+            reports.push_back(std::move(report));
+          }
+        }
+      }
+
+      for (const Instruction *term : unwindExits) {
+        LockSet mustHeld = m_locksetAnalysis->getMustLockSetAt(term);
+        for (LockID lock : mustHeld) {
+          if (!lock || !isLocallyAcquired(lock))
+            continue;
+          ConcurrencyBugReport report(
+              ConcurrencyBugType::LOCK_MISMATCH,
+              "Lock leak: function unwinds via exception with lock held",
+              BugDescription::BI_HIGH, BugDescription::BC_ERROR);
+          report.addStep(term, "Exceptional exit while holding lock");
+          reports.push_back(std::move(report));
         }
       }
     }
 
-    // Check for Lock Leaks at return points: report when *some* path returns
-    // with a lock held (use may-lock so we catch early-return-without-unlock).
-    if (!m_locksetAnalysis->getAllLocks().empty()) {
-      for (auto &bb : func) {
-        if (isa<ReturnInst>(bb.getTerminator())) {
-          const Instruction *term = bb.getTerminator();
-          // Use must-locks to avoid reporting leaks on loops/joins where
-          // may-lock can remain non-empty despite balanced acquire/release.
-          LockSet heldLocks = m_locksetAnalysis->getMustLockSetAt(term);
-
-          if (!heldLocks.empty()) {
-            bool intentional = false;
-            StringRef funcName = func.getName();
-            if (funcName.contains("lock") || funcName.contains("Lock") ||
-                funcName.contains("acquire") || funcName.contains("Acquire")) {
-              intentional = true;
-            }
-            if (!intentional && totalAcq > 0 && totalRel == 0) {
-              intentional = true; // lock-acquire helper function
-            }
-
-            if (!intentional) {
-              for (const auto *lock : heldLocks) {
-                (void)lock;
-                ConcurrencyBugReport report(
-                    ConcurrencyBugType::LOCK_MISMATCH,
-                    "Lock leak: function may return with lock held",
-                    BugDescription::BI_MEDIUM, BugDescription::BC_WARNING);
-                report.addStep(term, "Function return");
-                reports.push_back(report);
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Check for RAII lock misuse patterns only when function uses RAII locks.
     if (hasRAIICtor) {
       checkRAIILockMisuse(func, reports);
     }
@@ -301,56 +460,80 @@ void LockMismatchChecker::checkRAIILockMisuse(
 
   for (const auto &pair : lifetimes) {
     const auto &lifetime = pair.second;
+    const Value *wrapperObj =
+        lifetime.lockObject ? lifetime.lockObject->stripPointerCasts() : nullptr;
 
-    // Check for missing destructor (lock not released)
     if (lifetime.destructors.empty()) {
-      ConcurrencyBugReport report(
-          ConcurrencyBugType::LOCK_MISMATCH,
-          "RAII lock may not be released: no destructor found",
-          BugDescription::BI_HIGH, BugDescription::BC_WARNING);
-      report.addStep(lifetime.constructor, "RAII lock constructor");
-      reports.push_back(report);
+      // Skip RAII factory functions that construct a lock guard directly into
+      // an sret/out parameter or return it by value to the caller (e.g. C++17
+      // NRVO `qt_scoped_lock(m)`): the caller owns destruction.
+      const bool returnedToCaller =
+          wrapperObj && isParameterDerivedLock(wrapperObj, func);
+      if (!returnedToCaller) {
+        ConcurrencyBugReport report(
+            ConcurrencyBugType::LOCK_MISMATCH,
+            "RAII lock may not be released: no destructor found",
+            BugDescription::BI_HIGH, BugDescription::BC_WARNING);
+        report.addStep(lifetime.constructor, "RAII lock constructor");
+        reports.push_back(std::move(report));
+      }
     }
 
-    // Check for scoped_lock with single mutex (should use lock_guard)
-    if (lifetime.isScoped && lifetime.constructor->getNumOperands() == 2) {
-      // scoped_lock with only one mutex - could use lock_guard instead
-      ConcurrencyBugReport report(
-          ConcurrencyBugType::LOCK_MISMATCH,
-          "scoped_lock used with single mutex: consider using lock_guard",
-          BugDescription::BI_LOW, BugDescription::BC_STYLE);
-      report.addStep(lifetime.constructor, "scoped_lock constructor");
-      reports.push_back(report);
-    }
-
-    // Check for unique_lock without any manual lock/unlock operations
     if (lifetime.constructor && lifetime.constructor->getCalledFunction()) {
       StringRef name = lifetime.constructor->getCalledFunction()->getName();
       if (name.contains("unique_lock")) {
-        // Check if there are any manual lock/unlock calls in the function
-        bool hasManualOps = false;
-        for (inst_iterator I = inst_begin(func), E = inst_end(func); I != E;
-             ++I) {
-          const CallBase *call = dyn_cast<CallBase>(&*I);
-          if (call && call->getCalledFunction()) {
-            StringRef callName = call->getCalledFunction()->getName();
-            if (callName.contains("unique_lock") &&
-                (callName.contains("lockEv") ||
-                 callName.contains("unlockEv"))) {
-              hasManualOps = true;
+        // Only flag unique_lock when THIS specific wrapper object has no manual
+        // lock/unlock/release/move/swap AND is not passed to condition_variable
+        // wait (which requires unique_lock).
+        bool requiresUniqueLock =
+            lifetime.ownership == RAIILock::OwnershipKind::Deferred ||
+            lifetime.ownership == RAIILock::OwnershipKind::Try ||
+            lifetime.ownership == RAIILock::OwnershipKind::Adopt;
+        if (!requiresUniqueLock) {
+          for (inst_iterator I = inst_begin(func), E = inst_end(func); I != E;
+               ++I) {
+            const CallBase *call = dyn_cast<CallBase>(&*I);
+            if (!call || call == lifetime.constructor)
+              continue;
+            bool usesThisWrapper = false;
+            if (wrapperObj) {
+              for (unsigned a = 0; a < call->arg_size(); ++a) {
+                const Value *arg = call->getArgOperand(a);
+                if (arg && arg->stripPointerCasts() == wrapperObj) {
+                  usesThisWrapper = true;
+                  break;
+                }
+              }
+            }
+            if (!usesThisWrapper)
+              continue;
+
+            if (m_threadAPI && m_threadAPI->isTDCondWait(call)) {
+              requiresUniqueLock = true;
               break;
+            }
+            if (const Function *callee = call->getCalledFunction()) {
+              StringRef callName = callee->getName();
+              if (callName.contains("condition_variable") ||
+                  (callName.contains("unique_lock") &&
+                   (callName.contains("lock") || callName.contains("unlock") ||
+                    callName.contains("release") || callName.contains("swap") ||
+                    callName.contains("try_lock")))) {
+                requiresUniqueLock = true;
+                break;
+              }
             }
           }
         }
 
-        if (!hasManualOps) {
-          ConcurrencyBugReport report(ConcurrencyBugType::LOCK_MISMATCH,
-                                      "unique_lock used without manual "
-                                      "lock/unlock: consider using lock_guard",
-                                      BugDescription::BI_LOW,
-                                      BugDescription::BC_STYLE);
+        if (!requiresUniqueLock) {
+          ConcurrencyBugReport report(
+              ConcurrencyBugType::LOCK_MISMATCH,
+              "unique_lock used without manual lock/unlock or condition "
+              "variable: consider using lock_guard",
+              BugDescription::BI_LOW, BugDescription::BC_STYLE);
           report.addStep(lifetime.constructor, "unique_lock constructor");
-          reports.push_back(report);
+          reports.push_back(std::move(report));
         }
       }
     }

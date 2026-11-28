@@ -96,10 +96,11 @@ std::vector<ConcurrencyBugReport> MPIChecker::checkMPIBugs() {
   }
 
   for (const auto *window : results.leaked_windows) {
-    (void)window;
     ConcurrencyBugReport report(
         ConcurrencyBugType::MPI_WINDOW_LEAK, "MPI RMA window may be leaked",
         BugDescription::BI_MEDIUM, BugDescription::BC_ERROR);
+    report.addStep(dyn_cast_or_null<Instruction>(window),
+                   "MPI RMA window created without matching MPI_Win_free");
     reports.push_back(std::move(report));
   }
 
@@ -153,12 +154,11 @@ std::vector<ConcurrencyBugReport> MPIChecker::checkMPIBugs() {
   }
 
   for (const auto &req : results.persistent_request_leaks) {
-    (void)req;
     ConcurrencyBugReport report(
         ConcurrencyBugType::MPI_PERSISTENT_REQUEST_LEAK,
         "MPI persistent request may not be properly completed",
         BugDescription::BI_MEDIUM, BugDescription::BC_ERROR);
-    report.addStep(nullptr,
+    report.addStep(dyn_cast_or_null<Instruction>(req),
                    "Persistent request template created but never started");
     reports.push_back(std::move(report));
   }

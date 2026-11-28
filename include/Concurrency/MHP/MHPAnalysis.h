@@ -229,6 +229,8 @@ public:
   // Optional: LockSetAnalysis for more precise race detection
   LockSetAnalysis *getLockSetAnalysis() const { return m_lockset.get(); }
   void enableLockSetAnalysis();
+  bool isSingleMainThreadOnly() const { return m_single_main_thread_only; }
+  bool isSingleThreaded() const override { return m_single_main_thread_only; }
 
   // Thread-local storage analysis
   // Optional: precompute and store the full MHP pair relation.
@@ -360,6 +362,7 @@ private:
 
   // Indirect fork handling (conservative)
   bool m_has_unresolved_fork = false;
+  bool m_module_may_spawn_threads = false;
   std::unordered_set<const llvm::Function *> m_thread_entry_candidates;
 
   // Dominator tree cache used for loop/fork reasoning within a function
@@ -408,7 +411,9 @@ private:
   std::unordered_set<const llvm::Function *> m_sync_relevant_functions;
   void computeSyncRelevantFunctions();
   CallContextID chooseCalleeContext(ThreadID tid, const llvm::Function *target,
-                                    SyncNode *call_node);
+                                    SyncNode *call_node,
+                                    bool force_merged = false,
+                                    size_t queued_node_estimate = 0);
 
   struct PendingJoin {
     const llvm::Instruction *inst = nullptr;
@@ -485,8 +490,10 @@ private:
   void mapInstructionToThread(const llvm::Instruction *inst, ThreadID tid);
 
   // Fork-join analysis
-  void handleThreadFork(const llvm::Instruction *fork_inst, SyncNode *node,
-                        ThreadID parent_tid);
+  void handleThreadFork(
+      const llvm::Instruction *fork_inst, SyncNode *node, ThreadID parent_tid,
+      std::vector<std::pair<const llvm::Function *, ThreadID>>
+          *deferred_spawns = nullptr);
   void handleThreadJoin(const llvm::Instruction *join_inst, SyncNode *node,
                         ThreadID parent_tid);
   void handleThreadDetach(const llvm::Instruction *detach_inst);

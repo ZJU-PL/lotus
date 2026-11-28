@@ -21,9 +21,12 @@ using Held = std::map<mhp::LockID, const llvm::Instruction *>;
 using Released = std::set<mhp::LockID>;
 struct State {
   Held held;
+  Released conditionalHeld;
   Released released;
+  Released mayReleased;
   bool operator==(const State &s) const {
-    return held == s.held && released == s.released;
+    return held == s.held && conditionalHeld == s.conditionalHeld &&
+           released == s.released && mayReleased == s.mayReleased;
   }
 };
 Released intersection(const Released &a, const Released &b) {
@@ -34,13 +37,27 @@ Released intersection(const Released &a, const Released &b) {
 }
 State join(const State &a, const State &b) {
   State result = a;
-  result.held.insert(b.held.begin(), b.held.end());
+  for (const auto &entry : a.held) {
+    if (!b.held.count(entry.first)) {
+      result.conditionalHeld.insert(entry.first);
+    }
+  }
+  for (const auto &entry : b.held) {
+    auto inserted = result.held.emplace(entry.first, entry.second);
+    if (inserted.second || b.conditionalHeld.count(entry.first)) {
+      result.conditionalHeld.insert(entry.first);
+    }
+  }
   result.released = intersection(a.released, b.released);
+  result.mayReleased.insert(b.mayReleased.begin(), b.mayReleased.end());
   return result;
 }
 const llvm::Function *callee(const llvm::CallBase &call) {
-  return llvm::dyn_cast<llvm::Function>(
-      call.getCalledOperand()->stripPointerCasts());
+  if (const llvm::Value *called = call.getCalledOperand()) {
+    return llvm::dyn_cast<llvm::Function>(
+        called->stripPointerCastsAndAliases());
+  }
+  return nullptr;
 }
 bool pairEqual(const StarvationChecker::CriticalPair &a,
                const StarvationChecker::CriticalPair &b) {
@@ -51,7 +68,9 @@ bool pairEqual(const StarvationChecker::CriticalPair &a,
 bool summaryEqual(const StarvationChecker::Summary &a,
                   const StarvationChecker::Summary &b) {
   return a.acquiredOnReturn == b.acquiredOnReturn &&
+         a.conditionallyAcquiredOnReturn == b.conditionallyAcquiredOnReturn &&
          a.releasedOnReturn == b.releasedOnReturn &&
+         a.mayReleasedOnReturn == b.mayReleasedOnReturn &&
          a.criticalPairs.size() == b.criticalPairs.size() &&
          std::equal(a.criticalPairs.begin(), a.criticalPairs.end(),
                     b.criticalPairs.begin(), pairEqual);
@@ -95,25 +114,43 @@ StarvationChecker::analyze(const llvm::Function &function) const {
                          const llvm::CallBase &call) -> mhp::LockID {
     return locks_.projectLockAtCall(&call, callee(call), lock);
   };
-  auto release = [&](State &state, mhp::LockID lock) {
+  auto release = [&](State &state, mhp::LockID lock,
+                     bool conditionalReleaseOnly = false) {
     lock = canonical(lock);
     if (!lock)
       return;
     for (auto it = state.held.begin(); it != state.held.end();) {
-      if (locks_.locksMustMatch(it->first, lock))
-        it = state.held.erase(it);
-      else
-        ++it;
+      if (locks_.locksMustMatch(it->first, lock)) {
+        if (!conditionalReleaseOnly ||
+            state.conditionalHeld.count(it->first) != 0) {
+          state.conditionalHeld.erase(it->first);
+          it = state.held.erase(it);
+          continue;
+        }
+      }
+      ++it;
     }
-    state.released.insert(lock);
+    state.mayReleased.insert(lock);
+    if (!conditionalReleaseOnly) {
+      state.released.insert(lock);
+    }
   };
   auto acquire = [&](State &state, mhp::LockID lock,
-                     const llvm::Instruction *site) {
+                     const llvm::Instruction *site,
+                     bool conditionalAcquire = false) {
     lock = canonical(lock);
     if (!lock)
       return;
     state.released.erase(lock);
-    state.held.emplace(lock, site);
+    state.mayReleased.erase(lock);
+    auto inserted = state.held.emplace(lock, site);
+    if (conditionalAcquire) {
+      if (inserted.second) {
+        state.conditionalHeld.insert(lock);
+      }
+    } else {
+      state.conditionalHeld.erase(lock);
+    }
   };
 
   struct PairKey {
@@ -131,14 +168,10 @@ StarvationChecker::analyze(const llvm::Function &function) const {
     }
   };
   std::unordered_map<PairKey, size_t, PairKeyHash> pairIndex;
-  constexpr size_t kMaxCriticalPairsPerSummary = 1024;
   auto emit = [&](CriticalPair pair) {
     PairKey key{pair.kind, pair.event};
     auto it = pairIndex.find(key);
     if (it == pairIndex.end()) {
-      if (summary.criticalPairs.size() >= kMaxCriticalPairsPerSummary) {
-        return;
-      }
       pairIndex.emplace(key, summary.criticalPairs.size());
       summary.criticalPairs.push_back(std::move(pair));
     } else {
@@ -277,9 +310,17 @@ StarvationChecker::analyze(const llvm::Function &function) const {
           emit(std::move(pair));
         }
         for (const auto *lock : found->second.releasedOnReturn)
-          release(state, instantiate(lock, *call));
-        for (const auto &lock : found->second.acquiredOnReturn)
-          acquire(state, instantiate(lock.first, *call), lock.second);
+          release(state, instantiate(lock, *call), false);
+        for (const auto *lock : found->second.mayReleasedOnReturn) {
+          if (!found->second.releasedOnReturn.count(lock)) {
+            release(state, instantiate(lock, *call), true);
+          }
+        }
+        for (const auto &lock : found->second.acquiredOnReturn) {
+          const bool condAcq =
+              found->second.conditionallyAcquiredOnReturn.count(lock.first) != 0;
+          acquire(state, instantiate(lock.first, *call), lock.second, condAcq);
+        }
       }
       if (target && target->doesNotReturn())
         break;
@@ -310,16 +351,33 @@ StarvationChecker::analyze(const llvm::Function &function) const {
     }
   }
   bool firstReturn = true;
+  Released mustAcquiredOnReturn;
   for (const auto &block : function) {
     if (!llvm::isa<llvm::ReturnInst>(block.getTerminator()) ||
         !processed.count(&block))
       continue;
     const auto &state = outputs.find(&block)->second;
     summary.acquiredOnReturn.insert(state.held.begin(), state.held.end());
+    Released definiteHere;
+    for (const auto &entry : state.held) {
+      if (!state.conditionalHeld.count(entry.first)) {
+        definiteHere.insert(entry.first);
+      }
+    }
+    mustAcquiredOnReturn =
+        firstReturn ? definiteHere
+                    : intersection(mustAcquiredOnReturn, definiteHere);
     summary.releasedOnReturn =
         firstReturn ? state.released
                     : intersection(summary.releasedOnReturn, state.released);
+    summary.mayReleasedOnReturn.insert(state.mayReleased.begin(),
+                                       state.mayReleased.end());
     firstReturn = false;
+  }
+  for (const auto &entry : summary.acquiredOnReturn) {
+    if (!mustAcquiredOnReturn.count(entry.first)) {
+      summary.conditionallyAcquiredOnReturn.insert(entry.first);
+    }
   }
   std::sort(summary.criticalPairs.begin(), summary.criticalPairs.end(),
             [](const CriticalPair &a, const CriticalPair &b) {
@@ -509,11 +567,13 @@ std::vector<ConcurrencyBugReport> StarvationChecker::checkStarvation() {
       ConcurrencyBugReport report(
           ConcurrencyBugType::STARVATION, reason + ": " + pair.callee,
           BugDescription::BI_MEDIUM, BugDescription::BC_PERFORMANCE);
+      int level = 0;
       if (acquisition)
-        report.addStep(acquisition, "Lock acquired here");
+        report.addStep(acquisition, "Lock acquired here", level);
       for (auto *call : pair.trace)
-        report.addStep(call, "Call leading to " + pair.callee);
-      report.addStep(pair.event, report.description);
+        report.addStep(call, "Call leading to " + pair.callee, ++level);
+      report.addStep(pair.event, report.description,
+                     pair.trace.empty() ? 0 : level + 1);
       reports.push_back(std::move(report));
     }
   }

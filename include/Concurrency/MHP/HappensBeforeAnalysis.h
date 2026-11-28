@@ -13,6 +13,10 @@
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Module.h>
 
+namespace concurrency {
+class ConcurrencyContext;
+} // namespace concurrency
+
 namespace lotus {
 
 class AliasAnalysisWrapper;
@@ -32,6 +36,10 @@ public:
   explicit HappensBeforeAnalysis(llvm::Module &module, const mhp::IMHPAnalysis &mhp);
 
   void analyze();
+
+  void setContext(::concurrency::ConcurrencyContext *context) {
+    m_context = context;
+  }
 
   /**
    * @brief Set optional alias analysis for synchronizes-with same-location
@@ -142,6 +150,7 @@ private:
 
   llvm::Module &m_module;
   const mhp::IMHPAnalysis &m_mhp;
+  ::concurrency::ConcurrencyContext *m_context = nullptr;
   lotus::AliasAnalysisWrapper *m_alias_analysis = nullptr;
   CppAtomics::CppMemoryModel m_cpp_memory_model =
       CppAtomics::CppMemoryModel::Cpp20AndLater;

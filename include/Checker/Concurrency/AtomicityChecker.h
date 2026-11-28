@@ -17,9 +17,18 @@
 
 namespace lotus {
 class AliasAnalysisWrapper;
+class EscapeAnalysis;
+class HappensBeforeAnalysis;
+class StaticThreadSharingAnalysis;
 } // namespace lotus
 
+namespace ThreadLocal {
+class ThreadLocalAnalysis;
+} // namespace ThreadLocal
+
 namespace concurrency {
+
+class ConcurrencyContext;
 
 /**
  * @brief Represents a critical section (acquire-release pair)
@@ -50,6 +59,19 @@ public:
    */
   std::vector<ConcurrencyBugReport> checkAtomicityViolations();
 
+  void setContext(ConcurrencyContext *context) { m_context = context; }
+  void setEscapeAnalysis(lotus::EscapeAnalysis *ea) { m_escapeAnalysis = ea; }
+  void setThreadLocalAnalysis(ThreadLocal::ThreadLocalAnalysis *tla) {
+    m_threadLocalAnalysis = tla;
+  }
+  void
+  setStaticThreadSharingAnalysis(lotus::StaticThreadSharingAnalysis *stsa) {
+    m_staticThreadSharingAnalysis = stsa;
+  }
+  void setHappensBeforeAnalysis(lotus::HappensBeforeAnalysis *hb) {
+    m_happensBeforeAnalysis = hb;
+  }
+
 private:
   // Analysis components
   llvm::Module &m_module;
@@ -57,6 +79,11 @@ private:
   mhp::LockSetAnalysis *m_locksetAnalysis;
   ThreadAPI *m_threadAPI;
   lotus::AliasAnalysisWrapper *m_aliasAnalysis;
+  ConcurrencyContext *m_context = nullptr;
+  lotus::EscapeAnalysis *m_escapeAnalysis = nullptr;
+  ThreadLocal::ThreadLocalAnalysis *m_threadLocalAnalysis = nullptr;
+  lotus::StaticThreadSharingAnalysis *m_staticThreadSharingAnalysis = nullptr;
+  lotus::HappensBeforeAnalysis *m_happensBeforeAnalysis = nullptr;
 
   // Cache of critical sections per function
   llvm::DenseMap<llvm::Function *, llvm::SmallVector<CriticalSection, 4>>

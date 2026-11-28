@@ -10,6 +10,10 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/raw_ostream.h>
 
+namespace kernel {
+class LinuxKernelAnalysis;
+} // namespace kernel
+
 namespace concurrency {
 
 namespace cuda {
@@ -211,12 +215,36 @@ public:
     bool isComplete() const { return status == CUDAAnalysisStatus::Complete; }
   };
 
+  struct LinuxKernelSummary {
+    size_t operation_count = 0;
+    size_t lock_count = 0;
+    size_t rcu_section_count = 0;
+    size_t wait_queue_count = 0;
+    size_t lock_deadlock_count = 0;
+    size_t double_lock_count = 0;
+    size_t unlock_without_lock_count = 0;
+    size_t lock_without_unlock_count = 0;
+    size_t lock_order_inversion_count = 0;
+    size_t sleep_in_atomic_count = 0;
+    size_t mix_raw_and_cooked_count = 0;
+    size_t irq_save_restore_issue_count = 0;
+    size_t data_race_count = 0;
+    size_t rcu_issue_count = 0;
+    size_t wait_issue_count = 0;
+    size_t timer_issue_count = 0;
+    size_t lifetime_issue_count = 0;
+    size_t diagnostic_count = 0;
+  };
+
   static OpenMPSummary analyzeOpenMP(llvm::Module &module);
   static MPISummary analyzeMPI(llvm::Module &module);
   static CUDASummary analyzeCUDA(llvm::Module &module);
   static CUDASummary summarizeCUDA(const cuda::CUDAAnalysis &analysis);
   static CUDASummary summarizeCUDA(const cuda::CUDAAnalysis &analysis,
                                    const llvm::Module &module);
+  static LinuxKernelSummary analyzeLinuxKernel(llvm::Module &module);
+  static LinuxKernelSummary
+  summarizeLinuxKernel(const kernel::LinuxKernelAnalysis &analysis);
   static void printOpenMPResults(llvm::Module &module, llvm::raw_ostream &os);
 };
 

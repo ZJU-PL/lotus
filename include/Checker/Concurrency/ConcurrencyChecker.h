@@ -8,6 +8,7 @@
 #include "Checker/Concurrency/ConditionVariableChecker.h"
 #include "Checker/Concurrency/DataRaceChecker.h"
 #include "Checker/Concurrency/DeadlockChecker.h"
+#include "Checker/Concurrency/LinuxKernelChecker.h"
 #include "Checker/Concurrency/LockMismatchChecker.h"
 #include "Checker/Concurrency/MPIChecker.h"
 #include "Checker/Concurrency/OpenMPChecker.h"
@@ -16,6 +17,7 @@
 #include "Checker/Framework/BugReportMgr.h"
 #include "Concurrency/ConcurrencyFacade.h"
 #include "Concurrency/Core/ConcurrencyContext.h"
+#include "Concurrency/LinuxKernel/LinuxKernelAnalysis.h"
 #include "Concurrency/LockSet/LockSetAnalysis.h"
 #include "Concurrency/MHP/HappensBeforeAnalysis.h"
 #include "Concurrency/MHP/IMHPAnalysis.h"
@@ -115,6 +117,12 @@ public:
   void checkCUDABugs();
 
   /**
+   * @brief Run dedicated Linux kernel concurrency checks and report to
+   * BugReportMgr
+   */
+  void checkLinuxKernelBugs();
+
+  /**
    * @brief Set alias analysis wrapper for better precision
    */
   void setAliasAnalysis(lotus::AliasAnalysisWrapper *aa) {
@@ -143,6 +151,7 @@ public:
   void enableOpenMPCheck(bool enable) { m_checkOpenMP = enable; }
   void enableMPICheck(bool enable) { m_checkMPI = enable; }
   void enableCUDACheck(bool enable) { m_checkCUDA = enable; }
+  void enableLinuxKernelCheck(bool enable) { m_checkLinuxKernel = enable; }
   void enableStarvationCheck(bool enable) { m_checkStarvation = enable; }
   void addStarvationBlockingFunction(std::string name) {
     m_starvationBlockingFunctions.push_back(std::move(name));
@@ -185,6 +194,7 @@ public:
     size_t openMPBugsFound;
     size_t mpiBugsFound;
     size_t cudaBugsFound;
+    size_t linuxKernelBugsFound;
     size_t starvationBugsFound;
     size_t sparseInterferenceEdges;
     size_t sparseLockSpanPrunedPairs;
@@ -202,6 +212,7 @@ public:
     OpenMP::OpenMPTaskGraph::AnalysisSummary openMPSummary;
     ConcurrencyFacade::MPISummary mpiSummary;
     ConcurrencyFacade::CUDASummary cudaSummary;
+    ConcurrencyFacade::LinuxKernelSummary linuxKernelSummary;
   };
 
   Statistics getStatistics() const { return m_stats; }
@@ -235,6 +246,7 @@ private:
   std::unique_ptr<OpenMP::OpenMPTaskGraph> m_openMPTaskGraph;
   std::unique_ptr<mpi::MPIAnalysis> m_mpiAnalysis;
   std::unique_ptr<cuda::CUDAAnalysis> m_cudaAnalysis;
+  std::unique_ptr<kernel::LinuxKernelAnalysis> m_linuxKernelAnalysis;
   std::unique_ptr<lotus::analysis::WholeProgramSparseRefinement>
       m_sparseRefinement;
   lotus::AliasAnalysisWrapper *m_aliasAnalysis;
@@ -249,6 +261,7 @@ private:
   std::unique_ptr<OpenMPChecker> m_openMPChecker;
   std::unique_ptr<MPIChecker> m_mpiChecker;
   std::unique_ptr<CUDAChecker> m_cudaChecker;
+  std::unique_ptr<LinuxKernelChecker> m_linuxKernelChecker;
   std::unique_ptr<StarvationChecker> m_starvationChecker;
   std::vector<std::string> m_starvationBlockingFunctions;
 
@@ -261,6 +274,7 @@ private:
   bool m_checkOpenMP = true;
   bool m_checkMPI = true;
   bool m_checkCUDA = true;
+  bool m_checkLinuxKernel = true;
   bool m_checkStarvation = true;
   bool m_enableSparseFlowSensitiveRefinement = false;
   bool m_enableMultiStageSlicing = false;
@@ -272,40 +286,16 @@ private:
   bool m_enableLockSpanPruning = true;
   MHPBackendKind m_mhpBackend = MHPBackendKind::Region;
 
-  // Bug type IDs (registered with BugReportMgr)
-  int m_dataRaceTypeId;
-  int m_deadlockTypeId;
-  int m_starvationTypeId;
-  int m_atomicityViolationTypeId;
-  int m_condVarMisuseTypeId;
-  int m_lockMismatchTypeId;
-  int m_openMPTaskgroupMismatchTypeId;
-  int m_openMPAtomicMismatchTypeId;
-  int m_openMPPartialSyncTypeId;
-  int m_mpiOrphanedRequestTypeId;
-  int m_mpiDeadlockTypeId;
-  int m_mpiCollectiveMismatchTypeId;
-  int m_mpiConditionalCollectiveTypeId;
-  int m_mpiUnsyncRMATypeId;
-  int m_mpiRMARaceTypeId;
-  int m_mpiWindowLeakTypeId;
-  int m_cudaSharedRaceTypeId;
-  int m_cudaGlobalRaceTypeId;
-  int m_cudaInterKernelHazardTypeId;
-  int m_cudaBarrierMismatchTypeId;
-  int m_cudaWarpDivergenceTypeId;
-  int m_cudaBankConflictTypeId;
-  int m_cudaUncoalescedTypeId;
-  int m_cudaVolatileMissingTypeId;
-  int m_cudaSymbolicConfigTypeId;
-  int m_cudaMemorySpaceTypeId;
-  int m_cudaParametricRaceTypeId;
+  // Bug type IDs (registered with BugReportMgr for every ConcurrencyBugType)
+  std::unordered_map<ConcurrencyBugType, int> m_bugTypeIds;
+  int lookupBugTypeId(ConcurrencyBugType type) const;
 
   // Results tracking
   Statistics m_stats;
 
   // Helper to convert ConcurrencyBugReport to BugReport
   void reportBug(const ConcurrencyBugReport &bug_report, int bug_type_id);
+  void reportBug(const ConcurrencyBugReport &bug_report);
 };
 
 } // namespace concurrency

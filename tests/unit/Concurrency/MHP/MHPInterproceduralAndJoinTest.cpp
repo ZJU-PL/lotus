@@ -1,5 +1,7 @@
 #include "MHPAnalysisTestSupport.h"
 
+#include "Concurrency/MHP/StaticVectorClockMHP.h"
+
 TEST_F(MHPAnalysisTest, DetachResolutionIsIndependentOfBlockStorageOrder) {
   const char *source = R"(
     declare i32 @pthread_create(i8*, i8*, i8* (i8*)*, i8*)
@@ -1042,4 +1044,160 @@ TEST_F(MHPAnalysisTest, UnresolvedIndirectCallEnablesConservativeForkFallback) {
   ASSERT_NE(worker_inst, nullptr);
 
   EXPECT_EQ(mhp.getThreadID(worker_inst), std::numeric_limits<ThreadID>::max());
+}
+
+TEST_F(MHPAnalysisTest, RecursiveThreadForkTerminatesAndMarksMultiInstance) {
+  const char *source = R"(
+    @shared = global i32 0, align 4
+    declare i32 @pthread_create(i8*, i8*, i8* (i8*)*, i8*)
+
+    define i8* @recursive_worker(i8* %arg) {
+    entry:
+      %w = load i32, i32* @shared, align 4
+      %cmp = icmp eq i32 %w, 0
+      br i1 %cmp, label %spawn, label %done
+
+    spawn:
+      %tid = alloca i8
+      call i32 @pthread_create(i8* %tid, i8* null,
+                               i8* (i8*)* @recursive_worker, i8* null)
+      br label %done
+
+    done:
+      ret i8* null
+    }
+
+    define i32 @main() {
+    entry:
+      %tid = alloca i8
+      call i32 @pthread_create(i8* %tid, i8* null,
+                               i8* (i8*)* @recursive_worker, i8* null)
+      ret i32 0
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+  const Instruction *wInst =
+      findInstructionByName(*module->getFunction("recursive_worker"), "w");
+  ASSERT_NE(wInst, nullptr);
+
+  MHPAnalysis mhp(*module);
+  mhp.analyze();
+  EXPECT_FALSE(mhp.isSingleThreaded());
+  EXPECT_TRUE(mhp.mayHappenInParallel(wInst, wInst));
+
+  StaticVectorClockMHP svc(*module);
+  svc.analyze();
+  EXPECT_FALSE(svc.isSingleThreaded());
+  EXPECT_TRUE(svc.mayHappenInParallel(wInst, wInst));
+}
+
+TEST_F(MHPAnalysisTest, SingleThreadedIndirectCallModuleStaysSingleThreaded) {
+  const char *source = R"(
+    @hook = external global void ()*
+    @shared = global i32 0, align 4
+
+    define void @target_a() {
+    entry:
+      store i32 1, i32* @shared, align 4
+      ret void
+    }
+
+    define void @target_b() {
+    entry:
+      store i32 2, i32* @shared, align 4
+      ret void
+    }
+
+    define i32 @main() {
+    entry:
+      %fn = load void ()*, void ()** @hook
+      call void %fn()
+      ret i32 0
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+  const Instruction *storeA =
+      &module->getFunction("target_a")->getEntryBlock().front();
+  const Instruction *storeB =
+      &module->getFunction("target_b")->getEntryBlock().front();
+
+  MHPAnalysis mhp(*module);
+  mhp.analyze();
+  EXPECT_TRUE(mhp.isSingleThreaded());
+  EXPECT_FALSE(mhp.mayHappenInParallel(storeA, storeB));
+
+  StaticVectorClockMHP svc(*module);
+  svc.analyze();
+  EXPECT_TRUE(svc.isSingleThreaded());
+  EXPECT_FALSE(svc.mayHappenInParallel(storeA, storeB));
+}
+
+TEST_F(MHPAnalysisTest, IndirectForkResolvesClosedSelectTargetsWithoutConservatism) {
+  const char *source = R"(
+    @shared = global i32 0, align 4
+    declare i32 @pthread_create(i8*, i8*, i8* (i8*)*, i8*)
+
+    define i8* @w1(i8* %arg) {
+    entry:
+      %a = add i32 1, 2
+      ret i8* null
+    }
+
+    define i8* @w2(i8* %arg) {
+    entry:
+      %b = add i32 3, 4
+      ret i8* null
+    }
+
+    define i8* @unrelated(i8* %arg) {
+    entry:
+      %u = add i32 5, 6
+      ret i8* null
+    }
+
+    define i32 @main(i1 %cond) {
+    entry:
+      %tid = alloca i8
+      %pre = call i8* @unrelated(i8* null)
+      %fn = select i1 %cond, i8* (i8*)* @w1, i8* (i8*)* @w2
+      call i32 @pthread_create(i8* %tid, i8* null, i8* (i8*)* %fn, i8* null)
+      %post = add i32 7, 8
+      ret i32 %post
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  MHPAnalysis mhp(*module);
+  mhp.analyze();
+
+  const Instruction *a = findInstructionByName(*module->getFunction("w1"), "a");
+  const Instruction *b = findInstructionByName(*module->getFunction("w2"), "b");
+  const Instruction *u =
+      findInstructionByName(*module->getFunction("unrelated"), "u");
+  const Instruction *post =
+      findInstructionByName(*module->getFunction("main"), "post");
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  ASSERT_NE(u, nullptr);
+  ASSERT_NE(post, nullptr);
+
+  EXPECT_FALSE(mhp.isSingleThreaded());
+  EXPECT_EQ(mhp.getThreadID(u), 0u);
+  EXPECT_NE(mhp.getThreadID(a), 0u);
+  EXPECT_NE(mhp.getThreadID(a), std::numeric_limits<ThreadID>::max());
+  EXPECT_NE(mhp.getThreadID(b), 0u);
+  EXPECT_NE(mhp.getThreadID(b), std::numeric_limits<ThreadID>::max());
+  EXPECT_TRUE(mhp.mayHappenInParallel(a, post));
+  EXPECT_TRUE(mhp.mayHappenInParallel(b, post));
+  // Pre-fork call to @unrelated stays strictly on thread 0 and must NOT be
+  // spuriously marked MHP with post-fork or child threads via open conservatism.
+  EXPECT_FALSE(mhp.mayHappenInParallel(u, post));
+  EXPECT_FALSE(mhp.mayHappenInParallel(u, a));
+  EXPECT_FALSE(mhp.mayHappenInParallel(u, b));
 }

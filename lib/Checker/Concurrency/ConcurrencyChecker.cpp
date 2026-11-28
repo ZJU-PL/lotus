@@ -6,13 +6,14 @@
 #include "Alias/UnificationBased/seadsa/DsaAnalysis.hh"
 #include "Alias/UnificationBased/seadsa/InitializePasses.hh"
 #include "Checker/Concurrency/ConcurrencyAnalysisDumper.h"
-#include "Concurrency/MHP/HappensBeforeAnalysis.h"
 #include "Concurrency/API/ThreadAPI.h"
+#include "Concurrency/MHP/HappensBeforeAnalysis.h"
 
 #include <llvm/Analysis/CallGraph.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/PassRegistry.h>
 #include <llvm/Support/raw_ostream.h>
@@ -27,134 +28,283 @@ ConcurrencyChecker::ConcurrencyChecker(Module &module)
     : m_module(module), m_aliasAnalysis(nullptr),
       m_threadAPI(ThreadAPI::getThreadAPI()), m_stats{} {
 
-  // Register bug types with BugReportMgr (shared pattern)
+  // Register EVERY ConcurrencyBugType with BugReportMgr so no checker report
+  // is ever silently dropped.
   BugReportMgr &mgr = BugReportMgr::get_instance();
-  m_starvationTypeId = mgr.register_bug_type(
-      "Starvation", BugDescription::BI_MEDIUM, BugDescription::BC_PERFORMANCE,
+  auto reg = [&](ConcurrencyBugType type, const std::string &name,
+                 BugDescription::BugImportance imp,
+                 BugDescription::BugClassification cls,
+                 const std::string &desc) {
+    m_bugTypeIds[type] = mgr.register_bug_type(name, imp, cls, desc);
+  };
+
+  // Core shared-memory concurrency
+  reg(ConcurrencyBugType::STARVATION, "Starvation", BugDescription::BI_MEDIUM,
+      BugDescription::BC_PERFORMANCE,
       "Blocking or arbitrary callbacks in restricted concurrency contexts");
-  m_dataRaceTypeId =
-      mgr.register_bug_type("Data Race", BugDescription::BI_HIGH,
-                            BugDescription::BC_SECURITY, "CWE-362");
-  m_deadlockTypeId =
-      mgr.register_bug_type("Deadlock", BugDescription::BI_HIGH,
-                            BugDescription::BC_ERROR, "Deadlock potential");
-  m_atomicityViolationTypeId = mgr.register_bug_type(
-      "Atomicity Violation", BugDescription::BI_MEDIUM,
-      BugDescription::BC_ERROR, "Non-atomic operation sequence");
-  m_condVarMisuseTypeId = mgr.register_bug_type(
-      "Condition Variable Misuse", BugDescription::BI_HIGH,
-      BugDescription::BC_ERROR, "Improper condition variable usage");
-  m_lockMismatchTypeId = mgr.register_bug_type(
-      "Lock Mismatch", BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+  reg(ConcurrencyBugType::DATA_RACE, "Data Race", BugDescription::BI_HIGH,
+      BugDescription::BC_SECURITY, "CWE-362");
+  reg(ConcurrencyBugType::DEADLOCK, "Deadlock", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR, "Deadlock potential");
+  reg(ConcurrencyBugType::ATOMICITY_VIOLATION, "Atomicity Violation",
+      BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
+      "Non-atomic operation sequence");
+  reg(ConcurrencyBugType::COND_VAR_MISUSE, "Condition Variable Misuse",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Improper condition variable usage");
+  reg(ConcurrencyBugType::LOCK_MISMATCH, "Lock Mismatch",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
       "Lock acquisition/release mismatch");
-  m_openMPTaskgroupMismatchTypeId = mgr.register_bug_type(
+
+  // OpenMP (all 19 bug types)
+  reg(ConcurrencyBugType::OPENMP_TASKGROUP_MISMATCH,
       "OpenMP Taskgroup Mismatch", BugDescription::BI_HIGH,
       BugDescription::BC_ERROR, "Unbalanced OpenMP taskgroup region");
-  m_openMPAtomicMismatchTypeId = mgr.register_bug_type(
+  reg(ConcurrencyBugType::OPENMP_ATOMIC_MISMATCH,
       "OpenMP Atomic Region Mismatch", BugDescription::BI_HIGH,
       BugDescription::BC_ERROR, "Unbalanced OpenMP atomic region");
-  m_openMPPartialSyncTypeId = mgr.register_bug_type(
+  reg(ConcurrencyBugType::OPENMP_PARTIAL_SYNC,
       "OpenMP Partial Task Synchronization", BugDescription::BI_MEDIUM,
       BugDescription::BC_ERROR,
       "Selective task wait may leave sibling tasks unsynchronized");
-  m_mpiOrphanedRequestTypeId = mgr.register_bug_type(
-      "MPI Orphaned Request", BugDescription::BI_HIGH, BugDescription::BC_ERROR,
-      "Non-blocking MPI request without matching completion");
-  m_mpiDeadlockTypeId = mgr.register_bug_type(
-      "MPI Deadlock", BugDescription::BI_HIGH, BugDescription::BC_ERROR,
-      "Potential blocking communication deadlock");
-  m_mpiCollectiveMismatchTypeId = mgr.register_bug_type(
-      "MPI Collective Mismatch", BugDescription::BI_HIGH,
+  reg(ConcurrencyBugType::OPENMP_DETACHED_TASK_LEAK,
+      "OpenMP Detached Task Leak", BugDescription::BI_MEDIUM,
       BugDescription::BC_ERROR,
+      "Detached OpenMP task may never be completed");
+  reg(ConcurrencyBugType::OPENMP_NESTED_SINGLE, "OpenMP Nested Single",
+      BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
+      "Nested OpenMP single regions may deadlock or violate specification");
+  reg(ConcurrencyBugType::OPENMP_NOWAIT_MISSING_BARRIER,
+      "OpenMP Nowait Missing Barrier", BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR,
+      "Worksharing nowait region lacks synchronization before subsequent use");
+  reg(ConcurrencyBugType::OPENMP_REDUCTION_ERROR, "OpenMP Reduction Error",
+      BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
+      "Unbalanced or improperly nested OpenMP reduction region");
+  reg(ConcurrencyBugType::OPENMP_INCORRECT_NUMTHREADS,
+      "OpenMP Incorrect num_threads", BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR,
+      "Incorrect runtime query used in OpenMP num_threads clause");
+  reg(ConcurrencyBugType::OPENMP_MISSING_FLUSH, "OpenMP Missing Flush",
+      BugDescription::BI_MEDIUM, BugDescription::BC_WARNING,
+      "Shared synchronization loop lacks OpenMP flush");
+  reg(ConcurrencyBugType::OMP_TASKWAIT_MISSING, "OpenMP Missing Taskwait",
+      BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
+      "OpenMP task created without synchronizing taskwait before return");
+  reg(ConcurrencyBugType::OMP_NESTED_PARALLEL_DISABLED,
+      "OpenMP Nested Parallel Disabled", BugDescription::BI_LOW,
+      BugDescription::BC_WARNING,
+      "Nested OpenMP parallel region may be serialized by runtime");
+  reg(ConcurrencyBugType::OMP_SHARED_PRIVATE_CONFLICT,
+      "OpenMP Shared/Private Conflict", BugDescription::BI_MEDIUM,
+      BugDescription::BC_WARNING,
+      "Conflicting OpenMP shared/private data-sharing semantics");
+  reg(ConcurrencyBugType::OMP_IF_FALSE_PARALLEL,
+      "OpenMP Serialized Parallel Region", BugDescription::BI_LOW,
+      BugDescription::BC_WARNING,
+      "OpenMP parallel region forced to execute on a single thread");
+  reg(ConcurrencyBugType::OMP_ORDERED_DEPENDENCY,
+      "OpenMP Ordered Dependency Protocol Error", BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR,
+      "Incomplete or unbalanced OpenMP ordered/doacross dependency");
+  reg(ConcurrencyBugType::OMP_LASTPRIVATE_MISSING,
+      "OpenMP Lastprivate Finalize Missing", BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR,
+      "OpenMP worksharing loop init missing matching finalize");
+  reg(ConcurrencyBugType::OMP_COPYIN_NOT_SHARED, "OpenMP Copyin/Copyprivate Misuse",
+      BugDescription::BI_MEDIUM, BugDescription::BC_WARNING,
+      "OpenMP copyprivate/copyin operation outside valid single region");
+  reg(ConcurrencyBugType::OMP_BARRIER_IN_CRITICAL, "OpenMP Barrier in Critical",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "OpenMP barrier executed inside an active critical section");
+  reg(ConcurrencyBugType::OMP_PRIVATE_IN_LOOP,
+      "OpenMP Loop-Private Capture in Task", BugDescription::BI_MEDIUM,
+      BugDescription::BC_WARNING,
+      "OpenMP task created inside loop may unsafely capture loop-private state");
+  reg(ConcurrencyBugType::OMP_MISSING_SCHEDULE,
+      "OpenMP Implicit Default Schedule", BugDescription::BI_LOW,
+      BugDescription::BC_STYLE,
+      "OpenMP worksharing loop relies on implicit default scheduling");
+
+  // MPI (all 28 bug types)
+  reg(ConcurrencyBugType::MPI_ORPHANED_REQUEST, "MPI Orphaned Request",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Non-blocking MPI request without matching completion");
+  reg(ConcurrencyBugType::MPI_DEADLOCK, "MPI Deadlock",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Potential blocking communication deadlock");
+  reg(ConcurrencyBugType::MPI_COLLECTIVE_MISMATCH, "MPI Collective Mismatch",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
       "Incompatible collective operations across processes");
-  m_mpiConditionalCollectiveTypeId = mgr.register_bug_type(
+  reg(ConcurrencyBugType::MPI_CONDITIONAL_COLLECTIVE,
       "MPI Conditional Collective", BugDescription::BI_HIGH,
       BugDescription::BC_ERROR,
       "Collective may be executed only by a subset of ranks");
-  m_mpiUnsyncRMATypeId =
-      mgr.register_bug_type("MPI Unsynchronized RMA", BugDescription::BI_HIGH,
-                            BugDescription::BC_ERROR,
-                            "RMA operation without recognized synchronization");
-  m_mpiRMARaceTypeId = mgr.register_bug_type(
-      "MPI RMA Race", BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+  reg(ConcurrencyBugType::MPI_UNSYNC_RMA, "MPI Unsynchronized RMA",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "RMA operation without recognized synchronization");
+  reg(ConcurrencyBugType::MPI_RMA_RACE, "MPI RMA Race",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
       "Conflicting RMA operations without sufficient synchronization");
-  m_mpiWindowLeakTypeId = mgr.register_bug_type(
-      "MPI Window Leak", BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
+  reg(ConcurrencyBugType::MPI_WINDOW_LEAK, "MPI Window Leak",
+      BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
       "RMA window may not be freed");
-  m_cudaSharedRaceTypeId = mgr.register_bug_type(
-      "CUDA Shared-Memory Race", BugDescription::BI_HIGH,
+  reg(ConcurrencyBugType::MPI_DOUBLE_FINALIZE, "MPI Double Finalize",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI_Finalize called more than once");
+  reg(ConcurrencyBugType::MPI_MISSING_FINALIZE, "MPI Missing Finalize",
+      BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
+      "MPI_Init called without matching MPI_Finalize");
+  reg(ConcurrencyBugType::MPI_TAG_MISMATCH, "MPI Tag Mismatch",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI send and receive have mismatched tags");
+  reg(ConcurrencyBugType::MPI_COUNT_DATATYPE_MISMATCH,
+      "MPI Count/Datatype Mismatch", BugDescription::BI_HIGH,
       BugDescription::BC_ERROR,
-      "Conflicting shared-memory accesses without sufficient synchronization");
-  m_cudaGlobalRaceTypeId =
-      mgr.register_bug_type("CUDA Global-Memory Race", BugDescription::BI_HIGH,
-                            BugDescription::BC_ERROR,
-                            "Conflicting global/device-memory accesses without "
-                            "sufficient synchronization");
-  m_cudaInterKernelHazardTypeId =
-      mgr.register_bug_type("CUDA Inter-Kernel Hazard", BugDescription::BI_HIGH,
-                            BugDescription::BC_ERROR,
-                            "Potential inter-kernel hazard across ordered or "
-                            "unordered CUDA launches");
-  m_cudaBarrierMismatchTypeId = mgr.register_bug_type(
-      "CUDA Barrier Mismatch", BugDescription::BI_HIGH,
-      BugDescription::BC_ERROR, "Not all threads reach the same CUDA barrier");
-  m_cudaWarpDivergenceTypeId =
-      mgr.register_bug_type("CUDA Warp Divergence", BugDescription::BI_MEDIUM,
-                            BugDescription::BC_PERFORMANCE,
-                            "Warp executes divergent control-flow paths");
-  m_cudaBankConflictTypeId = mgr.register_bug_type(
-      "CUDA Bank Conflict", BugDescription::BI_MEDIUM,
-      BugDescription::BC_PERFORMANCE,
-      "Shared-memory accesses may map multiple lanes to the same bank");
-  m_cudaUncoalescedTypeId = mgr.register_bug_type(
-      "CUDA Uncoalesced Access", BugDescription::BI_MEDIUM,
-      BugDescription::BC_PERFORMANCE,
-      "Global-memory accesses may not coalesce");
-  m_cudaVolatileMissingTypeId = mgr.register_bug_type(
-      "CUDA Missing Volatile", BugDescription::BI_LOW,
+      "MPI send and receive have incompatible count or datatype");
+  reg(ConcurrencyBugType::MPI_RANK_OUT_OF_BOUNDS, "MPI Rank Out of Bounds",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI operation uses an out-of-bounds or negative rank");
+  reg(ConcurrencyBugType::MPI_PERSISTENT_REQUEST_LEAK,
+      "MPI Persistent Request Leak", BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR,
+      "MPI persistent request initialized without completion/free");
+  reg(ConcurrencyBugType::MPI_WRONG_ROOT_RANK, "MPI Inconsistent Root Rank",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI collective operations disagree on root rank");
+  reg(ConcurrencyBugType::MPI_CANCEL_WITHOUT_WAIT, "MPI Cancel Without Wait",
+      BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
+      "MPI_Cancel called without subsequent wait/test");
+  reg(ConcurrencyBugType::MPI_BUFFER_OVERLAP, "MPI Buffer Overlap",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI operation aliases send and receive buffers");
+  reg(ConcurrencyBugType::MPI_WILDCARD_IN_COLLECTIVE,
+      "MPI Wildcard in Collective", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR,
+      "MPI collective uses disallowed wildcard rank");
+  reg(ConcurrencyBugType::MPI_IN_PLACE_CONFLICT, "MPI_IN_PLACE Conflict",
+      BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
+      "Incorrect MPI_IN_PLACE usage in collective");
+  reg(ConcurrencyBugType::MPI_NULL_HANDLES, "MPI Null Handle",
+      BugDescription::BI_MEDIUM, BugDescription::BC_WARNING,
+      "MPI operation uses NULL handle");
+  reg(ConcurrencyBugType::MPI_ROOT_NEGATIVE, "MPI Negative Root Rank",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI collective specifies a negative root rank");
+  reg(ConcurrencyBugType::MPI_INVALID_TAG, "MPI Invalid Tag",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI operation uses invalid negative tag");
+  reg(ConcurrencyBugType::MPI_INVALID_RANK, "MPI Invalid Rank",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI operation uses invalid rank");
+  reg(ConcurrencyBugType::MPI_TYPE_SIZE_MISMATCH, "MPI Type Size Mismatch",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI send and receive payload byte sizes disagree");
+  reg(ConcurrencyBugType::MPI_DESTROY_NULL_COMM, "MPI Destroy Null Communicator",
+      BugDescription::BI_MEDIUM, BugDescription::BC_WARNING,
+      "MPI_Comm_free called on null communicator");
+  reg(ConcurrencyBugType::MPI_REQUEST_FREE_AFTER_WAIT,
+      "MPI Request Free After Wait", BugDescription::BI_MEDIUM,
       BugDescription::BC_WARNING,
+      "MPI_Request_free called after request completion");
+  reg(ConcurrencyBugType::MPI_IN_PLACE_WRONG_OP,
+      "MPI_IN_PLACE Unsupported Operand", BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR,
+      "MPI_IN_PLACE used on disallowed collective operand");
+  reg(ConcurrencyBugType::MPI_INVALID_RMA_TRANSITION,
+      "MPI Invalid RMA Epoch Transition", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR,
+      "MPI RMA synchronization violates epoch transition rules");
+  reg(ConcurrencyBugType::MPI_USE_AFTER_FREE_WINDOW,
+      "MPI Window Use After Free", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR,
+      "MPI RMA window used after MPI_Win_free");
+  reg(ConcurrencyBugType::MPI_DOUBLE_WINDOW_FREE, "MPI Double Window Free",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "MPI_Win_free called repeatedly on the same window");
+
+  // CUDA (all 11 bug types)
+  reg(ConcurrencyBugType::CUDA_SHARED_MEMORY_RACE, "CUDA Shared-Memory Race",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Conflicting shared-memory accesses without sufficient synchronization");
+  reg(ConcurrencyBugType::CUDA_GLOBAL_MEMORY_RACE, "CUDA Global-Memory Race",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Conflicting global/device-memory accesses without sufficient synchronization");
+  reg(ConcurrencyBugType::CUDA_INTER_KERNEL_HAZARD, "CUDA Inter-Kernel Hazard",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Potential inter-kernel hazard across ordered or unordered CUDA launches");
+  reg(ConcurrencyBugType::CUDA_BARRIER_MISMATCH, "CUDA Barrier Mismatch",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Not all threads reach the same CUDA barrier");
+  reg(ConcurrencyBugType::CUDA_WARP_DIVERGENCE, "CUDA Warp Divergence",
+      BugDescription::BI_MEDIUM, BugDescription::BC_PERFORMANCE,
+      "Warp executes divergent control-flow paths");
+  reg(ConcurrencyBugType::CUDA_BANK_CONFLICT, "CUDA Bank Conflict",
+      BugDescription::BI_MEDIUM, BugDescription::BC_PERFORMANCE,
+      "Shared-memory accesses may map multiple lanes to the same bank");
+  reg(ConcurrencyBugType::CUDA_UNCOALESCED_ACCESS, "CUDA Uncoalesced Access",
+      BugDescription::BI_MEDIUM, BugDescription::BC_PERFORMANCE,
+      "Global-memory accesses may not coalesce");
+  reg(ConcurrencyBugType::CUDA_VOLATILE_MISSING, "CUDA Missing Volatile",
+      BugDescription::BI_LOW, BugDescription::BC_WARNING,
       "Potential missing volatile on inter-thread CUDA memory");
-  m_cudaSymbolicConfigTypeId = mgr.register_bug_type(
+  reg(ConcurrencyBugType::CUDA_SYMBOLIC_CONFIG_RISK,
       "CUDA Symbolic Launch Configuration", BugDescription::BI_LOW,
       BugDescription::BC_WARNING,
       "Kernel launch uses symbolic or unknown thread/block sizing");
-  m_cudaMemorySpaceTypeId =
-      mgr.register_bug_type("CUDA Memory Space Ambiguity",
-                            BugDescription::BI_LOW, BugDescription::BC_WARNING,
-                            "Could not classify CUDA memory space precisely");
-  m_cudaParametricRaceTypeId = mgr.register_bug_type(
+  reg(ConcurrencyBugType::CUDA_SHARED_GLOBAL_SPACE_MISMATCH,
+      "CUDA Memory Space Ambiguity", BugDescription::BI_LOW,
+      BugDescription::BC_WARNING,
+      "Could not classify CUDA memory space precisely");
+  reg(ConcurrencyBugType::CUDA_PARAMETRIC_RACE_RISK,
       "CUDA Parametric Race Risk", BugDescription::BI_MEDIUM,
       BugDescription::BC_WARNING,
       "Parametric CUDA thread/block reasoning exposes a potential race");
 
-  m_stats.totalInstructions = 0;
-  m_stats.mhpPairs = 0;
-  m_stats.locksAnalyzed = 0;
-  m_stats.dataRacesFound = 0;
-  m_stats.deadlocksFound = 0;
-  m_stats.atomicityViolationsFound = 0;
-  m_stats.condVarBugsFound = 0;
-  m_stats.lockMismatchesFound = 0;
-  m_stats.openMPBugsFound = 0;
-  m_stats.mpiBugsFound = 0;
-  m_stats.cudaBugsFound = 0;
-  m_stats.sparseInterferenceEdges = 0;
-  m_stats.sparseLockSpanPrunedPairs = 0;
-  m_stats.sparseLockSpanPrunedObjects = 0;
-  m_stats.sparsePointsToFacts = 0;
-  m_stats.sparseMemoryRegions = 0;
-  m_stats.sparseOriginalNodes = 0;
-  m_stats.sparseSlicedNodes = 0;
-  m_stats.sparsePreThreads = 0;
-  m_stats.sparseMainThreads = 0;
-  m_stats.sparseForkMemoryEdges = 0;
-  m_stats.sparseJoinMemoryEdges = 0;
-  m_stats.sparseHashConsedUniqueSets = 0;
-  m_stats.sparseHashConsedUnionCacheHits = 0;
-  m_stats.openMPSummary = OpenMP::OpenMPTaskGraph::AnalysisSummary{};
-  m_stats.mpiSummary = ConcurrencyFacade::MPISummary{};
-  m_stats.cudaSummary = ConcurrencyFacade::CUDASummary{};
+  // Linux Kernel (all 13 bug types)
+  reg(ConcurrencyBugType::LINUX_KERNEL_DEADLOCK, "Linux Kernel Deadlock",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Potential Linux kernel lock deadlock");
+  reg(ConcurrencyBugType::LINUX_KERNEL_DOUBLE_LOCK, "Linux Kernel Double Lock",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Repeated acquisition of non-recursive kernel lock");
+  reg(ConcurrencyBugType::LINUX_KERNEL_UNLOCK_WITHOUT_LOCK,
+      "Linux Kernel Unlock Without Lock", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR, "Kernel unlock without holding lock");
+  reg(ConcurrencyBugType::LINUX_KERNEL_LOCK_WITHOUT_UNLOCK,
+      "Linux Kernel Lock Leak", BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR, "Kernel lock acquired without matching unlock");
+  reg(ConcurrencyBugType::LINUX_KERNEL_LOCK_ORDER_INVERSION,
+      "Linux Kernel Lock Order Inversion", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR, "Inconsistent kernel lock acquisition order");
+  reg(ConcurrencyBugType::LINUX_KERNEL_SLEEP_IN_ATOMIC,
+      "Linux Kernel Sleep in Atomic Context", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR, "Sleeping call inside spinlock/atomic context");
+  reg(ConcurrencyBugType::LINUX_KERNEL_MIX_RAW_COOKED,
+      "Linux Kernel Raw/Cooked Lock Mix", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR,
+      "Raw spinlock mixed with standard spinlock/sleepable lock");
+  reg(ConcurrencyBugType::LINUX_KERNEL_IRQ_SAVE_RESTORE,
+      "Linux Kernel IRQ Save/Restore Mismatch", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR, "Mismatched kernel IRQ save/restore");
+  reg(ConcurrencyBugType::LINUX_KERNEL_DATA_RACE, "Linux Kernel Data Race",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "Potential Linux kernel memory-model data race");
+  reg(ConcurrencyBugType::LINUX_KERNEL_RCU_ERROR, "Linux Kernel RCU Error",
+      BugDescription::BI_HIGH, BugDescription::BC_ERROR,
+      "RCU synchronization or reclamation misuse");
+  reg(ConcurrencyBugType::LINUX_KERNEL_WAIT_ERROR,
+      "Linux Kernel Wait/Completion Error", BugDescription::BI_MEDIUM,
+      BugDescription::BC_ERROR, "Wait-queue or completion misuse");
+  reg(ConcurrencyBugType::LINUX_KERNEL_TIMER_ERROR, "Linux Kernel Timer Error",
+      BugDescription::BI_MEDIUM, BugDescription::BC_ERROR,
+      "Kernel timer lifecycle error");
+  reg(ConcurrencyBugType::LINUX_KERNEL_LIFETIME_ERROR,
+      "Linux Kernel Lifetime Hazard", BugDescription::BI_HIGH,
+      BugDescription::BC_ERROR,
+      "Concurrent use-after-free or async work lifetime hazard");
 
+  m_stats = Statistics{};
   for (Function &func : module) {
     if (!func.isDeclaration()) {
       for (inst_iterator I = inst_begin(func), E = inst_end(func); I != E; ++I)
@@ -163,9 +313,22 @@ ConcurrencyChecker::ConcurrencyChecker(Module &module)
   }
 }
 
+int ConcurrencyChecker::lookupBugTypeId(ConcurrencyBugType type) const {
+  auto it = m_bugTypeIds.find(type);
+  return it != m_bugTypeIds.end() ? it->second : -1;
+}
+
 void ConcurrencyChecker::runAnalyses() {
   // The previous checker may retain a non-owning pointer to the sparse solver.
   m_dataRaceChecker.reset();
+  m_deadlockChecker.reset();
+  m_atomicityChecker.reset();
+  m_condVarChecker.reset();
+  m_lockMismatchChecker.reset();
+  m_openMPChecker.reset();
+  m_mpiChecker.reset();
+  m_cudaChecker.reset();
+  m_linuxKernelChecker.reset();
   m_starvationChecker.reset();
   m_mhpAnalysis = nullptr;
   m_mhpAnalysisStorage.reset();
@@ -179,28 +342,13 @@ void ConcurrencyChecker::runAnalyses() {
   m_openMPTaskGraph.reset();
   m_mpiAnalysis.reset();
   m_cudaAnalysis.reset();
+  m_linuxKernelAnalysis.reset();
   m_sparseRefinement.reset();
   m_context.reset();
-  m_stats.mhpPairs = 0;
-  m_stats.locksAnalyzed = 0;
-  m_stats.cudaBugsFound = 0;
-  m_stats.starvationBugsFound = 0;
-  m_stats.sparseInterferenceEdges = 0;
-  m_stats.sparseLockSpanPrunedPairs = 0;
-  m_stats.sparseLockSpanPrunedObjects = 0;
-  m_stats.sparsePointsToFacts = 0;
-  m_stats.sparseMemoryRegions = 0;
-  m_stats.sparseOriginalNodes = 0;
-  m_stats.sparseSlicedNodes = 0;
-  m_stats.sparsePreThreads = 0;
-  m_stats.sparseMainThreads = 0;
-  m_stats.sparseForkMemoryEdges = 0;
-  m_stats.sparseJoinMemoryEdges = 0;
-  m_stats.sparseHashConsedUniqueSets = 0;
-  m_stats.sparseHashConsedUnionCacheHits = 0;
-  m_stats.openMPSummary = OpenMP::OpenMPTaskGraph::AnalysisSummary{};
-  m_stats.mpiSummary = ConcurrencyFacade::MPISummary{};
-  m_stats.cudaSummary = ConcurrencyFacade::CUDASummary{};
+
+  const size_t totalInsts = m_stats.totalInstructions;
+  m_stats = Statistics{};
+  m_stats.totalInstructions = totalInsts;
 
   m_context = std::make_unique<ConcurrencyContext>(m_module, m_aliasAnalysis);
   const ModuleConcurrencySummary &moduleSummary = m_context->getSummary();
@@ -208,28 +356,37 @@ void ConcurrencyChecker::runAnalyses() {
   // Config-driven activation: run only analyses required by enabled checks
   // (Goblint-style)
   bool needMHP = m_checkDataRaces || m_checkDeadlocks ||
-                 m_checkAtomicityViolations || m_checkCondVars;
+                 m_checkAtomicityViolations || m_checkCondVars ||
+                 (m_checkLinuxKernel && moduleSummary.has_linux_kernel);
   bool needLockSet = m_checkDataRaces || m_checkDeadlocks ||
                      m_checkAtomicityViolations || m_checkCondVars ||
                      m_checkLockMismatches || m_checkStarvation;
   bool needEscape = m_checkDataRaces;
   bool needThreadLocal = m_checkDataRaces;
   bool needStaticSharing = m_checkDataRaces;
-  bool needHappensBefore = m_checkDataRaces;
+  bool needHappensBefore =
+      m_checkDataRaces || m_checkDeadlocks ||
+      (m_checkLinuxKernel && moduleSummary.has_linux_kernel);
   bool needOpenMP = m_checkOpenMP;
   bool needMPI = m_checkMPI;
   bool needCUDA = m_checkCUDA;
+  bool needLinuxKernel = m_checkLinuxKernel && moduleSummary.has_linux_kernel;
 
   if (needMHP) {
     if (m_mhpBackend == MHPBackendKind::StaticVectorClock) {
-      auto svc = std::make_unique<StaticVectorClockMHP>(m_module);
+      auto svc = std::make_unique<StaticVectorClockMHP>(*m_context);
+      if (needLockSet) {
+        svc->enableLockSetAnalysis();
+      }
       svc->analyze();
       m_stats.mhpPairs = svc->getMhpPairCount();
       m_mhpAnalysis = svc.get();
       m_mhpAnalysisStorage = std::move(svc);
     } else {
       auto mhp = std::make_unique<MHPAnalysis>(*m_context);
-      mhp->enableLockSetAnalysis();
+      if (needLockSet) {
+        mhp->enableLockSetAnalysis();
+      }
       mhp->analyze();
       m_stats.mhpPairs = mhp->getMhpPairCount();
       m_mhpAnalysis = mhp.get();
@@ -238,15 +395,18 @@ void ConcurrencyChecker::runAnalyses() {
   }
 
   auto *regionMHP = dynamic_cast<MHPAnalysis *>(m_mhpAnalysis);
+  auto *svcMHP = dynamic_cast<StaticVectorClockMHP *>(m_mhpAnalysis);
 
-  // Prefer reusing the lockset computed inside MHPAnalysis (avoids duplicate
-  // work).
+  // Prefer reusing the lockset computed inside MHPAnalysis/SVC-MHP.
   m_locksetAnalysisView = nullptr;
   if (needMHP && needLockSet && regionMHP && regionMHP->getLockSetAnalysis()) {
     m_locksetAnalysisView = regionMHP->getLockSetAnalysis();
     m_stats.locksAnalyzed = m_locksetAnalysisView->getAllLocks().size();
+  } else if (needMHP && needLockSet && svcMHP && svcMHP->getLockSetAnalysis()) {
+    m_locksetAnalysisView = svcMHP->getLockSetAnalysis();
+    m_stats.locksAnalyzed = m_locksetAnalysisView->getAllLocks().size();
   } else if (needLockSet) {
-    m_locksetAnalysis = std::make_unique<LockSetAnalysis>(m_module);
+    m_locksetAnalysis = std::make_unique<LockSetAnalysis>(*m_context);
     if (m_aliasAnalysis)
       m_locksetAnalysis->setAliasAnalysis(m_aliasAnalysis);
     m_locksetAnalysis->analyze();
@@ -266,13 +426,6 @@ void ConcurrencyChecker::runAnalyses() {
   }
 
   if (needStaticSharing) {
-    // StaticThreadSharingAnalysis only prunes DataRaceChecker candidates when
-    // it proves DefinitelyThreadLocal, which requires BOTH complete static
-    // thread discovery (no indirect forks) AND complete direct call paths (no
-    // indirect calls reachable from thread entries). Checking this upfront
-    // avoids running expensive SeaDSA global analysis on large modules where
-    // StaticThreadSharingAnalysis is guaranteed to return MaybeShared for every
-    // instruction.
     auto canStaticSharingProveThreadLocal = [&]() -> bool {
       std::vector<const Function *> threadEntries;
       if (Function *mainFn = m_module.getFunction("main")) {
@@ -305,9 +458,6 @@ void ConcurrencyChecker::runAnalyses() {
         }
       }
 
-      // Walk direct call graph from static thread entries to detect indirect
-      // calls that force StaticThreadSharingAnalysis::m_access_paths_complete
-      // to false (making every classify() query return MaybeShared).
       std::unordered_set<const Function *> visited;
       std::vector<const Function *> stack(threadEntries.begin(),
                                           threadEntries.end());
@@ -337,8 +487,6 @@ void ConcurrencyChecker::runAnalyses() {
         }
       }
 
-      // Single-threaded module with no forks and no indirect calls: MHP already
-      // proves all accesses sequential, so SeaDSA sharing adds no pruning.
       return hasFork;
     };
 
@@ -360,12 +508,18 @@ void ConcurrencyChecker::runAnalyses() {
     }
   }
 
-  if (needHappensBefore && regionMHP) {
+  lotus::AliasAnalysisWrapper *aa = m_aliasAnalysis;
+  if (!aa && (moduleSummary.hasSharedMemoryConcurrency() ||
+              moduleSummary.has_cuda)) {
+    aa = m_context->getOrCreateAliasAnalysis();
+  } else if (!aa) {
+    aa = m_context->getAliasAnalysisIfPresent();
+  }
+
+  if (needHappensBefore && m_mhpAnalysis) {
     m_happensBeforeAnalysis =
-        std::make_unique<HappensBeforeAnalysis>(m_module, *regionMHP);
-    lotus::AliasAnalysisWrapper *aa = m_aliasAnalysis;
-    if (!aa && moduleSummary.hasSharedMemoryConcurrency())
-      aa = m_context->getOrCreateAliasAnalysis();
+        std::make_unique<HappensBeforeAnalysis>(m_module, *m_mhpAnalysis);
+    m_happensBeforeAnalysis->setContext(m_context.get());
     if (aa)
       m_happensBeforeAnalysis->setAliasAnalysis(aa);
     m_happensBeforeAnalysis->analyze();
@@ -373,7 +527,7 @@ void ConcurrencyChecker::runAnalyses() {
 
   if (needOpenMP) {
     const OpenMP::OpenMPSemantics *sharedOpenMP =
-        regionMHP ? regionMHP->getOpenMPSemantics() : nullptr;
+        m_mhpAnalysis ? m_mhpAnalysis->getOpenMPSemantics() : nullptr;
     m_openMPTaskGraph =
         std::make_unique<OpenMP::OpenMPTaskGraph>(m_module, sharedOpenMP);
     m_openMPTaskGraph->analyze();
@@ -422,20 +576,24 @@ void ConcurrencyChecker::runAnalyses() {
         m_mpiAnalysis->getProtocolDiagnosticCount("collective_slots_tracked");
   }
 
-  lotus::AliasAnalysisWrapper *aa = m_aliasAnalysis;
-  if (!aa && (moduleSummary.hasSharedMemoryConcurrency() ||
-              moduleSummary.has_cuda)) {
-    aa = m_context->getOrCreateAliasAnalysis();
-  } else if (!aa) {
-    aa = m_context->getAliasAnalysisIfPresent();
-  }
-
   if (needCUDA) {
     m_cudaAnalysis =
         aa ? std::make_unique<cuda::CUDAAnalysis>(m_module, aa)
            : std::make_unique<cuda::CUDAAnalysis>(m_module);
     m_cudaAnalysis->runAnalysis();
     m_stats.cudaSummary = ConcurrencyFacade::summarizeCUDA(*m_cudaAnalysis);
+  }
+
+  if (needLinuxKernel) {
+    kernel::LinuxKernelAnalysisServices services;
+    services.alias_analysis = aa;
+    services.mhp_analysis = m_mhpAnalysis;
+    services.happens_before = m_happensBeforeAnalysis.get();
+    m_linuxKernelAnalysis =
+        std::make_unique<kernel::LinuxKernelAnalysis>(m_module, false, services);
+    m_linuxKernelAnalysis->runAnalysis();
+    m_stats.linuxKernelSummary =
+        ConcurrencyFacade::summarizeLinuxKernel(*m_linuxKernelAnalysis);
   }
 
   if (m_enableSparseFlowSensitiveRefinement && m_checkDataRaces &&
@@ -480,55 +638,66 @@ void ConcurrencyChecker::runAnalyses() {
       m_module, m_mhpAnalysis, m_locksetAnalysisView, m_escapeAnalysis.get(),
       m_threadLocalAnalysis.get(), m_staticThreadSharingAnalysis, aa,
       m_happensBeforeAnalysis.get());
+  if (m_sparseRefinement) {
+    m_dataRaceChecker->setSparseRefinement(m_sparseRefinement.get());
+  }
+
   m_deadlockChecker = std::make_unique<DeadlockChecker>(
       m_module, m_locksetAnalysisView, m_mhpAnalysis,
       m_happensBeforeAnalysis.get(), m_threadAPI);
+  m_deadlockChecker->setAliasAnalysis(aa);
+
   m_atomicityChecker = std::make_unique<AtomicityChecker>(
       m_module, m_mhpAnalysis, m_locksetAnalysisView, m_threadAPI, aa);
+  m_atomicityChecker->setContext(m_context.get());
+  m_atomicityChecker->setEscapeAnalysis(m_escapeAnalysis.get());
+  m_atomicityChecker->setThreadLocalAnalysis(m_threadLocalAnalysis.get());
+  m_atomicityChecker->setStaticThreadSharingAnalysis(
+      m_staticThreadSharingAnalysis);
+  m_atomicityChecker->setHappensBeforeAnalysis(m_happensBeforeAnalysis.get());
+
   m_condVarChecker = std::make_unique<ConditionVariableChecker>(
       m_module, m_threadAPI, m_locksetAnalysisView);
+  m_condVarChecker->setAliasAnalysis(aa);
+  m_condVarChecker->setContext(m_context.get());
+
   m_lockMismatchChecker = std::make_unique<LockMismatchChecker>(
       m_module, m_locksetAnalysisView, m_threadAPI);
+  m_lockMismatchChecker->setContext(m_context.get());
+
   m_openMPChecker = std::make_unique<OpenMPChecker>(
       m_module, m_openMPTaskGraph.get(), m_threadAPI);
+  m_openMPChecker->setContext(m_context.get());
+
   m_mpiChecker = std::make_unique<MPIChecker>(m_module, m_mpiAnalysis.get());
   m_cudaChecker = std::make_unique<CUDAChecker>(m_module, m_cudaAnalysis.get());
+  if (m_linuxKernelAnalysis) {
+    m_linuxKernelChecker = std::make_unique<LinuxKernelChecker>(
+        m_module, m_linuxKernelAnalysis.get());
+  }
 }
 
 void ConcurrencyChecker::runChecks() {
   if (m_checkStarvation)
     checkStarvation();
-  if (m_checkDataRaces) {
+  if (m_checkDataRaces)
     checkDataRaces();
-  }
-
-  if (m_checkDeadlocks) {
+  if (m_checkDeadlocks)
     checkDeadlocks();
-  }
-
-  if (m_checkAtomicityViolations) {
+  if (m_checkAtomicityViolations)
     checkAtomicityViolations();
-  }
-
-  if (m_checkCondVars) {
+  if (m_checkCondVars)
     checkConditionVariables();
-  }
-
-  if (m_checkLockMismatches) {
+  if (m_checkLockMismatches)
     checkLockMismatches();
-  }
-
-  if (m_checkOpenMP) {
+  if (m_checkOpenMP)
     checkOpenMPBugs();
-  }
-
-  if (m_checkMPI) {
+  if (m_checkMPI)
     checkMPIBugs();
-  }
-
-  if (m_checkCUDA) {
+  if (m_checkCUDA)
     checkCUDABugs();
-  }
+  if (m_checkLinuxKernel)
+    checkLinuxKernelBugs();
 }
 
 void ConcurrencyChecker::checkDataRaces() {
@@ -536,7 +705,7 @@ void ConcurrencyChecker::checkDataRaces() {
     auto reports = m_dataRaceChecker->checkDataRaces();
     m_stats.dataRacesFound = reports.size();
     for (const auto &report : reports) {
-      reportBug(report, m_dataRaceTypeId);
+      reportBug(report);
     }
   }
 }
@@ -546,7 +715,7 @@ void ConcurrencyChecker::checkDeadlocks() {
     auto reports = m_deadlockChecker->checkDeadlocks();
     m_stats.deadlocksFound = reports.size();
     for (const auto &report : reports) {
-      reportBug(report, m_deadlockTypeId);
+      reportBug(report);
     }
   }
 }
@@ -562,7 +731,7 @@ void ConcurrencyChecker::checkStarvation() {
   auto reports = m_starvationChecker->checkStarvation();
   m_stats.starvationBugsFound = reports.size();
   for (const auto &report : reports)
-    reportBug(report, m_starvationTypeId);
+    reportBug(report);
 }
 
 void ConcurrencyChecker::checkAtomicityViolations() {
@@ -570,7 +739,7 @@ void ConcurrencyChecker::checkAtomicityViolations() {
     auto reports = m_atomicityChecker->checkAtomicityViolations();
     m_stats.atomicityViolationsFound = reports.size();
     for (const auto &report : reports) {
-      reportBug(report, m_atomicityViolationTypeId);
+      reportBug(report);
     }
   }
 }
@@ -580,7 +749,7 @@ void ConcurrencyChecker::checkConditionVariables() {
     auto reports = m_condVarChecker->checkConditionVariables();
     m_stats.condVarBugsFound = reports.size();
     for (const auto &report : reports) {
-      reportBug(report, m_condVarMisuseTypeId);
+      reportBug(report);
     }
   }
 }
@@ -590,7 +759,7 @@ void ConcurrencyChecker::checkLockMismatches() {
     auto reports = m_lockMismatchChecker->checkLockMisuse();
     m_stats.lockMismatchesFound = reports.size();
     for (const auto &report : reports) {
-      reportBug(report, m_lockMismatchTypeId);
+      reportBug(report);
     }
   }
 }
@@ -599,23 +768,10 @@ void ConcurrencyChecker::checkOpenMPBugs() {
   if (!m_openMPChecker) {
     return;
   }
-
   auto reports = m_openMPChecker->checkOpenMPBugs();
   m_stats.openMPBugsFound = reports.size();
   for (const auto &report : reports) {
-    switch (report.bugType) {
-    case ConcurrencyBugType::OPENMP_TASKGROUP_MISMATCH:
-      reportBug(report, m_openMPTaskgroupMismatchTypeId);
-      break;
-    case ConcurrencyBugType::OPENMP_ATOMIC_MISMATCH:
-      reportBug(report, m_openMPAtomicMismatchTypeId);
-      break;
-    case ConcurrencyBugType::OPENMP_PARTIAL_SYNC:
-      reportBug(report, m_openMPPartialSyncTypeId);
-      break;
-    default:
-      break;
-    }
+    reportBug(report);
   }
 }
 
@@ -623,35 +779,10 @@ void ConcurrencyChecker::checkMPIBugs() {
   if (!m_mpiChecker) {
     return;
   }
-
   auto reports = m_mpiChecker->checkMPIBugs();
   m_stats.mpiBugsFound = reports.size();
   for (const auto &report : reports) {
-    switch (report.bugType) {
-    case ConcurrencyBugType::MPI_ORPHANED_REQUEST:
-      reportBug(report, m_mpiOrphanedRequestTypeId);
-      break;
-    case ConcurrencyBugType::MPI_DEADLOCK:
-      reportBug(report, m_mpiDeadlockTypeId);
-      break;
-    case ConcurrencyBugType::MPI_COLLECTIVE_MISMATCH:
-      reportBug(report, m_mpiCollectiveMismatchTypeId);
-      break;
-    case ConcurrencyBugType::MPI_CONDITIONAL_COLLECTIVE:
-      reportBug(report, m_mpiConditionalCollectiveTypeId);
-      break;
-    case ConcurrencyBugType::MPI_UNSYNC_RMA:
-      reportBug(report, m_mpiUnsyncRMATypeId);
-      break;
-    case ConcurrencyBugType::MPI_RMA_RACE:
-      reportBug(report, m_mpiRMARaceTypeId);
-      break;
-    case ConcurrencyBugType::MPI_WINDOW_LEAK:
-      reportBug(report, m_mpiWindowLeakTypeId);
-      break;
-    default:
-      break;
-    }
+    reportBug(report);
   }
 }
 
@@ -659,99 +790,218 @@ void ConcurrencyChecker::checkCUDABugs() {
   if (!m_cudaChecker) {
     return;
   }
-
   auto reports = m_cudaChecker->checkCUDABugs();
   m_stats.cudaBugsFound = reports.size();
   for (const auto &report : reports) {
-    switch (report.bugType) {
-    case ConcurrencyBugType::CUDA_SHARED_MEMORY_RACE:
-      reportBug(report, m_cudaSharedRaceTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_GLOBAL_MEMORY_RACE:
-      reportBug(report, m_cudaGlobalRaceTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_INTER_KERNEL_HAZARD:
-      reportBug(report, m_cudaInterKernelHazardTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_BARRIER_MISMATCH:
-      reportBug(report, m_cudaBarrierMismatchTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_WARP_DIVERGENCE:
-      reportBug(report, m_cudaWarpDivergenceTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_BANK_CONFLICT:
-      reportBug(report, m_cudaBankConflictTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_UNCOALESCED_ACCESS:
-      reportBug(report, m_cudaUncoalescedTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_VOLATILE_MISSING:
-      reportBug(report, m_cudaVolatileMissingTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_SYMBOLIC_CONFIG_RISK:
-      reportBug(report, m_cudaSymbolicConfigTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_SHARED_GLOBAL_SPACE_MISMATCH:
-      reportBug(report, m_cudaMemorySpaceTypeId);
-      break;
-    case ConcurrencyBugType::CUDA_PARAMETRIC_RACE_RISK:
-      reportBug(report, m_cudaParametricRaceTypeId);
-      break;
-    default:
-      break;
-    }
+    reportBug(report);
   }
+}
+
+void ConcurrencyChecker::checkLinuxKernelBugs() {
+  if (!m_linuxKernelChecker) {
+    return;
+  }
+  auto reports = m_linuxKernelChecker->checkLinuxKernelBugs();
+  m_stats.linuxKernelBugsFound = reports.size();
+  for (const auto &report : reports) {
+    reportBug(report);
+  }
+}
+
+void ConcurrencyChecker::reportBug(const ConcurrencyBugReport &bug_report) {
+  const int bug_type_id = lookupBugTypeId(bug_report.bugType);
+  if (bug_type_id < 0) {
+    return;
+  }
+  reportBug(bug_report, bug_type_id);
 }
 
 void ConcurrencyChecker::reportBug(const ConcurrencyBugReport &bug_report,
                                    int bug_type_id) {
-  // Create a new BugReport following the shared reporting pattern
   BugReport *report = new BugReport(bug_type_id);
 
-  // Add diagnostic steps showing the concurrency bug trace
-  // Enhanced with Infer-inspired features: trace levels, node tags, and access
-  // info
-  int trace_level = 0;
-  for (size_t i = 0; i < bug_report.steps.size(); ++i) {
-    const auto &step = bug_report.steps[i];
-    if (step.instruction) {
-      std::vector<NodeTag> tags;
+  // Preserve all diagnostic steps — including module-level steps whose
+  // instruction is null — and honor explicit traceLevel instead of blindly
+  // indenting sibling concurrent call events.
+  if (bug_report.steps.empty()) {
+    report->append_step(nullptr, bug_report.description, 0, {}, "summary");
+  } else {
+    for (const auto &step : bug_report.steps) {
+      if (step.instruction) {
+        std::vector<NodeTag> tags;
+        if (isa<CallBase>(step.instruction)) {
+          tags.push_back(NodeTag::CALL_SITE);
+        }
 
-      // Infer node tags based on instruction type
-      if (isa<CallInst>(step.instruction)) {
-        tags.push_back(NodeTag::CALL_SITE);
-      }
+        std::string access = "step";
+        if (isa<LoadInst>(step.instruction)) {
+          access = "load";
+        } else if (isa<StoreInst>(step.instruction)) {
+          access = "store";
+        } else if (isa<AtomicRMWInst>(step.instruction) ||
+                   isa<AtomicCmpXchgInst>(step.instruction)) {
+          access = "atomic";
+        } else if (isa<MemIntrinsic>(step.instruction)) {
+          access = "memop";
+        } else if (isa<CallBase>(step.instruction)) {
+          access = "call";
+        }
 
-      // Determine access type
-      std::string access = "step";
-      if (isa<LoadInst>(step.instruction)) {
-        access = "load";
-      } else if (isa<StoreInst>(step.instruction)) {
-        access = "store";
-      } else if (isa<CallInst>(step.instruction)) {
-        access = "call";
-      }
-
-      // Use enhanced append_step with trace level, tags, and access info
-      report->append_step(const_cast<Instruction *>(step.instruction),
-                          step.description, trace_level, tags, access);
-
-      // Increment trace level for nested calls
-      if (isa<CallInst>(step.instruction)) {
-        trace_level++;
+        report->append_step(const_cast<Instruction *>(step.instruction),
+                            step.description, step.traceLevel, tags, access);
+      } else {
+        report->append_step(nullptr, step.description, step.traceLevel, {},
+                            "note");
       }
     }
   }
 
-  // Set confidence score based on importance
-  report->set_conf_score(bug_report.importance == BugDescription::BI_HIGH ? 90
-                                                                          : 70);
+  // Forward full description and structured DataRaceInfo metadata.
+  if (!bug_report.description.empty()) {
+    report->add_metadata("description", bug_report.description);
+  }
+  if (bug_report.dataRaceInfo) {
+    report->add_metadata("access_path_1",
+                         bug_report.dataRaceInfo->accessPath1);
+    report->add_metadata("access_path_2",
+                         bug_report.dataRaceInfo->accessPath2);
+    report->add_metadata("write_1",
+                         bug_report.dataRaceInfo->write1 ? "true" : "false");
+    report->add_metadata("write_2",
+                         bug_report.dataRaceInfo->write2 ? "true" : "false");
+    if (!bug_report.dataRaceInfo->sharedLocation.empty()) {
+      report->add_metadata("shared_location",
+                           bug_report.dataRaceInfo->sharedLocation);
+    }
+  }
 
-  // Add metadata (Infer-inspired feature)
+  // Confidence and importance mapping (preserving HIGH / MEDIUM / LOW).
+  int confidence = 70;
+  const char *importanceStr = "MEDIUM";
+  switch (bug_report.importance) {
+  case BugDescription::BI_HIGH:
+    confidence = 90;
+    importanceStr = "HIGH";
+    break;
+  case BugDescription::BI_MEDIUM:
+    confidence = 70;
+    importanceStr = "MEDIUM";
+    break;
+  case BugDescription::BI_LOW:
+    confidence = 50;
+    importanceStr = "LOW";
+    break;
+  case BugDescription::BI_NA:
+    confidence = 50;
+    importanceStr = "NA";
+    break;
+  }
+  report->set_conf_score(confidence);
+
+  // Domain checker metadata.
+  auto isOpenMPType = [](ConcurrencyBugType t) {
+    switch (t) {
+    case ConcurrencyBugType::OPENMP_TASKGROUP_MISMATCH:
+    case ConcurrencyBugType::OPENMP_ATOMIC_MISMATCH:
+    case ConcurrencyBugType::OPENMP_PARTIAL_SYNC:
+    case ConcurrencyBugType::OPENMP_DETACHED_TASK_LEAK:
+    case ConcurrencyBugType::OPENMP_NESTED_SINGLE:
+    case ConcurrencyBugType::OPENMP_NOWAIT_MISSING_BARRIER:
+    case ConcurrencyBugType::OPENMP_REDUCTION_ERROR:
+    case ConcurrencyBugType::OPENMP_INCORRECT_NUMTHREADS:
+    case ConcurrencyBugType::OPENMP_MISSING_FLUSH:
+    case ConcurrencyBugType::OMP_TASKWAIT_MISSING:
+    case ConcurrencyBugType::OMP_NESTED_PARALLEL_DISABLED:
+    case ConcurrencyBugType::OMP_SHARED_PRIVATE_CONFLICT:
+    case ConcurrencyBugType::OMP_IF_FALSE_PARALLEL:
+    case ConcurrencyBugType::OMP_ORDERED_DEPENDENCY:
+    case ConcurrencyBugType::OMP_LASTPRIVATE_MISSING:
+    case ConcurrencyBugType::OMP_COPYIN_NOT_SHARED:
+    case ConcurrencyBugType::OMP_BARRIER_IN_CRITICAL:
+    case ConcurrencyBugType::OMP_PRIVATE_IN_LOOP:
+    case ConcurrencyBugType::OMP_MISSING_SCHEDULE:
+      return true;
+    default:
+      return false;
+    }
+  };
+  auto isMPIType = [](ConcurrencyBugType t) {
+    switch (t) {
+    case ConcurrencyBugType::MPI_ORPHANED_REQUEST:
+    case ConcurrencyBugType::MPI_DEADLOCK:
+    case ConcurrencyBugType::MPI_COLLECTIVE_MISMATCH:
+    case ConcurrencyBugType::MPI_CONDITIONAL_COLLECTIVE:
+    case ConcurrencyBugType::MPI_UNSYNC_RMA:
+    case ConcurrencyBugType::MPI_RMA_RACE:
+    case ConcurrencyBugType::MPI_WINDOW_LEAK:
+    case ConcurrencyBugType::MPI_DOUBLE_FINALIZE:
+    case ConcurrencyBugType::MPI_TAG_MISMATCH:
+    case ConcurrencyBugType::MPI_COUNT_DATATYPE_MISMATCH:
+    case ConcurrencyBugType::MPI_RANK_OUT_OF_BOUNDS:
+    case ConcurrencyBugType::MPI_MISSING_FINALIZE:
+    case ConcurrencyBugType::MPI_PERSISTENT_REQUEST_LEAK:
+    case ConcurrencyBugType::MPI_WRONG_ROOT_RANK:
+    case ConcurrencyBugType::MPI_CANCEL_WITHOUT_WAIT:
+    case ConcurrencyBugType::MPI_BUFFER_OVERLAP:
+    case ConcurrencyBugType::MPI_WILDCARD_IN_COLLECTIVE:
+    case ConcurrencyBugType::MPI_IN_PLACE_CONFLICT:
+    case ConcurrencyBugType::MPI_NULL_HANDLES:
+    case ConcurrencyBugType::MPI_ROOT_NEGATIVE:
+    case ConcurrencyBugType::MPI_INVALID_TAG:
+    case ConcurrencyBugType::MPI_INVALID_RANK:
+    case ConcurrencyBugType::MPI_TYPE_SIZE_MISMATCH:
+    case ConcurrencyBugType::MPI_DESTROY_NULL_COMM:
+    case ConcurrencyBugType::MPI_REQUEST_FREE_AFTER_WAIT:
+    case ConcurrencyBugType::MPI_IN_PLACE_WRONG_OP:
+    case ConcurrencyBugType::MPI_INVALID_RMA_TRANSITION:
+    case ConcurrencyBugType::MPI_USE_AFTER_FREE_WINDOW:
+    case ConcurrencyBugType::MPI_DOUBLE_WINDOW_FREE:
+      return true;
+    default:
+      return false;
+    }
+  };
+  auto isCUDAType = [](ConcurrencyBugType t) {
+    switch (t) {
+    case ConcurrencyBugType::CUDA_WARP_DIVERGENCE:
+    case ConcurrencyBugType::CUDA_SHARED_MEMORY_RACE:
+    case ConcurrencyBugType::CUDA_GLOBAL_MEMORY_RACE:
+    case ConcurrencyBugType::CUDA_INTER_KERNEL_HAZARD:
+    case ConcurrencyBugType::CUDA_BARRIER_MISMATCH:
+    case ConcurrencyBugType::CUDA_BANK_CONFLICT:
+    case ConcurrencyBugType::CUDA_UNCOALESCED_ACCESS:
+    case ConcurrencyBugType::CUDA_VOLATILE_MISSING:
+    case ConcurrencyBugType::CUDA_SYMBOLIC_CONFIG_RISK:
+    case ConcurrencyBugType::CUDA_SHARED_GLOBAL_SPACE_MISMATCH:
+    case ConcurrencyBugType::CUDA_PARAMETRIC_RACE_RISK:
+      return true;
+    default:
+      return false;
+    }
+  };
+  auto isLinuxKernelType = [](ConcurrencyBugType t) {
+    switch (t) {
+    case ConcurrencyBugType::LINUX_KERNEL_DEADLOCK:
+    case ConcurrencyBugType::LINUX_KERNEL_DOUBLE_LOCK:
+    case ConcurrencyBugType::LINUX_KERNEL_UNLOCK_WITHOUT_LOCK:
+    case ConcurrencyBugType::LINUX_KERNEL_LOCK_WITHOUT_UNLOCK:
+    case ConcurrencyBugType::LINUX_KERNEL_LOCK_ORDER_INVERSION:
+    case ConcurrencyBugType::LINUX_KERNEL_SLEEP_IN_ATOMIC:
+    case ConcurrencyBugType::LINUX_KERNEL_MIX_RAW_COOKED:
+    case ConcurrencyBugType::LINUX_KERNEL_IRQ_SAVE_RESTORE:
+    case ConcurrencyBugType::LINUX_KERNEL_DATA_RACE:
+    case ConcurrencyBugType::LINUX_KERNEL_RCU_ERROR:
+    case ConcurrencyBugType::LINUX_KERNEL_WAIT_ERROR:
+    case ConcurrencyBugType::LINUX_KERNEL_TIMER_ERROR:
+    case ConcurrencyBugType::LINUX_KERNEL_LIFETIME_ERROR:
+      return true;
+    default:
+      return false;
+    }
+  };
+
   report->add_metadata("checker", "ConcurrencyChecker");
-  if (bug_report.bugType == ConcurrencyBugType::OPENMP_TASKGROUP_MISMATCH ||
-      bug_report.bugType == ConcurrencyBugType::OPENMP_ATOMIC_MISMATCH ||
-      bug_report.bugType == ConcurrencyBugType::OPENMP_PARTIAL_SYNC) {
+  if (isOpenMPType(bug_report.bugType)) {
     report->add_metadata("checker", "OpenMPChecker");
     report->add_metadata("openmp_task_count",
                          std::to_string(m_stats.openMPSummary.task_count));
@@ -764,15 +1014,7 @@ void ConcurrencyChecker::reportBug(const ConcurrencyBugReport &bug_report,
     report->add_metadata(
         "openmp_partial_wait_boundary_count",
         std::to_string(m_stats.openMPSummary.partial_wait_boundary_count));
-  } else if (bug_report.bugType == ConcurrencyBugType::MPI_ORPHANED_REQUEST ||
-             bug_report.bugType == ConcurrencyBugType::MPI_DEADLOCK ||
-             bug_report.bugType ==
-                 ConcurrencyBugType::MPI_COLLECTIVE_MISMATCH ||
-             bug_report.bugType ==
-                 ConcurrencyBugType::MPI_CONDITIONAL_COLLECTIVE ||
-             bug_report.bugType == ConcurrencyBugType::MPI_UNSYNC_RMA ||
-             bug_report.bugType == ConcurrencyBugType::MPI_RMA_RACE ||
-             bug_report.bugType == ConcurrencyBugType::MPI_WINDOW_LEAK) {
+  } else if (isMPIType(bug_report.bugType)) {
     report->add_metadata("checker", "MPIChecker");
     report->add_metadata("mpi_operation_count",
                          std::to_string(m_stats.mpiSummary.operation_count));
@@ -791,24 +1033,7 @@ void ConcurrencyChecker::reportBug(const ConcurrencyBugReport &bug_report,
     report->add_metadata(
         "mpi_leaked_window_count",
         std::to_string(m_stats.mpiSummary.leaked_window_count));
-  } else if (bug_report.bugType == ConcurrencyBugType::CUDA_WARP_DIVERGENCE ||
-             bug_report.bugType ==
-                 ConcurrencyBugType::CUDA_SHARED_MEMORY_RACE ||
-             bug_report.bugType ==
-                 ConcurrencyBugType::CUDA_GLOBAL_MEMORY_RACE ||
-             bug_report.bugType ==
-                 ConcurrencyBugType::CUDA_INTER_KERNEL_HAZARD ||
-             bug_report.bugType == ConcurrencyBugType::CUDA_BARRIER_MISMATCH ||
-             bug_report.bugType == ConcurrencyBugType::CUDA_BANK_CONFLICT ||
-             bug_report.bugType ==
-                 ConcurrencyBugType::CUDA_UNCOALESCED_ACCESS ||
-             bug_report.bugType == ConcurrencyBugType::CUDA_VOLATILE_MISSING ||
-             bug_report.bugType ==
-                 ConcurrencyBugType::CUDA_SYMBOLIC_CONFIG_RISK ||
-             bug_report.bugType ==
-                 ConcurrencyBugType::CUDA_SHARED_GLOBAL_SPACE_MISMATCH ||
-             bug_report.bugType ==
-                 ConcurrencyBugType::CUDA_PARAMETRIC_RACE_RISK) {
+  } else if (isCUDAType(bug_report.bugType)) {
     report->add_metadata("checker", "CUDAChecker");
     report->add_metadata(
         "cuda_kernel_launch_count",
@@ -821,12 +1046,19 @@ void ConcurrencyChecker::reportBug(const ConcurrencyBugReport &bug_report,
     report->add_metadata(
         "cuda_unified_memory_count",
         std::to_string(m_stats.cudaSummary.unified_memory_count));
+  } else if (isLinuxKernelType(bug_report.bugType)) {
+    report->add_metadata("checker", "LinuxKernelChecker");
+    report->add_metadata(
+        "linux_kernel_operation_count",
+        std::to_string(m_stats.linuxKernelSummary.operation_count));
+    report->add_metadata("linux_kernel_lock_count",
+                         std::to_string(m_stats.linuxKernelSummary.lock_count));
+    report->add_metadata(
+        "linux_kernel_rcu_section_count",
+        std::to_string(m_stats.linuxKernelSummary.rcu_section_count));
   }
-  report->add_metadata(
-      "importance",
-      bug_report.importance == BugDescription::BI_HIGH ? "HIGH" : "MEDIUM");
+  report->add_metadata("importance", importanceStr);
 
-  // Report to the manager with deduplication enabled
   BugReportMgr::get_instance().insert_report(bug_type_id, report, true);
 }
 
@@ -840,6 +1072,23 @@ void ConcurrencyChecker::dumpAnalysisResults(raw_ostream &os,
   ConcurrencyAnalysisDumper dumper(m_module, m_mhpAnalysis,
                                    m_locksetAnalysisView,
                                    m_escapeAnalysis.get(), m_threadAPI);
+  ConcurrencyAnalysisDumper::ExtendedSummaries ext;
+  ext.hasOpenMP = m_openMPTaskGraph != nullptr;
+  ext.openMP = m_stats.openMPSummary;
+  ext.hasMPI = m_mpiAnalysis != nullptr;
+  ext.mpi = m_stats.mpiSummary;
+  ext.hasCUDA = m_cudaAnalysis != nullptr;
+  ext.cuda = m_stats.cudaSummary;
+  ext.hasLinuxKernel = m_linuxKernelAnalysis != nullptr;
+  ext.linuxKernel = m_stats.linuxKernelSummary;
+  ext.hasSparse = m_sparseRefinement != nullptr;
+  ext.sparseInterferenceEdges = m_stats.sparseInterferenceEdges;
+  ext.sparseLockSpanPrunedPairs = m_stats.sparseLockSpanPrunedPairs;
+  ext.sparsePointsToFacts = m_stats.sparsePointsToFacts;
+  ext.sparseMemoryRegions = m_stats.sparseMemoryRegions;
+  ext.sparseOriginalNodes = m_stats.sparseOriginalNodes;
+  ext.sparseSlicedNodes = m_stats.sparseSlicedNodes;
+  dumper.setExtendedSummaries(std::move(ext));
   dumper.dump(os, jsonFormat);
 }
 

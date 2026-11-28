@@ -11,6 +11,7 @@ add_library(ConcurrencyChecker STATIC
     OpenMPChecker.cpp
     MPIChecker.cpp
     CUDAChecker.cpp
+    LinuxKernelChecker.cpp
 )
 
 target_link_libraries(ConcurrencyChecker

@@ -30,7 +30,9 @@ public:
   struct Summary {
     std::vector<CriticalPair> criticalPairs;
     std::map<mhp::LockID, const llvm::Instruction *> acquiredOnReturn;
+    std::set<mhp::LockID> conditionallyAcquiredOnReturn;
     std::set<mhp::LockID> releasedOnReturn;
+    std::set<mhp::LockID> mayReleasedOnReturn;
   };
 
   StarvationChecker(llvm::Module &module, mhp::LockSetAnalysis &locks);

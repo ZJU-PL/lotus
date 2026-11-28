@@ -5,6 +5,8 @@
 
 #include "Concurrency/MHP/StaticVectorClockMHP.h"
 
+#include "Concurrency/Core/ConcurrencyContext.h"
+
 #include <deque>
 #include <set>
 #include <unordered_set>
@@ -20,9 +22,66 @@ using namespace llvm;
 using namespace mhp;
 
 namespace {
-bool isLikelyThreadEntryCandidate(const Function &func) {
+bool isOnlyUsedInVTableOrTypeInfo(const Function &func) {
+  bool sawNonCallUse = false;
+  std::deque<const Value *> worklist;
+  std::unordered_set<const Value *> visited;
+  for (const Use &u : func.uses()) {
+    const User *user = u.getUser();
+    if (const auto *cb = dyn_cast<CallBase>(user)) {
+      if (cb->isCallee(&u)) {
+        continue;
+      }
+    }
+    sawNonCallUse = true;
+    if (visited.insert(user).second) {
+      worklist.push_back(user);
+    }
+  }
+  if (!sawNonCallUse) {
+    return true;
+  }
+  while (!worklist.empty()) {
+    const Value *cur = worklist.front();
+    worklist.pop_front();
+    if (const auto *gv = dyn_cast<GlobalVariable>(cur)) {
+      StringRef name = gv->getName();
+      if (name.startswith("_ZTV") || name.startswith("_ZTI") ||
+          name.startswith("_ZTC") || name.startswith("_ZTS")) {
+        continue;
+      }
+      return false;
+    }
+    if (isa<ConstantAggregate>(cur) || isa<ConstantExpr>(cur)) {
+      if (cur->use_empty()) {
+        return false;
+      }
+      for (const User *u : cur->users()) {
+        if (visited.insert(u).second) {
+          worklist.push_back(u);
+        }
+      }
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+bool isLikelyThreadEntryCandidate(const Function &func,
+                                  bool pthreadOnlyForks = false) {
   if (func.isDeclaration() || func.arg_size() > 1) {
     return false;
+  }
+  if (isOnlyUsedInVTableOrTypeInfo(func)) {
+    return false;
+  }
+  if (pthreadOnlyForks) {
+    if (func.arg_size() != 1) {
+      return false;
+    }
+    return func.getFunctionType()->getParamType(0)->isPointerTy() &&
+           func.getReturnType()->isPointerTy();
   }
   if (func.arg_size() == 1 &&
       !func.getFunctionType()->getParamType(0)->isPointerTy()) {
@@ -34,7 +93,15 @@ bool isLikelyThreadEntryCandidate(const Function &func) {
 } // namespace
 
 StaticVectorClockMHP::StaticVectorClockMHP(Module &module)
-    : m_module(module), m_thread_api(ThreadAPI::getThreadAPI()) {
+    : m_module(module), m_context(nullptr),
+      m_thread_api(ThreadAPI::getThreadAPI()) {
+  m_tfg = std::make_unique<ThreadFlowGraph>();
+}
+
+StaticVectorClockMHP::StaticVectorClockMHP(
+    concurrency::ConcurrencyContext &context)
+    : m_module(context.getModule()), m_context(&context),
+      m_thread_api(context.getThreadAPI()) {
   m_tfg = std::make_unique<ThreadFlowGraph>();
 }
 
@@ -74,17 +141,38 @@ void StaticVectorClockMHP::analyze() {
   m_multi_instance_threads.clear();
   m_thread_entry_candidates.clear();
   m_has_unresolved_fork = false;
+  m_module_may_spawn_threads =
+      m_context
+          ? m_context->hasPotentialThreadCreation()
+          : concurrency::ConcurrencyContext::moduleHasPotentialThreadCreation(
+                m_module, m_thread_api);
   m_next_thread_id = 1;
   m_post_dom_cache.clear();
-  m_conservative_mhp = std::make_unique<MHPAnalysis>(m_module);
-  m_conservative_mhp->enableMHPPrecomputation(true);
+  if (m_context) {
+    m_conservative_mhp = std::make_unique<MHPAnalysis>(*m_context);
+  } else {
+    m_conservative_mhp = std::make_unique<MHPAnalysis>(m_module);
+  }
+  if (m_enable_lockset) {
+    m_conservative_mhp->enableLockSetAnalysis();
+  }
   m_conservative_mhp->analyze();
   m_tfg = std::make_unique<ThreadFlowGraph>();
-  m_call_graph = std::make_unique<CallGraph>(m_module);
+  if (m_conservative_mhp->isSingleMainThreadOnly()) {
+    return;
+  }
+  if (m_context) {
+    m_call_graph = &m_context->getCallGraph();
+    m_thread_multiplicity = &m_context->getThreadMultiplicity();
+  } else {
+    m_owned_call_graph = std::make_unique<CallGraph>(m_module);
+    m_call_graph = m_owned_call_graph.get();
+    m_owned_thread_multiplicity =
+        std::make_unique<concurrency::ThreadMultiplicityAnalysis>(m_module,
+                                                                  m_call_graph);
+    m_thread_multiplicity = m_owned_thread_multiplicity.get();
+  }
   m_join_target_analysis = std::make_unique<JoinTargetAnalysis>(m_module);
-  m_thread_multiplicity =
-      std::make_unique<concurrency::ThreadMultiplicityAnalysis>(
-          m_module, m_call_graph.get());
   buildThreadFlowGraph();
   buildStaticThreads();
   buildStaticEdges();
@@ -814,15 +902,18 @@ bool StaticVectorClockMHP::mayHappenInParallel(const Instruction *i1,
 
 bool StaticVectorClockMHP::isPrecomputedMHP(const Instruction *i1,
                                             const Instruction *i2) const {
-  if (m_conservative_mhp) {
-    return m_conservative_mhp->isPrecomputedMHP(i1, i2);
-  }
   if (!i1 || !i2) {
     return false;
   }
   const Instruction *a = i1 < i2 ? i1 : i2;
   const Instruction *b = i1 < i2 ? i2 : i1;
-  return m_mhp_pairs.count({a, b}) != 0;
+  if (m_mhp_pairs.count({a, b}) != 0) {
+    return true;
+  }
+  if (m_conservative_mhp) {
+    return m_conservative_mhp->isPrecomputedMHP(i1, i2);
+  }
+  return false;
 }
 
 InstructionSet
@@ -1097,6 +1188,17 @@ void StaticVectorClockMHP::processFunction(const Function *func, ThreadID tid,
 
           if (const Function *direct = m_thread_api->getCallee(cb)) {
             processCallee(direct);
+          } else if (!m_module_may_spawn_threads) {
+            // Single-threaded modules cannot spawn threads through indirect
+            // calls.
+          } else if (m_context) {
+            const auto resolved = m_context->resolveCallees(cb);
+            for (const Function *target : resolved.targets) {
+              processCallee(target);
+            }
+            if (resolved.targets.empty() || resolved.has_unresolved) {
+              enableIndirectForkConservatism();
+            }
           } else if (m_call_graph) {
             bool resolved_indirect_target = false;
             bool has_unresolved_indirect_target = false;
@@ -1117,17 +1219,21 @@ void StaticVectorClockMHP::processFunction(const Function *func, ThreadID tid,
                   continue;
                 }
                 if (callee->isDeclaration()) {
-                  has_unresolved_indirect_target = true;
+                  if (!concurrency::ConcurrencyContext::
+                          isKnownSyncFreeExternalFunction(callee)) {
+                    has_unresolved_indirect_target = true;
+                  }
                   continue;
                 }
                 resolved_indirect_target = true;
                 processCallee(callee);
               }
             }
-            if (!resolved_indirect_target || has_unresolved_indirect_target) {
+            if (m_module_may_spawn_threads &&
+                (!resolved_indirect_target || has_unresolved_indirect_target)) {
               enableIndirectForkConservatism();
             }
-          } else {
+          } else if (m_module_may_spawn_threads) {
             enableIndirectForkConservatism();
           }
         }
@@ -1234,23 +1340,98 @@ void StaticVectorClockMHP::enableIndirectForkConservatism() {
   }
   m_has_unresolved_fork = true;
 
+  bool has_indirect_or_addr_taken_fork = false;
+  std::deque<const Function *> seed_targets;
+  std::unordered_set<const Function *> marked_funcs;
+
+  auto markFunctionUnknown = [&](const Function *fn) {
+    if (!fn || fn->isDeclaration() || !marked_funcs.insert(fn).second) {
+      return;
+    }
+    m_thread_entry_candidates.insert(fn);
+    for (const Instruction &inst : instructions(*fn)) {
+      m_inst_to_thread[&inst] = kUnknownThread;
+    }
+  };
+
+  for (const Function &func : m_module) {
+    if (func.isDeclaration()) {
+      if (func.hasAddressTaken()) {
+        const ThreadAPI::TD_TYPE ty = m_thread_api->getType(&func);
+        if (ty == ThreadAPI::TD_FORK || ty == ThreadAPI::TD_OMP_TASK ||
+            ty == ThreadAPI::TD_OMP_TASKLOOP) {
+          has_indirect_or_addr_taken_fork = true;
+        }
+      }
+      continue;
+    }
+    for (const Instruction &inst : instructions(func)) {
+      const auto *cb = dyn_cast<CallBase>(&inst);
+      if (!cb || !m_thread_api->isTDFork(cb)) {
+        continue;
+      }
+      const Value *forked = m_thread_api->getForkedFun(cb);
+      if (const auto *direct = dyn_cast_or_null<Function>(
+              forked ? forked->stripPointerCasts() : nullptr)) {
+        if (!direct->isDeclaration()) {
+          seed_targets.push_back(direct);
+        } else {
+          has_indirect_or_addr_taken_fork = true;
+        }
+      } else {
+        has_indirect_or_addr_taken_fork = true;
+      }
+    }
+  }
+
+  if (!has_indirect_or_addr_taken_fork && !seed_targets.empty()) {
+    while (!seed_targets.empty()) {
+      const Function *cur = seed_targets.front();
+      seed_targets.pop_front();
+      if (!cur || cur->isDeclaration() || marked_funcs.count(cur)) {
+        continue;
+      }
+      markFunctionUnknown(cur);
+      for (const Instruction &inst : instructions(*cur)) {
+        if (const auto *cb = dyn_cast<CallBase>(&inst)) {
+          if (const Function *callee = m_thread_api->getCallee(cb)) {
+            if (!callee->isDeclaration() && !marked_funcs.count(callee)) {
+              seed_targets.push_back(callee);
+            }
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  bool has_non_pthread_fork = false;
+  for (const Function &func : m_module) {
+    if (func.isDeclaration()) {
+      continue;
+    }
+    for (const Instruction &inst : instructions(func)) {
+      const auto *cb = dyn_cast<CallBase>(&inst);
+      if (!cb || !m_thread_api->isTDFork(cb)) {
+        continue;
+      }
+      const Function *callee = m_thread_api->getCallee(cb);
+      if (!callee || callee->getName() != "pthread_create") {
+        has_non_pthread_fork = true;
+      }
+    }
+  }
+  const bool pthread_only_forks = !has_non_pthread_fork;
+
   for (Function &func : m_module) {
     if (func.isDeclaration()) {
       continue;
     }
-    if (!func.hasAddressTaken() || !isLikelyThreadEntryCandidate(func)) {
+    if (!func.hasAddressTaken() ||
+        !isLikelyThreadEntryCandidate(func, pthread_only_forks)) {
       continue;
     }
-
-    m_thread_entry_candidates.insert(&func);
-    for (Instruction &inst : instructions(func)) {
-      auto it = m_inst_to_thread.find(&inst);
-      if (it == m_inst_to_thread.end()) {
-        m_inst_to_thread[&inst] = kUnknownThread;
-      } else if (it->second != kUnknownThread) {
-        it->second = kUnknownThread;
-      }
-    }
+    markFunctionUnknown(&func);
   }
 }
 
@@ -1283,11 +1464,34 @@ void StaticVectorClockMHP::handleThreadFork(const Instruction *fork_inst,
   }
 
   const Value *forked_fun_val = m_thread_api->getForkedFun(fork_inst);
-  if (const Function *forked_fun = dyn_cast_or_null<Function>(forked_fun_val)) {
-    m_tfg->addThread(new_tid, forked_fun);
-    processFunction(forked_fun, new_tid, 0);
-    if (SyncNode *child_entry = m_tfg->getThreadEntryNode(new_tid)) {
-      m_tfg->addInterThreadEdge(node, child_entry);
+  if (const Function *forked_fun = dyn_cast_or_null<Function>(
+          forked_fun_val ? forked_fun_val->stripPointerCastsAndAliases()
+                         : nullptr)) {
+    ThreadID anc = parent_tid;
+    std::unordered_set<ThreadID> seen;
+    bool recursive_fork = false;
+    while (seen.insert(anc).second) {
+      if (m_tfg->getThreadEntry(anc) == forked_fun) {
+        m_multi_instance_threads.insert(anc);
+        m_multi_instance_threads.insert(new_tid);
+        if (SyncNode *entry = m_tfg->getThreadEntryNode(anc)) {
+          m_tfg->addInterThreadEdge(node, entry);
+        }
+        recursive_fork = true;
+        break;
+      }
+      auto pIt = m_thread_parents.find(anc);
+      if (pIt == m_thread_parents.end()) {
+        break;
+      }
+      anc = pIt->second;
+    }
+    if (!recursive_fork) {
+      m_tfg->addThread(new_tid, forked_fun);
+      processFunction(forked_fun, new_tid, 0);
+      if (SyncNode *child_entry = m_tfg->getThreadEntryNode(new_tid)) {
+        m_tfg->addInterThreadEdge(node, child_entry);
+      }
     }
   } else {
     enableIndirectForkConservatism();

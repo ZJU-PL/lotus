@@ -34,6 +34,11 @@ public:
   virtual bool mayHappenInParallel(const llvm::Instruction *i1,
                                    const llvm::Instruction *i2) const = 0;
 
+  /// Return true when the analysis proved the program executes strictly on a
+  /// single non-overlapping thread (so no pair of instructions may happen in
+  /// parallel).
+  virtual bool isSingleThreaded() const { return false; }
+
   virtual bool isPrecomputedMHP(const llvm::Instruction *i1,
                                 const llvm::Instruction *i2) const = 0;
 

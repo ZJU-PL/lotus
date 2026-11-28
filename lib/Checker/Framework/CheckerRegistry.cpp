@@ -75,6 +75,7 @@ constexpr NativeCheckDescriptor CONCURRENCY_CHECKS[] = {
     {"openmp", "OpenMP misuse"},
     {"mpi", "MPI misuse"},
     {"cuda", "CUDA misuse"},
+    {"linux-kernel", "Linux kernel concurrency misuse"},
 };
 constexpr NativeCheckDescriptor SYMEX_CHECKS[] = {
     {"buffer-overflow", "Buffer overflow"},

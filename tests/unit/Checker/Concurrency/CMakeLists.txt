@@ -1,5 +1,6 @@
 lotus_collect_test_sources(checker_tests
   ConcurrencyCheckerTest.cpp
   ConcurrencyCheckerCUDAAndSynchronizationTest.cpp
-  ConcurrencyCheckerOpenMPAndMPITest.cpp)
+  ConcurrencyCheckerOpenMPAndMPITest.cpp
+  ConcurrencyCheckerPrecisionAndHardeningTest.cpp)
 lotus_collect_test_sources(checker_tests StarvationCheckerTest.cpp)

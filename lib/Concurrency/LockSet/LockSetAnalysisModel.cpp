@@ -240,9 +240,55 @@ LockID LockSetAnalysis::getCanonicalLock(LockID lock) const {
 
   if (const auto *GEP = dyn_cast<GetElementPtrInst>(lock)) {
     if (GEP->hasAllConstantIndices()) {
+      const Module *module =
+          m_module
+              ? m_module
+              : (m_single_function ? m_single_function->getParent() : nullptr);
+      const Value *base = nullptr;
+      int64_t offset = 0;
+      uint64_t size = 0;
+      if (module &&
+          detail::getConstantOffsetPointerInfo(GEP, module, base, offset,
+                                               size) &&
+          base) {
+        if (m_alias_analysis && !isa<GlobalVariable>(base) &&
+            !isa<AllocaInst>(base)) {
+          std::vector<const Value *> pts;
+          if (m_alias_analysis->getPointsToSet(base, pts) && pts.size() == 1 &&
+              pts.front()) {
+            base = pts.front()->stripPointerCasts();
+          }
+        }
+        auto rep_it = m_access_path_lock_reps.find({base, offset});
+        if (rep_it != m_access_path_lock_reps.end()) {
+          return cacheAndReturn(rep_it->second);
+        }
+        m_access_path_lock_reps.emplace(std::make_pair(base, offset), lock);
+      }
       return cacheAndReturn(lock);
     }
     lock = GEP->getPointerOperand()->stripPointerCasts();
+  } else if (const auto *CE = dyn_cast<GEPOperator>(lock)) {
+    const Module *module =
+        m_module
+            ? m_module
+            : (m_single_function ? m_single_function->getParent() : nullptr);
+    const Value *base = nullptr;
+    int64_t offset = 0;
+    uint64_t size = 0;
+    if (module &&
+        detail::getConstantOffsetPointerInfo(CE, module, base, offset, size) &&
+        base) {
+      auto rep_it = m_access_path_lock_reps.find({base, offset});
+      if (rep_it != m_access_path_lock_reps.end()) {
+        return cacheAndReturn(rep_it->second);
+      }
+      m_access_path_lock_reps.emplace(std::make_pair(base, offset), lock);
+      return cacheAndReturn(lock);
+    }
+    if (const Value *underlying = getUnderlyingObject(lock, 32)) {
+      lock = underlying->stripPointerCasts();
+    }
   } else if (const Value *base = getUnderlyingObject(lock, 32)) {
     lock = base->stripPointerCasts();
   }

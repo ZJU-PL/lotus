@@ -8,9 +8,14 @@
 
 #include <algorithm>
 #include <cassert>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
-#include <llvm/IR/Dominators.h>
+#include <llvm/ADT/DenseSet.h>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/IR/CFG.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/Support/Casting.h>
 
 using namespace llvm;
@@ -133,11 +138,152 @@ void ThreadAwareSVFGBuilder::connectForkFlow() {
   if (!threadTree_)
     return;
   ThreadAPI *threadAPI = ThreadAPI::getThreadAPI();
+
+  auto isStrongUpdateStoreForObject = [&](const StoreSVFGNode *store,
+                                          uint32_t obj) -> bool {
+    if (!store || !inScope(store))
+      return false;
+    const SVFGNodeBS *pts = store->getPointsTo();
+    if (!pts || pts->size() != 1 || *pts->begin() != obj)
+      return false;
+    const auto *si = dyn_cast_or_null<StoreInst>(store->getInstruction());
+    if (!si || !si->getValueOperand()->getType()->isPointerTy())
+      return false;
+    const SVFG::ObjectInfo *info = graph_->getObjectInfo(obj);
+    if (!info || !info->isSingleton || info->isUnknown || info->isHeap ||
+        info->isArray || info->isFieldInsensitive)
+      return false;
+    if (info->baseObjId != 0 &&
+        graph_->isFieldInsensitiveObject(info->baseObjId))
+      return false;
+    return true;
+  };
+
+  struct FunctionDefIndex {
+    std::unordered_map<const Instruction *, std::vector<SVFGNode *>> defAtInst;
+    std::unordered_map<uint32_t, DenseSet<const Instruction *>> killersByObj;
+    std::vector<SVFGNode *> formalIns;
+  };
+  std::unordered_map<const Function *, FunctionDefIndex> fnIndexCache;
+
+  auto getFnIndex = [&](const Function *F) -> const FunctionDefIndex & {
+    auto it = fnIndexCache.find(F);
+    if (it != fnIndexCache.end())
+      return it->second;
+    FunctionDefIndex idx;
+    for (SVFGNode *formalIn : graph_->getFormalIns(F)) {
+      if (formalIn && inScope(formalIn))
+        idx.formalIns.push_back(formalIn);
+    }
+    for (auto &entry : *graph_) {
+      SVFGNode *node = entry.second;
+      if (!node || !inScope(node))
+        continue;
+      if (auto *store = dyn_cast<StoreSVFGNode>(node)) {
+        const Instruction *inst = store->getInstruction();
+        if (!inst || inst->getFunction() != F)
+          continue;
+        idx.defAtInst[inst].push_back(store);
+        const SVFGNodeBS *pts = store->getPointsTo();
+        if (pts && pts->size() == 1) {
+          uint32_t obj = *pts->begin();
+          if (isStrongUpdateStoreForObject(store, obj))
+            idx.killersByObj[obj].insert(inst);
+        }
+      } else if (auto *aout = dyn_cast<ActualOutSVFGNode>(node)) {
+        const Instruction *cs = aout->getCallSite();
+        if (!cs || cs->getFunction() != F)
+          continue;
+        idx.defAtInst[cs].push_back(aout);
+      }
+    }
+    return fnIndexCache.emplace(F, std::move(idx)).first->second;
+  };
+
+  auto collectReachingDefs = [&](const CallBase *fork,
+                                 const FunctionDefIndex &fnIdx,
+                                 const DenseSet<const Instruction *> *killers,
+                                 std::vector<SVFGNode *> &outDefs) {
+    outDefs.clear();
+    const Function *F = fork->getFunction();
+    const BasicBlock *forkBB = fork->getParent();
+    if (!F || !forkBB)
+      return;
+
+    std::unordered_set<SVFGNode *> seenDefs;
+    auto recordDefsAt = [&](const Instruction *inst) {
+      if (inst == fork)
+        return;
+      auto it = fnIdx.defAtInst.find(inst);
+      if (it == fnIdx.defAtInst.end())
+        return;
+      for (SVFGNode *def : it->second) {
+        if (seenDefs.insert(def).second)
+          outDefs.push_back(def);
+      }
+    };
+    auto recordFormalIns = [&]() {
+      for (SVFGNode *fi : fnIdx.formalIns) {
+        if (seenDefs.insert(fi).second)
+          outDefs.push_back(fi);
+      }
+    };
+
+    // Walk backward in forkBB strictly before fork.
+    bool killedBeforeFork = false;
+    for (auto it = std::next(fork->getReverseIterator()), end = forkBB->rend();
+         it != end; ++it) {
+      const Instruction *inst = &*it;
+      recordDefsAt(inst);
+      if (killers && killers->count(inst)) {
+        killedBeforeFork = true;
+        break;
+      }
+    }
+    if (killedBeforeFork)
+      return;
+
+    if (forkBB == &F->getEntryBlock())
+      recordFormalIns();
+
+    SmallVector<const BasicBlock *, 16> worklist;
+    DenseSet<const BasicBlock *> visited;
+    for (const BasicBlock *pred : predecessors(forkBB)) {
+      if (visited.insert(pred).second)
+        worklist.push_back(pred);
+    }
+
+    while (!worklist.empty()) {
+      const BasicBlock *bb = worklist.pop_back_val();
+      bool killed = false;
+      for (auto it = bb->rbegin(), end = bb->rend(); it != end; ++it) {
+        const Instruction *inst = &*it;
+        if (bb == forkBB && inst == fork) {
+          killed = true;
+          break;
+        }
+        recordDefsAt(inst);
+        if (killers && killers->count(inst)) {
+          killed = true;
+          break;
+        }
+      }
+      if (killed)
+        continue;
+      if (bb == &F->getEntryBlock())
+        recordFormalIns();
+      for (const BasicBlock *pred : predecessors(bb)) {
+        if (visited.insert(pred).second)
+          worklist.push_back(pred);
+      }
+    }
+  };
+
   for (const ThreadCreationTree::ForkRelation &relation :
        threadTree_->forkRelations()) {
     const CallBase *fork = relation.site;
     const Function *target = relation.target;
-    if (!fork || !target)
+    if (!fork || !target || !fork->getFunction())
       continue;
 
     const Value *payload = threadAPI->getActualParmAtForkSite(fork);
@@ -152,7 +298,11 @@ void ThreadAwareSVFGBuilder::connectForkFlow() {
       }
     }
 
-    DominatorTree dominators(*const_cast<Function *>(fork->getFunction()));
+    const FunctionDefIndex &fnIdx = getFnIndex(fork->getFunction());
+    std::vector<SVFGNode *> unkilledDefs;
+    bool computedUnkilledDefs = false;
+    std::unordered_map<uint32_t, std::vector<SVFGNode *>> killedDefsByObj;
+
     for (SVFGNode *formal : graph_->getFormalIns(target)) {
       if (!formal || !inScope(formal))
         continue;
@@ -160,28 +310,81 @@ void ThreadAwareSVFGBuilder::connectForkFlow() {
       if (!formalPointsTo || formalPointsTo->empty())
         continue;
 
-      std::vector<SVFGNode *> sources;
-      for (SVFGNode *actualIn : graph_->getActualIns(fork))
-        sources.push_back(actualIn);
-      for (SVFGNode *callerIn : graph_->getFormalIns(fork->getFunction()))
-        sources.push_back(callerIn);
-      for (auto &entry : *graph_) {
-        auto *store = dyn_cast<StoreSVFGNode>(entry.second);
-        const Instruction *instruction =
-            store ? store->getInstruction() : nullptr;
-        if (!instruction || instruction->getFunction() != fork->getFunction() ||
-            !dominators.dominates(instruction, fork))
+      // ActualIn nodes at fork already reflect MSSA versions at the call site.
+      for (SVFGNode *actualIn : graph_->getActualIns(fork)) {
+        if (!actualIn || !inScope(actualIn))
           continue;
-        sources.push_back(store);
+        SVFGNodeBS guard = intersectTargets(*actualIn, *formal);
+        if (!guard.empty() &&
+            addOwnedEdge(*actualIn, *formal, SVFGEdgeK::CallAIn, fork, guard))
+          ++stats_.forkMemoryEdges;
       }
 
-      for (SVFGNode *source : sources) {
-        if (!source || !inScope(source))
+      // Partition formal's objects into those with strong-update killers in the
+      // forking function vs. those without.
+      SVFGNodeBS unkilledObjs;
+      std::vector<uint32_t> killedObjs;
+      for (uint32_t obj : *formalPointsTo) {
+        if (fnIdx.killersByObj.count(obj))
+          killedObjs.push_back(obj);
+        else
+          unkilledObjs.insert(obj);
+      }
+
+      std::unordered_map<SVFGNode *, SVFGNodeBS> sourceGuards;
+
+      if (!unkilledObjs.empty()) {
+        if (!computedUnkilledDefs) {
+          collectReachingDefs(fork, fnIdx, nullptr, unkilledDefs);
+          computedUnkilledDefs = true;
+        }
+        for (SVFGNode *source : unkilledDefs) {
+          SVFGNodeBS guard = intersectTargets(*source, *formal);
+          if (guard.empty())
+            continue;
+          SVFGNodeBS filtered;
+          for (uint32_t obj : guard) {
+            if (unkilledObjs.count(obj) || graph_->isUnknownObject(obj))
+              filtered.insert(obj);
+          }
+          if (!filtered.empty()) {
+            SVFGNodeBS &acc = sourceGuards[source];
+            acc.insert(filtered.begin(), filtered.end());
+          }
+        }
+      }
+
+      for (uint32_t obj : killedObjs) {
+        auto it = killedDefsByObj.find(obj);
+        if (it == killedDefsByObj.end()) {
+          std::vector<SVFGNode *> defs;
+          const auto &killers = fnIdx.killersByObj.at(obj);
+          collectReachingDefs(fork, fnIdx, &killers, defs);
+          it = killedDefsByObj.emplace(obj, std::move(defs)).first;
+        }
+        for (SVFGNode *source : it->second) {
+          const SVFGNodeBS *srcPts = source->getPointsTo();
+          if (!srcPts || srcPts->empty())
+            continue;
+          bool matches = srcPts->count(obj) != 0;
+          if (!matches) {
+            for (uint32_t sObj : *srcPts) {
+              if (graph_->isUnknownObject(sObj)) {
+                matches = true;
+                break;
+              }
+            }
+          }
+          if (matches)
+            sourceGuards[source].insert(obj);
+        }
+      }
+
+      for (const auto &entry : sourceGuards) {
+        if (entry.second.empty())
           continue;
-        SVFGNodeBS guard = intersectTargets(*source, *formal);
-        if (guard.empty())
-          continue;
-        if (addOwnedEdge(*source, *formal, SVFGEdgeK::CallAIn, fork, guard))
+        if (addOwnedEdge(*entry.first, *formal, SVFGEdgeK::CallAIn, fork,
+                         entry.second))
           ++stats_.forkMemoryEdges;
       }
     }
@@ -191,13 +394,141 @@ void ThreadAwareSVFGBuilder::connectForkFlow() {
 void ThreadAwareSVFGBuilder::connectJoinFlow() {
   if (!threadTree_ || !graph_->getICFG())
     return;
+
+  auto isStrongUpdateStoreForObject = [&](const StoreSVFGNode *store,
+                                          uint32_t obj) -> bool {
+    if (!store || !inScope(store))
+      return false;
+    const SVFGNodeBS *pts = store->getPointsTo();
+    if (!pts || pts->size() != 1 || *pts->begin() != obj)
+      return false;
+    const auto *si = dyn_cast_or_null<StoreInst>(store->getInstruction());
+    if (!si || !si->getValueOperand()->getType()->isPointerTy())
+      return false;
+    const SVFG::ObjectInfo *info = graph_->getObjectInfo(obj);
+    if (!info || !info->isSingleton || info->isUnknown || info->isHeap ||
+        info->isArray || info->isFieldInsensitive)
+      return false;
+    if (info->baseObjId != 0 &&
+        graph_->isFieldInsensitiveObject(info->baseObjId))
+      return false;
+    return true;
+  };
+
+  struct FunctionUseIndex {
+    std::unordered_map<const Instruction *, std::vector<SVFGNode *>> useAtInst;
+    std::unordered_map<uint32_t, DenseSet<const Instruction *>> killersByObj;
+  };
+  std::unordered_map<const Function *, FunctionUseIndex> fnUseCache;
+
+  auto getFnUseIndex = [&](const Function *F) -> const FunctionUseIndex & {
+    auto it = fnUseCache.find(F);
+    if (it != fnUseCache.end())
+      return it->second;
+    FunctionUseIndex idx;
+    for (auto &entry : *graph_) {
+      SVFGNode *node = entry.second;
+      if (!node || !inScope(node))
+        continue;
+      if (isa<LoadSVFGNode, StoreSVFGNode>(node)) {
+        const Instruction *inst = node->getInstruction();
+        if (!inst || inst->getFunction() != F)
+          continue;
+        idx.useAtInst[inst].push_back(node);
+        if (auto *store = dyn_cast<StoreSVFGNode>(node)) {
+          const SVFGNodeBS *pts = store->getPointsTo();
+          if (pts && pts->size() == 1) {
+            uint32_t obj = *pts->begin();
+            if (isStrongUpdateStoreForObject(store, obj))
+              idx.killersByObj[obj].insert(inst);
+          }
+        }
+      } else if (auto *ain = dyn_cast<ActualInSVFGNode>(node)) {
+        const Instruction *cs = ain->getCallSite();
+        if (!cs || cs->getFunction() != F)
+          continue;
+        idx.useAtInst[cs].push_back(ain);
+      }
+    }
+    return fnUseCache.emplace(F, std::move(idx)).first->second;
+  };
+
+  auto collectReachableUses = [&](const CallBase *join,
+                                  const FunctionUseIndex &fnIdx,
+                                  const DenseSet<const Instruction *> *killers,
+                                  std::vector<SVFGNode *> &outUses) {
+    outUses.clear();
+    const BasicBlock *joinBB = join->getParent();
+    if (!joinBB)
+      return;
+
+    std::unordered_set<SVFGNode *> seenUses;
+    auto recordUsesAt = [&](const Instruction *inst) {
+      if (inst == join)
+        return;
+      auto it = fnIdx.useAtInst.find(inst);
+      if (it == fnIdx.useAtInst.end())
+        return;
+      for (SVFGNode *use : it->second) {
+        if (seenUses.insert(use).second)
+          outUses.push_back(use);
+      }
+    };
+
+    bool killedInJoinBB = false;
+    for (auto it = std::next(join->getIterator()), end = joinBB->end();
+         it != end; ++it) {
+      const Instruction *inst = &*it;
+      recordUsesAt(inst);
+      if (killers && killers->count(inst)) {
+        killedInJoinBB = true;
+        break;
+      }
+    }
+    if (killedInJoinBB)
+      return;
+
+    SmallVector<const BasicBlock *, 16> worklist;
+    DenseSet<const BasicBlock *> visited;
+    for (const BasicBlock *succ : successors(joinBB)) {
+      if (visited.insert(succ).second)
+        worklist.push_back(succ);
+    }
+
+    while (!worklist.empty()) {
+      const BasicBlock *bb = worklist.pop_back_val();
+      bool killed = false;
+      for (const Instruction &instRef : *bb) {
+        const Instruction *inst = &instRef;
+        if (bb == joinBB && inst == join) {
+          killed = true;
+          break;
+        }
+        recordUsesAt(inst);
+        if (killers && killers->count(inst)) {
+          killed = true;
+          break;
+        }
+      }
+      if (killed)
+        continue;
+      for (const BasicBlock *succ : successors(bb)) {
+        if (visited.insert(succ).second)
+          worklist.push_back(succ);
+      }
+    }
+  };
+
   for (const CallBase *join : threadTree_->threadCallGraph().joinSites()) {
     std::vector<const Function *> joined = threadTree_->joinedFunctions(join);
     if (joined.empty() || !join || !join->getFunction())
       continue;
     ICFGNode *joinNode =
         const_cast<ICFG *>(graph_->getICFG())->getRetICFGNode(join);
-    DominatorTree dominators(*const_cast<Function *>(join->getFunction()));
+    const FunctionUseIndex &fnIdx = getFnUseIndex(join->getFunction());
+    std::vector<SVFGNode *> unkilledUses;
+    bool computedUnkilledUses = false;
+    std::unordered_map<uint32_t, std::vector<SVFGNode *>> killedUsesByObj;
 
     for (const Function *target : joined) {
       for (SVFGNode *formal : graph_->getFormalOuts(target)) {
@@ -224,22 +555,77 @@ void ThreadAwareSVFGBuilder::connectJoinFlow() {
                          formalOut->getDefSVFVars()))
           ++stats_.joinMemoryEdges;
 
-        for (auto &entry : *graph_) {
-          SVFGNode *destination = entry.second;
-          if (!destination || destination == actualOut || !inScope(destination))
+        const SVFGNodeBS *aoutPts = actualOut->getPointsTo();
+        if (!aoutPts || aoutPts->empty())
+          continue;
+
+        SVFGNodeBS unkilledObjs;
+        std::vector<uint32_t> killedObjs;
+        for (uint32_t obj : *aoutPts) {
+          if (fnIdx.killersByObj.count(obj))
+            killedObjs.push_back(obj);
+          else
+            unkilledObjs.insert(obj);
+        }
+
+        std::unordered_map<SVFGNode *, SVFGNodeBS> destGuards;
+
+        if (!unkilledObjs.empty()) {
+          if (!computedUnkilledUses) {
+            collectReachableUses(join, fnIdx, nullptr, unkilledUses);
+            computedUnkilledUses = true;
+          }
+          for (SVFGNode *destination : unkilledUses) {
+            if (!destination || destination == actualOut)
+              continue;
+            SVFGNodeBS guard = intersectTargets(*actualOut, *destination);
+            if (guard.empty())
+              continue;
+            SVFGNodeBS filtered;
+            for (uint32_t obj : guard) {
+              if (unkilledObjs.count(obj) || graph_->isUnknownObject(obj))
+                filtered.insert(obj);
+            }
+            if (!filtered.empty()) {
+              SVFGNodeBS &acc = destGuards[destination];
+              acc.insert(filtered.begin(), filtered.end());
+            }
+          }
+        }
+
+        for (uint32_t obj : killedObjs) {
+          auto it = killedUsesByObj.find(obj);
+          if (it == killedUsesByObj.end()) {
+            std::vector<SVFGNode *> uses;
+            const auto &killers = fnIdx.killersByObj.at(obj);
+            collectReachableUses(join, fnIdx, &killers, uses);
+            it = killedUsesByObj.emplace(obj, std::move(uses)).first;
+          }
+          for (SVFGNode *destination : it->second) {
+            if (!destination || destination == actualOut)
+              continue;
+            const SVFGNodeBS *dstPts = destination->getPointsTo();
+            if (!dstPts || dstPts->empty())
+              continue;
+            bool matches = dstPts->count(obj) != 0;
+            if (!matches) {
+              for (uint32_t dObj : *dstPts) {
+                if (graph_->isUnknownObject(dObj)) {
+                  matches = true;
+                  break;
+                }
+              }
+            }
+            if (matches)
+              destGuards[destination].insert(obj);
+          }
+        }
+
+        for (const auto &entry : destGuards) {
+          if (entry.second.empty())
             continue;
-          if (!isa<LoadSVFGNode, StoreSVFGNode>(destination))
-            continue;
-          const Instruction *instruction = destination->getInstruction();
-          if (!instruction ||
-              instruction->getFunction() != join->getFunction() ||
-              !dominators.dominates(join, instruction))
-            continue;
-          SVFGNodeBS guard = intersectTargets(*actualOut, *destination);
-          if (guard.empty())
-            continue;
-          if (addOwnedEdge(*actualOut, *destination, SVFGEdgeK::IntraIndirect,
-                           nullptr, guard))
+          if (addOwnedEdge(*actualOut, *entry.first, SVFGEdgeK::IntraIndirect,
+                           nullptr, entry.second))
             ++stats_.joinMemoryEdges;
         }
       }
@@ -248,8 +634,8 @@ void ThreadAwareSVFGBuilder::connectJoinFlow() {
 }
 
 void ThreadAwareSVFGBuilder::connectForkJoinMemoryFlow() {
-  connectForkFlow();
   connectJoinFlow();
+  connectForkFlow();
 }
 
 const std::vector<StoreSVFGNode *> &

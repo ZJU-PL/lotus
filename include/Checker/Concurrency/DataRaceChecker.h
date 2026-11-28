@@ -22,6 +22,9 @@
 namespace lotus {
 class AliasAnalysisWrapper;
 class HappensBeforeAnalysis;
+namespace analysis {
+class WholeProgramSparseRefinement;
+} // namespace analysis
 } // namespace lotus
 
 namespace concurrency {
@@ -53,6 +56,14 @@ public:
    * @return Vector of data race reports
    */
   std::vector<ConcurrencyBugReport> checkDataRaces();
+
+  /// Attach optional thread-aware sparse flow-sensitive refinement to refine
+  /// candidate pointer alias pairs without losing recall.
+  void setSparseRefinement(
+      const lotus::analysis::WholeProgramSparseRefinement *refinement) {
+    m_sparseRefinement = refinement;
+    m_location_overlap_cache.clear();
+  }
 
   /**
    * @brief Check if two instructions are independent (do not access same
@@ -89,6 +100,8 @@ private:
   lotus::StaticThreadSharingAnalysis *m_staticThreadSharingAnalysis;
   lotus::AliasAnalysisWrapper *m_aliasAnalysis;
   lotus::HappensBeforeAnalysis *m_happensBeforeAnalysis;
+  const lotus::analysis::WholeProgramSparseRefinement *m_sparseRefinement =
+      nullptr;
 
   bool mayAlias(const llvm::Value *v1, const llvm::Value *v2) const;
   bool isMemoryAccess(const llvm::Instruction *inst) const;

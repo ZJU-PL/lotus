@@ -1,4 +1,5 @@
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
+#include "Concurrency/Core/ConcurrencyContext.h"
 #include "Concurrency/LockSet/LockSetAnalysis.h"
 #include "Concurrency/LockSet/LockSetAnalysisSupport.h"
 
@@ -37,6 +38,16 @@ std::set<Function *> LockSetAnalysis::getCallees(const CallBase *call) const {
     return callees;
   }
 
+  if (m_context) {
+    const auto &resolved = m_context->resolveCallees(call);
+    for (const Function *fn : resolved.targets) {
+      if (fn && !fn->isDeclaration()) {
+        callees.insert(const_cast<Function *>(fn));
+      }
+    }
+    return callees;
+  }
+
   if (Function *direct_callee = call->getCalledFunction()) {
     if (!direct_callee->isDeclaration()) {
       callees.insert(direct_callee);
@@ -55,6 +66,25 @@ std::set<Function *> LockSetAnalysis::getCallees(const CallBase *call) const {
 
     std::unordered_set<const Value *> visited_values;
     detail::collectDefinedFunctionTargets(called, callees, visited_values);
+
+    if (m_alias_analysis) {
+      std::vector<const Value *> pts;
+      if (m_alias_analysis->getPointsToSet(called, pts)) {
+        for (const Value *target : pts) {
+          const auto *fn =
+              dyn_cast_or_null<Function>(target ? target->stripPointerCasts()
+                                                : nullptr);
+          if (!fn || fn->isDeclaration()) {
+            continue;
+          }
+          const FunctionType *fnTy = fn->getFunctionType();
+          if (fnTy && (fnTy->isVarArg() ? call->arg_size() >= fnTy->getNumParams()
+                                        : call->arg_size() == fnTy->getNumParams())) {
+            callees.insert(const_cast<Function *>(fn));
+          }
+        }
+      }
+    }
   }
 
   if (m_call_graph) {
@@ -84,12 +114,25 @@ bool LockSetAnalysis::shouldInvalidateMustLockState(
   }
 
   const Function *direct = call->getCalledFunction();
-  if (direct && direct->isIntrinsic()) {
+  if (!direct) {
+    if (const Value *called = call->getCalledOperand()) {
+      direct = dyn_cast<Function>(called->stripPointerCasts());
+    }
+  }
+  if (direct &&
+      (direct->isIntrinsic() ||
+       concurrency::ConcurrencyContext::isKnownSyncFreeExternalFunction(
+           direct))) {
     return false;
   }
 
   if (call->doesNotAccessMemory() || call->onlyReadsMemory()) {
     return false;
+  }
+
+  if (m_context) {
+    const auto &resolved = m_context->resolveCallees(call);
+    return resolved.has_unresolved || resolved.targets.empty();
   }
 
   return getCallees(call).empty() || hasUnresolvedCalleeTarget(call);
@@ -100,14 +143,22 @@ bool LockSetAnalysis::hasUnresolvedCalleeTarget(const CallBase *call) const {
     return false;
   }
 
+  if (m_context) {
+    return m_context->resolveCallees(call).has_unresolved;
+  }
+
   if (Function *direct = call->getCalledFunction()) {
-    return direct->isDeclaration() && !direct->isIntrinsic();
+    return direct->isDeclaration() && !direct->isIntrinsic() &&
+           !concurrency::ConcurrencyContext::isKnownSyncFreeExternalFunction(
+               direct);
   }
 
   if (const Value *called = call->getCalledOperand()) {
     if (const auto *direct_target =
             dyn_cast<Function>(called->stripPointerCasts())) {
-      return direct_target->isDeclaration() && !direct_target->isIntrinsic();
+      return direct_target->isDeclaration() && !direct_target->isIntrinsic() &&
+             !concurrency::ConcurrencyContext::isKnownSyncFreeExternalFunction(
+                 direct_target);
     }
   }
 
@@ -794,7 +845,7 @@ LockID LockSetAnalysis::instantiateSummaryLock(const CallBase *call,
         }
         auto cached_projection = m_summary_lock_projections.find({call, lock});
         if (cached_projection != m_summary_lock_projections.end()) {
-          return cached_projection->second.get();
+          return getCanonicalLock(cached_projection->second.get());
         }
         SmallVector<Value *, 4> indices;
         for (const Value *index : gep->indices()) {
@@ -806,9 +857,9 @@ LockID LockSetAnalysis::instantiateSummaryLock(const CallBase *call,
                   gep->getSourceElementType(), const_cast<Value *>(actual),
                   indices, "lock.summary.projection"));
           projected->setIsInBounds(gep->isInBounds());
-          LockID result = projected.get();
+          LockID raw = projected.get();
           m_summary_lock_projections[{call, lock}] = std::move(projected);
-          return result;
+          return getCanonicalLock(raw);
         }
         return getCanonicalLock(actual);
       }

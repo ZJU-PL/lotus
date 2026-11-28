@@ -15,6 +15,10 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
+namespace lotus {
+class AliasAnalysisWrapper;
+} // namespace lotus
+
 namespace concurrency {
 
 /**
@@ -41,6 +45,12 @@ public:
    */
   std::vector<ConcurrencyBugReport> checkDeadlocks();
 
+  void setAliasAnalysis(lotus::AliasAnalysisWrapper *aa) {
+    m_aliasAnalysis = aa;
+  }
+
+  bool cycleSearchBudgetExceeded() const { return m_cycleBudgetExceeded; }
+
 private:
   // Analysis components
   llvm::Module &m_module;
@@ -48,17 +58,24 @@ private:
   mhp::IMHPAnalysis *m_mhpAnalysis;
   lotus::HappensBeforeAnalysis *m_hbAnalysis;
   ThreadAPI *m_threadAPI;
+  lotus::AliasAnalysisWrapper *m_aliasAnalysis = nullptr;
+  mutable bool m_cycleBudgetExceeded = false;
 
-  // Goblint-style: lock-order graph with events (from_lock -> [(to_lock,
-  // acquire_inst)])
-  using LockOrderEdge = std::pair<mhp::LockID, const llvm::Instruction *>;
+  struct LockOrderEdge {
+    mhp::LockID toLock = nullptr;
+    const llvm::Instruction *acquireInst = nullptr;
+    mhp::LockSet gateLocks;
+  };
   using LockOrderGraph =
       std::unordered_map<mhp::LockID, std::vector<LockOrderEdge>>;
 
   void buildLockOrderGraph(LockOrderGraph &graph) const;
   bool cycleCanHappenInParallel(
       const std::vector<const llvm::Instruction *> &acquireInsts) const;
-  std::vector<std::vector<std::pair<mhp::LockID, const llvm::Instruction *>>>
+  bool cycleHasCommonGateLock(
+      const std::vector<LockOrderEdge> &cycleEdges,
+      const std::vector<mhp::LockID> &cycleLocks) const;
+  std::vector<std::vector<std::pair<mhp::LockID, LockOrderEdge>>>
   findLockOrderCycles(const LockOrderGraph &graph) const;
 
   bool isLockOperation(const llvm::Instruction *inst) const;

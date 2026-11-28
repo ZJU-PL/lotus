@@ -1,6 +1,7 @@
 #include "Concurrency/MHP/HappensBeforeAnalysis.h"
 
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
+#include "Concurrency/Core/ConcurrencyContext.h"
 #include "Concurrency/Core/ThreadFlowGraph.h"
 #include "Concurrency/OpenMP/OpenMPSemantics.h"
 #include "Concurrency/Thread/ThreadMultiplicity.h"
@@ -762,7 +763,11 @@ void HappensBeforeAnalysis::buildSynchronizesWith() {
   ThreadAPI *threadAPI = ThreadAPI::getThreadAPI();
   std::unique_ptr<CallGraph> hb_call_graph;
   std::unique_ptr<::concurrency::ThreadMultiplicityAnalysis> site_multiplicity;
-  auto ensureSiteMultiplicity = [&]() -> ::concurrency::ThreadMultiplicityAnalysis & {
+  auto ensureSiteMultiplicity =
+      [&]() -> ::concurrency::ThreadMultiplicityAnalysis & {
+    if (m_context) {
+      return m_context->getThreadMultiplicity();
+    }
     if (!site_multiplicity) {
       hb_call_graph = std::make_unique<CallGraph>(m_module);
       site_multiplicity =
@@ -2553,6 +2558,9 @@ const Instruction *HappensBeforeAnalysis::getSingleFollowingAcquireFence(
 
 const PostDominatorTree &
 HappensBeforeAnalysis::getPostDominatorTree(const Function *func) const {
+  if (m_context && func) {
+    return m_context->getPostDominatorTree(*func);
+  }
   auto it = m_post_dom_cache.find(func);
   if (it != m_post_dom_cache.end()) {
     return *(it->second);

@@ -31,6 +31,10 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Support/raw_ostream.h>
 
+namespace concurrency {
+class ConcurrencyContext;
+} // namespace concurrency
+
 namespace mhp {
 
 using StaticThreadID = size_t;
@@ -51,6 +55,7 @@ using StaticThreadID = size_t;
 class StaticVectorClockMHP : public IMHPAnalysis {
 public:
   explicit StaticVectorClockMHP(llvm::Module &module);
+  explicit StaticVectorClockMHP(::concurrency::ConcurrencyContext &context);
 
   /// Run the SVC-MHP analysis.
   void analyze() override;
@@ -75,8 +80,10 @@ public:
   InstructionSet getInstructionsInThread(ThreadID tid) const override;
 
   size_t getMhpPairCount() const override {
-    return m_conservative_mhp ? m_conservative_mhp->getMhpPairCount()
-                              : m_mhp_pairs.size();
+    if (!m_mhp_pairs.empty()) {
+      return m_mhp_pairs.size();
+    }
+    return m_conservative_mhp ? m_conservative_mhp->getMhpPairCount() : 0;
   }
 
   /// Query happens-before using static vector clocks.
@@ -89,13 +96,32 @@ public:
   /// Print debug information about the computed clocks and pairs.
   void printResults(llvm::raw_ostream &os) const override;
 
-  const ThreadFlowGraph &getThreadFlowGraph() const override { return *m_tfg; }
+  const ThreadFlowGraph &getThreadFlowGraph() const override {
+    return m_conservative_mhp ? m_conservative_mhp->getThreadFlowGraph()
+                              : *m_tfg;
+  }
 
-  size_t getAnalysisGeneration() const override { return m_conservative_mhp ? m_conservative_mhp->getAnalysisGeneration() : 0; }
-  lotus::AliasAnalysisWrapper *getAliasAnalysis() const override { return nullptr; }
-  const OpenMP::OpenMPSemantics *getOpenMPSemantics() const override { return nullptr; }
+  size_t getAnalysisGeneration() const override {
+    return m_conservative_mhp ? m_conservative_mhp->getAnalysisGeneration() : 0;
+  }
+  lotus::AliasAnalysisWrapper *getAliasAnalysis() const override {
+    return m_conservative_mhp ? m_conservative_mhp->getAliasAnalysis()
+                              : nullptr;
+  }
+  const OpenMP::OpenMPSemantics *getOpenMPSemantics() const override {
+    return m_conservative_mhp ? m_conservative_mhp->getOpenMPSemantics()
+                              : nullptr;
+  }
+  void enableLockSetAnalysis() { m_enable_lockset = true; }
+  LockSetAnalysis *getLockSetAnalysis() const {
+    return m_conservative_mhp ? m_conservative_mhp->getLockSetAnalysis()
+                              : nullptr;
+  }
   bool instructionMayExecuteMultipleTimes(const llvm::Instruction *inst) const override {
     return m_conservative_mhp ? m_conservative_mhp->instructionMayExecuteMultipleTimes(inst) : false;
+  }
+  bool isSingleThreaded() const override {
+    return m_conservative_mhp && m_conservative_mhp->isSingleThreaded();
   }
   bool joinEdgeMustOrderTarget(const SyncNode *join_node, const SyncNode *target_node) const override {
     return m_conservative_mhp ? m_conservative_mhp->joinEdgeMustOrderTarget(join_node, target_node) : false;
@@ -218,15 +244,19 @@ private:
   };
 
   llvm::Module &m_module;
+  ::concurrency::ConcurrencyContext *m_context = nullptr;
+  bool m_enable_lockset = false;
 
   // Thread-flow graph owned by this analysis
   ThreadAPI *m_thread_api = nullptr;
   std::unique_ptr<ThreadFlowGraph> m_tfg;
   std::unique_ptr<MHPAnalysis> m_conservative_mhp;
-  std::unique_ptr<llvm::CallGraph> m_call_graph;
+  llvm::CallGraph *m_call_graph = nullptr;
+  std::unique_ptr<llvm::CallGraph> m_owned_call_graph;
   std::unique_ptr<JoinTargetAnalysis> m_join_target_analysis;
-  std::unique_ptr<concurrency::ThreadMultiplicityAnalysis>
-      m_thread_multiplicity;
+  ::concurrency::ThreadMultiplicityAnalysis *m_thread_multiplicity = nullptr;
+  std::unique_ptr<::concurrency::ThreadMultiplicityAnalysis>
+      m_owned_thread_multiplicity;
 
   // Static thread management
   std::unordered_map<Context, StaticThreadID, ContextHash> m_ctx_to_stid;
@@ -343,6 +373,7 @@ private:
 
   // Indirect fork handling (conservative)
   bool m_has_unresolved_fork = false;
+  bool m_module_may_spawn_threads = false;
   std::unordered_set<const llvm::Function *> m_thread_entry_candidates;
 
   mutable std::unordered_map<const llvm::Function *,

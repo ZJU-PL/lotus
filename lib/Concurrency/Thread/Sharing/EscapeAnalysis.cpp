@@ -1,6 +1,7 @@
 #include "Concurrency/Thread/Sharing/EscapeAnalysis.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
 #include "Concurrency/API/ThreadAPI.h"
+#include "Concurrency/Core/ConcurrencyContext.h"
 
 #include <deque>
 #include <unordered_set>
@@ -99,8 +100,16 @@ void EscapeAnalysis::runEscapeAnalysis() {
     if (callee && !callee->isDeclaration()) {
       return;
     }
+    if (callee &&
+        concurrency::ConcurrencyContext::isKnownNonCapturingExternalFunction(
+            callee)) {
+      return;
+    }
 
     for (unsigned i = 0; i < call->arg_size(); ++i) {
+      if (call->doesNotCapture(i)) {
+        continue;
+      }
       const Value *arg = call->getArgOperand(i);
       if (arg && arg->getType()->isPointerTy()) {
         enqueueEscaped(arg);

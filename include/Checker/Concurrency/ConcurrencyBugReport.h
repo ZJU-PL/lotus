@@ -76,15 +76,30 @@ enum class ConcurrencyBugType {
   CUDA_SYMBOLIC_CONFIG_RISK,
   CUDA_SHARED_GLOBAL_SPACE_MISMATCH,
   CUDA_PARAMETRIC_RACE_RISK,
+  LINUX_KERNEL_DEADLOCK,
+  LINUX_KERNEL_DOUBLE_LOCK,
+  LINUX_KERNEL_UNLOCK_WITHOUT_LOCK,
+  LINUX_KERNEL_LOCK_WITHOUT_UNLOCK,
+  LINUX_KERNEL_LOCK_ORDER_INVERSION,
+  LINUX_KERNEL_SLEEP_IN_ATOMIC,
+  LINUX_KERNEL_MIX_RAW_COOKED,
+  LINUX_KERNEL_IRQ_SAVE_RESTORE,
+  LINUX_KERNEL_DATA_RACE,
+  LINUX_KERNEL_RCU_ERROR,
+  LINUX_KERNEL_WAIT_ERROR,
+  LINUX_KERNEL_TIMER_ERROR,
+  LINUX_KERNEL_LIFETIME_ERROR,
   STARVATION
 };
 
 struct ConcurrencyBugStep {
   const llvm::Instruction *instruction;
   std::string description;
+  int traceLevel = 0;
 
-  ConcurrencyBugStep(const llvm::Instruction *inst, const std::string &desc)
-      : instruction(inst), description(desc) {}
+  ConcurrencyBugStep(const llvm::Instruction *inst, const std::string &desc,
+                     int level = 0)
+      : instruction(inst), description(desc), traceLevel(level) {}
 };
 
 /**
@@ -138,8 +153,9 @@ struct ConcurrencyBugReport {
   }
   ConcurrencyBugReport &operator=(ConcurrencyBugReport &&) noexcept = default;
 
-  void addStep(const llvm::Instruction *inst, const std::string &desc) {
-    steps.emplace_back(inst, desc);
+  void addStep(const llvm::Instruction *inst, const std::string &desc,
+               int traceLevel = 0) {
+    steps.emplace_back(inst, desc, traceLevel);
   }
 
   void setDataRaceInfo(std::string ap1, std::string ap2, bool w1, bool w2,

@@ -2,6 +2,7 @@
 
 #include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/CUDA/CUDAAnalysis.h"
+#include "Concurrency/LinuxKernel/LinuxKernelAnalysis.h"
 #include "Concurrency/MPI/MPIAnalysis.h"
 #include "Concurrency/OpenMP/OpenMPTaskGraph.h"
 
@@ -611,6 +612,49 @@ ConcurrencyFacade::summarizeCUDA(const cuda::CUDAAnalysis &analysis,
   }
   summary.model_gap_count = summary.model_gaps.size();
 
+  return summary;
+}
+
+ConcurrencyFacade::LinuxKernelSummary
+ConcurrencyFacade::analyzeLinuxKernel(llvm::Module &module) {
+  kernel::LinuxKernelAnalysis analysis(module);
+  analysis.runAnalysis();
+  return summarizeLinuxKernel(analysis);
+}
+
+ConcurrencyFacade::LinuxKernelSummary
+ConcurrencyFacade::summarizeLinuxKernel(
+    const kernel::LinuxKernelAnalysis &analysis) {
+  LinuxKernelSummary summary;
+  const auto &results = analysis.getResults();
+  summary.operation_count = analysis.getProcessModel().getAllOperations().size();
+  summary.lock_count = analysis.getLockCount();
+  summary.rcu_section_count = analysis.getRCUSectionCount();
+  summary.wait_queue_count = analysis.getWaitQueueCount();
+  summary.lock_deadlock_count = results.lock_deadlocks.size();
+  summary.double_lock_count = results.double_locks.size();
+  summary.unlock_without_lock_count = results.unlock_without_lock.size();
+  summary.lock_without_unlock_count = results.lock_without_unlock.size();
+  summary.lock_order_inversion_count = results.lock_order_inversions.size();
+  summary.sleep_in_atomic_count = results.sleep_in_atomic.size();
+  summary.mix_raw_and_cooked_count = results.mix_raw_and_cooked.size();
+  summary.irq_save_restore_issue_count = results.irq_save_restore_issues.size();
+  summary.data_race_count = results.data_races.size();
+  summary.rcu_issue_count = results.rcu_without_grace_period.size() +
+                            results.rcu_conflicts.size() +
+                            results.rcu_double_free.size() +
+                            results.deref_after_free.size() +
+                            results.rcu_unsafe_reclamation.size();
+  summary.wait_issue_count = results.missing_wake_ups.size() +
+                             results.spurious_wake_ups.size() +
+                             results.lost_wakeups.size() +
+                             results.missing_completion.size() +
+                             results.double_completion.size();
+  summary.timer_issue_count = results.timer_not_deleted.size() +
+                              results.timer_use_after_delete.size();
+  summary.lifetime_issue_count =
+      results.use_after_free.size() + results.async_lifetime_hazards.size();
+  summary.diagnostic_count = results.diagnostics.size();
   return summary;
 }
 

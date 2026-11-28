@@ -18,6 +18,7 @@
 #include "Concurrency/LockSet/LockSetAnalysis.h"
 
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
+#include "Concurrency/Core/ConcurrencyContext.h"
 #include "Concurrency/LockSet/LockSetAnalysisSupport.h"
 
 #include <algorithm>
@@ -96,14 +97,10 @@ bool getConstantOffsetPointerInfo(const Value *ptr, const Module *module,
   }
 
   const DataLayout &dl = module->getDataLayout();
-  APInt ap_offset(dl.getIndexTypeSizeInBits(gep->getType()), 0, true);
-  if (!gep->accumulateConstantOffset(dl, ap_offset)) {
+  int64_t total_offset = 0;
+  const Value *ptr_base = GetPointerBaseWithConstantOffset(ptr, total_offset, dl);
+  if (!ptr_base || ptr_base->stripPointerCasts() == ptr) {
     return false;
-  }
-
-  const Value *ptr_base = gep->getPointerOperand()->stripPointerCasts();
-  if (const Value *underlying = getUnderlyingObject(ptr_base, 32)) {
-    ptr_base = underlying->stripPointerCasts();
   }
 
   Type *pointee_ty = gep->getResultElementType();
@@ -111,8 +108,8 @@ bool getConstantOffsetPointerInfo(const Value *ptr, const Module *module,
     return false;
   }
 
-  base = ptr_base;
-  offset = ap_offset.getSExtValue();
+  base = ptr_base->stripPointerCasts();
+  offset = total_offset;
   size = dl.getTypeStoreSize(pointee_ty);
   return true;
 }
@@ -170,13 +167,33 @@ bool instructionPrecedesOrEquals(const Instruction *lhs, const Instruction *rhs,
 
 LockSetAnalysis::LockSetAnalysis(Module &module)
     : m_module(&module), m_single_function(nullptr),
-      m_thread_api(ThreadAPI::getThreadAPI()), m_alias_analysis(nullptr),
-      m_call_graph(nullptr) {}
+      m_thread_api(ThreadAPI::getThreadAPI()), m_context(nullptr),
+      m_alias_analysis(nullptr), m_call_graph(nullptr) {}
+
+LockSetAnalysis::LockSetAnalysis(concurrency::ConcurrencyContext &context)
+    : m_module(&context.getModule()), m_single_function(nullptr),
+      m_thread_api(context.getThreadAPI()), m_context(&context),
+      m_alias_analysis(context.getAliasAnalysisIfPresent()),
+      m_call_graph(&context.getCallGraph()),
+      m_uses_external_call_graph(true) {}
 
 LockSetAnalysis::LockSetAnalysis(Function &func)
     : m_module(nullptr), m_single_function(&func),
-      m_thread_api(ThreadAPI::getThreadAPI()), m_alias_analysis(nullptr),
-      m_call_graph(nullptr) {}
+      m_thread_api(ThreadAPI::getThreadAPI()), m_context(nullptr),
+      m_alias_analysis(nullptr), m_call_graph(nullptr) {}
+
+void LockSetAnalysis::setContext(concurrency::ConcurrencyContext *context) {
+  m_context = context;
+  if (m_context) {
+    if (!m_alias_analysis) {
+      m_alias_analysis = m_context->getAliasAnalysisIfPresent();
+    }
+    if (!m_uses_external_call_graph) {
+      m_call_graph = &m_context->getCallGraph();
+      m_uses_external_call_graph = true;
+    }
+  }
+}
 
 void LockSetAnalysis::analyze() {
   errs() << "Starting Lock Set Analysis...\n";
@@ -215,6 +232,7 @@ void LockSetAnalysis::analyze() {
   m_trylock_edge_refinements.clear();
   m_summary_lock_projections.clear();
   m_canonical_lock_cache.clear();
+  m_access_path_lock_reps.clear();
   m_recursive_acquire_limit = 1;
   m_functions_with_direct_lock_ops.clear();
   m_functions_with_raii_locks.clear();
@@ -721,6 +739,26 @@ bool LockSetAnalysis::locksMustMatch(LockID a, LockID b) const {
   const LockID cb = getCanonicalLock(b);
   if (ca && cb && ca == cb) {
     return true;
+  }
+  const Module *module =
+      m_module ? m_module
+               : (m_single_function ? m_single_function->getParent() : nullptr);
+  if (module && ca && cb) {
+    const Value *base_a = nullptr;
+    const Value *base_b = nullptr;
+    int64_t off_a = 0;
+    int64_t off_b = 0;
+    uint64_t size_a = 0;
+    uint64_t size_b = 0;
+    if (detail::getConstantOffsetPointerInfo(ca, module, base_a, off_a,
+                                             size_a) &&
+        detail::getConstantOffsetPointerInfo(cb, module, base_b, off_b,
+                                             size_b) &&
+        off_a == off_b &&
+        (base_a == base_b ||
+         (m_alias_analysis && m_alias_analysis->mustAlias(base_a, base_b)))) {
+      return true;
+    }
   }
   return m_alias_analysis && ca && cb && m_alias_analysis->mustAlias(ca, cb);
 }

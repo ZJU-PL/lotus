@@ -10,10 +10,14 @@
 
 namespace concurrency {
 
+class ConcurrencyContext;
+
 class OpenMPChecker {
 public:
   OpenMPChecker(llvm::Module &module, OpenMP::OpenMPTaskGraph *task_graph,
                 ThreadAPI *thread_api);
+
+  void setContext(ConcurrencyContext *context) { m_context = context; }
 
   std::vector<ConcurrencyBugReport> checkOpenMPBugs();
 
@@ -22,6 +26,7 @@ private:
   OpenMP::OpenMPTaskGraph *m_taskGraph;
   std::unique_ptr<OpenMP::OpenMPTaskGraph> m_ownedTaskGraph;
   ThreadAPI *m_threadAPI;
+  ConcurrencyContext *m_context = nullptr;
 
   void ensureTaskGraph();
   std::vector<ConcurrencyBugReport> checkPartialTaskSynchronization() const;

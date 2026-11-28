@@ -81,6 +81,15 @@ static cl::opt<unsigned> ThreadContextLimit(
     "concur.thread-context",
     cl::desc("Maximum call-string depth in the thread creation tree"),
     cl::init(2), cl::sub(lotus::checker::tooling::concurrencySubCommand()));
+enum class MHPBackendOption { Region, StaticVectorClock };
+static cl::opt<MHPBackendOption> MHPBackend(
+    "concur.mhp-backend", cl::desc("May-Happen-in-Parallel analysis backend"),
+    cl::values(clEnumValN(MHPBackendOption::Region, "region",
+                          "Thread-region MHP analysis (default)"),
+               clEnumValN(MHPBackendOption::StaticVectorClock, "svc",
+                          "Static vector clock MHP analysis")),
+    cl::init(MHPBackendOption::Region),
+    cl::sub(lotus::checker::tooling::concurrencySubCommand()));
 enum class PointsToSetOption { Mutable, HashConsed };
 static cl::opt<PointsToSetOption> PointsToSets(
     "concur.points-to-sets", cl::desc("Sparse solver points-to set backend"),
@@ -133,7 +142,12 @@ int runConcurrencyCheckerTool(const char *argv0) {
   checker.enableOpenMPCheck(selected.count("openmp"));
   checker.enableMPICheck(selected.count("mpi"));
   checker.enableCUDACheck(selected.count("cuda"));
+  checker.enableLinuxKernelCheck(selected.count("linux-kernel"));
   checker.enableStarvationCheck(selected.count("starvation"));
+  checker.setMHPBackend(
+      MHPBackend == MHPBackendOption::StaticVectorClock
+          ? ConcurrencyChecker::MHPBackendKind::StaticVectorClock
+          : ConcurrencyChecker::MHPBackendKind::Region);
   for (const auto &name : StarvationBlockingFunctions)
     checker.addStarvationBlockingFunction(StringRef(name).trim().str());
   checker.enableSparseFlowSensitiveRefinement(SparseFlowSensitive);
