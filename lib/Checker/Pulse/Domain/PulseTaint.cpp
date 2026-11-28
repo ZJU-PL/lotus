@@ -88,7 +88,6 @@ collectFieldTargetAVs(const AbductiveDomain &astate, AbstractValue base,
   std::vector<AbstractValue> out;
   std::set<AbstractValue> seen;
   AbstractValue base_c = astate.getCanonical(base);
-  Access field_acc(field_idx);
 
   auto addNode = [&](AbstractValue av) {
     AbstractValue c = astate.getCanonical(av);
@@ -97,24 +96,38 @@ collectFieldTargetAVs(const AbductiveDomain &astate, AbstractValue base,
     }
   };
 
-  if (const Address *direct = astate.getPostHeap().findEdge(base_c, field_acc)) {
-    addNode(direct->addr);
-  }
+  auto collectDirectFields = [&](AbstractValue owner) {
+    auto it = astate.getPostHeap().getEdges().find(owner);
+    if (it == astate.getPostHeap().getEdges().end())
+      return;
+    for (const auto &ekv : it->second) {
+      if (ekv.first.kind == AccessKind::Field &&
+          ekv.first.field_idx == field_idx) {
+        addNode(ekv.second.addr);
+      }
+    }
+  };
+
+  collectDirectFields(base_c);
+
   // Also match LLVM struct GEP paths: `base --ArrayIndex(0, stride)--> row0 --FieldAccess(field_idx)--> target`.
   auto edge_it = astate.getPostHeap().getEdges().find(base_c);
   if (edge_it != astate.getPostHeap().getEdges().end()) {
     for (const auto &ekv : edge_it->second) {
       if (ekv.first.kind != AccessKind::ArrayIndex)
         continue;
-      auto idx_c = astate.getPathFormula().asConstantInt(
-          astate.getCanonical(ekv.first.index));
-      if (!idx_c || *idx_c != 0)
+      bool is_zero = false;
+      if (ekv.first.const_index.has_value()) {
+        is_zero = (*ekv.first.const_index == 0);
+      } else {
+        auto idx_c = astate.getPathFormula().asConstantInt(
+            astate.getCanonical(ekv.first.index));
+        is_zero = (idx_c && *idx_c == 0);
+      }
+      if (!is_zero)
         continue;
       AbstractValue row_c = astate.getCanonical(ekv.second.addr);
-      if (const Address *gep_field =
-              astate.getPostHeap().findEdge(row_c, field_acc)) {
-        addNode(gep_field->addr);
-      }
+      collectDirectFields(row_c);
     }
   }
   return out;
@@ -160,10 +173,9 @@ void TaintOperations::taintField(AbductiveDomain &astate, AbstractValue base,
                                  const llvm::Instruction *source,
                                  AbstractValueFactory &factory) {
   AbstractValue base_c = astate.getCanonical(base);
-  Access field_acc(field_idx);
-  if (!astate.getPostHeap().findEdge(base_c, field_acc)) {
+  if (collectFieldTargetAVs(astate, base_c, field_idx).empty()) {
     AbstractValue fv = factory.createFresh(source);
-    astate.getPostHeap().addEdge(base_c, field_acc, Address(fv));
+    astate.getPostHeap().addEdge(base_c, Access(field_idx), Address(fv));
   }
   const llvm::Function *func =
       (source && source->getParent()) ? source->getParent()->getParent()
@@ -190,10 +202,9 @@ void TaintOperations::taintField(AbductiveDomain &astate, AbstractValue base,
                                  const std::string &procedure_name,
                                  AbstractValueFactory &factory) {
   AbstractValue base_c = astate.getCanonical(base);
-  Access field_acc(field_idx);
-  if (!astate.getPostHeap().findEdge(base_c, field_acc)) {
+  if (collectFieldTargetAVs(astate, base_c, field_idx).empty()) {
     AbstractValue fv = factory.createFresh(nullptr);
-    astate.getPostHeap().addEdge(base_c, field_acc, Address(fv));
+    astate.getPostHeap().addEdge(base_c, Access(field_idx), Address(fv));
   }
   for (AbstractValue target : collectFieldTargetAVs(astate, base_c, field_idx)) {
     unsigned timestamp = getNextTimestamp();

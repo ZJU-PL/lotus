@@ -90,7 +90,8 @@ static bool visitMapping(CallState &call_state,
       if (!caller_astate.getPathFormula().addEquality(prev_c, c_caller)) {
         return false;
       }
-      auto inc = caller_astate.incorporatePendingNewEqs();
+      auto inc = caller_astate.incorporatePendingNewEqs(
+          /*defer_canonicalize=*/true);
       if (!inc.isOk()) {
         return false;
       }
@@ -174,8 +175,10 @@ static bool materializePreFromAddress(
     AbstractValue callee_target_canon =
         callee_pre->getCanonical(callee_target.addr);
 
-    // Delay array index edges until after formula conjunction (Infer design).
-    if (access.kind == AccessKind::ArrayIndex) {
+    // Delay symbolic array index edges until after formula conjunction (Infer
+    // design). Constant array indices match immediately without delay.
+    if (access.kind == AccessKind::ArrayIndex &&
+        !access.const_index.has_value()) {
       call_state.getArrayIndicesToVisit().emplace_back(
           callee_target_canon, callee_target.history, access,
           std::make_pair(c_caller, caller_hist), path);
@@ -235,7 +238,7 @@ static Access substituteAccess(const Access &acc, const Substitution &subst,
                                const AbductiveDomain &caller_astate,
                                AbstractValueFactory &factory,
                                Substitution &mut_subst) {
-  if (acc.kind != AccessKind::ArrayIndex) {
+  if (acc.kind != AccessKind::ArrayIndex || acc.const_index.has_value()) {
     return acc;
   }
   Access out = acc;
@@ -470,6 +473,12 @@ static void applyPostCondition(
                                       caller_astate.getCanonical(*c_root));
     }
   }
+  for (const auto &kv : callee_post->getAllocationOffsets()) {
+    if (auto c_addr = subst.substitute(callee_post->getCanonical(kv.first))) {
+      caller_astate.setAllocationOffset(caller_astate.getCanonical(*c_addr),
+                                        kv.second);
+    }
+  }
   for (const auto &kv : callee_post->getDynamicTypes()) {
     if (auto caller_opt = subst.substitute(callee_post->getCanonical(kv.first))) {
       caller_astate.setDynamicType(caller_astate.getCanonical(*caller_opt),
@@ -682,6 +691,10 @@ std::vector<ExecutionDomain> PulseChecker::applySummaryImproved(
         }
       }
 
+      // Flush deferred canonicalization once after formal & global
+      // materialization instead of scanning all maps on every visitMapping eq.
+      work_astate.canonicalize();
+
       // 3. Check for aliasing contradiction discovered during visit().
       if (call_state.hasAliases()) {
         auto classes = call_state.extractAliasClasses();
@@ -842,6 +855,7 @@ std::vector<ExecutionDomain> PulseChecker::applySummaryImproved(
       if (!delayed_ok) {
         continue;
       }
+      work_astate.canonicalize();
 
       // 7. Check for dynamic type specialization needed (and bubble up to
       //    caller's pre-footprint for multi-hop wrapper chains!).
@@ -921,7 +935,19 @@ std::vector<ExecutionDomain> PulseChecker::applySummaryImproved(
             violation = OperationResult::UseAfterFree;
           } else if (work_astate.getPostAttrs().has(caller_av,
                                                     Attribute::OutOfBounds)) {
-            violation = OperationResult::OutOfBounds;
+            bool one_past_ok = false;
+            if (chk.mbv.allow_one_past_end) {
+              AbstractValue root = work_astate.getAllocationRoot(caller_av);
+              auto sz = work_astate.getAllocationSize(root);
+              auto off = work_astate.getAllocationOffset(caller_av);
+              if (sz && off && *off >= 0 &&
+                  static_cast<uint64_t>(*off) == *sz) {
+                one_past_ok = true;
+              }
+            }
+            if (!one_past_ok) {
+              violation = OperationResult::OutOfBounds;
+            }
           } else if (work_astate.getPathFormula().isNull(caller_av) ||
                      (work_astate.getPostAttrs().has(caller_av,
                                                      Attribute::Null) &&
@@ -950,7 +976,7 @@ std::vector<ExecutionDomain> PulseChecker::applySummaryImproved(
                      !work_astate.isAllocated(caller_av)) {
             work_astate.abduceMustBeValid(
                 caller_av, buildViaCallTrace(chk.mbv.trace, callee, CI),
-                chk.mbv.reason);
+                chk.mbv.reason, chk.mbv.allow_one_past_end);
           }
         } else {
           // MustBeInitialized check.

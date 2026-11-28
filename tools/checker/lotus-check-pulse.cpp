@@ -118,6 +118,10 @@ int runPulseCheckerTool(const char *argv0) {
   PulseLogger::setOutputStream(&errs());
   PulseLogger::resetStats();
 
+  struct ScopedTaintConfigReset {
+    ~ScopedTaintConfigReset() { TaintOperations::setConfig(nullptr); }
+  } taintConfigGuard;
+
   std::optional<TaintConfig> customTaintConfig;
   if (!TaintConfigPath.empty()) {
     auto buffer = MemoryBuffer::getFile(TaintConfigPath);

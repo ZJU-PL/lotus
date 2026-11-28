@@ -200,7 +200,8 @@ void AbductiveDomain::abduceToPre(AbstractValue addr, const Access &access,
     return;
   }
   Access canon_access = access;
-  if (canon_access.kind == AccessKind::ArrayIndex) {
+  if (canon_access.kind == AccessKind::ArrayIndex &&
+      !canon_access.const_index.has_value()) {
     canon_access.index = getCanonical(canon_access.index);
   }
   Address canon_target(getCanonical(target.addr));
@@ -224,7 +225,8 @@ void AbductiveDomain::abduceAttrToPre(AbstractValue addr, Attribute attr) {
 }
 
 void AbductiveDomain::abduceMustBeValid(
-    AbstractValue addr, Trace trace, std::optional<InvalidationKind> reason) {
+    AbstractValue addr, Trace trace, std::optional<InvalidationKind> reason,
+    bool allow_one_past_end) {
   AbstractValue canon_addr = getCanonical(addr);
   if (!isInPre(canon_addr)) {
     return;
@@ -234,9 +236,19 @@ void AbductiveDomain::abduceMustBeValid(
     return;
   }
   pre_heap_.registerAddress(canon_addr);
-  if (pre_must_be_valid_.find(canon_addr) == pre_must_be_valid_.end()) {
+  auto it = pre_must_be_valid_.find(canon_addr);
+  if (it == pre_must_be_valid_.end()) {
     pre_must_be_valid_.emplace(
-        canon_addr, MustBeValidInfo(nextTimestamp(), std::move(trace), reason));
+        canon_addr, MustBeValidInfo(nextTimestamp(), std::move(trace), reason,
+                                    allow_one_past_end));
+  } else if (it->second.allow_one_past_end && !allow_one_past_end) {
+    // Upgrade a pointer-arithmetic requirement to a strict dereference
+    // requirement so one-past-the-end pointers are rejected at call sites.
+    it->second.allow_one_past_end = false;
+    it->second.trace = std::move(trace);
+    if (reason) {
+      it->second.reason = reason;
+    }
   }
 }
 
@@ -273,6 +285,7 @@ void AbductiveDomain::markWrittenTo(AbstractValue addr,
                                     const llvm::Instruction *loc, Trace trace) {
   AbstractValue canon = getCanonical(addr);
   post_written_to_[canon] = WrittenToInfo(nextTimestamp(), loc, std::move(trace));
+  post_attrs_.remove(canon, Attribute::Uninitialized);
 }
 
 bool AbductiveDomain::hasWrittenTo(AbstractValue addr) const {
@@ -448,6 +461,7 @@ AbductiveDomain AbductiveDomain::clone() const {
   cloned.symbolic_allocation_sizes_ = symbolic_allocation_sizes_;
   cloned.shared_ptr_targets_ = shared_ptr_targets_;
   cloned.allocation_roots_ = allocation_roots_;
+  cloned.allocation_offsets_ = allocation_offsets_;
   cloned.taint_domain_.join(taint_domain_);
   cloned.topl_history_ = topl_history_;
 
@@ -477,7 +491,8 @@ void AbductiveDomain::canonicalize() {
     return;
   }
   auto canon_access = [this](const Access &access) -> Access {
-    if (access.kind == AccessKind::ArrayIndex) {
+    if (access.kind == AccessKind::ArrayIndex &&
+        !access.const_index.has_value()) {
       Access out = access;
       out.index = getCanonical(access.index);
       return out;
@@ -519,6 +534,7 @@ void AbductiveDomain::canonicalize() {
       }
       for (const auto &edge_kv : kv.second) {
         if (edge_kv.first.kind == AccessKind::ArrayIndex &&
+            !edge_kv.first.const_index.has_value() &&
             !(getCanonical(edge_kv.first.index) == edge_kv.first.index)) {
           needs_rebuild = true;
           break;
@@ -566,6 +582,7 @@ void AbductiveDomain::canonicalize() {
       }
       for (const auto &edge_kv : kv.second) {
         if (edge_kv.first.kind == AccessKind::ArrayIndex &&
+            !edge_kv.first.const_index.has_value() &&
             !(getCanonical(edge_kv.first.index) == edge_kv.first.index)) {
           needs_rebuild = true;
           break;
@@ -856,6 +873,15 @@ void AbductiveDomain::canonicalize() {
     }
   }
 
+  // Allocation offsets
+  if (!allocation_offsets_.empty() && anyKeyNonCanon(allocation_offsets_)) {
+    std::map<AbstractValue, int64_t> new_offsets;
+    for (const auto &kv : allocation_offsets_) {
+      new_offsets.emplace(getCanonical(kv.first), kv.second);
+    }
+    allocation_offsets_ = std::move(new_offsets);
+  }
+
   // Dynamic type specialization set
   if (!need_dynamic_type_specialization_.empty() &&
       anyElemNonCanon(need_dynamic_type_specialization_)) {
@@ -868,7 +894,8 @@ void AbductiveDomain::canonicalize() {
 }
 
 IncorporateResult
-AbductiveDomain::incorporateNewEqs(const NewEqs &initial_eqs) {
+AbductiveDomain::incorporateNewEqs(const NewEqs &initial_eqs,
+                                   bool defer_canonicalize) {
   std::deque<NewEq> worklist(initial_eqs.begin(), initial_eqs.end());
   unsigned steps = 0;
   constexpr unsigned kMaxSteps = 4096;
@@ -1002,7 +1029,14 @@ AbductiveDomain::incorporateNewEqs(const NewEqs &initial_eqs) {
       auto mbv_new = pre_must_be_valid_.find(v_new);
       if (mbv_new == pre_must_be_valid_.end() ||
           mbv_old->second.timestamp < mbv_new->second.timestamp) {
+        const bool strict =
+            !mbv_old->second.allow_one_past_end ||
+            (mbv_new != pre_must_be_valid_.end() &&
+             !mbv_new->second.allow_one_past_end);
         pre_must_be_valid_[v_new] = mbv_old->second;
+        pre_must_be_valid_[v_new].allow_one_past_end = !strict;
+      } else if (!mbv_old->second.allow_one_past_end) {
+        mbv_new->second.allow_one_past_end = false;
       }
       pre_must_be_valid_.erase(mbv_old);
     }
@@ -1073,6 +1107,18 @@ AbductiveDomain::incorporateNewEqs(const NewEqs &initial_eqs) {
       dynamic_types_.erase(dt_old);
     }
 
+    auto off_old = allocation_offsets_.find(v_old);
+    if (off_old != allocation_offsets_.end()) {
+      allocation_offsets_.emplace(v_new, off_old->second);
+      allocation_offsets_.erase(off_old);
+    }
+
+    auto ar_old = allocation_roots_.find(v_old);
+    if (ar_old != allocation_roots_.end()) {
+      allocation_roots_.emplace(v_new, getCanonical(ar_old->second));
+      allocation_roots_.erase(ar_old);
+    }
+
     // Check if the merged value is now simultaneously null and allocated/valid.
     if (getPathFormula().isNull(v_new)) {
       if (hasConcreteAlloc(v_new)) {
@@ -1085,18 +1131,19 @@ AbductiveDomain::incorporateNewEqs(const NewEqs &initial_eqs) {
     }
   }
 
-  if (merged_any_av) {
+  if (merged_any_av && !defer_canonicalize) {
     canonicalize();
   }
   return IncorporateResult::ok();
 }
 
-IncorporateResult AbductiveDomain::incorporatePendingNewEqs() {
+IncorporateResult
+AbductiveDomain::incorporatePendingNewEqs(bool defer_canonicalize) {
   NewEqs eqs = getPathFormula().takeNewEqs();
   if (eqs.empty()) {
     return IncorporateResult::ok();
   }
-  return incorporateNewEqs(eqs);
+  return incorporateNewEqs(eqs, defer_canonicalize);
 }
 
 bool AbductiveDomain::leq(const AbductiveDomain &lhs,
@@ -1180,7 +1227,8 @@ bool AbductiveDomain::leq(const AbductiveDomain &lhs,
     }
     for (const auto &le : l_it->second) {
       Access expected = le.first;
-      if (expected.kind == AccessKind::ArrayIndex) {
+      if (expected.kind == AccessKind::ArrayIndex &&
+          !expected.const_index.has_value()) {
         AbstractValue l_idx = lhs.getCanonical(expected.index);
         auto map_it = l_to_r.find(l_idx);
         if (map_it != l_to_r.end()) {
@@ -1191,6 +1239,7 @@ bool AbductiveDomain::leq(const AbductiveDomain &lhs,
           auto l_const = lhs.getPathFormula().asConstantInt(l_idx);
           for (const auto &re : r_it->second) {
             if (re.first.kind == AccessKind::ArrayIndex &&
+                !re.first.const_index.has_value() &&
                 re.first.stride_bytes == expected.stride_bytes) {
               AbstractValue r_idx = rhs.getCanonical(re.first.index);
               auto r_const = rhs.getPathFormula().asConstantInt(r_idx);

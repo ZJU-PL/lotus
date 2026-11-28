@@ -463,6 +463,10 @@ void PulseChecker::analyze() {
         if (!CB)
           continue;
         const llvm::Function *Callee = CB->getCalledFunction();
+        if (!Callee) {
+          Callee = llvm::dyn_cast_or_null<llvm::Function>(
+              CB->getCalledOperand()->stripPointerCastsAndAliases());
+        }
         if (!Callee || Callee->isDeclaration())
           continue;
         if (function_set.count(Callee) == 0)
@@ -1131,6 +1135,9 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
                 {}));
             continue;
           }
+          if (case_astate->getPathFormula().isUnsat()) {
+            continue;
+          }
           PathConditionAtom atom = PathConditionAtom::makeRel(
               PathConditionAtom::Kind::Equal, cond_c, val_c);
           atom.is_ground =
@@ -1166,7 +1173,8 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
           }
         }
         const llvm::BasicBlock *default_succ = SI->getDefaultDest();
-        if (feasible && !default_succ->empty()) {
+        if (feasible && !default_astate->getPathFormula().isUnsat() &&
+            !default_succ->empty()) {
           default_state.setEntryPred(BB);
           pushWork(default_succ, std::move(default_state), BB);
         }

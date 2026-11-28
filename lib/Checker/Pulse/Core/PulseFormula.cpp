@@ -22,33 +22,84 @@
 namespace pulse {
 
 namespace {
-// Single thread-local holder guaranteeing strict destruction order:
-// expressions, params, and solvers are always destroyed BEFORE `ctx`.
+// Thread-local Z3 state with ISOLATED contexts for linear vs QF_BV vs nonlinear
+// solving. Keeping `bv_solver` (tactic2solver) and `nonlin_solver` in their own
+// periodically refreshed contexts prevents `cleanup_tactical -> compact_memory()`
+// from scanning the large linear AST table on every bitwise/nonlinear query,
+// and using pure deterministic `rlimit` avoids OS timer-thread churn.
 struct Z3ThreadState {
+  // 1. Persistent linear incremental solver (QF_LIA / QF_LRA)
   z3::context ctx;
   z3::solver simple_solver;
-  z3::solver bv_solver;
-  z3::solver nonlin_solver;
   z3::params linear_params;
-  z3::params fast_params;
   std::vector<z3::expr> int_pool;
-  std::vector<z3::expr> bv_pool;
   std::vector<z3::expr> real_pool;
   unsigned query_count{0};
 
+  // 2. Isolated QF_BV context & solver (recreated periodically to stay tiny)
+  std::unique_ptr<z3::context> bv_ctx;
+  std::unique_ptr<z3::solver> bv_solver;
+  std::vector<z3::expr> bv_pool;
+  unsigned bv_query_count{0};
+
+  // 3. Isolated nonlinear context & solver (recreated periodically to stay tiny)
+  std::unique_ptr<z3::context> nonlin_ctx;
+  std::unique_ptr<z3::solver> nonlin_solver;
+  std::vector<z3::expr> nonlin_int_pool;
+  std::vector<z3::expr> nonlin_real_pool;
+  unsigned nonlin_query_count{0};
+
   Z3ThreadState()
-      : ctx(), simple_solver(ctx, z3::solver::simple()),
-        bv_solver(ctx, "QF_BV"), nonlin_solver(ctx), linear_params(ctx),
-        fast_params(ctx) {
-    // Use deterministic in-memory resource limits (`rlimit`) to bound solver
-    // work without burning CPU in 1000-bit rational/nlsat loops; keep a tight
-    // 3ms timeout on `fast_params` as an additional guard for nlsat.
+      : ctx(), simple_solver(ctx, z3::solver::simple()), linear_params(ctx) {
     linear_params.set("rlimit", 60000u);
-    fast_params.set("rlimit", 15000u);
-    fast_params.set("timeout", 3u);
+    linear_params.set("timeout", 10u);
     simple_solver.set(linear_params);
-    bv_solver.set(fast_params);
-    nonlin_solver.set(fast_params);
+  }
+
+  ~Z3ThreadState() {
+    // Explicitly destroy expressions & solvers before their owning contexts.
+    bv_pool.clear();
+    bv_solver.reset();
+    bv_ctx.reset();
+    nonlin_int_pool.clear();
+    nonlin_real_pool.clear();
+    nonlin_solver.reset();
+    nonlin_ctx.reset();
+  }
+
+  void ensureFreshBV() {
+    if (!bv_ctx || ++bv_query_count >= 256) {
+      bv_pool.clear();
+      bv_solver.reset();
+      bv_ctx.reset();
+      bv_ctx = std::make_unique<z3::context>();
+      bv_solver = std::make_unique<z3::solver>(*bv_ctx, "QF_BV");
+      z3::params p(*bv_ctx);
+      p.set("rlimit", 15000u);
+      p.set("timeout", 3u);
+      bv_solver->set(p);
+      bv_query_count = 0;
+    } else {
+      bv_solver->reset();
+    }
+  }
+
+  void ensureFreshNonlin() {
+    if (!nonlin_ctx || ++nonlin_query_count >= 256) {
+      nonlin_int_pool.clear();
+      nonlin_real_pool.clear();
+      nonlin_solver.reset();
+      nonlin_ctx.reset();
+      nonlin_ctx = std::make_unique<z3::context>();
+      nonlin_solver = std::make_unique<z3::solver>(*nonlin_ctx);
+      z3::params p(*nonlin_ctx);
+      p.set("rlimit", 15000u);
+      p.set("timeout", 3u);
+      nonlin_solver->set(p);
+      nonlin_query_count = 0;
+    } else {
+      nonlin_solver->reset();
+    }
   }
 };
 
@@ -61,8 +112,6 @@ z3::context &getCachedZ3Context() { return getZ3ThreadState().ctx; }
 
 // Persistent lightweight incremental SMT solver (`Z3_mk_simple_solver`),
 // bypassing `tactic2solver` pipeline setup/teardown on every query.
-// Periodically reset to keep learned clauses bounded without excessive
-// ast_manager::compact_memory() churn.
 z3::solver &getCachedSimpleSolver(z3::context &) {
   auto &st = getZ3ThreadState();
   if (++st.query_count >= 2048) {
@@ -73,21 +122,16 @@ z3::solver &getCachedSimpleSolver(z3::context &) {
   return st.simple_solver;
 }
 
-// Reusable QF_BV bit-blasting solver (reset without push/pop so tactic2solver
-// stays on the fast bit-blasting path instead of falling back to lazy
-// incremental theory_bv).
-z3::solver &getResetBVSolver() {
+std::pair<z3::context *, z3::solver *> getResetBVSolverAndCtx() {
   auto &st = getZ3ThreadState();
-  st.bv_solver.reset();
-  st.bv_solver.set(st.fast_params);
-  return st.bv_solver;
+  st.ensureFreshBV();
+  return {st.bv_ctx.get(), st.bv_solver.get()};
 }
 
-z3::solver &getResetNonlinSolver() {
+std::pair<z3::context *, z3::solver *> getResetNonlinSolverAndCtx() {
   auto &st = getZ3ThreadState();
-  st.nonlin_solver.reset();
-  st.nonlin_solver.set(st.fast_params);
-  return st.nonlin_solver;
+  st.ensureFreshNonlin();
+  return {st.nonlin_ctx.get(), st.nonlin_solver.get()};
 }
 
 struct SolverPushScope {
@@ -102,10 +146,11 @@ struct SolverPushScope {
 };
 
 // Pooled per-query normalized Z3 constants ("i0".."ik", "b0".."bk", "r0".."rk")
-// so Z3's ast_manager never interns unbounded unique AbstractValue symbol names
-// across an entire module.
+// scoped to the owning context's pool so we never mix expressions across
+// contexts or intern unbounded unique symbol names.
 z3::expr getPooledIntVar(z3::context &ctx, size_t idx) {
-  auto &pool = getZ3ThreadState().int_pool;
+  auto &st = getZ3ThreadState();
+  auto &pool = (&ctx == &st.ctx) ? st.int_pool : st.nonlin_int_pool;
   while (pool.size() <= idx) {
     std::string name = "i" + std::to_string(pool.size());
     pool.push_back(ctx.int_const(name.c_str()));
@@ -123,7 +168,8 @@ z3::expr getPooledBVVar(z3::context &ctx, size_t idx) {
 }
 
 z3::expr getPooledRealVar(z3::context &ctx, size_t idx) {
-  auto &pool = getZ3ThreadState().real_pool;
+  auto &st = getZ3ThreadState();
+  auto &pool = (&ctx == &st.ctx) ? st.real_pool : st.nonlin_real_pool;
   while (pool.size() <= idx) {
     std::string name = "r" + std::to_string(pool.size());
     pool.push_back(ctx.real_const(name.c_str()));
@@ -744,7 +790,11 @@ bool PulseFormula::addDisequality(AbstractValue v1, AbstractValue v2) {
     if (!addNonNull(rep1))
       return false;
   }
-  invalidateSatCache();
+  if (consistent_cache_valid_ && consistent_cache_result_) {
+    invalidateSatOnly();
+  } else {
+    invalidateSatCache();
+  }
   disequalities_.insert(normalizePair(rep1, rep2));
   return true;
 }
@@ -764,7 +814,11 @@ bool PulseFormula::addNonNull(AbstractValue v) {
     return false; // Contradiction: value is concretely 0.
   }
   if (non_null_values_.insert(rep).second) {
-    invalidateSatCache();
+    if (consistent_cache_valid_ && consistent_cache_result_) {
+      invalidateSatOnly();
+    } else {
+      invalidateSatCache();
+    }
   }
   return true;
 }
@@ -793,7 +847,11 @@ bool PulseFormula::addNull(AbstractValue v) {
     }
   }
   if (null_values_.insert(rep).second) {
-    invalidateSatCache();
+    if (consistent_cache_valid_ && consistent_cache_result_) {
+      invalidateSatOnly();
+    } else {
+      invalidateSatCache();
+    }
     pending_new_eqs_.push_back(NewEq::makeEqZero(rep));
     if (!in_tableau_propagate_ && !linear_tableau_.empty()) {
       bool touches_tableau = false;
@@ -1460,31 +1518,45 @@ PulseFormula PulseFormula::join(const PulseFormula &f1,
   }
 
   // Null/non-null: intersection (plus non-killed one-sided fresh vars).
-  for (AbstractValue v : f1.null_values_) {
-    AbstractValue r = f1.findRepReadOnly(v);
-    if (f2.isNull(r) ||
-        (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
-      (void)out.addNull(r);
+  {
+    std::vector<AbstractValue> nulls;
+    nulls.reserve(f1.null_values_.size() + f2.null_values_.size());
+    for (AbstractValue v : f1.null_values_) {
+      AbstractValue r = f1.findRepReadOnly(v);
+      if (f2.isNull(r) || (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
+        nulls.push_back(out.findRep(r));
+      }
     }
+    for (AbstractValue v : f2.null_values_) {
+      AbstractValue r = f2.findRepReadOnly(v);
+      if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
+        nulls.push_back(out.findRep(r));
+      }
+    }
+    out.null_values_.assignUnsorted(std::move(nulls));
   }
-  for (AbstractValue v : f2.null_values_) {
-    AbstractValue r = f2.findRepReadOnly(v);
-    if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
-      (void)out.addNull(r);
+  {
+    std::vector<AbstractValue> non_nulls;
+    non_nulls.reserve(f1.non_null_values_.size() + f2.non_null_values_.size());
+    for (AbstractValue v : f1.non_null_values_) {
+      AbstractValue r = f1.findRepReadOnly(v);
+      if (f2.isNonNull(r) || (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
+        AbstractValue or_v = out.findRep(r);
+        if (out.null_values_.count(or_v) == 0) {
+          non_nulls.push_back(or_v);
+        }
+      }
     }
-  }
-  for (AbstractValue v : f1.non_null_values_) {
-    AbstractValue r = f1.findRepReadOnly(v);
-    if (f2.isNonNull(r) ||
-        (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
-      (void)out.addNonNull(r);
+    for (AbstractValue v : f2.non_null_values_) {
+      AbstractValue r = f2.findRepReadOnly(v);
+      if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
+        AbstractValue or_v = out.findRep(r);
+        if (out.null_values_.count(or_v) == 0) {
+          non_nulls.push_back(or_v);
+        }
+      }
     }
-  }
-  for (AbstractValue v : f2.non_null_values_) {
-    AbstractValue r = f2.findRepReadOnly(v);
-    if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
-      (void)out.addNonNull(r);
-    }
+    out.non_null_values_.assignUnsorted(std::move(non_nulls));
   }
 
   // Disequalities: intersection.
@@ -1495,50 +1567,65 @@ PulseFormula PulseFormula::join(const PulseFormula &f1,
   }
 
   // Bounds: join interval [min(lo1, lo2), max(hi1, hi2)] when present on both
-  // sides; preserve non-killed one-sided fresh variables.
-  for (const auto &kv : f1.lower_bounds_) {
-    AbstractValue r = f1.findRepReadOnly(kv.first);
-    auto lo2 = f2.getLowerBound(r);
-    if (lo2) {
-      out.lower_bounds_[out.findRep(r)] = std::min(kv.second, *lo2);
-    } else if (f2_vars.count(r) == 0 && killed.count(r) == 0) {
-      out.lower_bounds_[out.findRep(r)] = kv.second;
+  // sides; preserve non-killed one-sided fresh variables (O(N log N) batch).
+  {
+    std::vector<std::pair<AbstractValue, int64_t>> lbs;
+    lbs.reserve(f1.lower_bounds_.size() + f2.lower_bounds_.size());
+    for (const auto &kv : f1.lower_bounds_) {
+      AbstractValue r = f1.findRepReadOnly(kv.first);
+      auto lo2 = f2.getLowerBound(r);
+      if (lo2) {
+        lbs.emplace_back(out.findRep(r), std::min(kv.second, *lo2));
+      } else if (f2_vars.count(r) == 0 && killed.count(r) == 0) {
+        lbs.emplace_back(out.findRep(r), kv.second);
+      }
     }
+    for (const auto &kv : f2.lower_bounds_) {
+      AbstractValue r = f2.findRepReadOnly(kv.first);
+      if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
+        lbs.emplace_back(out.findRep(r), kv.second);
+      }
+    }
+    out.lower_bounds_.assignUnsorted(std::move(lbs));
   }
-  for (const auto &kv : f2.lower_bounds_) {
-    AbstractValue r = f2.findRepReadOnly(kv.first);
-    if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
-      out.lower_bounds_[out.findRep(r)] = kv.second;
+  {
+    std::vector<std::pair<AbstractValue, int64_t>> ubs;
+    ubs.reserve(f1.upper_bounds_.size() + f2.upper_bounds_.size());
+    for (const auto &kv : f1.upper_bounds_) {
+      AbstractValue r = f1.findRepReadOnly(kv.first);
+      auto hi2 = f2.getUpperBound(r);
+      if (hi2) {
+        ubs.emplace_back(out.findRep(r), std::max(kv.second, *hi2));
+      } else if (f2_vars.count(r) == 0 && killed.count(r) == 0) {
+        ubs.emplace_back(out.findRep(r), kv.second);
+      }
     }
-  }
-  for (const auto &kv : f1.upper_bounds_) {
-    AbstractValue r = f1.findRepReadOnly(kv.first);
-    auto hi2 = f2.getUpperBound(r);
-    if (hi2) {
-      out.upper_bounds_[out.findRep(r)] = std::max(kv.second, *hi2);
-    } else if (f2_vars.count(r) == 0 && killed.count(r) == 0) {
-      out.upper_bounds_[out.findRep(r)] = kv.second;
+    for (const auto &kv : f2.upper_bounds_) {
+      AbstractValue r = f2.findRepReadOnly(kv.first);
+      if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
+        ubs.emplace_back(out.findRep(r), kv.second);
+      }
     }
-  }
-  for (const auto &kv : f2.upper_bounds_) {
-    AbstractValue r = f2.findRepReadOnly(kv.first);
-    if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
-      out.upper_bounds_[out.findRep(r)] = kv.second;
-    }
+    out.upper_bounds_.assignUnsorted(std::move(ubs));
   }
 
   // Integer markers: intersection + fresh vars.
-  for (AbstractValue v : f1.integer_values_) {
-    AbstractValue r = f1.findRepReadOnly(v);
-    if (f2.isInteger(r) || (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
-      out.addIntegerConstraint(r);
+  {
+    std::vector<AbstractValue> ints;
+    ints.reserve(f1.integer_values_.size() + f2.integer_values_.size());
+    for (AbstractValue v : f1.integer_values_) {
+      AbstractValue r = f1.findRepReadOnly(v);
+      if (f2.isInteger(r) || (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
+        ints.push_back(out.findRep(r));
+      }
     }
-  }
-  for (AbstractValue v : f2.integer_values_) {
-    AbstractValue r = f2.findRepReadOnly(v);
-    if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
-      out.addIntegerConstraint(r);
+    for (AbstractValue v : f2.integer_values_) {
+      AbstractValue r = f2.findRepReadOnly(v);
+      if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
+        ints.push_back(out.findRep(r));
+      }
     }
+    out.integer_values_.assignUnsorted(std::move(ints));
   }
 
   // Linear constraints: keep syntactic intersection without string allocations.
@@ -1611,42 +1698,74 @@ PulseFormula PulseFormula::join(const PulseFormula &f1,
   }
 
   // Type / InstanceOf: intersection + non-killed fresh variables.
-  for (const auto &kv : f1.exact_types_) {
-    AbstractValue r = f1.findRepReadOnly(kv.first);
-    auto t2 = f2.getExactType(r);
-    if ((t2 && *t2 == kv.second) ||
-        (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
-      (void)out.addExactType(r, kv.second);
+  {
+    std::vector<std::pair<AbstractValue, std::string>> etypes;
+    etypes.reserve(f1.exact_types_.size() + f2.exact_types_.size());
+    for (const auto &kv : f1.exact_types_) {
+      AbstractValue r = f1.findRepReadOnly(kv.first);
+      auto t2 = f2.getExactType(r);
+      if ((t2 && *t2 == kv.second) ||
+          (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
+        etypes.emplace_back(out.findRep(r), kv.second);
+      }
     }
-  }
-  for (const auto &kv : f2.exact_types_) {
-    AbstractValue r = f2.findRepReadOnly(kv.first);
-    if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
-      (void)out.addExactType(r, kv.second);
+    for (const auto &kv : f2.exact_types_) {
+      AbstractValue r = f2.findRepReadOnly(kv.first);
+      if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
+        etypes.emplace_back(out.findRep(r), kv.second);
+      }
     }
+    out.exact_types_.assignUnsorted(std::move(etypes));
   }
 
   // Float constants: intersection + non-killed fresh variables.
-  for (const auto &kv : f1.float_constants_) {
-    AbstractValue r = f1.findRepReadOnly(kv.first);
-    auto c2 = f2.asConstantFloat(r);
-    if ((c2 && *c2 == kv.second) ||
-        (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
-      (void)out.addFloatConstant(r, kv.second);
+  {
+    std::vector<std::pair<AbstractValue, double>> fconsts;
+    fconsts.reserve(f1.float_constants_.size() + f2.float_constants_.size());
+    for (const auto &kv : f1.float_constants_) {
+      AbstractValue r = f1.findRepReadOnly(kv.first);
+      auto c2 = f2.asConstantFloat(r);
+      if ((c2 && *c2 == kv.second) ||
+          (f2_vars.count(r) == 0 && killed.count(r) == 0)) {
+        fconsts.emplace_back(out.findRep(r), kv.second);
+      }
     }
-  }
-  for (const auto &kv : f2.float_constants_) {
-    AbstractValue r = f2.findRepReadOnly(kv.first);
-    if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
-      (void)out.addFloatConstant(r, kv.second);
+    for (const auto &kv : f2.float_constants_) {
+      AbstractValue r = f2.findRepReadOnly(kv.first);
+      if (f1_vars.count(r) == 0 && killed.count(r) == 0) {
+        fconsts.emplace_back(out.findRep(r), kv.second);
+      }
     }
+    out.float_constants_.assignUnsorted(std::move(fconsts));
   }
 
-  for (const auto &kv : f1.bit_widths_) {
-    out.setBitWidth(f1.findRepReadOnly(kv.first), kv.second);
+  // String constants: keep shared intersection (avoids bloating joins with
+  // hundreds of dead one-sided error-message string literals while preserving
+  // constant strings alive across branches).
+  if (!f1.string_constants_.empty() && !f2.string_constants_.empty()) {
+    std::vector<std::pair<AbstractValue, std::string>> sconsts;
+    sconsts.reserve(
+        std::min(f1.string_constants_.size(), f2.string_constants_.size()));
+    for (const auto &kv : f1.string_constants_) {
+      AbstractValue r = f1.findRepReadOnly(kv.first);
+      auto s2 = f2.asConstantString(r);
+      if (s2 && *s2 == kv.second) {
+        sconsts.emplace_back(out.findRep(r), kv.second);
+      }
+    }
+    out.string_constants_.assignUnsorted(std::move(sconsts));
   }
-  for (const auto &kv : f2.bit_widths_) {
-    out.setBitWidth(f2.findRepReadOnly(kv.first), kv.second);
+
+  {
+    std::vector<std::pair<AbstractValue, unsigned>> bws;
+    bws.reserve(f1.bit_widths_.size() + f2.bit_widths_.size());
+    for (const auto &kv : f1.bit_widths_) {
+      bws.emplace_back(out.findRep(f1.findRepReadOnly(kv.first)), kv.second);
+    }
+    for (const auto &kv : f2.bit_widths_) {
+      bws.emplace_back(out.findRep(f2.findRepReadOnly(kv.first)), kv.second);
+    }
+    out.bit_widths_.assignUnsorted(std::move(bws));
   }
 
   out.in_tableau_propagate_ = false;
@@ -1881,10 +2000,11 @@ PulseFormula::applySubstitution(const Substitution &substitution,
 
 std::set<AbstractValue> PulseFormula::simplifyForSummary(
     const std::set<AbstractValue> &keep_vars,
-    const std::set<AbstractValue> &precondition_vocab) {
+    const std::set<AbstractValue> &precondition_vocab,
+    bool keep_non_ground_conditions) {
   (void)precondition_vocab;
   std::set<AbstractValue> live_via_arithmetic;
-  if (is_contradiction_) {
+  if (is_contradiction_ || isEmpty()) {
     return live_via_arithmetic;
   }
 
@@ -1993,9 +2113,10 @@ std::set<AbstractValue> PulseFormula::simplifyForSummary(
       }
     }
     for (const auto &kv : conditions_) {
-      if (kv.second > 0) {
-        // Keep variables appearing in depth > 0 conditions so callers can
-        // discharge them and decide manifestness.
+      if (kv.second > 0 || (keep_non_ground_conditions && !kv.first.is_ground)) {
+        // Keep variables appearing in depth > 0 conditions (and non-ground
+        // depth-0 conditions on latent summaries) so callers can discharge
+        // them and never misclassify a guarded callee path as manifest.
         std::set<AbstractValue> cvars;
         collectConditionVars(kv.first, cvars);
         for (AbstractValue v : cvars) {
@@ -2221,7 +2342,8 @@ std::set<AbstractValue> PulseFormula::simplifyForSummary(
       mapped.lhs = map_rep(mapped.lhs);
     if (!mapped.const_rhs && mapped.rhs.getId() != 0)
       mapped.rhs = map_rep(mapped.rhs);
-    bool keep_cond = kv.second > 0;
+    bool keep_cond =
+        kv.second > 0 || (keep_non_ground_conditions && !mapped.is_ground);
     if (!keep_cond) {
       if (mapped.lhs.getId() != 0 && live.count(mapped.lhs) > 0 &&
           (mapped.const_rhs || mapped.rhs.getId() == 0 ||
@@ -2662,6 +2784,32 @@ bool PulseFormula::addLinearConstraint(const LinearConstraint &constraint) {
     if (!in_tableau_propagate_ && !propagateLinearTableau()) {
       return false;
     }
+    if (!in_tableau_propagate_ && has_linear_inequalities_ &&
+        canonical_lc.terms.size() == 2 &&
+        ((canonical_lc.terms[0].coefficient == 1 &&
+          canonical_lc.terms[1].coefficient == -1) ||
+         (canonical_lc.terms[0].coefficient == -1 &&
+          canonical_lc.terms[1].coefficient == 1))) {
+      AbstractValue t0 = findRep(canonical_lc.terms[0].var);
+      AbstractValue t1 = findRep(canonical_lc.terms[1].var);
+      bool touches_ineq = false;
+      for (const auto &lc : linear_constraints_) {
+        if (lc.kind == ConstraintKind::Equal)
+          continue;
+        for (const auto &tm : lc.terms) {
+          AbstractValue tv = findRepReadOnly(tm.var);
+          if (tv == t0 || tv == t1) {
+            touches_ineq = true;
+            break;
+          }
+        }
+        if (touches_ineq)
+          break;
+      }
+      if (touches_ineq && !propagateLinearInequalities()) {
+        return false;
+      }
+    }
     // Equalities from +/- SSA definitions are already checked by the RREF
     // tableau; defer full Z3 solving to branch assumptions / isUnsat().
     return in_tableau_propagate_ ? true : isConsistent();
@@ -2712,7 +2860,23 @@ bool PulseFormula::addBounds(AbstractValue v, int64_t lower, int64_t upper) {
   if (!bounds_changed) {
     return true;
   }
-  invalidateSatCache();
+
+  if (new_lower == 0 && new_upper == 0 && null_values_.count(rep) == 0) {
+    for (const auto &p : disequalities_) {
+      AbstractValue a = findRep(p.first);
+      AbstractValue b = findRep(p.second);
+      if ((a == rep && null_values_.count(b) > 0) ||
+          (b == rep && null_values_.count(a) > 0)) {
+        return false;
+      }
+    }
+  }
+
+  if (consistent_cache_valid_ && consistent_cache_result_) {
+    invalidateSatOnly();
+  } else {
+    invalidateSatCache();
+  }
   lower_bounds_[rep] = new_lower;
   upper_bounds_[rep] = new_upper;
 
@@ -2987,9 +3151,25 @@ bool PulseFormula::checkSatisfiability() const {
       needs_linear_smt = !tableau_complete;
     } else {
       // Check if any inequality is non-difference (not `u - v <= c`) or
-      // interacts with tableau equalities, or if difference graph > 32 nodes.
+      // interacts with non-unit-difference tableau equalities, or if the
+      // combined difference graph exceeds propagateLinearInequalities's cap.
+      auto isUnitDiffRow = [](const LinearEqRow &row) -> bool {
+        if (row.coeffs.size() != 2)
+          return false;
+        auto it = row.coeffs.begin();
+        int64_t c0 = it->second;
+        ++it;
+        int64_t c1 = it->second;
+        return (c0 == 1 && c1 == -1) || (c0 == -1 && c1 == 1);
+      };
+
       std::set<AbstractValue> diff_nodes;
+      if (linear_constraints_.size() > 128) {
+        needs_linear_smt = true;
+      }
       for (const auto &lc : linear_constraints_) {
+        if (needs_linear_smt)
+          break;
         if (lc.kind == ConstraintKind::Equal)
           continue;
         bool is_unit_diff =
@@ -3000,22 +3180,36 @@ bool PulseFormula::checkSatisfiability() const {
           needs_linear_smt = true;
           break;
         }
-        AbstractValue v0 = findRepReadOnly(lc.terms[0].var);
-        AbstractValue v1 = findRepReadOnly(lc.terms[1].var);
-        diff_nodes.insert(v0);
-        diff_nodes.insert(v1);
-        if (!linear_tableau_.empty()) {
-          // If any variable in the inequality also appears in a tableau row,
-          // let Z3 decide the combined LIA system.
+        diff_nodes.insert(findRepReadOnly(lc.terms[0].var));
+        diff_nodes.insert(findRepReadOnly(lc.terms[1].var));
+      }
+      if (!needs_linear_smt && !linear_tableau_.empty()) {
+        // Expand diff_nodes across 2-variable unit-difference tableau rows
+        // (which propagateLinearInequalities incorporates directly); only
+        // escalate to Z3 if a non-unit-difference tableau row touches them.
+        bool expanded_diff = true;
+        while (expanded_diff && !needs_linear_smt) {
+          expanded_diff = false;
           for (const auto &trow : linear_tableau_) {
-            if (trow.second.coeffs.count(v0) > 0 ||
-                trow.second.coeffs.count(v1) > 0) {
+            bool touches = false;
+            for (const auto &ckv : trow.second.coeffs) {
+              if (diff_nodes.count(findRepReadOnly(ckv.first)) > 0) {
+                touches = true;
+                break;
+              }
+            }
+            if (!touches)
+              continue;
+            if (!isUnitDiffRow(trow.second)) {
               needs_linear_smt = true;
               break;
             }
+            for (const auto &ckv : trow.second.coeffs) {
+              if (diff_nodes.insert(findRepReadOnly(ckv.first)).second) {
+                expanded_diff = true;
+              }
+            }
           }
-          if (needs_linear_smt)
-            break;
         }
       }
       if (diff_nodes.size() > 32) {
@@ -3760,27 +3954,29 @@ bool PulseFormula::checkSatisfiability() const {
         return cacheAndReturn(cit->second);
       }
 
-      // Reuse thread-local QF_BV bit-blasting solver (reset without push/pop
-      // to keep fast bit-blasting and avoid per-query solver/params teardown).
-      z3::solver &bv_solver = getResetBVSolver();
+      // Use isolated QF_BV context & solver so tactic2solver's memory
+      // compaction stays tiny and never scans the main linear AST table.
+      auto [bv_ctx_ptr, bv_solver_ptr] = getResetBVSolverAndCtx();
+      z3::context &bv_ctx = *bv_ctx_ptr;
+      z3::solver &bv_solver = *bv_solver_ptr;
       std::unordered_map<AbstractValue, z3::expr> bv_map;
       auto getBV = [&](AbstractValue v) -> z3::expr {
-        return getZ3BVVar(ctx, findRepReadOnly(v), bv_map);
+        return getZ3BVVar(bv_ctx, findRepReadOnly(v), bv_map);
       };
       for (AbstractValue c : z3_vars) {
         auto lit = lower_bounds_.find(c);
         if (lit != lower_bounds_.end()) {
-          bv_solver.add(getBV(c) >= ctx.bv_val(lit->second, 64));
+          bv_solver.add(getBV(c) >= bv_ctx.bv_val(lit->second, 64));
         }
         auto uit = upper_bounds_.find(c);
         if (uit != upper_bounds_.end()) {
-          bv_solver.add(getBV(c) <= ctx.bv_val(uit->second, 64));
+          bv_solver.add(getBV(c) <= bv_ctx.bv_val(uit->second, 64));
         }
         if (null_values_.count(c) > 0) {
-          bv_solver.add(getBV(c) == ctx.bv_val(0, 64));
+          bv_solver.add(getBV(c) == bv_ctx.bv_val(0, 64));
         }
         if (non_null_values_.count(c) > 0) {
-          bv_solver.add(getBV(c) != ctx.bv_val(0, 64));
+          bv_solver.add(getBV(c) != bv_ctx.bv_val(0, 64));
         }
       }
       for (const auto &neq : active_diseqs) {
@@ -3788,11 +3984,11 @@ bool PulseFormula::checkSatisfiability() const {
       }
       for (const LinearConstraint *cp : active_linear) {
         const auto &constraint = *cp;
-        z3::expr lhs = ctx.bv_val(0, 64);
+        z3::expr lhs = bv_ctx.bv_val(0, 64);
         for (const auto &term : constraint.terms) {
-          lhs = lhs + (ctx.bv_val(term.coefficient, 64) * getBV(term.var));
+          lhs = lhs + (bv_ctx.bv_val(term.coefficient, 64) * getBV(term.var));
         }
-        z3::expr rhs = ctx.bv_val(constraint.constant, 64);
+        z3::expr rhs = bv_ctx.bv_val(constraint.constant, 64);
         switch (constraint.kind) {
         case ConstraintKind::LessEqual:
           bv_solver.add(lhs <= rhs);
@@ -3826,12 +4022,12 @@ bool PulseFormula::checkSatisfiability() const {
             bv_solver.add(rv == o1 * o2);
           }
         } else if (arith_op.op == "/") {
-          bv_solver.add(o2 != ctx.bv_val(0, 64));
+          bv_solver.add(o2 != bv_ctx.bv_val(0, 64));
           if (asConstantInt(arith_op.op1) && asConstantInt(arith_op.op2)) {
             bv_solver.add(rv == o1 / o2);
           }
         } else if (arith_op.op == "%") {
-          bv_solver.add(o2 != ctx.bv_val(0, 64));
+          bv_solver.add(o2 != bv_ctx.bv_val(0, 64));
           if (asConstantInt(arith_op.op1) && asConstantInt(arith_op.op2)) {
             bv_solver.add(rv == z3::srem(o1, o2));
           }
@@ -3853,9 +4049,9 @@ bool PulseFormula::checkSatisfiability() const {
       }
       for (const auto &deq : active_disj_eqs) {
         z3::expr tv = getBV(deq.target);
-        z3::expr_vector alts(ctx);
+        z3::expr_vector alts(bv_ctx);
         for (int64_t c : deq.const_options) {
-          alts.push_back(tv == ctx.bv_val(c, 64));
+          alts.push_back(tv == bv_ctx.bv_val(c, 64));
         }
         for (AbstractValue ov : deq.var_options) {
           alts.push_back(tv == getBV(ov));
@@ -3929,10 +4125,10 @@ bool PulseFormula::checkSatisfiability() const {
     }
     std::string cache_key;
     if (use_nonlin ||
-        (z3_vars.size() + real_vars.size() <= 16 &&
+        (z3_vars.size() + real_vars.size() <= 48 &&
          active_linear.size() + active_arith_ops.size() +
                  active_float_ops.size() + active_float_cmps.size() <=
-             16)) {
+             48)) {
       cache_key = buildNormalizedQueryKey(use_nonlin ? 'N' : 'L');
       auto cit = smt_query_cache.find(cache_key);
       if (cit != smt_query_cache.end()) {
@@ -3940,13 +4136,17 @@ bool PulseFormula::checkSatisfiability() const {
       }
     }
     std::optional<SolverPushScope> push_scope;
+    z3::context *active_ctx_ptr = &ctx;
     z3::solver *solver_ptr = nullptr;
     if (!use_nonlin) {
       solver_ptr = &getCachedSimpleSolver(ctx);
       push_scope.emplace(*solver_ptr);
     } else {
-      solver_ptr = &getResetNonlinSolver();
+      auto [nl_ctx, nl_solver] = getResetNonlinSolverAndCtx();
+      active_ctx_ptr = nl_ctx;
+      solver_ptr = nl_solver;
     }
+    z3::context &actx = *active_ctx_ptr;
     z3::solver &solver = *solver_ptr;
     std::unordered_map<AbstractValue, z3::expr> var_map;
 
@@ -3956,14 +4156,14 @@ bool PulseFormula::checkSatisfiability() const {
 
     for (const LinearConstraint *cp : active_linear) {
       const auto &constraint = *cp;
-      z3::expr lhs = ctx.int_val(0);
+      z3::expr lhs = actx.int_val(0);
       for (const auto &term : constraint.terms) {
         AbstractValue canon = getCanon(term.var);
-        z3::expr var = getZ3Var(ctx, canon, var_map);
-        lhs = lhs + (ctx.int_val(term.coefficient) * var);
+        z3::expr var = getZ3Var(actx, canon, var_map);
+        lhs = lhs + (actx.int_val(term.coefficient) * var);
       }
 
-      z3::expr rhs = ctx.int_val(constraint.constant);
+      z3::expr rhs = actx.int_val(constraint.constant);
 
       switch (constraint.kind) {
       case ConstraintKind::LessEqual:
@@ -3987,23 +4187,23 @@ bool PulseFormula::checkSatisfiability() const {
     for (AbstractValue canon : z3_vars) {
       auto lit = lower_bounds_.find(canon);
       if (lit != lower_bounds_.end()) {
-        solver.add(getZ3Var(ctx, canon, var_map) >= ctx.int_val(lit->second));
+        solver.add(getZ3Var(actx, canon, var_map) >= actx.int_val(lit->second));
       }
       auto uit = upper_bounds_.find(canon);
       if (uit != upper_bounds_.end()) {
-        solver.add(getZ3Var(ctx, canon, var_map) <= ctx.int_val(uit->second));
+        solver.add(getZ3Var(actx, canon, var_map) <= actx.int_val(uit->second));
       }
       if (null_values_.count(canon) > 0) {
-        solver.add(getZ3Var(ctx, canon, var_map) == ctx.int_val(0));
+        solver.add(getZ3Var(actx, canon, var_map) == actx.int_val(0));
       }
       if (non_null_values_.count(canon) > 0) {
-        solver.add(getZ3Var(ctx, canon, var_map) != ctx.int_val(0));
+        solver.add(getZ3Var(actx, canon, var_map) != actx.int_val(0));
       }
     }
 
     for (const auto &neq : active_diseqs) {
-      z3::expr v1 = getZ3Var(ctx, neq.first, var_map);
-      z3::expr v2 = getZ3Var(ctx, neq.second, var_map);
+      z3::expr v1 = getZ3Var(actx, neq.first, var_map);
+      z3::expr v2 = getZ3Var(actx, neq.second, var_map);
       solver.add(v1 != v2);
     }
 
@@ -4012,21 +4212,29 @@ bool PulseFormula::checkSatisfiability() const {
       AbstractValue canon_op1 = getCanon(arith_op.op1);
       AbstractValue canon_op2 = getCanon(arith_op.op2);
 
-      z3::expr result_var = getZ3Var(ctx, canon_result, var_map);
-      z3::expr op1_var = getZ3Var(ctx, canon_op1, var_map);
-      z3::expr op2_var = getZ3Var(ctx, canon_op2, var_map);
+      z3::expr result_var = getZ3Var(actx, canon_result, var_map);
+      z3::expr op1_var = getZ3Var(actx, canon_op1, var_map);
+      z3::expr op2_var = getZ3Var(actx, canon_op2, var_map);
 
       if (arith_op.op == "+") {
         solver.add(result_var == op1_var + op2_var);
       } else if (arith_op.op == "-") {
         solver.add(result_var == op1_var - op2_var);
       } else if (arith_op.op == "*") {
-        solver.add(result_var == op1_var * op2_var);
+        // Encode constant-factor multiplication linearly so Z3 stays in QF_LIA
+        // instead of launching `nla::core::bounded_nlsat` on `i1 * i2`!
+        if (auto c1 = asConstantInt(arith_op.op1)) {
+          solver.add(result_var == actx.int_val(*c1) * op2_var);
+        } else if (auto c2 = asConstantInt(arith_op.op2)) {
+          solver.add(result_var == op1_var * actx.int_val(*c2));
+        } else {
+          solver.add(result_var == op1_var * op2_var);
+        }
       } else if (arith_op.op == "/") {
         solver.add(op2_var != 0);
         if (auto c2 = asConstantInt(arith_op.op2)) {
           if (*c2 != 0)
-            solver.add(result_var == op1_var / ctx.int_val(*c2));
+            solver.add(result_var == op1_var / actx.int_val(*c2));
         } else {
           solver.add(result_var == op1_var / op2_var);
         }
@@ -4034,27 +4242,27 @@ bool PulseFormula::checkSatisfiability() const {
         solver.add(op2_var != 0);
         if (auto c2 = asConstantInt(arith_op.op2)) {
           if (*c2 != 0)
-            solver.add(result_var == z3::mod(op1_var, ctx.int_val(*c2)));
+            solver.add(result_var == z3::mod(op1_var, actx.int_val(*c2)));
         } else {
           solver.add(result_var == z3::mod(op1_var, op2_var));
         }
       } else if (arith_op.op == "&") {
         solver.add(result_var ==
-                   fromBV64(ctx, toBV64(ctx, op1_var) & toBV64(ctx, op2_var)));
+                   fromBV64(actx, toBV64(actx, op1_var) & toBV64(actx, op2_var)));
       } else if (arith_op.op == "|") {
         solver.add(result_var ==
-                   fromBV64(ctx, toBV64(ctx, op1_var) | toBV64(ctx, op2_var)));
+                   fromBV64(actx, toBV64(actx, op1_var) | toBV64(actx, op2_var)));
       } else if (arith_op.op == "^") {
         solver.add(result_var ==
-                   fromBV64(ctx, toBV64(ctx, op1_var) ^ toBV64(ctx, op2_var)));
+                   fromBV64(actx, toBV64(actx, op1_var) ^ toBV64(actx, op2_var)));
       } else if (arith_op.op == "<<") {
         solver.add(result_var ==
-                   fromBV64(ctx, z3::shl(toBV64(ctx, op1_var),
-                                         toBV64(ctx, op2_var))));
+                   fromBV64(actx, z3::shl(toBV64(actx, op1_var),
+                                          toBV64(actx, op2_var))));
       } else if (arith_op.op == ">>") {
         solver.add(result_var ==
-                   fromBV64(ctx, z3::ashr(toBV64(ctx, op1_var),
-                                          toBV64(ctx, op2_var))));
+                   fromBV64(actx, z3::ashr(toBV64(actx, op1_var),
+                                           toBV64(actx, op2_var))));
       } else {
         continue;
       }
@@ -4062,13 +4270,13 @@ bool PulseFormula::checkSatisfiability() const {
 
     // Disjunctive equalities from PulseJoin (v = c1 ∨ v = c2 / v = o1 ∨ v = o2).
     for (const auto &deq : active_disj_eqs) {
-      z3::expr tv = getZ3Var(ctx, getCanon(deq.target), var_map);
-      z3::expr_vector alts(ctx);
+      z3::expr tv = getZ3Var(actx, getCanon(deq.target), var_map);
+      z3::expr_vector alts(actx);
       for (int64_t c : deq.const_options) {
-        alts.push_back(tv == ctx.int_val(c));
+        alts.push_back(tv == actx.int_val(c));
       }
       for (AbstractValue ov : deq.var_options) {
-        alts.push_back(tv == getZ3Var(ctx, getCanon(ov), var_map));
+        alts.push_back(tv == getZ3Var(actx, getCanon(ov), var_map));
       }
       if (alts.size() > 0) {
         solver.add(z3::mk_or(alts));
@@ -4082,45 +4290,45 @@ bool PulseFormula::checkSatisfiability() const {
       for (AbstractValue c : real_vars) {
         auto fit = float_constants_.find(c);
         if (fit != float_constants_.end()) {
-          z3::expr rv = getZ3RealVar(ctx, c, real_map);
-          solver.add(rv == z3RealVal(ctx, fit->second));
+          z3::expr rv = getZ3RealVar(actx, c, real_map);
+          solver.add(rv == z3RealVal(actx, fit->second));
         }
       }
       for (const FloatOp *fop_ptr : active_float_ops) {
         const auto &fop = *fop_ptr;
-        z3::expr res = getZ3RealVar(ctx, getCanon(fop.result), real_map);
-        z3::expr o1 = getZ3RealVar(ctx, getCanon(fop.op1), real_map);
-        z3::expr o2 = getZ3RealVar(ctx, getCanon(fop.op2), real_map);
+        z3::expr res = getZ3RealVar(actx, getCanon(fop.result), real_map);
+        z3::expr o1 = getZ3RealVar(actx, getCanon(fop.op1), real_map);
+        z3::expr o2 = getZ3RealVar(actx, getCanon(fop.op2), real_map);
         if (fop.op == "+") {
           solver.add(res == o1 + o2);
         } else if (fop.op == "-") {
           solver.add(res == o1 - o2);
         } else if (fop.op == "*") {
           if (auto c1 = asConstantFloat(fop.op1)) {
-            solver.add(res == z3RealVal(ctx, *c1) * o2);
+            solver.add(res == z3RealVal(actx, *c1) * o2);
           } else if (auto c2 = asConstantFloat(fop.op2)) {
-            solver.add(res == o1 * z3RealVal(ctx, *c2));
+            solver.add(res == o1 * z3RealVal(actx, *c2));
           } else {
             solver.add(res == o1 * o2);
           }
         } else if (fop.op == "/") {
           if (auto c2 = asConstantFloat(fop.op2)) {
             if (*c2 == 0.0) {
-              solver.add(ctx.bool_val(false));
+              solver.add(actx.bool_val(false));
             } else {
               // Linear form `res * c2 == o1` keeps query in pure QF_LRA.
-              solver.add(res * z3RealVal(ctx, *c2) == o1);
+              solver.add(res * z3RealVal(actx, *c2) == o1);
             }
           } else {
-            solver.add(o2 != ctx.real_val(0));
+            solver.add(o2 != actx.real_val(0));
             solver.add(res == o1 / o2);
           }
         }
       }
       for (const FloatCmp *fcmp_ptr : active_float_cmps) {
         const auto &fcmp = *fcmp_ptr;
-        z3::expr o1 = getZ3RealVar(ctx, getCanon(fcmp.op1), real_map);
-        z3::expr o2 = getZ3RealVar(ctx, getCanon(fcmp.op2), real_map);
+        z3::expr o1 = getZ3RealVar(actx, getCanon(fcmp.op1), real_map);
+        z3::expr o2 = getZ3RealVar(actx, getCanon(fcmp.op2), real_map);
         if (fcmp.pred == "==")
           solver.add(o1 == o2);
         else if (fcmp.pred == "!=")
@@ -4221,6 +4429,156 @@ std::optional<bool> PulseFormula::impliesComparison(
       return false;
     if (op == "!=")
       return true;
+  }
+
+  // Non-SMT difference-logic entailment fast-path: checks 2-variable unit
+  // difference constraints from linear_constraints_ and linear_tableau_
+  // (`u - v <= d`) via bounded Bellman-Ford / Floyd-Warshall over <= 32 nodes.
+  // Decides transitive relational comparisons in BOTH smt=off and smt=on modes
+  // without invoking Z3.
+  if (lhs_var && rhs_var && !lc && !rc &&
+      (!linear_constraints_.empty() || !linear_tableau_.empty()) &&
+      linear_constraints_.size() <= 64) {
+    AbstractValue lrep = findRepReadOnly(*lhs_var);
+    AbstractValue rrep = findRepReadOnly(*rhs_var);
+    if (!(lrep == rrep)) {
+      constexpr size_t kMaxNodes = 32;
+      llvm::SmallVector<AbstractValue, kMaxNodes> nodes;
+      __int128 dist[kMaxNodes][kMaxNodes];
+      bool has_e[kMaxNodes][kMaxNodes] = {};
+      auto idxOf = [&](AbstractValue v) -> int {
+        for (size_t i = 0; i < nodes.size(); ++i) {
+          if (nodes[i] == v)
+            return static_cast<int>(i);
+        }
+        if (nodes.size() >= kMaxNodes)
+          return -1;
+        int id = static_cast<int>(nodes.size());
+        nodes.push_back(v);
+        return id;
+      };
+      auto addEdge = [&](AbstractValue u, AbstractValue v, __int128 d) {
+        if (u == v)
+          return;
+        int iu = idxOf(u), iv = idxOf(v);
+        if (iu < 0 || iv < 0)
+          return;
+        if (!has_e[iu][iv] || d < dist[iu][iv]) {
+          has_e[iu][iv] = true;
+          dist[iu][iv] = d;
+        }
+      };
+      int il = idxOf(lrep);
+      int ir = idxOf(rrep);
+      for (const auto &c : linear_constraints_) {
+        if (c.terms.size() != 2)
+          continue;
+        AbstractValue v0 = findRepReadOnly(c.terms[0].var);
+        AbstractValue v1 = findRepReadOnly(c.terms[1].var);
+        int64_t k0 = c.terms[0].coefficient;
+        int64_t k1 = c.terms[1].coefficient;
+        __int128 rhs = c.constant;
+        if (k0 == -1 && k1 == 1) {
+          std::swap(v0, v1);
+          k0 = 1;
+          k1 = -1;
+        }
+        if (k0 != 1 || k1 != -1)
+          continue;
+        switch (c.kind) {
+        case ConstraintKind::Equal:
+          addEdge(v0, v1, rhs);
+          addEdge(v1, v0, -rhs);
+          break;
+        case ConstraintKind::LessEqual:
+          addEdge(v0, v1, rhs);
+          break;
+        case ConstraintKind::Less:
+          addEdge(v0, v1, rhs - 1);
+          break;
+        case ConstraintKind::GreaterEqual:
+          addEdge(v1, v0, -rhs);
+          break;
+        case ConstraintKind::Greater:
+          addEdge(v1, v0, -rhs - 1);
+          break;
+        }
+      }
+      for (const auto &kv : linear_tableau_) {
+        const auto &row = kv.second;
+        if (row.coeffs.size() != 2)
+          continue;
+        auto it0 = row.coeffs.begin();
+        auto it1 = std::next(it0);
+        AbstractValue v0 = findRepReadOnly(it0->first);
+        AbstractValue v1 = findRepReadOnly(it1->first);
+        int64_t k0 = it0->second;
+        int64_t k1 = it1->second;
+        __int128 rhs = -static_cast<__int128>(row.constant);
+        if (k0 == 1 && k1 == -1) {
+          addEdge(v0, v1, rhs);
+          addEdge(v1, v0, -rhs);
+        } else if (k0 == -1 && k1 == 1) {
+          addEdge(v1, v0, rhs);
+          addEdge(v0, v1, -rhs);
+        }
+      }
+      const size_t n = nodes.size();
+      if (n >= 2 && il >= 0 && ir >= 0) {
+        for (size_t k = 0; k < n; ++k) {
+          for (size_t i = 0; i < n; ++i) {
+            if (!has_e[i][k])
+              continue;
+            __int128 dik = dist[i][k];
+            for (size_t j = 0; j < n; ++j) {
+              if (!has_e[k][j] || i == j)
+                continue;
+              __int128 cand = dik + dist[k][j];
+              if (!has_e[i][j] || cand < dist[i][j]) {
+                has_e[i][j] = true;
+                dist[i][j] = cand;
+              }
+            }
+          }
+        }
+        // dist[il][ir] = upper bound on (lhs - rhs)
+        // dist[ir][il] = upper bound on (rhs - lhs)
+        if (has_e[il][ir]) {
+          __int128 ub = dist[il][ir];
+          if (ub < 0) {
+            if (op == "<" || op == "<=" || op == "!=")
+              return true;
+            if (op == "==" || op == ">" || op == ">=")
+              return false;
+          } else if (ub == 0) {
+            if (op == "<=")
+              return true;
+            if (op == ">")
+              return false;
+          }
+        }
+        if (has_e[ir][il]) {
+          __int128 ub = dist[ir][il];
+          if (ub < 0) {
+            if (op == ">" || op == ">=" || op == "!=")
+              return true;
+            if (op == "==" || op == "<" || op == "<=")
+              return false;
+          } else if (ub == 0) {
+            if (op == ">=")
+              return true;
+            if (op == "<")
+              return false;
+          }
+        }
+        if (has_e[il][ir] && has_e[ir][il] && dist[il][ir] == 0 &&
+            dist[ir][il] == 0) {
+          if (op == "==" || op == "<=" || op == ">=")
+            return true;
+          return false;
+        }
+      }
+    }
   }
 
   // SMT entailment fallback when relational or disjunctive constraints exist.
@@ -4371,32 +4729,36 @@ std::optional<bool> PulseFormula::impliesComparison(
         has_bitwise = true;
         has_nonlin_int = true;
       } else if (op->op == "/" || op->op == "%") {
-        has_nonlin_int = true;
+        if (!asConstantInt(op->op2)) {
+          has_nonlin_int = true;
+        }
       } else if (op->op == "*" && !asConstantInt(op->op1) &&
                  !asConstantInt(op->op2)) {
         has_nonlin_int = true;
       }
     }
     if (has_bitwise && float_ops_.empty() && float_cmps_.empty()) {
-      z3::solver &bv_solver = getResetBVSolver();
+      auto [bv_ctx_ptr, bv_solver_ptr] = getResetBVSolverAndCtx();
+      z3::context &bv_ctx = *bv_ctx_ptr;
+      z3::solver &bv_solver = *bv_solver_ptr;
       std::unordered_map<AbstractValue, z3::expr> bv_map;
       auto getBV = [&](AbstractValue v) -> z3::expr {
-        return getZ3BVVar(ctx, findRepReadOnly(v), bv_map);
+        return getZ3BVVar(bv_ctx, findRepReadOnly(v), bv_map);
       };
       for (AbstractValue c : rel_vars) {
         auto lit = lower_bounds_.find(c);
         if (lit != lower_bounds_.end()) {
-          bv_solver.add(getBV(c) >= ctx.bv_val(lit->second, 64));
+          bv_solver.add(getBV(c) >= bv_ctx.bv_val(lit->second, 64));
         }
         auto uit = upper_bounds_.find(c);
         if (uit != upper_bounds_.end()) {
-          bv_solver.add(getBV(c) <= ctx.bv_val(uit->second, 64));
+          bv_solver.add(getBV(c) <= bv_ctx.bv_val(uit->second, 64));
         }
         if (null_values_.count(c) > 0) {
-          bv_solver.add(getBV(c) == ctx.bv_val(0, 64));
+          bv_solver.add(getBV(c) == bv_ctx.bv_val(0, 64));
         }
         if (non_null_values_.count(c) > 0) {
-          bv_solver.add(getBV(c) != ctx.bv_val(0, 64));
+          bv_solver.add(getBV(c) != bv_ctx.bv_val(0, 64));
         }
       }
       for (const auto &neq : slice_diseqs) {
@@ -4404,11 +4766,11 @@ std::optional<bool> PulseFormula::impliesComparison(
       }
       for (const LinearConstraint *cp : slice_linear) {
         const auto &constraint = *cp;
-        z3::expr lhs = ctx.bv_val(0, 64);
+        z3::expr lhs = bv_ctx.bv_val(0, 64);
         for (const auto &term : constraint.terms) {
-          lhs = lhs + (ctx.bv_val(term.coefficient, 64) * getBV(term.var));
+          lhs = lhs + (bv_ctx.bv_val(term.coefficient, 64) * getBV(term.var));
         }
-        z3::expr rhs = ctx.bv_val(constraint.constant, 64);
+        z3::expr rhs = bv_ctx.bv_val(constraint.constant, 64);
         switch (constraint.kind) {
         case ConstraintKind::LessEqual:
           bv_solver.add(lhs <= rhs);
@@ -4439,10 +4801,10 @@ std::optional<bool> PulseFormula::impliesComparison(
         else if (arith_op.op == "*")
           bv_solver.add(rv == o1 * o2);
         else if (arith_op.op == "/") {
-          bv_solver.add(o2 != ctx.bv_val(0, 64));
+          bv_solver.add(o2 != bv_ctx.bv_val(0, 64));
           bv_solver.add(rv == o1 / o2);
         } else if (arith_op.op == "%") {
-          bv_solver.add(o2 != ctx.bv_val(0, 64));
+          bv_solver.add(o2 != bv_ctx.bv_val(0, 64));
           bv_solver.add(rv == z3::srem(o1, o2));
         } else if (arith_op.op == "&")
           bv_solver.add(rv == (o1 & o2));
@@ -4457,9 +4819,9 @@ std::optional<bool> PulseFormula::impliesComparison(
       }
       for (const DisjunctiveEq *dp : slice_disj) {
         z3::expr tv = getBV(dp->target);
-        z3::expr_vector alts(ctx);
+        z3::expr_vector alts(bv_ctx);
         for (int64_t c : dp->const_options) {
-          alts.push_back(tv == ctx.bv_val(c, 64));
+          alts.push_back(tv == bv_ctx.bv_val(c, 64));
         }
         for (AbstractValue ov : dp->var_options) {
           alts.push_back(tv == getBV(ov));
@@ -4469,10 +4831,10 @@ std::optional<bool> PulseFormula::impliesComparison(
         }
       }
       z3::expr bv_le =
-          lc ? ctx.bv_val(*lc, 64) : getBV(findRepReadOnly(*lhs_var));
+          lc ? bv_ctx.bv_val(*lc, 64) : getBV(findRepReadOnly(*lhs_var));
       z3::expr bv_re =
-          rc ? ctx.bv_val(*rc, 64) : getBV(findRepReadOnly(*rhs_var));
-      z3::expr bv_pred = ctx.bool_val(true);
+          rc ? bv_ctx.bv_val(*rc, 64) : getBV(findRepReadOnly(*rhs_var));
+      z3::expr bv_pred = bv_ctx.bool_val(true);
       if (op == "==")
         bv_pred = (bv_le == bv_re);
       else if (op == "!=")
@@ -4504,24 +4866,28 @@ std::optional<bool> PulseFormula::impliesComparison(
     }
 
     std::optional<SolverPushScope> push_scope;
+    z3::context *active_ctx_ptr = &ctx;
     z3::solver *solver_ptr = nullptr;
     if (!has_nonlin_int) {
       solver_ptr = &getCachedSimpleSolver(ctx);
       push_scope.emplace(*solver_ptr);
     } else {
-      solver_ptr = &getResetNonlinSolver();
+      auto [nl_ctx, nl_solver] = getResetNonlinSolverAndCtx();
+      active_ctx_ptr = nl_ctx;
+      solver_ptr = nl_solver;
     }
+    z3::context &actx = *active_ctx_ptr;
     z3::solver &solver = *solver_ptr;
     std::unordered_map<AbstractValue, z3::expr> var_map;
 
     for (const LinearConstraint *cp : slice_linear) {
       const auto &constraint = *cp;
-      z3::expr lhs_e = ctx.int_val(0);
+      z3::expr lhs_e = actx.int_val(0);
       for (const auto &term : constraint.terms) {
-        lhs_e = lhs_e + (ctx.int_val(term.coefficient) *
-                         getZ3Var(ctx, findRepReadOnly(term.var), var_map));
+        lhs_e = lhs_e + (actx.int_val(term.coefficient) *
+                         getZ3Var(actx, findRepReadOnly(term.var), var_map));
       }
-      z3::expr rhs_e = ctx.int_val(constraint.constant);
+      z3::expr rhs_e = actx.int_val(constraint.constant);
       switch (constraint.kind) {
       case ConstraintKind::LessEqual:
         solver.add(lhs_e <= rhs_e);
@@ -4543,74 +4909,90 @@ std::optional<bool> PulseFormula::impliesComparison(
     for (AbstractValue c : rel_vars) {
       auto lit = lower_bounds_.find(c);
       if (lit != lower_bounds_.end()) {
-        solver.add(getZ3Var(ctx, c, var_map) >= ctx.int_val(lit->second));
+        solver.add(getZ3Var(actx, c, var_map) >= actx.int_val(lit->second));
       }
       auto uit = upper_bounds_.find(c);
       if (uit != upper_bounds_.end()) {
-        solver.add(getZ3Var(ctx, c, var_map) <= ctx.int_val(uit->second));
+        solver.add(getZ3Var(actx, c, var_map) <= actx.int_val(uit->second));
       }
       if (null_values_.count(c) > 0) {
-        solver.add(getZ3Var(ctx, c, var_map) == ctx.int_val(0));
+        solver.add(getZ3Var(actx, c, var_map) == actx.int_val(0));
       }
       if (non_null_values_.count(c) > 0) {
-        solver.add(getZ3Var(ctx, c, var_map) != ctx.int_val(0));
+        solver.add(getZ3Var(actx, c, var_map) != actx.int_val(0));
       }
     }
     for (const auto &neq : slice_diseqs) {
-      solver.add(getZ3Var(ctx, neq.first, var_map) !=
-                 getZ3Var(ctx, neq.second, var_map));
+      solver.add(getZ3Var(actx, neq.first, var_map) !=
+                 getZ3Var(actx, neq.second, var_map));
     }
     for (const ArithmeticOp *aop : slice_arith) {
       const auto &arith_op = *aop;
-      z3::expr rv = getZ3Var(ctx, findRepReadOnly(arith_op.result), var_map);
-      z3::expr o1 = getZ3Var(ctx, findRepReadOnly(arith_op.op1), var_map);
-      z3::expr o2 = getZ3Var(ctx, findRepReadOnly(arith_op.op2), var_map);
+      z3::expr rv = getZ3Var(actx, findRepReadOnly(arith_op.result), var_map);
+      z3::expr o1 = getZ3Var(actx, findRepReadOnly(arith_op.op1), var_map);
+      z3::expr o2 = getZ3Var(actx, findRepReadOnly(arith_op.op2), var_map);
       if (arith_op.op == "+")
         solver.add(rv == o1 + o2);
       else if (arith_op.op == "-")
         solver.add(rv == o1 - o2);
-      else if (arith_op.op == "*")
-        solver.add(rv == o1 * o2);
-      else if (arith_op.op == "/") {
+      else if (arith_op.op == "*") {
+        if (auto c1 = asConstantInt(arith_op.op1)) {
+          solver.add(rv == actx.int_val(*c1) * o2);
+        } else if (auto c2 = asConstantInt(arith_op.op2)) {
+          solver.add(rv == o1 * actx.int_val(*c2));
+        } else {
+          solver.add(rv == o1 * o2);
+        }
+      } else if (arith_op.op == "/") {
         solver.add(o2 != 0);
-        solver.add(rv == o1 / o2);
+        if (auto c2 = asConstantInt(arith_op.op2)) {
+          if (*c2 != 0)
+            solver.add(rv == o1 / actx.int_val(*c2));
+        } else {
+          solver.add(rv == o1 / o2);
+        }
       } else if (arith_op.op == "%") {
         solver.add(o2 != 0);
-        solver.add(rv == z3::mod(o1, o2));
+        if (auto c2 = asConstantInt(arith_op.op2)) {
+          if (*c2 != 0)
+            solver.add(rv == z3::mod(o1, actx.int_val(*c2)));
+        } else {
+          solver.add(rv == z3::mod(o1, o2));
+        }
       } else if (arith_op.op == "&") {
-        solver.add(rv == fromBV64(ctx, toBV64(ctx, o1) & toBV64(ctx, o2)));
+        solver.add(rv == fromBV64(actx, toBV64(actx, o1) & toBV64(actx, o2)));
       } else if (arith_op.op == "|") {
-        solver.add(rv == fromBV64(ctx, toBV64(ctx, o1) | toBV64(ctx, o2)));
+        solver.add(rv == fromBV64(actx, toBV64(actx, o1) | toBV64(actx, o2)));
       } else if (arith_op.op == "^") {
-        solver.add(rv == fromBV64(ctx, toBV64(ctx, o1) ^ toBV64(ctx, o2)));
+        solver.add(rv == fromBV64(actx, toBV64(actx, o1) ^ toBV64(actx, o2)));
       } else if (arith_op.op == "<<") {
-        solver.add(rv == fromBV64(ctx, z3::shl(toBV64(ctx, o1),
-                                               toBV64(ctx, o2))));
+        solver.add(rv == fromBV64(actx, z3::shl(toBV64(actx, o1),
+                                                toBV64(actx, o2))));
       } else if (arith_op.op == ">>") {
-        solver.add(rv == fromBV64(ctx, z3::ashr(toBV64(ctx, o1),
-                                                toBV64(ctx, o2))));
+        solver.add(rv == fromBV64(actx, z3::ashr(toBV64(actx, o1),
+                                                 toBV64(actx, o2))));
       }
     }
     for (const DisjunctiveEq *dp : slice_disj) {
-      z3::expr tv = getZ3Var(ctx, findRepReadOnly(dp->target), var_map);
-      z3::expr_vector alts(ctx);
+      z3::expr tv = getZ3Var(actx, findRepReadOnly(dp->target), var_map);
+      z3::expr_vector alts(actx);
       for (int64_t c : dp->const_options) {
-        alts.push_back(tv == ctx.int_val(c));
+        alts.push_back(tv == actx.int_val(c));
       }
       for (AbstractValue ov : dp->var_options) {
-        alts.push_back(tv == getZ3Var(ctx, findRepReadOnly(ov), var_map));
+        alts.push_back(tv == getZ3Var(actx, findRepReadOnly(ov), var_map));
       }
       if (alts.size() > 0) {
         solver.add(z3::mk_or(alts));
       }
     }
 
-    z3::expr le = lc ? ctx.int_val(*lc)
-                     : getZ3Var(ctx, findRepReadOnly(*lhs_var), var_map);
-    z3::expr re = rc ? ctx.int_val(*rc)
-                     : getZ3Var(ctx, findRepReadOnly(*rhs_var), var_map);
+    z3::expr le = lc ? actx.int_val(*lc)
+                     : getZ3Var(actx, findRepReadOnly(*lhs_var), var_map);
+    z3::expr re = rc ? actx.int_val(*rc)
+                     : getZ3Var(actx, findRepReadOnly(*rhs_var), var_map);
 
-    z3::expr pred = ctx.bool_val(true);
+    z3::expr pred = actx.bool_val(true);
     if (op == "==")
       pred = (le == re);
     else if (op == "!=")
@@ -5343,18 +5725,43 @@ bool PulseFormula::propagateLinearInequalities() {
   }
   in_tableau_propagate_ = true;
 
-  // Represent normalized difference constraints: u - v <= c (exact __int128).
-  using DiffKey = std::pair<AbstractValue, AbstractValue>;
-  std::map<DiffKey, __int128> diff_upper;
+  // Stack-allocated dense difference-constraint matrix (u - v <= dist[u][v],
+  // exact __int128) over up to kMaxDiffNodes = 32 variables: eliminates all
+  // std::map RB-tree allocations and snapshots on the hot path while running
+  // exact Floyd-Warshall closure.
+  constexpr size_t kMaxDiffNodes = 32;
+  llvm::SmallVector<AbstractValue, kMaxDiffNodes> nodes;
+  __int128 dist[kMaxDiffNodes][kMaxDiffNodes];
+  bool has_edge[kMaxDiffNodes][kMaxDiffNodes] = {};
+  bool tableau_pair[kMaxDiffNodes][kMaxDiffNodes] = {};
+  bool overflowed = false;
+
+  auto getNodeIdx = [&](AbstractValue v) -> int {
+    for (size_t i = 0; i < nodes.size(); ++i) {
+      if (nodes[i] == v)
+        return static_cast<int>(i);
+    }
+    if (nodes.size() >= kMaxDiffNodes) {
+      overflowed = true;
+      return -1;
+    }
+    int idx = static_cast<int>(nodes.size());
+    nodes.push_back(v);
+    return idx;
+  };
 
   auto recordDiff = [&](AbstractValue u, AbstractValue v, __int128 c) -> bool {
     if (u == v) {
       return c >= 0; // u - u <= c requires c >= 0!
     }
-    DiffKey key{u, v};
-    auto it = diff_upper.find(key);
-    if (it == diff_upper.end() || c < it->second) {
-      diff_upper[key] = c;
+    int iu = getNodeIdx(u);
+    int iv = getNodeIdx(v);
+    if (iu < 0 || iv < 0) {
+      return true;
+    }
+    if (!has_edge[iu][iv] || c < dist[iu][iv]) {
+      has_edge[iu][iv] = true;
+      dist[iu][iv] = c;
     }
     return true;
   };
@@ -5432,41 +5839,86 @@ bool PulseFormula::propagateLinearInequalities() {
     }
   }
 
-  // Bounded Floyd-Warshall / Bellman-Ford closure over difference graph:
+  if (nodes.empty()) {
+    in_tableau_propagate_ = false;
+    return true;
+  }
+
+  // Feed 2-variable unit-difference rows from `linear_tableau_` that connect to
+  // the inequality variables (`u - v + c == 0` => `u - v <= -c` and `v - u <= c`).
+  if (!overflowed && !linear_tableau_.empty()) {
+    bool added_row = true;
+    while (added_row && !overflowed) {
+      added_row = false;
+      for (const auto &trow : linear_tableau_) {
+        const LinearEqRow &row = trow.second;
+        if (row.coeffs.size() != 2)
+          continue;
+        auto it = row.coeffs.begin();
+        AbstractValue v0 = findRep(it->first);
+        int64_t c0 = it->second;
+        ++it;
+        AbstractValue v1 = findRep(it->first);
+        int64_t c1 = it->second;
+        if (!((c0 == 1 && c1 == -1) || (c0 == -1 && c1 == 1)))
+          continue;
+        bool touches = false;
+        for (AbstractValue existing : nodes) {
+          if (existing == v0 || existing == v1) {
+            touches = true;
+            break;
+          }
+        }
+        if (!touches)
+          continue;
+        const size_t before_n = nodes.size();
+        __int128 k = row.constant;
+        bool ok = (c0 == 1 && c1 == -1)
+                      ? (recordDiff(v0, v1, -k) && recordDiff(v1, v0, k))
+                      : (recordDiff(v1, v0, -k) && recordDiff(v0, v1, k));
+        if (!ok) {
+          in_tableau_propagate_ = false;
+          return false;
+        }
+        if (!overflowed) {
+          int i0 = getNodeIdx(v0);
+          int i1 = getNodeIdx(v1);
+          if (i0 >= 0 && i1 >= 0) {
+            tableau_pair[i0][i1] = true;
+            tableau_pair[i1][i0] = true;
+          }
+        }
+        if (nodes.size() > before_n) {
+          added_row = true;
+        }
+      }
+    }
+  }
+
+  // Exact Floyd-Warshall closure over the dense matrix:
   // detects negative cycles (`x < y ∧ y < z ∧ z < x`) AND antisymmetric
   // equalities (`x <= y ∧ y <= x => x == y`!) eagerly without Z3.
-  std::set<AbstractValue> diff_nodes;
-  for (const auto &kv : diff_upper) {
-    diff_nodes.insert(kv.first.first);
-    diff_nodes.insert(kv.first.second);
-  }
-  if (diff_nodes.size() <= 32) {
-    bool changed = true;
-    for (unsigned iter = 0; iter < 8 && changed; ++iter) {
-      changed = false;
-      std::vector<std::pair<DiffKey, __int128>> snapshot(diff_upper.begin(),
-                                                         diff_upper.end());
-      for (const auto &e1 : snapshot) {
-        AbstractValue a = e1.first.first;
-        AbstractValue b = e1.first.second;
-        __int128 w1 = e1.second;
-        for (const auto &e2 : snapshot) {
-          if (!(e2.first.first == b))
+  const size_t n = nodes.size();
+  if (!overflowed) {
+    for (size_t k = 0; k < n; ++k) {
+      for (size_t i = 0; i < n; ++i) {
+        if (!has_edge[i][k])
+          continue;
+        __int128 dik = dist[i][k];
+        for (size_t j = 0; j < n; ++j) {
+          if (!has_edge[k][j])
             continue;
-          AbstractValue c = e2.first.second;
-          __int128 w = w1 + e2.second;
-          if (a == c) {
-            if (w < 0) {
+          __int128 cand = dik + dist[k][j];
+          if (i == j) {
+            if (cand < 0) {
               in_tableau_propagate_ = false;
               return false; // Negative cycle -> UNSAT!
             }
             continue;
           }
-          DiffKey k{a, c};
-          auto it = diff_upper.find(k);
-          if (it == diff_upper.end() || w < it->second) {
-            diff_upper[k] = w;
-            changed = true;
+          if (!has_edge[i][j] || cand < dist[i][j]) {
+            has_edge[i][j] = true;
+            dist[i][j] = cand;
           }
         }
       }
@@ -5477,55 +5929,58 @@ bool PulseFormula::propagateLinearInequalities() {
   // v - u <= -c => u - v == c!).
   std::vector<std::pair<AbstractValue, AbstractValue>> derived_eqs;
   std::vector<LinearEqRow> derived_rows;
-  for (const auto &kv : diff_upper) {
-    AbstractValue u = kv.first.first;
-    AbstractValue v = kv.first.second;
-    __int128 c = kv.second;
+  for (size_t i = 0; i < n; ++i) {
+    AbstractValue u = nodes[i];
+    for (size_t j = 0; j < n; ++j) {
+      if (i == j || !has_edge[i][j])
+        continue;
+      AbstractValue v = nodes[j];
+      __int128 c = dist[i][j];
 
-    // Interval bound tightening: u <= v + c and v >= u - c.
-    if (auto v_hi = getUpperBound(v)) {
-      __int128 u_hi = static_cast<__int128>(*v_hi) + c;
-      if (fitsInI64(u_hi)) {
-        auto old_hi = getUpperBound(u);
-        if (!old_hi || static_cast<int64_t>(u_hi) < *old_hi) {
-          if (!addBounds(u, std::numeric_limits<int64_t>::min(),
-                         static_cast<int64_t>(u_hi))) {
-            in_tableau_propagate_ = false;
-            return false;
+      // Interval bound tightening: u <= v + c and v >= u - c.
+      if (auto v_hi = getUpperBound(v)) {
+        __int128 u_hi = static_cast<__int128>(*v_hi) + c;
+        if (fitsInI64(u_hi)) {
+          auto old_hi = getUpperBound(u);
+          if (!old_hi || static_cast<int64_t>(u_hi) < *old_hi) {
+            if (!addBounds(u, std::numeric_limits<int64_t>::min(),
+                           static_cast<int64_t>(u_hi))) {
+              in_tableau_propagate_ = false;
+              return false;
+            }
           }
         }
       }
-    }
-    if (auto u_lo = getLowerBound(u)) {
-      __int128 v_lo = static_cast<__int128>(*u_lo) - c;
-      if (fitsInI64(v_lo)) {
-        auto old_lo = getLowerBound(v);
-        if (!old_lo || static_cast<int64_t>(v_lo) > *old_lo) {
-          if (!addBounds(v, static_cast<int64_t>(v_lo),
-                         std::numeric_limits<int64_t>::max())) {
-            in_tableau_propagate_ = false;
-            return false;
+      if (auto u_lo = getLowerBound(u)) {
+        __int128 v_lo = static_cast<__int128>(*u_lo) - c;
+        if (fitsInI64(v_lo)) {
+          auto old_lo = getLowerBound(v);
+          if (!old_lo || static_cast<int64_t>(v_lo) > *old_lo) {
+            if (!addBounds(v, static_cast<int64_t>(v_lo),
+                           std::numeric_limits<int64_t>::max())) {
+              in_tableau_propagate_ = false;
+              return false;
+            }
           }
         }
       }
-    }
 
-    auto rev_it = diff_upper.find({v, u});
-    if (rev_it != diff_upper.end()) {
-      __int128 sum = c + rev_it->second;
-      if (sum < 0) {
-        in_tableau_propagate_ = false;
-        return false; // Contradiction!
-      }
-      if (sum == 0 && u < v) {
-        if (c == 0) {
-          derived_eqs.emplace_back(u, v);
-        } else if (fitsInI64(c)) {
-          LinearEqRow row;
-          row.coeffs[u] = 1;
-          row.coeffs[v] = -1;
-          row.constant = static_cast<int64_t>(-c);
-          derived_rows.push_back(std::move(row));
+      if (has_edge[j][i]) {
+        __int128 sum = c + dist[j][i];
+        if (sum < 0) {
+          in_tableau_propagate_ = false;
+          return false; // Contradiction!
+        }
+        if (sum == 0 && u < v) {
+          if (c == 0) {
+            derived_eqs.emplace_back(u, v);
+          } else if (fitsInI64(c) && !tableau_pair[i][j]) {
+            LinearEqRow row;
+            row.coeffs[u] = 1;
+            row.coeffs[v] = -1;
+            row.constant = static_cast<int64_t>(-c);
+            derived_rows.push_back(std::move(row));
+          }
         }
       }
     }
@@ -5737,17 +6192,8 @@ bool PulseFormula::addStringConstant(AbstractValue v, const std::string &str) {
   }
   AbstractValue rep = findRep(v);
   auto it = string_constants_.find(rep);
-  if (it != string_constants_.end() && it->second != str) {
-    return false;
-  }
-  invalidateSatCache();
-  string_constants_[rep] = str;
-  auto lit = string_lengths_.find(rep);
-  if (lit != string_lengths_.end()) {
-    int64_t len = static_cast<int64_t>(str.size());
-    if (!addBounds(lit->second, len, len)) {
-      return false;
-    }
+  if (it != string_constants_.end()) {
+    return it->second == str;
   }
   for (const auto &rm : string_regex_matches_) {
     if (findRep(rm.value) == rep) {
@@ -5758,6 +6204,19 @@ bool PulseFormula::addStringConstant(AbstractValue v, const std::string &str) {
         }
       } catch (const std::regex_error &) {
       }
+    }
+  }
+  if (consistent_cache_valid_ && consistent_cache_result_) {
+    invalidateSatOnly();
+  } else {
+    invalidateSatCache();
+  }
+  string_constants_[rep] = str;
+  auto lit = string_lengths_.find(rep);
+  if (lit != string_lengths_.end()) {
+    int64_t len = static_cast<int64_t>(str.size());
+    if (!addBounds(lit->second, len, len)) {
+      return false;
     }
   }
   return true;

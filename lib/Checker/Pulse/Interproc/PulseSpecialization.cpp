@@ -58,11 +58,15 @@ materializeHeapPathInEntry(AbductiveDomain &astate,
       acc = Access(AccessKind::Dereference);
       break;
     case HeapPath::PathElement::FieldAccess:
-      acc = Access(elems[i].field_idx);
+      acc = Access::field(elems[i].field_idx, elems[i].field_byte_offset);
       break;
     case HeapPath::PathElement::ArrayIndex:
-      acc = Access::arrayIndex(astate.getCanonical(elems[i].index),
-                               elems[i].stride);
+      if (elems[i].const_index.has_value()) {
+        acc = Access::constArrayIndex(*elems[i].const_index, elems[i].stride);
+      } else {
+        acc = Access::arrayIndex(astate.getCanonical(elems[i].index),
+                                 elems[i].stride);
+      }
       break;
     case HeapPath::PathElement::Pvar:
       return std::nullopt;

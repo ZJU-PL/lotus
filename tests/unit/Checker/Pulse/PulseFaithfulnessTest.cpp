@@ -2512,3 +2512,491 @@ TEST_F(PulseCheckerTest, RobustnessFormulaSmtSlicingAndToggleSoundness) {
     EXPECT_TRUE(chain.areEqual(e3, e0));
   }
 }
+
+namespace {
+struct ScopedSMTMode {
+  bool saved;
+  explicit ScopedSMTMode(bool disable_smt) : saved(pulse::options::disableSMT()) {
+    pulse::options::setDisableSMT(disable_smt);
+  }
+  ~ScopedSMTMode() { pulse::options::setDisableSMT(saved); }
+};
+} // namespace
+
+TEST_F(PulseCheckerTest, AllocaAddressVsSlotSeparationBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    auto module = parseModule(context, R"(
+      @g_sink = global i8* null
+      declare void @fill_out_param(i8**)
+      declare void @free(i8*)
+
+      define i8 @read_byte(i8* %p) {
+      entry:
+        %v = load i8, i8* %p
+        ret i8 %v
+      }
+
+      define i8 @store_zero_then_pass_address() {
+      entry:
+        %a = alloca i32
+        store i32 0, i32* %a
+        %bc = bitcast i32* %a to i8*
+        %r = call i8 @read_byte(i8* %bc)
+        ret i8 %r
+      }
+
+      define void @unknown_out_param_free_and_global_store() {
+      entry:
+        %slot = alloca i8*
+        call void @fill_out_param(i8** %slot)
+        %p = load i8*, i8** %slot
+        store i8* %p, i8** @g_sink
+        call void @free(i8* %p)
+        ret void
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::NullDereference), 0u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::InvalidFree), 0u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::StackVariableAddressEscape),
+              0u)
+        << "disable_smt=" << disable_smt;
+  }
+}
+
+TEST_F(PulseCheckerTest,
+       SingleInheritanceBitcastFieldOffsetDisambiguationBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    auto module = parseModule(context, R"(
+      %struct.Base = type { i64, i8* }
+      %struct.Sub = type { i32 }
+      %struct.Derived = type { %struct.Base, %struct.Sub }
+
+      define void @base_ctor(%struct.Base* %this) {
+      entry:
+        %f1 = getelementptr inbounds %struct.Base, %struct.Base* %this, i32 0, i32 1
+        store i8* null, i8** %f1
+        ret void
+      }
+
+      define void @sub_init(%struct.Sub* %s) {
+      entry:
+        %x = getelementptr inbounds %struct.Sub, %struct.Sub* %s, i32 0, i32 0
+        store i32 7, i32* %x
+        ret void
+      }
+
+      define i32 @derived_ctor_safe(%struct.Derived* %d) {
+      entry:
+        %b = bitcast %struct.Derived* %d to %struct.Base*
+        call void @base_ctor(%struct.Base* %b)
+        %sub = getelementptr inbounds %struct.Derived, %struct.Derived* %d, i32 0, i32 1
+        call void @sub_init(%struct.Sub* %sub)
+        %x = getelementptr inbounds %struct.Sub, %struct.Sub* %sub, i32 0, i32 0
+        %v = load i32, i32* %x
+        ret i32 %v
+      }
+
+      define i8 @derived_deref_base_null(%struct.Derived* %d) {
+      entry:
+        %b = bitcast %struct.Derived* %d to %struct.Base*
+        call void @base_ctor(%struct.Base* %b)
+        %f1 = getelementptr inbounds %struct.Base, %struct.Base* %b, i32 0, i32 1
+        %p = load i8*, i8** %f1
+        %v = load i8, i8* %p
+        ret i8 %v
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    // Exactly 1 NPD (from derived_deref_base_null), 0 from derived_ctor_safe.
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::NullDereference), 1u)
+        << "disable_smt=" << disable_smt;
+  }
+}
+
+TEST_F(PulseCheckerTest, OnePastTheEndPointerArithmeticAndRewindBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    auto module = parseModule(context, R"(
+      declare i8* @malloc(i64)
+      declare void @free(i8*)
+
+      define i8 @read_prev(i8* %end) {
+      entry:
+        %prev = getelementptr inbounds i8, i8* %end, i64 -1
+        %v = load i8, i8* %prev
+        ret i8 %v
+      }
+
+      define i8 @read_cur(i8* %end) {
+      entry:
+        %v = load i8, i8* %end
+        ret i8 %v
+      }
+
+      define i8 @safe_one_past_end_rewind() {
+      entry:
+        %buf = call i8* @malloc(i64 4)
+        %last = getelementptr inbounds i8, i8* %buf, i64 3
+        store i8 42, i8* %last
+        %end = getelementptr inbounds i8, i8* %buf, i64 4
+        %v = call i8 @read_prev(i8* %end)
+        call void @free(i8* %buf)
+        ret i8 %v
+      }
+
+      define i8 @unsafe_one_past_end_deref() {
+      entry:
+        %buf = call i8* @malloc(i64 4)
+        %end = getelementptr inbounds i8, i8* %buf, i64 4
+        %v = call i8 @read_cur(i8* %end)
+        call void @free(i8* %buf)
+        ret i8 %v
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::OutOfBounds), 1u)
+        << "disable_smt=" << disable_smt;
+  }
+}
+
+TEST_F(PulseCheckerTest,
+       StructTrailingPaddingSymbolicArrayAndVaStartBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    auto module = parseModule(context, R"(
+      %struct.PairPad = type { i64, i32, [4 x i8] }
+      declare void @llvm.va_start(i8*)
+      declare void @llvm.va_end(i8*)
+
+      define void @init_pair(%struct.PairPad* %p, i64 %a, i32 %b) {
+      entry:
+        %f0 = getelementptr inbounds %struct.PairPad, %struct.PairPad* %p, i32 0, i32 0
+        store i64 %a, i64* %f0
+        %f1 = getelementptr inbounds %struct.PairPad, %struct.PairPad* %p, i32 0, i32 1
+        store i32 %b, i32* %f1
+        ret void
+      }
+
+      define { i64, i32 } @make_pair_abi_load(i64 %a, i32 %b) {
+      entry:
+        %retval = alloca %struct.PairPad, align 8
+        call void @init_pair(%struct.PairPad* %retval, i64 %a, i32 %b)
+        %bc = bitcast %struct.PairPad* %retval to { i64, i32 }*
+        %v = load { i64, i32 }, { i64, i32 }* %bc, align 8
+        ret { i64, i32 } %v
+      }
+
+      define i32 @symbolic_array_init(i64 %idx) {
+      entry:
+        %arr = alloca [4 x i32], align 4
+        %p = getelementptr inbounds [4 x i32], [4 x i32]* %arr, i64 0, i64 %idx
+        store i32 1, i32* %p
+        %q = getelementptr inbounds [4 x i32], [4 x i32]* %arr, i64 0, i64 0
+        %v = load i32, i32* %q
+        ret i32 %v
+      }
+
+      define i8 @va_start_initializes(i32 %n, ...) {
+      entry:
+        %ap = alloca [24 x i8], align 8
+        %ap0 = getelementptr inbounds [24 x i8], [24 x i8]* %ap, i64 0, i64 0
+        call void @llvm.va_start(i8* %ap0)
+        %v = load i8, i8* %ap0
+        call void @llvm.va_end(i8* %ap0)
+        ret i8 %v
+      }
+
+      define i32 @partial_const_array_still_uninit() {
+      entry:
+        %arr = alloca [4 x i32], align 4
+        %p0 = getelementptr inbounds [4 x i32], [4 x i32]* %arr, i64 0, i64 0
+        store i32 1, i32* %p0
+        %p1 = getelementptr inbounds [4 x i32], [4 x i32]* %arr, i64 0, i64 1
+        %v = load i32, i32* %p1
+        ret i32 %v
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    // Only partial_const_array_still_uninit should report UninitializedRead.
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::UninitializedRead), 1u)
+        << "disable_smt=" << disable_smt;
+  }
+}
+
+TEST_F(PulseCheckerTest, SmartPtrLayoutAndOperatorBoolBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    auto module = parseModule(context, R"(
+      %class.shared_ptr = type { i32*, i8* }
+      %class.unique_ptr = type { i32* }
+
+      declare i8* @malloc(i64)
+      declare void @_ZNSt10shared_ptrIiEC2Ev(%class.shared_ptr*)
+      declare void @_ZNSt10unique_ptrIiEC2Ev(%class.unique_ptr*)
+      declare void @_ZNSt10unique_ptrIiE5resetEPi(%class.unique_ptr*, i32*)
+      declare i32* @_ZNKSt10unique_ptrIiE3getEv(%class.unique_ptr*)
+      declare i1 @_ZNKSt10unique_ptrIiEcvbEv(%class.unique_ptr*)
+      declare void @_ZNSt10unique_ptrIiED2Ev(%class.unique_ptr*)
+
+      define i1 @libstdcxx_shared_ptr_bool_layout() {
+      entry:
+        %sp = alloca %class.shared_ptr, align 8
+        call void @_ZNSt10shared_ptrIiEC2Ev(%class.shared_ptr* %sp)
+        %m_ptr = getelementptr inbounds %class.shared_ptr, %class.shared_ptr* %sp, i32 0, i32 0
+        %raw = load i32*, i32** %m_ptr, align 8
+        %nz = icmp ne i32* %raw, null
+        ret i1 %nz
+      }
+
+      define i32 @unique_ptr_lazy_init_safe() {
+      entry:
+        %up = alloca %class.unique_ptr, align 8
+        call void @_ZNSt10unique_ptrIiEC2Ev(%class.unique_ptr* %up)
+        %ok = call i1 @_ZNKSt10unique_ptrIiEcvbEv(%class.unique_ptr* %up)
+        br i1 %ok, label %use, label %init
+
+      init:
+        %mem = call i8* @malloc(i64 4)
+        %ip = bitcast i8* %mem to i32*
+        store i32 99, i32* %ip
+        call void @_ZNSt10unique_ptrIiE5resetEPi(%class.unique_ptr* %up, i32* %ip)
+        br label %use
+
+      use:
+        %p = call i32* @_ZNKSt10unique_ptrIiE3getEv(%class.unique_ptr* %up)
+        %v = load i32, i32* %p
+        call void @_ZNSt10unique_ptrIiED2Ev(%class.unique_ptr* %up)
+        ret i32 %v
+      }
+
+      define i32 @unique_ptr_null_deref_caught() {
+      entry:
+        %up = alloca %class.unique_ptr, align 8
+        call void @_ZNSt10unique_ptrIiEC2Ev(%class.unique_ptr* %up)
+        %p = call i32* @_ZNKSt10unique_ptrIiE3getEv(%class.unique_ptr* %up)
+        %v = load i32, i32* %p
+        ret i32 %v
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::NullDereference), 1u)
+        << "disable_smt=" << disable_smt;
+  }
+}
+
+TEST_F(PulseCheckerTest, GlobalAliasStrcmpAndGlobalReallocJoinBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    auto module = parseModule(context, R"(
+      @.str_root = private unnamed_addr constant [2 x i8] c"/\00", align 1
+      @g_cwd = global i8* null, align 8
+
+      declare i8* @realloc(i8*, i64)
+      declare void @free(i8*)
+      declare i32 @strcmp(i8*, i8*)
+
+      @deref_alias = alias i32 (i32*), i32 (i32*)* @deref_impl
+
+      define i32 @deref_impl(i32* %p) {
+      entry:
+        %v = load i32, i32* %p
+        ret i32 %v
+      }
+
+      define i32 @call_through_alias_catches_npd() {
+      entry:
+        %v = call i32 @deref_alias(i32* null)
+        ret i32 %v
+      }
+
+      define void @strcmp_guards_global_free(i1 %cond) {
+      entry:
+        %slot = alloca i8*, align 8
+        store i8* getelementptr inbounds ([2 x i8], [2 x i8]* @.str_root, i64 0, i64 0), i8** %slot
+        br i1 %cond, label %b1, label %b2
+      b1:
+        br label %merge
+      b2:
+        br label %merge
+      merge:
+        %p = load i8*, i8** %slot
+        %cmp = call i32 @strcmp(i8* %p, i8* getelementptr inbounds ([2 x i8], [2 x i8]* @.str_root, i64 0, i64 0))
+        %ne = icmp ne i32 %cmp, 0
+        br i1 %ne, label %do_free, label %done
+      do_free:
+        call void @free(i8* %p)
+        br label %done
+      done:
+        ret void
+      }
+
+      define void @realloc_stored_in_global_no_leak(i1 %cond) {
+      entry:
+        br i1 %cond, label %do_realloc, label %done
+      do_realloc:
+        %old = load i8*, i8** @g_cwd
+        %buf = call i8* @realloc(i8* %old, i64 32)
+        store i8* %buf, i8** @g_cwd
+        br label %done
+      done:
+        ret void
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::NullDereference), 1u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::InvalidFree), 0u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::MemoryLeak), 0u)
+        << "disable_smt=" << disable_smt;
+  }
+}
+
+TEST_F(PulseCheckerTest,
+       FormulaConstMulUnitDiffTruncAndPointerAssumeBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    // 1. Unit-difference linear equality + inequality reasoning (both modes).
+    {
+      AbstractValue a(nullptr, 9401);
+      AbstractValue b(nullptr, 9402);
+      AbstractValue c(nullptr, 9403);
+      PulseFormula f;
+      LinearConstraint eq;
+      eq.kind = ConstraintKind::Equal;
+      eq.terms = {{a, 1}, {b, -1}};
+      eq.constant = 1; // a - b = 1
+      ASSERT_TRUE(f.addLinearConstraint(eq));
+      LinearConstraint lt;
+      lt.kind = ConstraintKind::Less;
+      lt.terms = {{b, 1}, {c, -1}};
+      lt.constant = 0; // b < c
+      ASSERT_TRUE(f.addLinearConstraint(lt));
+      auto le = f.impliesComparison(a, std::nullopt, "<=", c, std::nullopt);
+      ASSERT_TRUE(le.has_value()) << "disable_smt=" << disable_smt;
+      EXPECT_TRUE(*le) << "disable_smt=" << disable_smt;
+    }
+
+    // 2. Const * var linear SMT consistency in smt=on mode.
+    if (!disable_smt) {
+      AbstractValue x(nullptr, 9410);
+      AbstractValue y(nullptr, 9411);
+      AbstractValue z(nullptr, 9412);
+      AbstractValue c2(nullptr, 9413);
+      AbstractValue c1(nullptr, 9414);
+      PulseFormula f;
+      ASSERT_TRUE(f.addBounds(c2, 2, 2));
+      ASSERT_TRUE(f.addBounds(c1, 1, 1));
+      ASSERT_TRUE(f.addArithmeticOperation(y, c2, x, "*")); // y = 2 * x
+      ASSERT_TRUE(f.addArithmeticOperation(z, y, c1, "+")); // z = y + 1
+      LinearConstraint bad;
+      bad.kind = ConstraintKind::GreaterEqual;
+      bad.terms = {{y, 1}, {z, -1}};
+      bad.constant = 0; // y >= z contradicts z = y + 1
+      bool ok = f.addLinearConstraint(bad);
+      EXPECT_TRUE(!ok || f.isUnsat());
+    }
+
+    // 3. TruncInst narrowing, boolean `and` assume, pointer `ugt null` guard.
+    auto module = parseModule(context, R"(
+      define i32 @trunc_and_ptr_guards(i32* %p) {
+      entry:
+        %t = trunc i32 256 to i8
+        %tz = icmp ne i8 %t, 0
+        br i1 %tz, label %dead_npd, label %check_ptr
+
+      dead_npd:
+        %bad = load i32, i32* null
+        ret i32 %bad
+
+      check_ptr:
+        %gt = icmp ugt i32* %p, null
+        br i1 %gt, label %safe_load, label %ret_zero
+
+      safe_load:
+        %v = load i32, i32* %p
+        ret i32 %v
+
+      ret_zero:
+        ret i32 0
+      }
+
+      define i32 @caller_null_guarded() {
+      entry:
+        %r = call i32 @trunc_and_ptr_guards(i32* null)
+        ret i32 %r
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::NullDereference), 0u)
+        << "disable_smt=" << disable_smt;
+  }
+}

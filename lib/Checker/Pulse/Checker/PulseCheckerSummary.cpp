@@ -66,7 +66,8 @@ computeReachable(const AbductiveDomain &astate, const Heap &heap,
     if (it == heap.getEdges().end())
       continue;
     for (const auto &edge_kv : it->second) {
-      if (edge_kv.first.kind == AccessKind::ArrayIndex) {
+      if (edge_kv.first.kind == AccessKind::ArrayIndex &&
+          !edge_kv.first.const_index.has_value()) {
         AbstractValue idx = astate.getCanonical(edge_kv.first.index);
         if (reachable.insert(idx).second) {
           worklist.push_back(idx);
@@ -149,17 +150,18 @@ checkRetainCyclesOnExit(const llvm::Function *F, const AbductiveDomain &astate,
     std::set<AbstractValue> visiting;
     std::function<bool(AbstractValue, unsigned)> dfs =
         [&](AbstractValue cur, unsigned depth) -> bool {
-      if (depth > 8)
+      if (depth > 12)
         return false;
       auto it = edges.find(cur);
       if (it == edges.end())
         return false;
       for (const auto &ekv : it->second) {
-        // Weak references (std::weak_ptr) do not participate in strong
-        // ownership cycles.
+        // Weak references (std::weak_ptr) and control blocks do not
+        // participate in strong ownership cycles.
         if (ekv.first.kind == AccessKind::Field &&
             (ekv.first.field_idx == 0x7FFFFFF0u ||
-             ekv.first.field_idx == 0x7FFFFFF1u)) {
+             ekv.first.field_idx == 0x7FFFFFF1u ||
+             ekv.first.field_idx == 0x7FFFFFF2u)) {
           continue;
         }
         AbstractValue nxt = astate.getCanonical(ekv.second.addr);
@@ -306,10 +308,11 @@ static void checkLeaksOnExit(const llvm::Function *F,
   }
 }
 
-static AbductiveDomain pruneForSummary(const llvm::Function *F,
-                                       const AbductiveDomain &astate,
-                                       std::optional<AbstractValue> ret_val,
-                                       bool check_leaks) {
+static AbductiveDomain
+pruneForSummary(const llvm::Function *F, const AbductiveDomain &astate,
+                std::optional<AbstractValue> ret_val, bool check_leaks,
+                std::optional<AbstractValue> extra_keep_var = std::nullopt,
+                bool keep_non_ground_conditions = false) {
   AbductiveDomain pruned = astate.clone();
   pruned.canonicalize();
 
@@ -336,6 +339,11 @@ static AbductiveDomain pruneForSummary(const llvm::Function *F,
   std::set<AbstractValue> keep_vars;
   keep_vars.insert(reachable_post.begin(), reachable_post.end());
   keep_vars.insert(reachable_pre.begin(), reachable_pre.end());
+  if (extra_keep_var) {
+    AbstractValue ek = pruned.getCanonical(*extra_keep_var);
+    keep_vars.insert(ek);
+    reachable_post.insert(ek);
+  }
   for (const auto &event : pruned.getToplHistory().events) {
     for (const auto &arg : event.arguments) {
       if (arg.value) {
@@ -346,7 +354,8 @@ static AbductiveDomain pruneForSummary(const llvm::Function *F,
 
   // Simplify formula and retain variables connected via live arithmetic.
   std::set<AbstractValue> live_arith =
-      pruned.getPathFormula().simplifyForSummary(keep_vars, reachable_pre);
+      pruned.getPathFormula().simplifyForSummary(keep_vars, reachable_pre,
+                                                 keep_non_ground_conditions);
   reachable_post.insert(live_arith.begin(), live_arith.end());
   reachable_pre.insert(live_arith.begin(), live_arith.end());
 
@@ -546,6 +555,15 @@ static AbductiveDomain pruneForSummary(const llvm::Function *F,
     }
     pruned.getAllocationRoots() = std::move(alloc_roots);
 
+    std::map<AbstractValue, int64_t> alloc_offsets;
+    for (const auto &kv : astate.getAllocationOffsets()) {
+      AbstractValue addr = pruned.getCanonical(kv.first);
+      if (reachable_post.count(addr) > 0 || reachable_pre.count(addr) > 0) {
+        alloc_offsets.emplace(addr, kv.second);
+      }
+    }
+    pruned.getAllocationOffsets() = std::move(alloc_offsets);
+
     std::set<AbstractValue> kept_dyn_needed;
     for (AbstractValue need_av : pruned.getNeedDynamicTypeSpecialization()) {
       AbstractValue canon = pruned.getCanonical(need_av);
@@ -622,7 +640,9 @@ void PulseChecker::createSummary(
       latent.calling_context = stopped.calling_context;
     }
 
-    AbductiveDomain pruned = pruneForSummary(F, *astate, std::nullopt, false);
+    AbductiveDomain pruned = pruneForSummary(
+        F, *astate, std::nullopt, false, latent.address,
+        /*keep_non_ground_conditions=*/true);
     PulseFormula formula = pruned.getPathFormula().clone();
     merged_transitive =
         TransitiveInfo::merge(merged_transitive, pruned.getTransitiveInfo());

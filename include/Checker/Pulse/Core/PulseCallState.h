@@ -121,10 +121,14 @@ public:
           hp.pushDeref();
           break;
         case AccessKind::Field:
-          hp.pushField(acc.field_idx);
+          hp.pushField(acc.field_idx, acc.field_byte_offset);
           break;
         case AccessKind::ArrayIndex:
-          hp.pushArrayIndex(acc.index, acc.stride_bytes);
+          if (acc.const_index.has_value()) {
+            hp.pushConstArrayIndex(*acc.const_index, acc.stride_bytes);
+          } else {
+            hp.pushArrayIndex(acc.index, acc.stride_bytes);
+          }
           break;
         }
       }

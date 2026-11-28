@@ -128,9 +128,35 @@ bool ProcedureMatcher::matchesName(const std::string &func_name,
     }
   }
 
-  const std::string demangled = llvm::demangle(func_name);
+  // Fast O(1) path for exact C/mangled procedure names when no scope exclusions
+  // require demangling.
+  if (exclude_in_.empty()) {
+    if (type_ == Type::ExactNames) {
+      if (exact_names_.count(func_name) > 0) {
+        return true;
+      }
+      if (func_name.size() < 2 || func_name[0] != '_' || func_name[1] != 'Z') {
+        return false;
+      }
+    } else if (type_ == Type::ProcedureName) {
+      if (func_name == name_) {
+        return true;
+      }
+      if (func_name.size() < 2 || func_name[0] != '_' || func_name[1] != 'Z') {
+        return false;
+      }
+    } else if (type_ == Type::BuiltinName) {
+      return is_intrinsic && func_name == name_;
+    }
+  }
+
+  const bool maybe_mangled =
+      func_name.size() >= 2 && func_name[0] == '_' && func_name[1] == 'Z';
+  const std::string demangled =
+      maybe_mangled ? llvm::demangle(func_name) : func_name;
+  const size_t paren = demangled.find('(');
   const std::string demangled_no_args =
-      demangled.substr(0, demangled.find('('));
+      (paren == std::string::npos) ? demangled : demangled.substr(0, paren);
 
   for (const auto &ex_in : exclude_in_) {
     if (demangled_no_args.find(ex_in) != std::string::npos ||
@@ -143,9 +169,13 @@ bool ProcedureMatcher::matchesName(const std::string &func_name,
   case Type::ProcedureName:
     return func_name == name_ || demangled_no_args == name_;
 
+  case Type::ExactNames:
+    return exact_names_.count(func_name) > 0 ||
+           exact_names_.count(demangled_no_args) > 0;
+
   case Type::ProcedureNameRegex:
     return std::regex_search(func_name, name_regex_) ||
-           std::regex_search(demangled_no_args, name_regex_);
+           (maybe_mangled && std::regex_search(demangled_no_args, name_regex_));
 
   case Type::BuiltinName:
     return is_intrinsic && func_name == name_;
@@ -216,14 +246,38 @@ static std::vector<const ProcedureUnit *> matchUnitsCached(
   }
   return out;
 }
+
+static std::vector<const ProcedureUnit *> matchUnitsFnCached(
+    const std::vector<ProcedureUnit> &units,
+    std::unordered_map<const llvm::Function *, std::vector<size_t>> &fn_cache,
+    const llvm::Function *func) {
+  std::vector<const ProcedureUnit *> out;
+  if (units.empty() || !func || !func->hasName()) {
+    return out;
+  }
+  auto it = fn_cache.find(func);
+  if (it == fn_cache.end()) {
+    std::string fname = func->getName().str();
+    const bool is_intr = func->isIntrinsic();
+    std::vector<size_t> indices;
+    for (size_t i = 0; i < units.size(); ++i) {
+      if (units[i].matcher.matchesName(fname, is_intr)) {
+        indices.push_back(i);
+      }
+    }
+    it = fn_cache.emplace(func, std::move(indices)).first;
+  }
+  out.reserve(it->second.size());
+  for (size_t idx : it->second) {
+    out.push_back(&units[idx]);
+  }
+  return out;
+}
 } // namespace
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchSources(const llvm::Function *func) const {
-  if (!func)
-    return {};
-  return matchUnitsCached(source_procedures_, source_cache_,
-                          func->getName().str(), func->isIntrinsic());
+  return matchUnitsFnCached(source_procedures_, source_fn_cache_, func);
 }
 
 std::vector<const ProcedureUnit *>
@@ -233,18 +287,12 @@ TaintConfig::matchSourcesByName(const std::string &func_name) const {
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchSourceBlocks(const llvm::Function *func) const {
-  if (!func)
-    return {};
-  return matchUnitsCached(source_blocks_, source_block_cache_,
-                          func->getName().str(), func->isIntrinsic());
+  return matchUnitsFnCached(source_blocks_, source_block_fn_cache_, func);
 }
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchSinks(const llvm::Function *func) const {
-  if (!func)
-    return {};
-  return matchUnitsCached(sink_procedures_, sink_cache_, func->getName().str(),
-                          func->isIntrinsic());
+  return matchUnitsFnCached(sink_procedures_, sink_fn_cache_, func);
 }
 
 std::vector<const ProcedureUnit *>
@@ -254,10 +302,7 @@ TaintConfig::matchSinksByName(const std::string &func_name) const {
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchSanitizers(const llvm::Function *func) const {
-  if (!func)
-    return {};
-  return matchUnitsCached(sanitizer_procedures_, sanitizer_cache_,
-                          func->getName().str(), func->isIntrinsic());
+  return matchUnitsFnCached(sanitizer_procedures_, sanitizer_fn_cache_, func);
 }
 
 std::vector<const ProcedureUnit *>
@@ -268,10 +313,7 @@ TaintConfig::matchSanitizersByName(const std::string &func_name) const {
 
 std::vector<const ProcedureUnit *>
 TaintConfig::matchPropagators(const llvm::Function *func) const {
-  if (!func)
-    return {};
-  return matchUnitsCached(propagator_procedures_, propagator_cache_,
-                          func->getName().str(), func->isIntrinsic());
+  return matchUnitsFnCached(propagator_procedures_, propagator_fn_cache_, func);
 }
 
 std::vector<const ProcedureUnit *>
@@ -367,12 +409,10 @@ void TaintConfig::initializeDefault() {
       ProcedureMatcher(ProcedureMatcher::Type::ProcedureName, "read"),
       {TaintKind::UserInput()}, ProcedureTarget::ArgumentPositions, {1}));
   default_config_->addSourceProcedure(ProcedureUnit(
-      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
-                       "^(recv|recvfrom|recvmsg)$"),
+      ProcedureMatcher::forExactNames({"recv", "recvfrom", "recvmsg"}),
       {TaintKind::Network()}, ProcedureTarget::ArgumentPositions, {1}));
   default_config_->addSourceProcedure(ProcedureUnit(
-      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
-                       "^(gets|fgets|fread)$"),
+      ProcedureMatcher::forExactNames({"gets", "fgets", "fread"}),
       {TaintKind::UserInput()}, ProcedureTarget::ArgumentPositions, {0}));
   default_config_->addSourceProcedure(ProcedureUnit(
       ProcedureMatcher(ProcedureMatcher::Type::ProcedureName, "getcwd"),
@@ -391,27 +431,27 @@ void TaintConfig::initializeDefault() {
 
   // --- Unified default taint sinks ---
   default_config_->addSinkProcedure(ProcedureUnit(
-      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
-                       "^(system|exec|execl|execlp|execle|execv|execvp|execve|"
-                       "popen|eval)$"),
+      ProcedureMatcher::forExactNames({"system", "exec", "execl", "execlp",
+                                       "execle", "execv", "execvp", "execve",
+                                       "popen", "eval"}),
       {TaintKind::UserInput()}, ProcedureTarget::AllArguments));
   default_config_->addSinkProcedure(ProcedureUnit(
-      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
-                       "^(printf|fprintf|sprintf|snprintf)$"),
+      ProcedureMatcher::forExactNames(
+          {"printf", "fprintf", "sprintf", "snprintf"}),
       {TaintKind::UserInput()}, ProcedureTarget::AllArguments));
 
   // --- Unified default taint sanitizers ---
   default_config_->addSanitizerProcedure(ProcedureUnit(
-      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
-                       "^(strlen|strcmp|strncmp|atoi|atol|atoll|strtol|"
-                       "strtoul)$"),
+      ProcedureMatcher::forExactNames(
+          {"strlen", "strcmp", "strncmp", "atoi", "atol", "atoll", "strtol",
+           "strtoul"}),
       {TaintKind::Unknown()}, ProcedureTarget::AllArguments));
 
   // --- Unified default taint propagators ---
   default_config_->addPropagatorProcedure(ProcedureUnit(
-      ProcedureMatcher(ProcedureMatcher::Type::ProcedureNameRegex,
-                       "^(strcpy|strncpy|strcat|strncat|memcpy|memmove|strdup|"
-                       "sprintf|snprintf)$"),
+      ProcedureMatcher::forExactNames({"strcpy", "strncpy", "strcat", "strncat",
+                                       "memcpy", "memmove", "strdup", "sprintf",
+                                       "snprintf"}),
       {TaintKind::UserInput()}, ProcedureTarget::ReturnValue));
 
   // --- Default sink policies ---

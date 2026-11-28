@@ -7,6 +7,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <llvm/ADT/StringRef.h>
@@ -50,6 +51,7 @@ class ProcedureMatcher {
 public:
   enum class Type {
     ProcedureName,       // Exact name match
+    ExactNames,          // O(1) set of exact procedure names
     ProcedureNameRegex,  // Regex match on raw or demangled name
     ClassNameRegex,      // Regex match on demangled class name
     ClassAndMethodNames, // Match demangled class and method names
@@ -59,6 +61,7 @@ public:
 private:
   Type type_;
   std::string name_;
+  std::unordered_set<std::string> exact_names_;
   std::regex name_regex_;
   std::vector<std::string> class_names_;
   std::vector<std::string> method_names_;
@@ -70,6 +73,15 @@ public:
     if (t == Type::ProcedureNameRegex || t == Type::ClassNameRegex) {
       name_regex_ = std::regex(name);
     }
+  }
+
+  static ProcedureMatcher
+  forExactNames(std::initializer_list<const char *> names) {
+    ProcedureMatcher m(Type::ExactNames, "");
+    for (const char *n : names) {
+      m.exact_names_.emplace(n);
+    }
+    return m;
   }
 
   static ProcedureMatcher
@@ -181,7 +193,9 @@ private:
   std::map<TaintKind, std::vector<SinkPolicy>> sink_policies_;
   std::map<std::string, std::vector<TaintKind>> allocation_sources_;
 
-  // Memoized match caches keyed by "(I:|F:)<func_name>" storing unit indices.
+  // Memoized match caches keyed by "(I:|F:)<func_name>" storing unit indices,
+  // plus fast Function* pointer caches to avoid std::string construction on
+  // hot call-site queries.
   mutable std::unordered_map<std::string, std::vector<size_t>> source_cache_;
   mutable std::unordered_map<std::string, std::vector<size_t>>
       source_block_cache_;
@@ -189,6 +203,16 @@ private:
   mutable std::unordered_map<std::string, std::vector<size_t>> sanitizer_cache_;
   mutable std::unordered_map<std::string, std::vector<size_t>>
       propagator_cache_;
+  mutable std::unordered_map<const llvm::Function *, std::vector<size_t>>
+      source_fn_cache_;
+  mutable std::unordered_map<const llvm::Function *, std::vector<size_t>>
+      source_block_fn_cache_;
+  mutable std::unordered_map<const llvm::Function *, std::vector<size_t>>
+      sink_fn_cache_;
+  mutable std::unordered_map<const llvm::Function *, std::vector<size_t>>
+      sanitizer_fn_cache_;
+  mutable std::unordered_map<const llvm::Function *, std::vector<size_t>>
+      propagator_fn_cache_;
 
   void clearMatchCaches() {
     source_cache_.clear();
@@ -196,6 +220,11 @@ private:
     sink_cache_.clear();
     sanitizer_cache_.clear();
     propagator_cache_.clear();
+    source_fn_cache_.clear();
+    source_block_fn_cache_.clear();
+    sink_fn_cache_.clear();
+    sanitizer_fn_cache_.clear();
+    propagator_fn_cache_.clear();
   }
 
   static TaintConfig *default_config_;
@@ -206,22 +235,27 @@ public:
   void addSourceProcedure(const ProcedureUnit &unit) {
     source_procedures_.push_back(unit);
     source_cache_.clear();
+    source_fn_cache_.clear();
   }
   void addSourceBlock(const ProcedureUnit &unit) {
     source_blocks_.push_back(unit);
     source_block_cache_.clear();
+    source_block_fn_cache_.clear();
   }
   void addSinkProcedure(const ProcedureUnit &unit) {
     sink_procedures_.push_back(unit);
     sink_cache_.clear();
+    sink_fn_cache_.clear();
   }
   void addSanitizerProcedure(const ProcedureUnit &unit) {
     sanitizer_procedures_.push_back(unit);
     sanitizer_cache_.clear();
+    sanitizer_fn_cache_.clear();
   }
   void addPropagatorProcedure(const ProcedureUnit &unit) {
     propagator_procedures_.push_back(unit);
     propagator_cache_.clear();
+    propagator_fn_cache_.clear();
   }
   void addSinkPolicy(const TaintKind &sink_kind, const SinkPolicy &policy) {
     sink_policies_[sink_kind].push_back(policy);

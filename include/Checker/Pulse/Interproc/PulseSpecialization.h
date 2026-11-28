@@ -36,17 +36,27 @@ public:
     int param_index{-1};                  // >= 0 for formal parameter Pvar
     const llvm::Value *pvar_root{nullptr}; // Non-null for global Pvar
     unsigned field_idx{0};                // For FieldAccess
+    uint64_t field_byte_offset{0};        // Byte offset for FieldAccess
     std::string field_name;               // For Pvar name or FieldAccess
     AbstractValue index;                  // For ArrayIndex
+    std::optional<int64_t> const_index;   // For constant ArrayIndex
     uint64_t stride{0};                   // For ArrayIndex byte stride
 
     Element(PathElement k) : kind(k) {}
     Element(PathElement k, const std::string &fname)
         : kind(k), field_name(fname) {}
-    Element(PathElement k, unsigned fidx, const std::string &fname = "")
-        : kind(k), field_idx(fidx), field_name(fname) {}
+    Element(PathElement k, unsigned fidx, const std::string &fname = "",
+            uint64_t foff = 0)
+        : kind(k), field_idx(fidx), field_byte_offset(foff),
+          field_name(fname) {}
     Element(PathElement k, AbstractValue idx, uint64_t s = 0)
         : kind(k), index(idx), stride(s) {}
+    static Element constArrayIndex(int64_t idx, uint64_t s = 0) {
+      Element e(PathElement::ArrayIndex);
+      e.const_index = idx;
+      e.stride = s;
+      return e;
+    }
 
     static Element formalPvar(unsigned idx, const std::string &name = "") {
       Element e(PathElement::Pvar);
@@ -74,14 +84,20 @@ public:
         return field_name < other.field_name;
       }
       if (kind == PathElement::FieldAccess) {
+        if (field_byte_offset != other.field_byte_offset)
+          return field_byte_offset < other.field_byte_offset;
         if (field_idx != other.field_idx)
           return field_idx < other.field_idx;
         return field_name < other.field_name;
       }
       if (kind == PathElement::ArrayIndex) {
-        if (!(index == other.index))
-          return index < other.index;
-        return stride < other.stride;
+        if (stride != other.stride)
+          return stride < other.stride;
+        if (const_index.has_value() != other.const_index.has_value())
+          return const_index.has_value() < other.const_index.has_value();
+        if (const_index.has_value())
+          return *const_index < *other.const_index;
+        return index < other.index;
       }
       return false;
     }
@@ -93,9 +109,17 @@ public:
         return param_index == other.param_index &&
                pvar_root == other.pvar_root && field_name == other.field_name;
       if (kind == PathElement::FieldAccess)
-        return field_idx == other.field_idx && field_name == other.field_name;
-      if (kind == PathElement::ArrayIndex)
-        return index == other.index && stride == other.stride;
+        return field_idx == other.field_idx &&
+               field_byte_offset == other.field_byte_offset &&
+               field_name == other.field_name;
+      if (kind == PathElement::ArrayIndex) {
+        if (stride != other.stride ||
+            const_index.has_value() != other.const_index.has_value())
+          return false;
+        if (const_index.has_value())
+          return *const_index == *other.const_index;
+        return index == other.index;
+      }
       return true;
     }
   };
@@ -123,12 +147,15 @@ public:
 
   void push(Element e) { path_.push_back(std::move(e)); }
   void pushDeref() { path_.emplace_back(PathElement::Dereference); }
-  void pushField(unsigned idx) {
+  void pushField(unsigned idx, uint64_t byte_offset = 0) {
     path_.emplace_back(PathElement::FieldAccess, idx,
-                       "f" + std::to_string(idx));
+                       "f" + std::to_string(idx), byte_offset);
   }
   void pushArrayIndex(AbstractValue idx, uint64_t stride = 0) {
     path_.emplace_back(PathElement::ArrayIndex, idx, stride);
+  }
+  void pushConstArrayIndex(int64_t idx, uint64_t stride = 0) {
+    path_.push_back(Element::constArrayIndex(idx, stride));
   }
 
   const std::vector<Element> &getPath() const { return path_; }

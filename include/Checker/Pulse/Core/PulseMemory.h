@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 
 #include <llvm/IR/Value.h>
@@ -63,16 +64,30 @@ enum class AccessKind { Dereference, Field, ArrayIndex };
  */
 struct Access {
   AccessKind kind;
-  // For Field
+  // For Field: element index and byte offset within the enclosing struct
+  // (disambiguates `bitcast %Derived* to %Base*` field indices at distinct
+  // byte offsets so Base::field1 never collides with Derived::field1).
   unsigned field_idx{0};
+  uint64_t field_byte_offset{0};
   // For ArrayIndex
   AbstractValue index{};
+  // Constant integer array index when statically known (matches identically
+  // across summary boundaries and i32/i64 index widths).
+  std::optional<int64_t> const_index;
   // Size in bytes of the indexed element (0 if unknown / not applicable).
   uint64_t stride_bytes{0};
 
   Access() : kind(AccessKind::Dereference) {}
   explicit Access(AccessKind k) : kind(k) {}
   Access(unsigned idx) : kind(AccessKind::Field), field_idx(idx) {}
+
+  static Access field(unsigned idx, uint64_t byte_offset = 0) {
+    Access a;
+    a.kind = AccessKind::Field;
+    a.field_idx = idx;
+    a.field_byte_offset = byte_offset;
+    return a;
+  }
 
   static Access arrayIndex(AbstractValue idx, uint64_t stride_bytes = 0) {
     Access a;
@@ -82,16 +97,31 @@ struct Access {
     return a;
   }
 
+  static Access constArrayIndex(int64_t idx, uint64_t stride_bytes = 0) {
+    Access a;
+    a.kind = AccessKind::ArrayIndex;
+    a.const_index = idx;
+    a.stride_bytes = stride_bytes;
+    return a;
+  }
+
   bool operator<(const Access &other) const {
     if (kind != other.kind)
       return kind < other.kind;
-    if (kind == AccessKind::Field)
+    if (kind == AccessKind::Field) {
+      if (field_byte_offset != other.field_byte_offset)
+        return field_byte_offset < other.field_byte_offset;
       return field_idx < other.field_idx;
+    }
     if (kind == AccessKind::ArrayIndex) {
       // Stride is part of the projection identity: same index value but
       // different element types should not necessarily alias.
       if (stride_bytes != other.stride_bytes)
         return stride_bytes < other.stride_bytes;
+      if (const_index.has_value() != other.const_index.has_value())
+        return const_index.has_value() < other.const_index.has_value();
+      if (const_index.has_value())
+        return *const_index < *other.const_index;
       return index < other.index;
     }
     return false;
@@ -101,9 +131,18 @@ struct Access {
     if (kind != other.kind)
       return false;
     if (kind == AccessKind::Field)
-      return field_idx == other.field_idx;
-    if (kind == AccessKind::ArrayIndex)
-      return stride_bytes == other.stride_bytes && index == other.index;
+      return field_idx == other.field_idx &&
+             field_byte_offset == other.field_byte_offset;
+    if (kind == AccessKind::ArrayIndex) {
+      if (stride_bytes != other.stride_bytes ||
+          const_index.has_value() != other.const_index.has_value()) {
+        return false;
+      }
+      if (const_index.has_value()) {
+        return *const_index == *other.const_index;
+      }
+      return index == other.index;
+    }
     return true;
   }
 };

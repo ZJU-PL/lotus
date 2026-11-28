@@ -135,6 +135,25 @@ public:
 
   iterator erase(iterator it) { return data_.erase(it); }
 
+  void assignUnsorted(std::vector<value_type> &&items) {
+    std::sort(items.begin(), items.end(),
+              [](const value_type &a, const value_type &b) {
+                return a.first < b.first;
+              });
+    auto out = items.begin();
+    for (auto it = items.begin(); it != items.end(); ++it) {
+      if (out != items.begin() && std::prev(out)->first == it->first) {
+        std::prev(out)->second = std::move(it->second);
+      } else {
+        if (out != it)
+          *out = std::move(*it);
+        ++out;
+      }
+    }
+    items.erase(out, items.end());
+    data_.swap(items);
+  }
+
   bool operator==(const FlatMap &other) const { return data_ == other.data_; }
 };
 
@@ -188,6 +207,12 @@ public:
   }
 
   iterator erase(iterator it) { return data_.erase(it); }
+
+  void assignUnsorted(std::vector<K> &&items) {
+    std::sort(items.begin(), items.end());
+    items.erase(std::unique(items.begin(), items.end()), items.end());
+    data_.swap(items);
+  }
 
   bool operator==(const FlatSet &other) const { return data_ == other.data_; }
 };
@@ -603,7 +628,8 @@ public:
    */
   std::set<AbstractValue> simplifyForSummary(
       const std::set<AbstractValue> &keep_vars,
-      const std::set<AbstractValue> &precondition_vocab = {});
+      const std::set<AbstractValue> &precondition_vocab = {},
+      bool keep_non_ground_conditions = false);
 
   /**
    * Compare two formulas after canonical normalization.

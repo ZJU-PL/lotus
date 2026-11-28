@@ -9,6 +9,9 @@
 #include <limits>
 #include <optional>
 
+#include <llvm/IR/GlobalValue.h>
+#include <llvm/IR/GlobalVariable.h>
+
 namespace pulse {
 
 //===----------------------------------------------------------------------===//
@@ -611,6 +614,74 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
   Stack stack_pre_join = std::move(pre_result.first);
   Heap heap_pre_join = std::move(pre_result.second);
 
+  // Collect pointer/aggregate GlobalValue roots that carry post_heap_ edges
+  // (e.g. mutable globals holding heap pointers like `@cwd`). Scalar int/float
+  // globals (like static init flags) and read-only string literals cannot root
+  // heap allocations and must not bloat joins across sequential diamonds.
+  auto isPointerCarryingGlobalWithEdges = [](const AbductiveDomain &dom,
+                                             AbstractValue c) {
+    const auto *GV =
+        llvm::dyn_cast_or_null<llvm::GlobalVariable>(c.getValue());
+    if (!GV)
+      return false;
+    llvm::Type *vty = GV->getValueType();
+    if (!vty || vty->isIntegerTy() || vty->isFloatingPointTy())
+      return false;
+    auto pit = dom.getPostHeap().getEdges().find(c);
+    return pit != dom.getPostHeap().getEdges().end() && !pit->second.empty();
+  };
+  std::set<AbstractValue> lhs_globals;
+  std::set<AbstractValue> rhs_globals;
+  std::set<AbstractValue> all_globals;
+  for (const auto &kv : lhs.getPostAttrs().getAttrs()) {
+    if (kv.second.count(Attribute::Global) > 0 && kv.first.getValue() &&
+        llvm::isa<llvm::GlobalVariable>(kv.first.getValue())) {
+      AbstractValue c = lhs.getCanonical(kv.first);
+      if (isPointerCarryingGlobalWithEdges(lhs, c)) {
+        lhs_globals.insert(c);
+        all_globals.insert(c);
+      }
+    }
+  }
+  for (const auto &kv : rhs.getPostAttrs().getAttrs()) {
+    if (kv.second.count(Attribute::Global) > 0 && kv.first.getValue() &&
+        llvm::isa<llvm::GlobalVariable>(kv.first.getValue())) {
+      AbstractValue c = rhs.getCanonical(kv.first);
+      if (isPointerCarryingGlobalWithEdges(rhs, c)) {
+        rhs_globals.insert(c);
+        all_globals.insert(c);
+      }
+    }
+  }
+
+  auto joinGlobalRoot = [&](Heap &target_heap, AbstractValue gv,
+                            bool use_pre_heap) {
+    const bool in_l = lhs_globals.count(gv) > 0;
+    const bool in_r = rhs_globals.count(gv) > 0;
+    std::optional<std::pair<AbstractValue, ValueHistory>> l_opt;
+    std::optional<std::pair<AbstractValue, ValueHistory>> r_opt;
+    if (in_l)
+      l_opt = {{gv, ValueHistory()}};
+    if (in_r)
+      r_opt = {{gv, ValueHistory()}};
+    if (in_l != in_r) {
+      // Preserve the GlobalValue's canonical AbstractValue identity even when
+      // only one branch touched the global.
+      uint64_t packed = JoinState::packOptPair(
+          in_l ? std::optional<AbstractValue>(gv) : std::nullopt,
+          in_r ? std::optional<AbstractValue>(gv) : std::nullopt);
+      join_state.subst[packed] = gv;
+      join_state.rev_subst[gv] = {
+          in_l ? std::optional<AbstractValue>(gv) : std::nullopt,
+          in_r ? std::optional<AbstractValue>(gv) : std::nullopt};
+    }
+    joinHeaps(join_state, target_heap, lhs, l_opt, rhs, r_opt, use_pre_heap);
+  };
+
+  for (AbstractValue gv : all_globals) {
+    joinGlobalRoot(heap_pre_join, gv, /*use_pre_heap=*/true);
+  }
+
   // Join post stacks and heaps separately
   Stack stack_post_join;
   Heap heap_post_join;
@@ -662,6 +733,10 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
     }
   }
 
+  for (AbstractValue gv : all_globals) {
+    joinGlobalRoot(heap_post_join, gv, /*use_pre_heap=*/false);
+  }
+
   // Join attributes using rev_subst
   AddressAttributes attrs_pre_join, attrs_post_join;
 
@@ -688,6 +763,11 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
     for (Attribute attr : joined_pre_attrs) {
       attrs_pre_join.add(v_join, attr);
     }
+  }
+
+  // GlobalValue roots always retain Attribute::Global (an invariant IR fact).
+  for (AbstractValue gv : all_globals) {
+    attrs_post_join.add(gv, Attribute::Global);
   }
 
   // Reuse already-computed formula join instead of joining a second time.
@@ -745,6 +825,11 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
         if (t1 && t2 && *t1 == *t2) {
           (void)joined_formula.addExactType(v_join, *t1);
         }
+        auto s1 = lhs_f.asConstantString(l_av);
+        auto s2 = rhs_f.asConstantString(r_av);
+        if (s1 && s2 && *s1 == *s2) {
+          (void)joined_formula.addStringConstant(v_join, *s1);
+        }
         if (lhs_constrained.count(lhs_f.getCanonicalReadOnly(l_av)) > 0 ||
             rhs_constrained.count(rhs_f.getCanonicalReadOnly(r_av)) > 0) {
           (void)joined_formula.addDisjunctiveEquality(v_join, l_av, r_av);
@@ -777,6 +862,9 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
       }
       if (auto t = src_f.getExactType(src_av)) {
         (void)joined_formula.addExactType(v_join, *t);
+      }
+      if (auto s = src_f.asConstantString(src_av)) {
+        (void)joined_formula.addStringConstant(v_join, *s);
       }
     }
   }
@@ -834,6 +922,15 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
 
   // Preserve parameterized attributes, invalidation metadata, allocation
   // sizes/roots/info, dynamic types, and taint along rev_subst.
+  llvm::DenseMap<AbstractValue, unsigned> lhs_ref_count;
+  llvm::DenseMap<AbstractValue, unsigned> rhs_ref_count;
+  for (const auto &kv : join_state.rev_subst) {
+    if (kv.second.first)
+      lhs_ref_count[lhs.getCanonical(*kv.second.first)]++;
+    if (kv.second.second)
+      rhs_ref_count[rhs.getCanonical(*kv.second.second)]++;
+  }
+
   for (const auto &kv : join_state.rev_subst) {
     AbstractValue v_join = kv.first;
     const auto &l_opt = kv.second.first;
@@ -865,14 +962,36 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
       joined.setAllocationSize(v_join, *r_sz);
     }
 
-    // Allocation info (keep when present on both or one-sided weak).
-    if (l_opt) {
-      if (auto ai = lhs.getAllocationInfo(*l_opt)) {
-        joined.setAllocationInfo(v_join, *ai);
+    // Allocation info: only keep as a live allocation for leak checking when
+    // BOTH sides treat it as a live (non-invalidated) allocation and the join
+    // did not split aliases of the allocation across distinct joined values.
+    if (l_opt && r_opt) {
+      AbstractValue lc = lhs.getCanonical(*l_opt);
+      AbstractValue rc = rhs.getCanonical(*r_opt);
+      auto l_ai = lhs.getAllocationInfo(lc);
+      auto r_ai = rhs.getAllocationInfo(rc);
+      if (l_ai && r_ai && !lhs.getPostAttrs().has(lc, Attribute::Invalid) &&
+          !rhs.getPostAttrs().has(rc, Attribute::Invalid) &&
+          lhs_ref_count[lc] == 1 && rhs_ref_count[rc] == 1) {
+        joined.setAllocationInfo(v_join, *l_ai);
       }
-    } else if (r_opt) {
-      if (auto ai = rhs.getAllocationInfo(*r_opt)) {
-        joined.setAllocationInfo(v_join, *ai);
+
+      // Preserve allocation root and offset when both sides agree.
+      AbstractValue l_root = lhs.getAllocationRoot(lc);
+      AbstractValue r_root = rhs.getAllocationRoot(rc);
+      if (!(l_root == lc) || !(r_root == rc)) {
+        uint64_t packed_root = JoinState::packOptPair(l_root, r_root);
+        auto root_it = join_state.subst.find(packed_root);
+        if (root_it != join_state.subst.end()) {
+          joined.setAllocationRoot(v_join, root_it->second);
+        } else if (l_root == r_root) {
+          joined.setAllocationRoot(v_join, l_root);
+        }
+      }
+      auto l_off = lhs.getAllocationOffset(lc);
+      auto r_off = rhs.getAllocationOffset(rc);
+      if (l_off && r_off && *l_off == *r_off) {
+        joined.setAllocationOffset(v_join, *l_off);
       }
     }
 

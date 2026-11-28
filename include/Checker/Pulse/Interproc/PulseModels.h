@@ -127,6 +127,9 @@ private:
                           const llvm::BasicBlock *pred);
   ModelResult modelStrstr(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
+  ModelResult modelStrcmp(const llvm::CallBase *call, ExecutionDomain &state,
+                          const llvm::BasicBlock *pred, bool bounded,
+                          bool case_insensitive, bool is_memcmp = false);
   ModelResult modelMemcpy(const llvm::CallBase *call, ExecutionDomain &state,
                           const llvm::BasicBlock *pred);
   ModelResult modelMemmove(const llvm::CallBase *call, ExecutionDomain &state,
@@ -188,6 +191,9 @@ private:
                                      ExecutionDomain &state,
                                      const llvm::BasicBlock *pred);
   ModelResult modelStdUniquePtrGet(const llvm::CallBase *call,
+                                   ExecutionDomain &state,
+                                   const llvm::BasicBlock *pred);
+  ModelResult modelStdSmartPtrBool(const llvm::CallBase *call,
                                    ExecutionDomain &state,
                                    const llvm::BasicBlock *pred);
   ModelResult modelStdUniquePtrDtor(const llvm::CallBase *call,

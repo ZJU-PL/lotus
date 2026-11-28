@@ -78,19 +78,23 @@ struct MustBeValidInfo {
   uint64_t timestamp{0};
   Trace trace;
   std::optional<InvalidationKind> reason;
+  bool allow_one_past_end{false};
 
   MustBeValidInfo() = default;
   MustBeValidInfo(uint64_t ts, Trace t,
-                  std::optional<InvalidationKind> r = std::nullopt)
-      : timestamp(ts), trace(std::move(t)), reason(r) {}
+                  std::optional<InvalidationKind> r = std::nullopt,
+                  bool one_past_end = false)
+      : timestamp(ts), trace(std::move(t)), reason(r),
+        allow_one_past_end(one_past_end) {}
   MustBeValidInfo(const MustBeValidInfo &other)
       : timestamp(other.timestamp), trace(other.trace.clone()),
-        reason(other.reason) {}
+        reason(other.reason), allow_one_past_end(other.allow_one_past_end) {}
   MustBeValidInfo &operator=(const MustBeValidInfo &other) {
     if (this != &other) {
       timestamp = other.timestamp;
       trace = other.trace.clone();
       reason = other.reason;
+      allow_one_past_end = other.allow_one_past_end;
     }
     return *this;
   }
@@ -312,6 +316,10 @@ private:
   // Stable allocation identity for base and derived pointer values
   std::map<AbstractValue, AbstractValue> allocation_roots_;
 
+  // Signed byte offset from allocation_root when statically known (enables
+  // exact one-past-the-end + backward-step pointer arithmetic like `*(end - 1)`).
+  std::map<AbstractValue, int64_t> allocation_offsets_;
+
   // Skipped calls (for unknown functions)
   std::set<std::string> skipped_calls_;
 
@@ -407,7 +415,8 @@ public:
   void abduceToPre(AbstractValue addr, const Access &access, Address target);
   void abduceAttrToPre(AbstractValue addr, Attribute attr);
   void abduceMustBeValid(AbstractValue addr, Trace trace,
-                         std::optional<InvalidationKind> reason = std::nullopt);
+                         std::optional<InvalidationKind> reason = std::nullopt,
+                         bool allow_one_past_end = false);
   void abduceMustBeInitialized(AbstractValue addr, Trace trace);
   void abduceMustNotBeTainted(AbstractValue addr, MustNotBeTaintedSink sink);
 
@@ -587,6 +596,28 @@ public:
     return allocation_roots_;
   }
 
+  void setAllocationOffset(AbstractValue addr, int64_t offset_bytes) {
+    allocation_offsets_[getCanonical(addr)] = offset_bytes;
+  }
+  std::optional<int64_t> getAllocationOffset(AbstractValue addr) const {
+    AbstractValue canon_addr = getCanonical(addr);
+    auto it = allocation_offsets_.find(canon_addr);
+    if (it != allocation_offsets_.end()) {
+      return it->second;
+    }
+    it = allocation_offsets_.find(addr);
+    if (it != allocation_offsets_.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+  const std::map<AbstractValue, int64_t> &getAllocationOffsets() const {
+    return allocation_offsets_;
+  }
+  std::map<AbstractValue, int64_t> &getAllocationOffsets() {
+    return allocation_offsets_;
+  }
+
   // Skipped calls
   void addSkippedCall(const std::string &name) { skipped_calls_.insert(name); }
   const std::set<std::string> &getSkippedCalls() const {
@@ -749,8 +780,9 @@ public:
 
   // Incorporate newly discovered formula equalities / zeros into heaps and
   // attributes (Infer's AbductiveDomain.incorporate_new_eqs).
-  IncorporateResult incorporateNewEqs(const NewEqs &new_eqs);
-  IncorporateResult incorporatePendingNewEqs();
+  IncorporateResult incorporateNewEqs(const NewEqs &new_eqs,
+                                      bool defer_canonicalize = false);
+  IncorporateResult incorporatePendingNewEqs(bool defer_canonicalize = false);
 
   // Graph-isomorphism partial order (Infer's GraphComparison.is_isograph).
   static bool leq(const AbductiveDomain &lhs, const AbductiveDomain &rhs);

@@ -65,8 +65,54 @@ static const llvm::Function *
 extractFunctionFromConstant(const llvm::Constant *C) {
   if (!C)
     return nullptr;
-  const llvm::Value *stripped = C->stripPointerCasts();
+  const llvm::Value *stripped = C->stripPointerCastsAndAliases();
   return llvm::dyn_cast_or_null<llvm::Function>(stripped);
+}
+
+static bool maybeMarkStructInitialized(AbductiveDomain &astate,
+                                       AbstractValue struct_av,
+                                       const llvm::StructType *ST,
+                                       const llvm::DataLayout *DL,
+                                       const llvm::Instruction *loc = nullptr,
+                                       unsigned depth = 0) {
+  if (!ST)
+    return false;
+  AbstractValue c_struct = astate.getCanonical(struct_av);
+  if (!astate.getPostAttrs().has(c_struct, Attribute::Uninitialized)) {
+    return true;
+  }
+  const unsigned num_elems = ST->getNumElements();
+  if (num_elems == 0 || num_elems > 16)
+    return false;
+  const llvm::StructLayout *SL =
+      (DL && ST->isSized())
+          ? DL->getStructLayout(const_cast<llvm::StructType *>(ST))
+          : nullptr;
+  for (unsigned i = 0; i < num_elems; ++i) {
+    uint64_t field_off = SL ? SL->getElementOffset(i) : 0;
+    const Address *edge =
+        astate.getPostHeap().findEdge(c_struct, Access::field(i, field_off));
+    if (!edge) {
+      return false;
+    }
+    AbstractValue fc = astate.getCanonical(edge->addr);
+    if (astate.getPostAttrs().has(fc, Attribute::Uninitialized) &&
+        !astate.hasWrittenTo(fc)) {
+      if (depth < 4) {
+        if (const auto *sub_st =
+                llvm::dyn_cast<llvm::StructType>(ST->getElementType(i))) {
+          if (maybeMarkStructInitialized(astate, fc, sub_st, DL, loc,
+                                         depth + 1)) {
+            continue;
+          }
+        }
+      }
+      return false;
+    }
+  }
+  astate.getPostAttrs().remove(c_struct, Attribute::Uninitialized);
+  astate.markWrittenTo(c_struct, loc);
+  return true;
 }
 
 static const llvm::Constant *
@@ -338,7 +384,7 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
             astate.getPostHeap().addEdge(gv_av, Access(AccessKind::Dereference),
                                          Address(nv));
           } else if (const auto *target_gv = llvm::dyn_cast_or_null<llvm::GlobalValue>(
-                         init->stripPointerCasts())) {
+                         init->stripPointerCastsAndAliases())) {
             if (auto target_opt = eval(astate, target_gv, loc, pred)) {
               astate.getPostHeap().addEdge(gv_av,
                                            Access(AccessKind::Dereference),
@@ -490,7 +536,15 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
                                      ? &loc->getModule()->getDataLayout()
                                      : nullptr;
 
-    // Bounds tracking: use allocation size (when known) to prove OOB.
+    // Bounds tracking: use allocation root size + signed offset when known so
+    // one-past-the-end pointers (`end = buff + N`) stepped back (`end - 1`)
+    // return cleanly in-bounds while dereferencing `end` remains OOB.
+    AbstractValue alloc_root = astate.getAllocationRoot(base_canon);
+    std::optional<uint64_t> root_size_opt = astate.getAllocationSize(alloc_root);
+    std::optional<int64_t> base_off_opt = astate.getAllocationOffset(base_canon);
+    if (!base_off_opt && base_canon == alloc_root && root_size_opt) {
+      base_off_opt = 0;
+    }
     std::optional<uint64_t> alloc_size_opt =
         astate.getAllocationSize(base_canon);
     bool offset_known = true;
@@ -514,11 +568,13 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
           // Invalid field access. Be conservative: treat as unknown.
           return std::nullopt;
         }
-        acc = Access(static_cast<unsigned>(field));
+        uint64_t field_off = 0;
+        if (DL && ST->isSized()) {
+          field_off = DL->getStructLayout(ST)->getElementOffset(field);
+        }
+        acc = Access::field(static_cast<unsigned>(field), field_off);
 
-        if (offset_known && DL) {
-          auto *layout = DL->getStructLayout(ST);
-          uint64_t field_off = layout->getElementOffset(field);
+        if (offset_known && DL && ST->isSized()) {
           if (field_off >
               static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
             offset_known = false;
@@ -529,10 +585,20 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
           offset_known = false;
         }
       } else {
-        AbstractValue idxAv = factory_->getOrCreate(idx);
-        astate.getPathFormula().addIntegerConstraint(idxAv);
-        if (auto c = getI64Constant(idx)) {
-          (void)astate.getPathFormula().addBounds(idxAv, *c, *c);
+        auto const_idx_opt = getI64Constant(idx);
+        AbstractValue idxAv;
+        if (!const_idx_opt) {
+          idxAv = factory_->getOrCreate(idx);
+          astate.getPathFormula().addIntegerConstraint(idxAv);
+          const_idx_opt = astate.getPathFormula().asConstantInt(idxAv);
+        }
+
+        // First GEP index 0 (`gep T, T* %p, 0, ...`) is pointer identity
+        // (`%p + 0 == %p`). Skipping a synthetic ArrayIndex(0) hop unifies
+        // struct GEPs with InsertValue/ExtractValue, field-sensitive taint,
+        // bitcasts, and interprocedural constructor summaries.
+        if (op_index == 1 && const_idx_opt && *const_idx_opt == 0) {
+          continue;
         }
 
         uint64_t stride_bytes = 0;
@@ -540,17 +606,27 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
         if (DL && indexed && indexed->isSized()) {
           stride_bytes = DL->getTypeAllocSize(indexed);
         }
-        acc = Access::arrayIndex(idxAv, stride_bytes);
+        if (const_idx_opt) {
+          acc = Access::constArrayIndex(*const_idx_opt, stride_bytes);
+        } else {
+          acc = Access::arrayIndex(astate.getCanonical(idxAv), stride_bytes);
+        }
 
         if (offset_known && stride_bytes > 0) {
-          if (auto c = getI64Constant(idx)) {
-            __int128 off =
-                static_cast<__int128>(*c) * static_cast<__int128>(stride_bytes);
+          if (const_idx_opt) {
+            __int128 off = static_cast<__int128>(*const_idx_opt) *
+                           static_cast<__int128>(stride_bytes);
             if (off > std::numeric_limits<int64_t>::max() ||
                 off < std::numeric_limits<int64_t>::min()) {
               offset_known = false;
             } else {
-              total_offset += static_cast<int64_t>(off);
+              __int128 sum = static_cast<__int128>(total_offset) + off;
+              if (sum > std::numeric_limits<int64_t>::max() ||
+                  sum < std::numeric_limits<int64_t>::min()) {
+                offset_known = false;
+              } else {
+                total_offset = static_cast<int64_t>(sum);
+              }
             }
           } else {
             // Never assume a symbolic index is in bounds merely because the
@@ -583,13 +659,6 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
 
       if (auto *target = astate.getPostHeap().findEdge(cur, acc)) {
         cur = target->addr;
-        // If base was uninitialized, propagate to existing field unless it was
-        // already explicitly written to.
-        if (base_is_uninitialized &&
-            !astate.hasWrittenTo(astate.getCanonical(cur))) {
-          AbstractValue target_canon = astate.getCanonical(cur);
-          astate.getPostAttrs().add(target_canon, Attribute::Uninitialized);
-        }
         continue;
       }
       AbstractValue fresh = factory_->createFresh(GEP);
@@ -615,27 +684,26 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
         astate.getPostAttrs().add(fresh_canon, Attribute::Uninitialized);
       }
 
-      // Mirror field-level taint attached directly on `base_canon` onto the
-      // struct-GEP cell (so field-sensitive taint sources called before GEP
-      // flow precisely to the matching field only).
-      if (op_index == 2 && acc.kind == AccessKind::Field) {
-        if (const Address *direct_field =
-                astate.getPostHeap().findEdge(base_canon, acc)) {
-          TaintOperations::propagate(astate, direct_field->addr, fresh, loc);
-          astate.getPostAttrs().remove(astate.getCanonical(fresh),
-                                       Attribute::Uninitialized);
-        }
-      }
-
       cur = fresh;
     }
-    // Base pointer must be valid if it comes from the precondition.
+
+    // Pure zero-offset pointer identity GEP (`gep T, T* %p, 0`) returns base.
+    AbstractValue cur_canon = astate.getCanonical(cur);
+    if (cur_canon == base_canon) {
+      Address gepAddr(base_canon);
+      gepAddr.history = base.history;
+      return std::optional<Address>(gepAddr);
+    }
+
+    // Base pointer must be valid if it comes from the precondition. Pointer
+    // arithmetic alone allows one-past-the-end pointers (e.g. `end - 1`).
     if (astate.isInPre(base_canon) && !astate.isAllocated(base_canon)) {
       Trace t = Trace::fromValueHistory(base.history);
       if (loc) {
         t.addEvent(loc, "Pointer arithmetic / field access");
       }
-      astate.abduceMustBeValid(base_canon, std::move(t));
+      astate.abduceMustBeValid(base_canon, std::move(t), std::nullopt,
+                               /*allow_one_past_end=*/true);
     }
     // Resolve constant global vtable / dispatch-table pointers (e.g., C++
     // @_ZTV... vtables or static function-pointer arrays/structs) so virtual
@@ -743,29 +811,44 @@ std::optional<Address> PulseOperations::eval(AbductiveDomain &astate,
       }
     }
 
-    // If we can prove an out-of-bounds offset, mark it for later reporting.
-    if (alloc_size_opt && offset_known) {
+    // If we can prove an out-of-bounds offset (using absolute offset from the
+    // allocation root when available so `*(end - 1)` returns in-bounds), mark
+    // or clear OutOfBounds accordingly.
+    if (root_size_opt && base_off_opt && offset_known) {
+      __int128 abs_off =
+          static_cast<__int128>(*base_off_opt) + static_cast<__int128>(total_offset);
+      if (abs_off >= std::numeric_limits<int64_t>::min() &&
+          abs_off <= std::numeric_limits<int64_t>::max()) {
+        int64_t off64 = static_cast<int64_t>(abs_off);
+        astate.setAllocationOffset(cur_canon, off64);
+        const uint64_t root_size = *root_size_opt;
+        if (off64 < 0 || static_cast<uint64_t>(off64) >= root_size) {
+          oob_proven = true;
+        } else {
+          astate.getPostAttrs().remove(cur_canon, Attribute::OutOfBounds);
+          uint64_t remaining = root_size - static_cast<uint64_t>(off64);
+          if (remaining > 0) {
+            astate.setAllocationSize(cur_canon, remaining);
+          }
+        }
+      }
+    } else if (alloc_size_opt && offset_known) {
       const uint64_t alloc_size = *alloc_size_opt;
       if (total_offset < 0 ||
           static_cast<uint64_t>(total_offset) >= alloc_size) {
         oob_proven = true;
-      }
-    }
-
-    AbstractValue cur_canon = astate.getCanonical(cur);
-    if (oob_proven) {
-      astate.getPostAttrs().add(cur_canon, Attribute::OutOfBounds);
-    }
-    if (alloc_size_opt && offset_known && total_offset >= 0) {
-      uint64_t alloc_size = *alloc_size_opt;
-      if (static_cast<uint64_t>(total_offset) < alloc_size) {
+      } else {
         uint64_t remaining = alloc_size - static_cast<uint64_t>(total_offset);
         if (remaining > 0) {
           astate.setAllocationSize(cur_canon, remaining);
         }
       }
     }
-    astate.setAllocationRoot(cur_canon, astate.getAllocationRoot(base_canon));
+
+    if (oob_proven) {
+      astate.getPostAttrs().add(cur_canon, Attribute::OutOfBounds);
+    }
+    astate.setAllocationRoot(cur_canon, alloc_root);
     if (base_is_stack) {
       astate.getPostAttrs().add(cur_canon, Attribute::Stack);
     }
@@ -947,6 +1030,7 @@ void PulseOperations::allocate(AbductiveDomain &astate, AbstractValue addr,
   astate.getPostAttrs().remove(canon, Attribute::Invalid);
   astate.getPostAttrs().remove(canon, Attribute::Uninitialized);
   astate.setAllocationRoot(canon, canon);
+  astate.setAllocationOffset(canon, 0);
   Trace alloc_trace;
   if (loc) {
     alloc_trace.addEvent(loc, "Allocated");
@@ -1085,6 +1169,104 @@ OperationResult PulseOperations::writeDeref(AbductiveDomain &astate,
     astate.getPostAttrs().remove(canon_ptr, Attribute::Uninitialized);
   }
 
+  // If writing a struct field via GEP (including nested GEP/bitcast chains
+  // such as ABI `coerce.dive`), propagate initialization to enclosing structs
+  // whenever all fields of a struct have now been initialized.
+  if (const auto *SI = llvm::dyn_cast_or_null<llvm::StoreInst>(loc)) {
+    const llvm::DataLayout *DL =
+        SI->getModule() ? &SI->getModule()->getDataLayout() : nullptr;
+    llvm::SmallVector<const llvm::GEPOperator *, 6> gep_chain;
+    const llvm::Value *cur_p = SI->getPointerOperand()->stripPointerCasts();
+    while (const auto *GEP = llvm::dyn_cast<llvm::GEPOperator>(cur_p)) {
+      gep_chain.push_back(GEP);
+      if (gep_chain.size() >= 6)
+        break;
+      cur_p = GEP->getPointerOperand()->stripPointerCasts();
+    }
+    if (!gep_chain.empty()) {
+      const llvm::Value *root_v = gep_chain.back()->getPointerOperand()->stripPointerCasts();
+      const Address *root_slot = astate.getPostStack().find(root_v);
+      if (!root_slot) {
+        root_slot = astate.getPostStack().find(gep_chain.back()->getPointerOperand());
+      }
+      if (root_slot) {
+        AbstractValue walk_av = astate.getCanonical(root_slot->addr);
+        llvm::SmallVector<std::pair<AbstractValue, const llvm::StructType *>, 8>
+            enclosing_structs;
+        bool walk_ok = true;
+        for (auto g_it = gep_chain.rbegin();
+             g_it != gep_chain.rend() && walk_ok; ++g_it) {
+          const llvm::GEPOperator *GEP = *g_it;
+          unsigned op_idx = 1;
+          for (auto GTI = llvm::gep_type_begin(GEP), E = llvm::gep_type_end(GEP);
+               GTI != E && walk_ok; ++GTI, ++op_idx) {
+            const llvm::Value *idx = GEP->getOperand(op_idx);
+            if (const auto *ST = GTI.getStructTypeOrNull()) {
+              enclosing_structs.emplace_back(walk_av, ST);
+              auto *C = llvm::dyn_cast<llvm::ConstantInt>(idx);
+              if (!C || C->getZExtValue() >= ST->getNumElements()) {
+                walk_ok = false;
+                break;
+              }
+              unsigned fidx = static_cast<unsigned>(C->getZExtValue());
+              uint64_t foff =
+                  (DL && ST->isSized())
+                      ? DL->getStructLayout(const_cast<llvm::StructType *>(ST))
+                            ->getElementOffset(fidx)
+                      : 0;
+              const Address *next = astate.getPostHeap().findEdge(
+                  walk_av, Access::field(fidx, foff));
+              if (!next) {
+                walk_ok = false;
+                break;
+              }
+              walk_av = astate.getCanonical(next->addr);
+            } else {
+              auto c_opt = getI64Constant(idx);
+              if (!c_opt) {
+                c_opt = astate.getPathFormula().asConstantInt(
+                    astate.getCanonical(factory_->getOrCreate(idx)));
+              }
+              if (op_idx == 1 && c_opt && *c_opt == 0) {
+                continue;
+              }
+              if (!c_opt) {
+                // Writing to a symbolic/loop-varying array index initializes
+                // elements that cannot be soundly proven uninitialized later
+                // (under-approximating Pulse semantics). Constant indices do NOT
+                // clear the base array so partial constant init is still caught.
+                AbstractValue walk_root = astate.getAllocationRoot(walk_av);
+                astate.getPostAttrs().remove(walk_av, Attribute::Uninitialized);
+                astate.getPostAttrs().remove(walk_root, Attribute::Uninitialized);
+              }
+              uint64_t stride_bytes = 0;
+              llvm::Type *indexed = GTI.getIndexedType();
+              if (DL && indexed && indexed->isSized()) {
+                stride_bytes = DL->getTypeAllocSize(indexed);
+              }
+              Access acc = c_opt
+                               ? Access::constArrayIndex(*c_opt, stride_bytes)
+                               : Access::arrayIndex(
+                                     astate.getCanonical(
+                                         factory_->getOrCreate(idx)),
+                                     stride_bytes);
+              const Address *next = astate.getPostHeap().findEdge(walk_av, acc);
+              if (!next) {
+                walk_ok = false;
+                break;
+              }
+              walk_av = astate.getCanonical(next->addr);
+            }
+          }
+        }
+        for (auto it = enclosing_structs.rbegin();
+             it != enclosing_structs.rend(); ++it) {
+          maybeMarkStructInitialized(astate, it->first, it->second, DL, loc);
+        }
+      }
+    }
+  }
+
   return OperationResult::Success;
 }
 
@@ -1095,6 +1277,28 @@ PulseOperations::readDeref(AbductiveDomain &astate, Address ptr,
   AbstractValue canon_ptr = astate.getCanonical(ptr.addr);
   if (astate.getPostAttrs().has(canon_ptr, Attribute::Invalid)) {
     return {OperationResult::UseAfterFree, std::nullopt};
+  }
+
+  // Before reporting UninitializedRead on a struct alloca (e.g., ABI-coerced
+  // `bitcast %retval to <2 x float>*; load` after all struct fields were
+  // initialized), check whether all fields of the struct have been written.
+  if (astate.getPostAttrs().has(canon_ptr, Attribute::Uninitialized)) {
+    const llvm::DataLayout *DL =
+        (loc && loc->getModule()) ? &loc->getModule()->getDataLayout() : nullptr;
+    if (const auto *AI =
+            llvm::dyn_cast_or_null<llvm::AllocaInst>(canon_ptr.getValue())) {
+      if (const auto *ST =
+              llvm::dyn_cast<llvm::StructType>(AI->getAllocatedType())) {
+        maybeMarkStructInitialized(astate, canon_ptr, ST, DL, loc);
+      }
+    }
+    if (astate.getPostAttrs().has(canon_ptr, Attribute::Uninitialized)) {
+      if (const auto *LI = llvm::dyn_cast_or_null<llvm::LoadInst>(loc)) {
+        if (const auto *ST = llvm::dyn_cast<llvm::StructType>(LI->getType())) {
+          maybeMarkStructInitialized(astate, canon_ptr, ST, DL, loc);
+        }
+      }
+    }
   }
 
   // Check access (will check Null, OutOfBounds, Uninitialized, and abduce
