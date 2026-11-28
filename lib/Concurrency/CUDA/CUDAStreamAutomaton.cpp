@@ -1,7 +1,7 @@
 #include "Concurrency/CUDA/CUDAStreamAutomaton.h"
 
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/CUDA/CUDASemantics.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <llvm/Analysis/PostDominators.h>
 #include <llvm/IR/Dominators.h>

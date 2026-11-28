@@ -45,22 +45,22 @@ Directory layout
 The source tree is grouped by subdirectory under ``include/Concurrency/`` and
 ``lib/Concurrency/``:
 
-- ``Runtime/``: ``APIRegistry``, ``RuntimeKind``, and language runtime abstractions
+- ``Core/``: ``ConcurrencyContext``, ``ConcurrencyConfig``, ``ConcurrencyRelation``,
+  ``ThreadFlowGraph``, ``CallTarget``, and bit-vector clocks (``BVClock``, ``FBVClock``)
+- ``API/``: ``ThreadAPI``, ``CppAtomics``, and ``CppThreading``
 - ``Thread/``: Core thread model and reasoning:
-  - ``ThreadModel``, ``ThreadModelBuilder``, and ``ThreadCreationTree``
+  - ``ThreadCreationTree`` and ``ThreadMultiplicity``
   - ``Join/``: ``JoinTargetAnalysis``
-  - ``Sharing/``: ``EscapeAnalysis`` and ``StaticThreadSharingAnalysis``
-- ``Utils/``: ``ThreadAPI``, ``ThreadFlowGraph``, vector-clock utilities,
-  RAII lock tracking, and language models for C++, OpenMP, MPI, and Linux kernel
-  APIs
-- ``MHP/``: ``MHPAnalysis``, ``StaticVectorClockMHP``, and
+  - ``Sharing/``: ``EscapeAnalysis``, ``StaticThreadSharingAnalysis``, and ``ThreadLocalAnalysis``
+- ``MHP/``: ``MHPAnalysis``, ``ThreadRegionAnalysis``, ``StaticVectorClockMHP``, and
   ``HappensBeforeAnalysis`` (decoupled to consume abstract ``IMHPAnalysis``)
-- ``LockSet/``: ``LockSetAnalysis``
-- ``MPI/``: ``MPIAnalysis``, ``MPISemanticOp``, and its process, collective, rank, and RMA analyses
-- ``CUDA/``: ``CUDAAnalysis``, ``CUDAFunctionSummary``, ``CUDASemantics``, and
+- ``LockSet/``: ``LockSetAnalysis`` and ``RAIILockTracker``
+- ``ValueFlow/``: Thread-aware sparse value-flow refinement
+- ``MPI/``: ``MPIModel``, ``MPIAnalysis``, ``MPISemanticOp``, and its process, collective, rank, and RMA analyses
+- ``CUDA/``: ``CUDAModel``, ``CUDAAnalysis``, ``CUDAFunctionSummary``, ``CUDASemantics``, and
   ``PTXAnalyzer``
 - ``OpenMP/``: ``OpenMPModel``, ``OpenMPSemantics``, ``OpenMPOpKind``,
-  ``OpenMPThreadModelLowering``, and ``OpenMPTaskGraph``
+  ``DataSharingAnalysis``, and ``OpenMPTaskGraph``
 - ``LinuxKernel/``: ``LinuxKernelAnalysis``, ``LinuxKernelLockAnalysis``,
   ``LinuxKernelOperation``, and ``LinuxKernelRCUAnalysis``
 

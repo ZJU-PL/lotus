@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Concurrency/ConcurrencyRelation.h"
+#include "Concurrency/Core/ConcurrencyRelation.h"
 
 #include <map>
 #include <string>

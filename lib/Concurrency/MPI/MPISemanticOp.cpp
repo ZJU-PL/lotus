@@ -1,6 +1,6 @@
 #include "Concurrency/MPI/MPISemanticOp.h"
 
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 namespace lotus::concurrency::mpi {
 

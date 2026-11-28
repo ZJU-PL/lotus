@@ -2,7 +2,7 @@
 
 #include "Alias/UnificationBased/seadsa/DsaAnalysis.hh"
 #include "Alias/UnificationBased/seadsa/InitializePasses.hh"
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include "TestUtils/LLVMHelpers.h"
 

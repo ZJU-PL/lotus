@@ -1,8 +1,10 @@
 #include "Concurrency/CUDA/CUDAFunctionSummary.h"
 
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <optional>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/Analysis/PostDominators.h>
@@ -101,14 +103,68 @@ void CUDAFunctionSummaryAnalysis::runAnalysis() {
     return;
   }
 
+  // First pass: collect direct CUDA operations and call-graph edges without
+  // eagerly computing PostDominatorTree for functions unrelated to CUDA.
+  std::unordered_set<const llvm::Function *> direct_cuda_funcs;
+  std::unordered_map<const llvm::Function *,
+                     std::vector<const llvm::Function *>>
+      reverse_callers;
+  for (const auto &fn : m_module.functions()) {
+    if (fn.isDeclaration()) {
+      continue;
+    }
+    bool has_direct_cuda = false;
+    for (const auto &bb : fn) {
+      for (const auto &inst : bb) {
+        const auto *call = llvm::dyn_cast<llvm::CallBase>(&inst);
+        if (!call) {
+          continue;
+        }
+        auto td_type = api->getType(call);
+        if (api->getRuntimeLibrary(call) == ThreadAPI::RuntimeLibrary::CUDA &&
+            isCUDACall(td_type)) {
+          has_direct_cuda = true;
+        }
+        if (const llvm::Function *callee = api->getCallee(call)) {
+          if (!callee->isDeclaration()) {
+            reverse_callers[callee].push_back(&fn);
+          }
+        }
+      }
+    }
+    if (has_direct_cuda) {
+      direct_cuda_funcs.insert(&fn);
+    }
+  }
+
+  std::unordered_set<const llvm::Function *> cuda_relevant_funcs(
+      direct_cuda_funcs.begin(), direct_cuda_funcs.end());
+  std::vector<const llvm::Function *> rel_worklist(direct_cuda_funcs.begin(),
+                                                   direct_cuda_funcs.end());
+  for (size_t head = 0; head < rel_worklist.size(); ++head) {
+    auto it = reverse_callers.find(rel_worklist[head]);
+    if (it == reverse_callers.end()) {
+      continue;
+    }
+    for (const llvm::Function *caller : it->second) {
+      if (cuda_relevant_funcs.insert(caller).second) {
+        rel_worklist.push_back(caller);
+      }
+    }
+  }
+
   for (const auto &fn : m_module.functions()) {
     if (fn.isDeclaration()) {
       continue;
     }
     CUDAFunctionSummary summary;
     summary.function = &fn;
-    llvm::PostDominatorTree post_dom_tree;
-    post_dom_tree.recalculate(const_cast<llvm::Function &>(fn));
+    const bool is_relevant = cuda_relevant_funcs.count(&fn) != 0;
+    std::unique_ptr<llvm::PostDominatorTree> post_dom_tree;
+    if (is_relevant) {
+      post_dom_tree = std::make_unique<llvm::PostDominatorTree>();
+      post_dom_tree->recalculate(const_cast<llvm::Function &>(fn));
+    }
 
     for (const auto &bb : fn) {
       for (const auto &inst : bb) {
@@ -116,106 +172,107 @@ void CUDAFunctionSummaryAnalysis::runAnalysis() {
         if (!call) {
           continue;
         }
-        auto td_type = api->getType(call);
-        if (api->getRuntimeLibrary(call) == ThreadAPI::RuntimeLibrary::CUDA &&
-            isCUDACall(td_type)) {
-          switch (td_type) {
-          case ThreadAPI::TD_CUDA_KERNEL_LAUNCH:
-            summary.kernel_launches.push_back(call);
-            break;
-          case ThreadAPI::TD_CUDA_MEMCPY:
-          case ThreadAPI::TD_CUDA_MEMSET:
-          case ThreadAPI::TD_CUDA_MALLOC:
-          case ThreadAPI::TD_CUDA_FREE:
-          case ThreadAPI::TD_CUDA_UNIFIED_MEMORY:
-            summary.memory_transfers.push_back(call);
-            break;
-          case ThreadAPI::TD_CUDA_DEVICE_SYNC:
-          case ThreadAPI::TD_CUDA_BARRIER:
-          case ThreadAPI::TD_CUDA_WARP_BARRIER:
-          case ThreadAPI::TD_CUDA_MEMORY_BARRIER:
-            summary.synchronizations.push_back(call);
-            break;
-          case ThreadAPI::TD_CUDA_ATOMIC:
-            summary.atomics.push_back(call);
-            break;
-          case ThreadAPI::TD_CUDA_STREAM:
-            summary.stream_ops.push_back(call);
-            break;
-          case ThreadAPI::TD_CUDA_EVENT:
-            summary.event_ops.push_back(call);
-            break;
-          case ThreadAPI::TD_CUDA_TEXTURE:
-            summary.texture_ops.push_back(call);
-            break;
-          case ThreadAPI::TD_CUDA_SURFACE:
-            summary.surface_ops.push_back(call);
-            break;
-          default:
-            break;
-          }
-          if (auto effect_class = getEffectClass(td_type, call)) {
-            CUDAEffectSummary &effect = summary.effects[*effect_class];
-            appendUnique(effect.may, call);
-            const llvm::BasicBlock *entry = &fn.getEntryBlock();
-            const llvm::BasicBlock *call_block = call->getParent();
-            if (post_dom_tree.getNode(call_block) &&
-                post_dom_tree.getNode(entry) &&
-                post_dom_tree.dominates(call_block, entry)) {
-              appendUnique(effect.must, call);
+        if (is_relevant) {
+          auto td_type = api->getType(call);
+          if (api->getRuntimeLibrary(call) == ThreadAPI::RuntimeLibrary::CUDA &&
+              isCUDACall(td_type)) {
+            switch (td_type) {
+            case ThreadAPI::TD_CUDA_KERNEL_LAUNCH:
+              summary.kernel_launches.push_back(call);
+              break;
+            case ThreadAPI::TD_CUDA_MEMCPY:
+            case ThreadAPI::TD_CUDA_MEMSET:
+            case ThreadAPI::TD_CUDA_MALLOC:
+            case ThreadAPI::TD_CUDA_FREE:
+            case ThreadAPI::TD_CUDA_UNIFIED_MEMORY:
+              summary.memory_transfers.push_back(call);
+              break;
+            case ThreadAPI::TD_CUDA_DEVICE_SYNC:
+            case ThreadAPI::TD_CUDA_BARRIER:
+            case ThreadAPI::TD_CUDA_WARP_BARRIER:
+            case ThreadAPI::TD_CUDA_MEMORY_BARRIER:
+              summary.synchronizations.push_back(call);
+              break;
+            case ThreadAPI::TD_CUDA_ATOMIC:
+              summary.atomics.push_back(call);
+              break;
+            case ThreadAPI::TD_CUDA_STREAM:
+              summary.stream_ops.push_back(call);
+              break;
+            case ThreadAPI::TD_CUDA_EVENT:
+              summary.event_ops.push_back(call);
+              break;
+            case ThreadAPI::TD_CUDA_TEXTURE:
+              summary.texture_ops.push_back(call);
+              break;
+            case ThreadAPI::TD_CUDA_SURFACE:
+              summary.surface_ops.push_back(call);
+              break;
+            default:
+              break;
             }
-            CUDAInstantiatedEffect instantiated;
-            instantiated.effect_class = *effect_class;
-            instantiated.origin = call;
-            instantiated.must_execute = llvm::is_contained(effect.must, call);
-            for (const llvm::Argument &argument : fn.args()) {
-              instantiated.bindings.push_back({&argument, &argument});
+            if (auto effect_class = getEffectClass(td_type, call)) {
+              CUDAEffectSummary &effect = summary.effects[*effect_class];
+              appendUnique(effect.may, call);
+              const llvm::BasicBlock *entry = &fn.getEntryBlock();
+              const llvm::BasicBlock *call_block = call->getParent();
+              if (post_dom_tree->getNode(call_block) &&
+                  post_dom_tree->getNode(entry) &&
+                  post_dom_tree->dominates(call_block, entry)) {
+                appendUnique(effect.must, call);
+              }
+              CUDAInstantiatedEffect instantiated;
+              instantiated.effect_class = *effect_class;
+              instantiated.origin = call;
+              instantiated.must_execute = llvm::is_contained(effect.must, call);
+              for (const llvm::Argument &argument : fn.args()) {
+                instantiated.bindings.push_back({&argument, &argument});
+              }
+              appendUnique(summary.instantiated_effects,
+                           std::move(instantiated));
             }
-            appendUnique(summary.instantiated_effects, std::move(instantiated));
           }
         }
 
         const llvm::Function *callee = api->getCallee(call);
         if (callee && !callee->isDeclaration()) {
-          bool already_added = false;
-          for (const llvm::Function *existing : summary.callees) {
-            if (existing == callee) {
-              already_added = true;
-              break;
-            }
-          }
-          if (!already_added) {
+          if (!llvm::is_contained(summary.callees, callee)) {
             summary.callees.push_back(callee);
           }
-          CUDAFunctionCallsite callsite;
-          callsite.callsite = call;
-          callsite.callee = callee;
-          callsite.must_execute =
-              post_dom_tree.getNode(call->getParent()) &&
-              post_dom_tree.getNode(&fn.getEntryBlock()) &&
-              post_dom_tree.dominates(call->getParent(), &fn.getEntryBlock());
-          unsigned index = 0;
-          for (const llvm::Argument &formal : callee->args()) {
-            if (index >= call->arg_size()) {
-              break;
+          if (is_relevant && cuda_relevant_funcs.count(callee) != 0) {
+            CUDAFunctionCallsite callsite;
+            callsite.callsite = call;
+            callsite.callee = callee;
+            callsite.must_execute =
+                post_dom_tree->getNode(call->getParent()) &&
+                post_dom_tree->getNode(&fn.getEntryBlock()) &&
+                post_dom_tree->dominates(call->getParent(),
+                                         &fn.getEntryBlock());
+            unsigned index = 0;
+            for (const llvm::Argument &formal : callee->args()) {
+              if (index >= call->arg_size()) {
+                break;
+              }
+              callsite.arguments.push_back(
+                  {&formal, call->getArgOperand(index++)});
             }
-            callsite.arguments.push_back(
-                {&formal, call->getArgOperand(index++)});
+            summary.callsites.push_back(std::move(callsite));
           }
-          summary.callsites.push_back(std::move(callsite));
         }
       }
     }
 
-    m_summaries[&fn] = summary;
+    m_summaries[&fn] = std::move(summary);
   }
 
-  bool changed = true;
-  while (changed) {
+  bool changed = !cuda_relevant_funcs.empty();
+  size_t iterations = 0;
+  constexpr size_t kMaxSummaryIterations = 64;
+  while (changed && ++iterations <= kMaxSummaryIterations) {
     changed = false;
 
-    for (auto &pair : m_summaries) {
-      CUDAFunctionSummary &summary = pair.second;
+    for (const llvm::Function *fn : cuda_relevant_funcs) {
+      CUDAFunctionSummary &summary = m_summaries[fn];
       size_t orig_kernel_count = summary.kernel_launches.size();
       size_t orig_transfer_count = summary.memory_transfers.size();
       size_t orig_sync_count = summary.synchronizations.size();
@@ -371,43 +428,40 @@ void CUDAFunctionSummaryAnalysis::runAnalysis() {
     }
   }
 
-  for (auto &pair : m_summaries) {
-    CUDAFunctionSummary &summary = pair.second;
-
-    std::set<const llvm::Function *> visited;
-    visited.insert(summary.function);
-
+  // O(V + E) cycle reachability detection using memoized 3-color DFS instead
+  // of exponential all-simple-paths backtracking.
+  // State: 0 = unvisited, 1 = on stack (gray), 2 = acyclic (black),
+  //        3 = reaches a cycle.
+  std::unordered_map<const llvm::Function *, uint8_t> color;
+  color.reserve(m_summaries.size());
+  std::function<bool(const llvm::Function *)> reaches_cycle =
+      [&](const llvm::Function *fn) -> bool {
+    auto col_it = color.find(fn);
+    if (col_it != color.end()) {
+      if (col_it->second == 1 || col_it->second == 3) {
+        return true;
+      }
+      return false;
+    }
+    color[fn] = 1;
     bool has_cycle = false;
-    std::function<void(const llvm::Function *,
-                       std::set<const llvm::Function *> &)>
-        detect_recursion = [&](const llvm::Function *fn,
-                               std::set<const llvm::Function *> &vis) {
-          auto it = m_summaries.find(fn);
-          if (it == m_summaries.end()) {
-            return;
-          }
-          const CUDAFunctionSummary &fn_summary = it->second;
-          for (const llvm::Function *callee : fn_summary.callees) {
-            if (callee->isDeclaration()) {
-              continue;
-            }
-            if (vis.count(callee)) {
-              has_cycle = true;
-              return;
-            }
-            vis.insert(callee);
-            detect_recursion(callee, vis);
-            if (has_cycle) {
-              return;
-            }
-            vis.erase(callee);
-          }
-        };
+    auto it = m_summaries.find(fn);
+    if (it != m_summaries.end()) {
+      for (const llvm::Function *callee : it->second.callees) {
+        if (!callee || callee->isDeclaration()) {
+          continue;
+        }
+        if (reaches_cycle(callee)) {
+          has_cycle = true;
+        }
+      }
+    }
+    color[fn] = has_cycle ? 3 : 2;
+    return has_cycle;
+  };
 
-    std::set<const llvm::Function *> local_visited;
-    detect_recursion(summary.function, local_visited);
-
-    summary.recursive = has_cycle;
+  for (auto &pair : m_summaries) {
+    pair.second.recursive = reaches_cycle(pair.first);
   }
 
   for (auto &pair : m_summaries) {

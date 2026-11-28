@@ -1,9 +1,9 @@
 #include "Concurrency/MHP/HappensBeforeAnalysis.h"
 
-#include "Concurrency/Utils/ThreadFlowGraph.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
+#include "Concurrency/Core/ThreadFlowGraph.h"
 #include "Concurrency/OpenMP/OpenMPSemantics.h"
-#include "Concurrency/Utils/ThreadMultiplicity.h"
+#include "Concurrency/Thread/ThreadMultiplicity.h"
 
 #include <algorithm>
 #include <deque>
@@ -605,9 +605,14 @@ void HappensBeforeAnalysis::analyze() {
   m_sync_with.clear();
   m_extra_hb_successors.clear();
   m_post_dom_cache.clear();
+  m_has_custom_hb_index = false;
+  m_hb_topo_order.clear();
+  m_hb_scc_id.clear();
+  m_hb_thread_reachability.clear();
 
   computeAtomicHappensBefore();
   buildSynchronizesWith();
+  buildHBReachabilityIndex();
 }
 
 void HappensBeforeAnalysis::addExtraHBEdge(const Instruction *from,
@@ -755,14 +760,22 @@ void HappensBeforeAnalysis::buildSynchronizesWith() {
 
   std::set<std::pair<const Instruction *, const Instruction *>> seen_sync_edges;
   ThreadAPI *threadAPI = ThreadAPI::getThreadAPI();
-  auto hb_call_graph = std::make_unique<CallGraph>(m_module);
-  ::concurrency::ThreadMultiplicityAnalysis site_multiplicity(
-      m_module, hb_call_graph.get());
+  std::unique_ptr<CallGraph> hb_call_graph;
+  std::unique_ptr<::concurrency::ThreadMultiplicityAnalysis> site_multiplicity;
+  auto ensureSiteMultiplicity = [&]() -> ::concurrency::ThreadMultiplicityAnalysis & {
+    if (!site_multiplicity) {
+      hb_call_graph = std::make_unique<CallGraph>(m_module);
+      site_multiplicity =
+          std::make_unique<::concurrency::ThreadMultiplicityAnalysis>(
+              m_module, hb_call_graph.get());
+    }
+    return *site_multiplicity;
+  };
   const mhp::ThreadFlowGraph &tfg = m_mhp.getThreadFlowGraph();
   auto getSingleExecutionNode =
       [&](const Instruction *inst) -> mhp::SyncNode * {
     if (!inst || isInstructionThreadAmbiguous(inst) ||
-        site_multiplicity.instructionMayExecuteMultipleTimes(inst)) {
+        ensureSiteMultiplicity().instructionMayExecuteMultipleTimes(inst)) {
       return nullptr;
     }
     const mhp::ThreadID tid = m_mhp.getThreadID(inst);
@@ -1416,7 +1429,8 @@ void HappensBeforeAnalysis::buildSynchronizesWith() {
             getAtomicStoredConstant(release_candidates.front().second);
         bool ambiguous_sequence_order = false;
         for (const AtomicEvent *event : release_sequence_events) {
-          if (site_multiplicity.instructionMayExecuteMultipleTimes(event->inst)) {
+          if (ensureSiteMultiplicity().instructionMayExecuteMultipleTimes(
+                  event->inst)) {
             ambiguous_sequence_order = true;
             break;
           }
@@ -1877,32 +1891,327 @@ void HappensBeforeAnalysis::buildSynchronizesWith() {
          << ", omp_task_edges=" << omp_task_dependency_edges << "\n";
 }
 
+void HappensBeforeAnalysis::buildHBReachabilityIndex() {
+  m_has_custom_hb_index = false;
+  m_hb_topo_order.clear();
+  m_hb_scc_id.clear();
+  m_hb_thread_reachability.clear();
+
+  if (m_extra_hb_successors.empty()) {
+    return;
+  }
+
+  const mhp::ThreadFlowGraph &tfg = m_mhp.getThreadFlowGraph();
+  const auto &all_nodes = tfg.getAllNodes();
+  const size_t max_id = tfg.getMaxNodeID();
+  if (all_nodes.empty() || max_id == 0) {
+    return;
+  }
+
+  // Thread-level reachability over (TFG edges U extra HB edges).
+  std::unordered_map<mhp::ThreadID, std::unordered_set<mhp::ThreadID>>
+      thread_adj;
+  for (mhp::ThreadID tid : tfg.getAllThreads()) {
+    thread_adj[tid];
+  }
+  for (mhp::SyncNode *node : all_nodes) {
+    const mhp::ThreadID from_tid = node->getThreadID();
+    for (mhp::SyncNode *succ : node->getSuccessors()) {
+      const mhp::ThreadID to_tid = succ->getThreadID();
+      if (from_tid != to_tid) {
+        thread_adj[from_tid].insert(to_tid);
+      }
+    }
+    auto extra_it = m_extra_hb_successors.find(node);
+    if (extra_it != m_extra_hb_successors.end()) {
+      for (const mhp::SyncNode *succ : extra_it->second) {
+        const mhp::ThreadID to_tid = succ->getThreadID();
+        if (from_tid != to_tid) {
+          thread_adj[from_tid].insert(to_tid);
+        }
+      }
+    }
+  }
+  for (const auto &entry : thread_adj) {
+    const mhp::ThreadID start_tid = entry.first;
+    auto &reach = m_hb_thread_reachability[start_tid];
+    reach.insert(start_tid);
+    std::vector<mhp::ThreadID> q{start_tid};
+    for (size_t head = 0; head < q.size(); ++head) {
+      auto adj_it = thread_adj.find(q[head]);
+      if (adj_it == thread_adj.end()) {
+        continue;
+      }
+      for (mhp::ThreadID next : adj_it->second) {
+        if (reach.insert(next).second) {
+          q.push_back(next);
+        }
+      }
+    }
+  }
+
+  // Global Kosaraju SCC + topological rank over (TFG U extra HB edges).
+  m_hb_topo_order.assign(max_id, -1);
+  m_hb_scc_id.assign(max_id, 0);
+  if (m_visit_stamp.size() < max_id) {
+    m_visit_stamp.assign(max_id, 0);
+  }
+  auto nextStamp = [&]() -> uint32_t {
+    if (++m_current_stamp == 0) {
+      std::fill(m_visit_stamp.begin(), m_visit_stamp.end(), 0);
+      m_current_stamp = 1;
+    }
+    return m_current_stamp;
+  };
+
+  std::unordered_map<const mhp::SyncNode *, std::vector<const mhp::SyncNode *>>
+      extra_rev;
+  for (const auto &entry : m_extra_hb_successors) {
+    for (const mhp::SyncNode *succ : entry.second) {
+      extra_rev[succ].push_back(entry.first);
+    }
+  }
+
+  uint32_t mark = nextStamp();
+  std::vector<const mhp::SyncNode *> finish_order;
+  finish_order.reserve(all_nodes.size());
+  struct DFSFrame {
+    const mhp::SyncNode *node;
+    size_t tfg_idx = 0;
+    size_t extra_idx = 0;
+  };
+  std::vector<DFSFrame> stack;
+  for (const mhp::SyncNode *root : all_nodes) {
+    if (m_visit_stamp[root->getNodeID()] == mark) {
+      continue;
+    }
+    m_visit_stamp[root->getNodeID()] = mark;
+    stack.push_back({root, 0, 0});
+    while (!stack.empty()) {
+      DFSFrame &frame = stack.back();
+      const auto &succs = frame.node->getSuccessors();
+      bool descended = false;
+      while (frame.tfg_idx < succs.size()) {
+        const mhp::SyncNode *succ = succs[frame.tfg_idx++];
+        if (m_visit_stamp[succ->getNodeID()] != mark) {
+          m_visit_stamp[succ->getNodeID()] = mark;
+          stack.push_back({succ, 0, 0});
+          descended = true;
+          break;
+        }
+      }
+      if (descended) {
+        continue;
+      }
+      auto extra_it = m_extra_hb_successors.find(frame.node);
+      if (extra_it != m_extra_hb_successors.end()) {
+        const auto &esuccs = extra_it->second;
+        while (frame.extra_idx < esuccs.size()) {
+          const mhp::SyncNode *succ = esuccs[frame.extra_idx++];
+          if (m_visit_stamp[succ->getNodeID()] != mark) {
+            m_visit_stamp[succ->getNodeID()] = mark;
+            stack.push_back({succ, 0, 0});
+            descended = true;
+            break;
+          }
+        }
+      }
+      if (!descended) {
+        finish_order.push_back(frame.node);
+        stack.pop_back();
+      }
+    }
+  }
+
+  mark = nextStamp();
+  std::vector<std::vector<const mhp::SyncNode *>> components;
+  std::vector<const mhp::SyncNode *> rev_stack;
+  for (auto it = finish_order.rbegin(); it != finish_order.rend(); ++it) {
+    const mhp::SyncNode *rep = *it;
+    if (m_visit_stamp[rep->getNodeID()] == mark) {
+      continue;
+    }
+    const size_t comp_id = components.size();
+    components.emplace_back();
+    m_visit_stamp[rep->getNodeID()] = mark;
+    rev_stack.push_back(rep);
+    while (!rev_stack.empty()) {
+      const mhp::SyncNode *node = rev_stack.back();
+      rev_stack.pop_back();
+      m_hb_scc_id[node->getNodeID()] = comp_id + 1;
+      components[comp_id].push_back(node);
+      for (const mhp::SyncNode *pred : node->getPredecessors()) {
+        if (m_visit_stamp[pred->getNodeID()] != mark) {
+          m_visit_stamp[pred->getNodeID()] = mark;
+          rev_stack.push_back(pred);
+        }
+      }
+      auto erev_it = extra_rev.find(node);
+      if (erev_it != extra_rev.end()) {
+        for (const mhp::SyncNode *pred : erev_it->second) {
+          if (m_visit_stamp[pred->getNodeID()] != mark) {
+            m_visit_stamp[pred->getNodeID()] = mark;
+            rev_stack.push_back(pred);
+          }
+        }
+      }
+    }
+  }
+
+  std::vector<std::vector<size_t>> comp_succs(components.size());
+  std::vector<size_t> in_degree(components.size(), 0);
+  std::vector<uint32_t> edge_stamp(components.size(), 0);
+  uint32_t e_stamp = 0;
+  for (size_t from_c = 0; from_c < components.size(); ++from_c) {
+    ++e_stamp;
+    auto addCompEdge = [&](const mhp::SyncNode *succ) {
+      const size_t to_c = m_hb_scc_id[succ->getNodeID()] - 1;
+      if (from_c == to_c || edge_stamp[to_c] == e_stamp) {
+        return;
+      }
+      edge_stamp[to_c] = e_stamp;
+      comp_succs[from_c].push_back(to_c);
+      ++in_degree[to_c];
+    };
+    for (const mhp::SyncNode *node : components[from_c]) {
+      for (const mhp::SyncNode *succ : node->getSuccessors()) {
+        addCompEdge(succ);
+      }
+      auto extra_it = m_extra_hb_successors.find(node);
+      if (extra_it != m_extra_hb_successors.end()) {
+        for (const mhp::SyncNode *succ : extra_it->second) {
+          addCompEdge(succ);
+        }
+      }
+    }
+  }
+
+  std::deque<size_t> ready;
+  for (size_t c = 0; c < components.size(); ++c) {
+    if (in_degree[c] == 0) {
+      ready.push_back(c);
+    }
+  }
+  int rank = 0;
+  while (!ready.empty()) {
+    size_t c = ready.front();
+    ready.pop_front();
+    for (const mhp::SyncNode *node : components[c]) {
+      m_hb_topo_order[node->getNodeID()] = rank;
+    }
+    ++rank;
+    for (size_t next_c : comp_succs[c]) {
+      if (--in_degree[next_c] == 0) {
+        ready.push_back(next_c);
+      }
+    }
+  }
+
+  m_has_custom_hb_index = true;
+}
+
+bool HappensBeforeAnalysis::canThreadReachHB(mhp::ThreadID from_tid,
+                                             mhp::ThreadID to_tid) const {
+  if (from_tid == to_tid) {
+    return true;
+  }
+  if (m_has_custom_hb_index) {
+    auto it = m_hb_thread_reachability.find(from_tid);
+    return it != m_hb_thread_reachability.end() && it->second.count(to_tid) != 0;
+  }
+  return m_mhp.getThreadFlowGraph().canThreadReach(from_tid, to_tid);
+}
+
+int HappensBeforeAnalysis::getHBTopologicalOrder(
+    const mhp::SyncNode *node) const {
+  if (!node) {
+    return -1;
+  }
+  if (m_has_custom_hb_index) {
+    const size_t id = node->getNodeID();
+    return id < m_hb_topo_order.size() ? m_hb_topo_order[id] : -1;
+  }
+  return m_mhp.getThreadFlowGraph().getGlobalTopologicalOrder(node);
+}
+
+size_t HappensBeforeAnalysis::getHBSCCID(const mhp::SyncNode *node) const {
+  if (!node) {
+    return 0;
+  }
+  if (m_has_custom_hb_index) {
+    const size_t id = node->getNodeID();
+    return id < m_hb_scc_id.size() ? m_hb_scc_id[id] : 0;
+  }
+  return m_mhp.getThreadFlowGraph().getGlobalSCCID(node);
+}
+
 bool HappensBeforeAnalysis::canReach(const mhp::SyncNode *start,
                                      const mhp::SyncNode *end) const {
   if (!start || !end) {
     return false;
   }
+  if (start == end) {
+    return true;
+  }
 
-  std::deque<const mhp::SyncNode *> worklist;
-  std::unordered_set<const mhp::SyncNode *> visited;
-  worklist.push_back(start);
-  visited.insert(start);
-
-  while (!worklist.empty()) {
-    const mhp::SyncNode *current = worklist.front();
-    worklist.pop_front();
-    if (current == end) {
-      return true;
+  const mhp::ThreadFlowGraph &tfg = m_mhp.getThreadFlowGraph();
+  if (tfg.hasReachabilityIndex()) {
+    if (!tfg.canNodeReachThread(start, end->getThreadID())) {
+      return false;
     }
+    const int s_topo = tfg.getGlobalTopologicalOrder(start);
+    const int e_topo = tfg.getGlobalTopologicalOrder(end);
+    if (s_topo >= 0 && e_topo >= 0 && s_topo > e_topo &&
+        tfg.getGlobalSCCID(start) != tfg.getGlobalSCCID(end)) {
+      return false;
+    }
+  }
+
+  const size_t max_id = tfg.getMaxNodeID();
+  if (m_visit_stamp.size() < max_id) {
+    m_visit_stamp.assign(max_id, 0);
+  }
+  if (++m_current_stamp == 0) {
+    std::fill(m_visit_stamp.begin(), m_visit_stamp.end(), 0);
+    m_current_stamp = 1;
+  }
+  const uint32_t stamp = m_current_stamp;
+  const int end_topo =
+      tfg.hasReachabilityIndex() ? tfg.getGlobalTopologicalOrder(end) : -1;
+
+  m_bfs_queue.clear();
+  m_bfs_queue.push_back(start);
+  m_visit_stamp[start->getNodeID()] = stamp;
+
+  for (size_t head = 0; head < m_bfs_queue.size(); ++head) {
+    const mhp::SyncNode *current = m_bfs_queue[head];
+    const bool has_join_out =
+        current->hasAnyOutgoingEdgeKind(mhp::EdgeKind::Join);
     for (mhp::SyncNode *succ : current->getSuccessors()) {
-      if (m_mhp.getThreadFlowGraph().hasEdgeKind(current, succ,
-                                                 mhp::EdgeKind::Join) &&
+      if (has_join_out && tfg.hasEdgeKind(current, succ, mhp::EdgeKind::Join) &&
           !m_mhp.joinEdgeMustOrderTarget(succ, end)) {
         continue;
       }
-      if (visited.insert(succ).second) {
-        worklist.push_back(succ);
+      if (succ == end) {
+        return true;
       }
+      const size_t sid = succ->getNodeID();
+      if (m_visit_stamp[sid] == stamp) {
+        continue;
+      }
+      if (tfg.hasReachabilityIndex()) {
+        if (!tfg.canThreadReach(succ->getThreadID(), end->getThreadID())) {
+          continue;
+        }
+        if (end_topo >= 0) {
+          const int succ_topo = tfg.getGlobalTopologicalOrder(succ);
+          if (succ_topo > end_topo) {
+            continue;
+          }
+        }
+      }
+      m_visit_stamp[sid] = stamp;
+      m_bfs_queue.push_back(succ);
     }
   }
 
@@ -1914,28 +2223,67 @@ bool HappensBeforeAnalysis::canReachWithHB(const mhp::SyncNode *start,
   if (!start || !end) {
     return false;
   }
+  if (start == end) {
+    return true;
+  }
+  if (m_extra_hb_successors.empty()) {
+    return canReach(start, end);
+  }
 
-  std::deque<const mhp::SyncNode *> worklist;
-  std::unordered_set<const mhp::SyncNode *> visited;
-  worklist.push_back(start);
-  visited.insert(start);
-
-  while (!worklist.empty()) {
-    const mhp::SyncNode *current = worklist.front();
-    worklist.pop_front();
-    if (current == end) {
-      return true;
+  const mhp::ThreadFlowGraph &tfg = m_mhp.getThreadFlowGraph();
+  if (m_has_custom_hb_index) {
+    if (!canThreadReachHB(start->getThreadID(), end->getThreadID())) {
+      return false;
     }
+    const int s_topo = getHBTopologicalOrder(start);
+    const int e_topo = getHBTopologicalOrder(end);
+    if (s_topo >= 0 && e_topo >= 0 && s_topo > e_topo &&
+        getHBSCCID(start) != getHBSCCID(end)) {
+      return false;
+    }
+  }
 
+  const size_t max_id = tfg.getMaxNodeID();
+  if (m_visit_stamp.size() < max_id) {
+    m_visit_stamp.assign(max_id, 0);
+  }
+  if (++m_current_stamp == 0) {
+    std::fill(m_visit_stamp.begin(), m_visit_stamp.end(), 0);
+    m_current_stamp = 1;
+  }
+  const uint32_t stamp = m_current_stamp;
+  const int end_topo = m_has_custom_hb_index ? getHBTopologicalOrder(end) : -1;
+
+  m_bfs_queue.clear();
+  m_bfs_queue.push_back(start);
+  m_visit_stamp[start->getNodeID()] = stamp;
+
+  for (size_t head = 0; head < m_bfs_queue.size(); ++head) {
+    const mhp::SyncNode *current = m_bfs_queue[head];
+    const bool has_join_out =
+        current->hasAnyOutgoingEdgeKind(mhp::EdgeKind::Join);
     for (mhp::SyncNode *succ : current->getSuccessors()) {
-      if (m_mhp.getThreadFlowGraph().hasEdgeKind(current, succ,
-                                                 mhp::EdgeKind::Join) &&
+      if (has_join_out && tfg.hasEdgeKind(current, succ, mhp::EdgeKind::Join) &&
           !m_mhp.joinEdgeMustOrderTarget(succ, end)) {
         continue;
       }
-      if (visited.insert(succ).second) {
-        worklist.push_back(succ);
+      if (succ == end) {
+        return true;
       }
+      const size_t sid = succ->getNodeID();
+      if (m_visit_stamp[sid] == stamp) {
+        continue;
+      }
+      if (m_has_custom_hb_index) {
+        if (!canThreadReachHB(succ->getThreadID(), end->getThreadID())) {
+          continue;
+        }
+        if (end_topo >= 0 && getHBTopologicalOrder(succ) > end_topo) {
+          continue;
+        }
+      }
+      m_visit_stamp[sid] = stamp;
+      m_bfs_queue.push_back(succ);
     }
 
     auto extra_it = m_extra_hb_successors.find(current);
@@ -1943,9 +2291,23 @@ bool HappensBeforeAnalysis::canReachWithHB(const mhp::SyncNode *start,
       continue;
     }
     for (const mhp::SyncNode *succ : extra_it->second) {
-      if (visited.insert(succ).second) {
-        worklist.push_back(succ);
+      if (succ == end) {
+        return true;
       }
+      const size_t sid = succ->getNodeID();
+      if (m_visit_stamp[sid] == stamp) {
+        continue;
+      }
+      if (m_has_custom_hb_index) {
+        if (!canThreadReachHB(succ->getThreadID(), end->getThreadID())) {
+          continue;
+        }
+        if (end_topo >= 0 && getHBTopologicalOrder(succ) > end_topo) {
+          continue;
+        }
+      }
+      m_visit_stamp[sid] = stamp;
+      m_bfs_queue.push_back(succ);
     }
   }
 
@@ -2355,25 +2717,23 @@ const Value *HappensBeforeAnalysis::traceSharedState(const Value *value) const {
       const Function *parent = arg->getParent();
       bool expanded = false;
       if (parent) {
-        for (const Use &use : parent->uses()) {
-          const auto *cb = dyn_cast<CallBase>(use.getUser());
-          if (cb && arg->getArgNo() < cb->arg_size()) {
-            worklist.push_back(cb->getArgOperand(arg->getArgNo()));
-            expanded = true;
-          }
-        }
-
-        for (const Function &func : m_module) {
-          for (const BasicBlock &bb : func) {
-            for (const Instruction &inst : bb) {
-              const auto *cb = dyn_cast<CallBase>(&inst);
-              if (!cb || arg->getArgNo() >= cb->arg_size()) {
-                continue;
-              }
-              const Value *called = cb->getCalledOperand();
-              if (called && called->stripPointerCasts() == parent) {
+        SmallVector<const Value *, 8> func_refs;
+        std::unordered_set<const Value *> seen_refs;
+        func_refs.push_back(parent);
+        seen_refs.insert(parent);
+        while (!func_refs.empty()) {
+          const Value *ref = func_refs.pop_back_val();
+          for (const Use &use : ref->uses()) {
+            const User *user = use.getUser();
+            if (const auto *cb = dyn_cast<CallBase>(user)) {
+              if (cb->getCalledOperand() == ref &&
+                  arg->getArgNo() < cb->arg_size()) {
                 worklist.push_back(cb->getArgOperand(arg->getArgNo()));
                 expanded = true;
+              }
+            } else if (const auto *ce = dyn_cast<ConstantExpr>(user)) {
+              if (ce->isCast() && seen_refs.insert(ce).second) {
+                func_refs.push_back(ce);
               }
             }
           }
@@ -2446,6 +2806,13 @@ bool HappensBeforeAnalysis::happensBefore(const Instruction *A,
     return cache_it->second;
   }
 
+  auto cacheAndReturn = [&](bool result) {
+    if (m_hb_cache.size() < kMaxHBCacheEntries) {
+      m_hb_cache[key] = result;
+    }
+    return result;
+  };
+
   mhp::ThreadID a_tid = m_mhp.getThreadID(A);
   mhp::ThreadID b_tid = m_mhp.getThreadID(B);
   // Static sites in the same repeatedly executed thread cannot establish a
@@ -2455,34 +2822,33 @@ bool HappensBeforeAnalysis::happensBefore(const Instruction *A,
   if (a_tid == b_tid &&
       (m_mhp.instructionMayExecuteMultipleTimes(A) ||
        m_mhp.instructionMayExecuteMultipleTimes(B))) {
-    m_hb_cache[key] = false;
-    return false;
+    return cacheAndReturn(false);
   }
   const mhp::ThreadFlowGraph &tfg = m_mhp.getThreadFlowGraph();
+  constexpr mhp::ThreadID kUnknownTid = std::numeric_limits<mhp::ThreadID>::max();
+  if (a_tid == kUnknownTid || b_tid == kUnknownTid) {
+    return cacheAndReturn(false);
+  }
+  if (!canThreadReachHB(a_tid, b_tid)) {
+    return cacheAndReturn(false);
+  }
   std::vector<mhp::SyncNode *> start_nodes =
-      a_tid == std::numeric_limits<mhp::ThreadID>::max()
-          ? tfg.getNodes(A)
-          : tfg.getNodes(A, a_tid);
+      a_tid == kUnknownTid ? tfg.getNodes(A) : tfg.getNodes(A, a_tid);
   std::vector<mhp::SyncNode *> end_nodes =
-      b_tid == std::numeric_limits<mhp::ThreadID>::max()
-          ? tfg.getNodes(B)
-          : tfg.getNodes(B, b_tid);
+      b_tid == kUnknownTid ? tfg.getNodes(B) : tfg.getNodes(B, b_tid);
   if (start_nodes.empty() || end_nodes.empty()) {
-    m_hb_cache[key] = false;
-    return false;
+    return cacheAndReturn(false);
   }
 
   for (mhp::SyncNode *start : start_nodes) {
     for (mhp::SyncNode *end : end_nodes) {
       if (!canReachWithHB(start, end)) {
-        m_hb_cache[key] = false;
-        return false;
+        return cacheAndReturn(false);
       }
     }
   }
 
-  m_hb_cache[key] = true;
-  return true;
+  return cacheAndReturn(true);
 }
 
 } // namespace lotus

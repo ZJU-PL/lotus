@@ -7,8 +7,8 @@
 #include "Concurrency/MHP/IMHPAnalysis.h"
 #include "Concurrency/Thread/Sharing/EscapeAnalysis.h"
 #include "Concurrency/Thread/Sharing/StaticThreadSharingAnalysis.h"
-#include "Concurrency/Utils/ThreadAPI.h"
-#include "Concurrency/Utils/ThreadLocalAnalysis.h"
+#include "Concurrency/API/ThreadAPI.h"
+#include "Concurrency/Thread/Sharing/ThreadLocalAnalysis.h"
 
 #include <string>
 #include <unordered_map>
@@ -70,6 +70,9 @@ public:
                            const llvm::Instruction *inst2) const;
 
 private:
+  bool wouldReportDataRaceCore(const llvm::Instruction *inst1,
+                               const llvm::Instruction *inst2) const;
+  static constexpr size_t kMaxLocationCacheEntries = 250000;
   struct InstPairHash {
     size_t operator()(const std::pair<const llvm::Instruction *,
                                       const llvm::Instruction *> &p) const {

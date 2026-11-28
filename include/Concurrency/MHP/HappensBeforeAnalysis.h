@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Concurrency/MHP/IMHPAnalysis.h"
-#include "Concurrency/Utils/CppAtomics.h"
+#include "Concurrency/API/CppAtomics.h"
 
 #include <memory>
 #include <string>
@@ -73,13 +73,18 @@ private:
   struct InstPairHash {
     size_t operator()(const std::pair<const llvm::Instruction *,
                                       const llvm::Instruction *> &p) const {
-      return std::hash<const llvm::Instruction *>()(p.first) ^
-             std::hash<const llvm::Instruction *>()(p.second);
+      size_t h1 = std::hash<const llvm::Instruction *>()(p.first);
+      size_t h2 = std::hash<const llvm::Instruction *>()(p.second);
+      return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
     }
   };
 
   void buildSynchronizesWith();
   void computeAtomicHappensBefore();
+  void buildHBReachabilityIndex();
+  bool canThreadReachHB(mhp::ThreadID from_tid, mhp::ThreadID to_tid) const;
+  int getHBTopologicalOrder(const mhp::SyncNode *node) const;
+  size_t getHBSCCID(const mhp::SyncNode *node) const;
   bool hasProgramOrder(const llvm::Instruction *A,
                        const llvm::Instruction *B) const;
   bool canReach(const mhp::SyncNode *start, const mhp::SyncNode *end) const;
@@ -159,6 +164,15 @@ private:
       std::pair<const llvm::Instruction *, const llvm::Instruction *>, bool,
       InstPairHash>
       m_hb_cache;
+  static constexpr size_t kMaxHBCacheEntries = 250000;
+  bool m_has_custom_hb_index = false;
+  std::vector<int> m_hb_topo_order;
+  std::vector<size_t> m_hb_scc_id;
+  std::unordered_map<mhp::ThreadID, std::unordered_set<mhp::ThreadID>>
+      m_hb_thread_reachability;
+  mutable std::vector<uint32_t> m_visit_stamp;
+  mutable uint32_t m_current_stamp = 0;
+  mutable std::vector<const mhp::SyncNode *> m_bfs_queue;
   size_t m_analyzed_generation = 0;
 };
 

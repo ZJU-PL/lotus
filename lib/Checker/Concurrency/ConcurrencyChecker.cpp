@@ -7,7 +7,7 @@
 #include "Alias/UnificationBased/seadsa/InitializePasses.hh"
 #include "Checker/Concurrency/ConcurrencyAnalysisDumper.h"
 #include "Concurrency/MHP/HappensBeforeAnalysis.h"
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <llvm/Analysis/CallGraph.h>
 #include <llvm/IR/Constants.h>
@@ -180,6 +180,7 @@ void ConcurrencyChecker::runAnalyses() {
   m_mpiAnalysis.reset();
   m_cudaAnalysis.reset();
   m_sparseRefinement.reset();
+  m_context.reset();
   m_stats.mhpPairs = 0;
   m_stats.locksAnalyzed = 0;
   m_stats.cudaBugsFound = 0;
@@ -200,6 +201,9 @@ void ConcurrencyChecker::runAnalyses() {
   m_stats.openMPSummary = OpenMP::OpenMPTaskGraph::AnalysisSummary{};
   m_stats.mpiSummary = ConcurrencyFacade::MPISummary{};
   m_stats.cudaSummary = ConcurrencyFacade::CUDASummary{};
+
+  m_context = std::make_unique<ConcurrencyContext>(m_module, m_aliasAnalysis);
+  const ModuleConcurrencySummary &moduleSummary = m_context->getSummary();
 
   // Config-driven activation: run only analyses required by enabled checks
   // (Goblint-style)
@@ -224,7 +228,7 @@ void ConcurrencyChecker::runAnalyses() {
       m_mhpAnalysis = svc.get();
       m_mhpAnalysisStorage = std::move(svc);
     } else {
-      auto mhp = std::make_unique<MHPAnalysis>(m_module);
+      auto mhp = std::make_unique<MHPAnalysis>(*m_context);
       mhp->enableLockSetAnalysis();
       mhp->analyze();
       m_stats.mhpPairs = mhp->getMhpPairCount();
@@ -240,14 +244,14 @@ void ConcurrencyChecker::runAnalyses() {
   m_locksetAnalysisView = nullptr;
   if (needMHP && needLockSet && regionMHP && regionMHP->getLockSetAnalysis()) {
     m_locksetAnalysisView = regionMHP->getLockSetAnalysis();
-    m_stats.locksAnalyzed = m_locksetAnalysisView->getStatistics().num_locks;
+    m_stats.locksAnalyzed = m_locksetAnalysisView->getAllLocks().size();
   } else if (needLockSet) {
     m_locksetAnalysis = std::make_unique<LockSetAnalysis>(m_module);
     if (m_aliasAnalysis)
       m_locksetAnalysis->setAliasAnalysis(m_aliasAnalysis);
     m_locksetAnalysis->analyze();
     m_locksetAnalysisView = m_locksetAnalysis.get();
-    m_stats.locksAnalyzed = m_locksetAnalysisView->getStatistics().num_locks;
+    m_stats.locksAnalyzed = m_locksetAnalysisView->getAllLocks().size();
   }
 
   if (needEscape) {
@@ -262,35 +266,116 @@ void ConcurrencyChecker::runAnalyses() {
   }
 
   if (needStaticSharing) {
-    static bool passes_initialized = false;
-    if (!passes_initialized) {
-      llvm::PassRegistry &registry = *llvm::PassRegistry::getPassRegistry();
-      seadsa::initializeAnalysisPasses(registry);
-      llvm::initializeDsaAnalysisPass(registry);
-      passes_initialized = true;
-    }
+    // StaticThreadSharingAnalysis only prunes DataRaceChecker candidates when
+    // it proves DefinitelyThreadLocal, which requires BOTH complete static
+    // thread discovery (no indirect forks) AND complete direct call paths (no
+    // indirect calls reachable from thread entries). Checking this upfront
+    // avoids running expensive SeaDSA global analysis on large modules where
+    // StaticThreadSharingAnalysis is guaranteed to return MaybeShared for every
+    // instruction.
+    auto canStaticSharingProveThreadLocal = [&]() -> bool {
+      std::vector<const Function *> threadEntries;
+      if (Function *mainFn = m_module.getFunction("main")) {
+        if (!mainFn->isDeclaration()) {
+          threadEntries.push_back(mainFn);
+        }
+      }
+      bool hasFork = false;
+      for (const Function &F : m_module) {
+        if (F.isDeclaration()) {
+          continue;
+        }
+        for (const Instruction &I : instructions(F)) {
+          if (!m_threadAPI->isTDFork(&I)) {
+            continue;
+          }
+          hasFork = true;
+          const Value *entry = m_threadAPI->getForkedFun(&I);
+          if (!entry) {
+            return false;
+          }
+          const Function *entryFn =
+              dyn_cast<Function>(entry->stripPointerCasts());
+          if (!entryFn) {
+            return false;
+          }
+          if (!entryFn->isDeclaration()) {
+            threadEntries.push_back(entryFn);
+          }
+        }
+      }
 
-    m_staticThreadSharingPM = std::make_unique<llvm::legacy::PassManager>();
-    m_staticThreadSharingPM->add(new seadsa::DsaAnalysis());
-    auto *sharing = new lotus::StaticThreadSharingAnalysis();
-    m_staticThreadSharingAnalysis = sharing;
-    m_staticThreadSharingPM->add(sharing);
-    m_staticThreadSharingPM->run(m_module);
+      // Walk direct call graph from static thread entries to detect indirect
+      // calls that force StaticThreadSharingAnalysis::m_access_paths_complete
+      // to false (making every classify() query return MaybeShared).
+      std::unordered_set<const Function *> visited;
+      std::vector<const Function *> stack(threadEntries.begin(),
+                                          threadEntries.end());
+      while (!stack.empty()) {
+        const Function *cur = stack.back();
+        stack.pop_back();
+        if (!cur || cur->isDeclaration() || !visited.insert(cur).second) {
+          continue;
+        }
+        for (const Instruction &I : instructions(*cur)) {
+          const auto *cb = dyn_cast<CallBase>(&I);
+          if (!cb) {
+            continue;
+          }
+          const Value *called = cb->getCalledOperand();
+          const Function *direct =
+              cb->getCalledFunction()
+                  ? cb->getCalledFunction()
+                  : dyn_cast_or_null<Function>(
+                        called ? called->stripPointerCasts() : nullptr);
+          if (!direct) {
+            return false;
+          }
+          if (!direct->isDeclaration() && !visited.count(direct)) {
+            stack.push_back(direct);
+          }
+        }
+      }
+
+      // Single-threaded module with no forks and no indirect calls: MHP already
+      // proves all accesses sequential, so SeaDSA sharing adds no pruning.
+      return hasFork;
+    };
+
+    if (canStaticSharingProveThreadLocal()) {
+      static bool passes_initialized = false;
+      if (!passes_initialized) {
+        llvm::PassRegistry &registry = *llvm::PassRegistry::getPassRegistry();
+        seadsa::initializeAnalysisPasses(registry);
+        llvm::initializeDsaAnalysisPass(registry);
+        passes_initialized = true;
+      }
+
+      m_staticThreadSharingPM = std::make_unique<llvm::legacy::PassManager>();
+      m_staticThreadSharingPM->add(new seadsa::DsaAnalysis());
+      auto *sharing = new lotus::StaticThreadSharingAnalysis();
+      m_staticThreadSharingAnalysis = sharing;
+      m_staticThreadSharingPM->add(sharing);
+      m_staticThreadSharingPM->run(m_module);
+    }
   }
 
   if (needHappensBefore && regionMHP) {
     m_happensBeforeAnalysis =
         std::make_unique<HappensBeforeAnalysis>(m_module, *regionMHP);
     lotus::AliasAnalysisWrapper *aa = m_aliasAnalysis;
-    if (!aa)
-      aa = regionMHP->getAliasAnalysis();
+    if (!aa && moduleSummary.hasSharedMemoryConcurrency())
+      aa = m_context->getOrCreateAliasAnalysis();
     if (aa)
       m_happensBeforeAnalysis->setAliasAnalysis(aa);
     m_happensBeforeAnalysis->analyze();
   }
 
   if (needOpenMP) {
-    m_openMPTaskGraph = std::make_unique<OpenMP::OpenMPTaskGraph>(m_module);
+    const OpenMP::OpenMPSemantics *sharedOpenMP =
+        regionMHP ? regionMHP->getOpenMPSemantics() : nullptr;
+    m_openMPTaskGraph =
+        std::make_unique<OpenMP::OpenMPTaskGraph>(m_module, sharedOpenMP);
     m_openMPTaskGraph->analyze();
     m_stats.openMPSummary = m_openMPTaskGraph->getSummary();
   }
@@ -337,15 +422,21 @@ void ConcurrencyChecker::runAnalyses() {
         m_mpiAnalysis->getProtocolDiagnosticCount("collective_slots_tracked");
   }
 
+  lotus::AliasAnalysisWrapper *aa = m_aliasAnalysis;
+  if (!aa && (moduleSummary.hasSharedMemoryConcurrency() ||
+              moduleSummary.has_cuda)) {
+    aa = m_context->getOrCreateAliasAnalysis();
+  } else if (!aa) {
+    aa = m_context->getAliasAnalysisIfPresent();
+  }
+
   if (needCUDA) {
-    m_cudaAnalysis = std::make_unique<cuda::CUDAAnalysis>(m_module);
+    m_cudaAnalysis =
+        aa ? std::make_unique<cuda::CUDAAnalysis>(m_module, aa)
+           : std::make_unique<cuda::CUDAAnalysis>(m_module);
     m_cudaAnalysis->runAnalysis();
     m_stats.cudaSummary = ConcurrencyFacade::summarizeCUDA(*m_cudaAnalysis);
   }
-
-  lotus::AliasAnalysisWrapper *aa = m_aliasAnalysis;
-  if (!aa && regionMHP)
-    aa = regionMHP->getAliasAnalysis();
 
   if (m_enableSparseFlowSensitiveRefinement && m_checkDataRaces &&
       m_mhpAnalysis) {

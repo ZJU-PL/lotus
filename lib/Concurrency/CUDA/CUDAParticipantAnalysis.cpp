@@ -1,6 +1,6 @@
 #include "Concurrency/CUDA/CUDAParticipantAnalysis.h"
 
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <llvm/Analysis/PostDominators.h>
 #include <llvm/IR/Constants.h>

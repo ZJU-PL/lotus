@@ -12,10 +12,10 @@
 
 #pragma once
 
-#include "Concurrency/ConcurrencyRelation.h"
+#include "Concurrency/Core/ConcurrencyRelation.h"
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/MPI/MPINormalization.h"
 #include "Concurrency/MPI/MPIRankAnalysis.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <map>
 #include <memory>

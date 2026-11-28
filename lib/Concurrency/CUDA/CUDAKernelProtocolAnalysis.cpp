@@ -1,6 +1,6 @@
 #include "Concurrency/CUDA/CUDAKernelProtocolAnalysis.h"
 
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/CFG.h>

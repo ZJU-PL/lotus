@@ -13,12 +13,12 @@
 #pragma once
 
 #include "Concurrency/MPI/MPIAbstractState.h"
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/MPI/MPINormalization.h"
 #include "Concurrency/MPI/MPIOperation.h"
 #include "Concurrency/MPI/MPIRankAnalysis.h"
 #include "Concurrency/MPI/MPISemanticEvent.h"
 #include "Concurrency/MPI/MPISemantics.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <map>
 #include <memory>

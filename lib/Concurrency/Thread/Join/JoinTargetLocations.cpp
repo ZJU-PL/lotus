@@ -9,6 +9,7 @@
 #include <set>
 
 #include <llvm/ADT/APInt.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
@@ -20,6 +21,34 @@ using namespace llvm;
 namespace mhp {
 
 namespace {
+
+void collectDirectCallActuals(const Function *parent, unsigned argNo,
+                              std::deque<const Value *> &worklist,
+                              bool &expanded) {
+  if (!parent) {
+    return;
+  }
+  SmallVector<const Value *, 8> funcRefs;
+  SmallPtrSet<const Value *, 16> seenRefs;
+  funcRefs.push_back(parent);
+  seenRefs.insert(parent);
+  while (!funcRefs.empty()) {
+    const Value *ref = funcRefs.pop_back_val();
+    for (const Use &use : ref->uses()) {
+      const User *user = use.getUser();
+      if (const auto *cb = dyn_cast<CallBase>(user)) {
+        if (cb->getCalledOperand() == ref && argNo < cb->arg_size()) {
+          worklist.push_back(cb->getArgOperand(argNo));
+          expanded = true;
+        }
+      } else if (const auto *ce = dyn_cast<ConstantExpr>(user)) {
+        if (ce->isCast() && seenRefs.insert(ce).second) {
+          funcRefs.push_back(ce);
+        }
+      }
+    }
+  }
+}
 
 bool collectUniqueStoredValues(const Value *ptr,
                                SmallVectorImpl<const Value *> &storedValues) {
@@ -141,32 +170,7 @@ const Value *JoinTargetAnalysis::traceThreadHandleRoot(const Value *value,
       }
       const Function *parent = arg->getParent();
       bool expanded = false;
-      if (parent) {
-        for (const Use &use : parent->uses()) {
-          const auto *cb = dyn_cast<CallBase>(use.getUser());
-          if (!cb || arg->getArgNo() >= cb->arg_size()) {
-            continue;
-          }
-          worklist.push_back(cb->getArgOperand(arg->getArgNo()));
-          expanded = true;
-        }
-
-        for (const Function &func : *module) {
-          for (const BasicBlock &bb : func) {
-            for (const Instruction &inst : bb) {
-              const auto *cb = dyn_cast<CallBase>(&inst);
-              if (!cb || arg->getArgNo() >= cb->arg_size()) {
-                continue;
-              }
-              const Value *called = cb->getCalledOperand();
-              if (called && called->stripPointerCasts() == parent) {
-                worklist.push_back(cb->getArgOperand(arg->getArgNo()));
-                expanded = true;
-              }
-            }
-          }
-        }
-      }
+      collectDirectCallActuals(parent, arg->getArgNo(), worklist, expanded);
       if (!expanded) {
         if (!resolvedRoot) {
           resolvedRoot = stripped;
@@ -257,27 +261,8 @@ void JoinTargetAnalysis::traceThreadHandleRoots(
     if (const auto *arg = dyn_cast<Argument>(stripped)) {
       const Function *parent = arg->getParent();
       if (module && parent) {
-        for (const Use &use : parent->uses()) {
-          const auto *cb = dyn_cast<CallBase>(use.getUser());
-          if (!cb || arg->getArgNo() >= cb->arg_size()) {
-            continue;
-          }
-          worklist.push_back(cb->getArgOperand(arg->getArgNo()));
-        }
-        for (const Function &func : *module) {
-          for (const BasicBlock &bb : func) {
-            for (const Instruction &inst : bb) {
-              const auto *cb = dyn_cast<CallBase>(&inst);
-              if (!cb || arg->getArgNo() >= cb->arg_size()) {
-                continue;
-              }
-              const Value *called = cb->getCalledOperand();
-              if (called && called->stripPointerCasts() == parent) {
-                worklist.push_back(cb->getArgOperand(arg->getArgNo()));
-              }
-            }
-          }
-        }
+        bool expanded = false;
+        collectDirectCallActuals(parent, arg->getArgNo(), worklist, expanded);
       }
       continue;
     }
@@ -291,72 +276,49 @@ void JoinTargetAnalysis::traceThreadHandleRoots(
   }
 }
 
-std::unordered_set<HandleLocation, HandleLocationHash>
-JoinTargetAnalysis::resolveReadLocations(const Value *value) const {
-  std::unordered_set<HandleLocation, HandleLocationHash> locations;
+namespace {
+
+using LocationSet = std::unordered_set<HandleLocation, HandleLocationHash>;
+
+LocationSet resolveWriteLocationsImpl(
+    const Value *value, const DataLayout &layout,
+    SmallPtrSetImpl<const Value *> &visiting,
+    std::unordered_map<const Value *, LocationSet> &memo) {
+  LocationSet locations;
   if (!value) {
     return locations;
   }
 
   const Value *stripped = value->stripPointerCasts();
+  auto memoIt = memo.find(stripped);
+  if (memoIt != memo.end()) {
+    return memoIt->second;
+  }
+  if (!visiting.insert(stripped).second) {
+    return locations;
+  }
+
   if (isa<AllocaInst>(stripped) || isa<GlobalValue>(stripped) ||
       isa<Argument>(stripped)) {
     locations.insert(HandleLocation{stripped, {}, false});
-    return locations;
-  }
-
-  if (const auto *load = dyn_cast<LoadInst>(stripped)) {
-    return resolveWriteLocations(load->getPointerOperand());
-  }
-
-  if (const auto *gep = dyn_cast<GEPOperator>(stripped)) {
-    return resolveWriteLocations(gep);
-  }
-
-  if (const auto *phi = dyn_cast<PHINode>(stripped)) {
-    for (const Value *incoming : phi->incoming_values()) {
-      auto incomingLocations = resolveReadLocations(incoming);
-      locations.insert(incomingLocations.begin(), incomingLocations.end());
-    }
-    return locations;
-  }
-
-  if (const auto *select = dyn_cast<SelectInst>(stripped)) {
-    auto trueLocations = resolveReadLocations(select->getTrueValue());
-    auto falseLocations = resolveReadLocations(select->getFalseValue());
-    locations.insert(trueLocations.begin(), trueLocations.end());
-    locations.insert(falseLocations.begin(), falseLocations.end());
-    return locations;
-  }
-
-  return locations;
-}
-
-std::unordered_set<HandleLocation, HandleLocationHash>
-JoinTargetAnalysis::resolveWriteLocations(const Value *value) const {
-  std::unordered_set<HandleLocation, HandleLocationHash> locations;
-  if (!value) {
-    return locations;
-  }
-
-  const Value *stripped = value->stripPointerCasts();
-  if (isa<AllocaInst>(stripped) || isa<GlobalValue>(stripped) ||
-      isa<Argument>(stripped)) {
-    locations.insert(HandleLocation{stripped, {}, false});
+    visiting.erase(stripped);
+    memo.emplace(stripped, locations);
     return locations;
   }
 
   if (const auto *gep = dyn_cast<GEPOperator>(stripped)) {
-    auto baseLocations = resolveWriteLocations(gep->getPointerOperand());
+    auto baseLocations =
+        resolveWriteLocationsImpl(gep->getPointerOperand(), layout, visiting, memo);
     if (baseLocations.empty()) {
       if (const Value *baseRoot =
-              traceThreadHandleRoot(gep->getPointerOperand(), nullptr)) {
+              JoinTargetAnalysis::traceThreadHandleRoot(gep->getPointerOperand(),
+                                                        nullptr)) {
         locations.insert(HandleLocation{baseRoot, {}, true});
       }
+      visiting.erase(stripped);
       return locations;
     }
 
-    const DataLayout &layout = m_module.getDataLayout();
     APInt byteOffset(layout.getIndexTypeSizeInBits(gep->getType()), 0, true);
     const bool hasConstantOffset =
         gep->accumulateConstantOffset(layout, byteOffset) &&
@@ -379,29 +341,56 @@ JoinTargetAnalysis::resolveWriteLocations(const Value *value) const {
       }
       locations.insert(std::move(location));
     }
+    visiting.erase(stripped);
+    memo.emplace(stripped, locations);
     return locations;
   }
 
   if (const auto *phi = dyn_cast<PHINode>(stripped)) {
+    bool hitCycle = false;
     for (const Value *incoming : phi->incoming_values()) {
-      auto incomingLocations = resolveWriteLocations(incoming);
+      const Value *incStripped = incoming ? incoming->stripPointerCasts() : nullptr;
+      if (incStripped && visiting.count(incStripped)) {
+        hitCycle = true;
+        continue;
+      }
+      auto incomingLocations =
+          resolveWriteLocationsImpl(incoming, layout, visiting, memo);
       locations.insert(incomingLocations.begin(), incomingLocations.end());
+    }
+    if (hitCycle) {
+      LocationSet widened;
+      for (HandleLocation loc : locations) {
+        loc.offsets.clear();
+        loc.is_base_wildcard = true;
+        widened.insert(std::move(loc));
+      }
+      locations = std::move(widened);
+    }
+    visiting.erase(stripped);
+    if (!hitCycle) {
+      memo.emplace(stripped, locations);
     }
     return locations;
   }
 
   if (const auto *select = dyn_cast<SelectInst>(stripped)) {
-    auto trueLocations = resolveWriteLocations(select->getTrueValue());
-    auto falseLocations = resolveWriteLocations(select->getFalseValue());
+    auto trueLocations =
+        resolveWriteLocationsImpl(select->getTrueValue(), layout, visiting, memo);
+    auto falseLocations =
+        resolveWriteLocationsImpl(select->getFalseValue(), layout, visiting, memo);
     locations.insert(trueLocations.begin(), trueLocations.end());
     locations.insert(falseLocations.begin(), falseLocations.end());
+    visiting.erase(stripped);
+    memo.emplace(stripped, locations);
     return locations;
   }
 
   std::unordered_set<const Value *> roots;
-  traceThreadHandleRoots(value, nullptr, roots);
+  JoinTargetAnalysis::traceThreadHandleRoots(value, nullptr, roots);
   if (roots.empty()) {
-    if (const Value *root = traceThreadHandleRoot(value, nullptr)) {
+    if (const Value *root =
+            JoinTargetAnalysis::traceThreadHandleRoot(value, nullptr)) {
       locations.insert(HandleLocation{root, {}, true});
     }
   } else {
@@ -409,7 +398,100 @@ JoinTargetAnalysis::resolveWriteLocations(const Value *value) const {
       locations.insert(HandleLocation{root, {}, true});
     }
   }
+  visiting.erase(stripped);
+  memo.emplace(stripped, locations);
   return locations;
+}
+
+LocationSet resolveReadLocationsImpl(
+    const Value *value, const DataLayout &layout,
+    SmallPtrSetImpl<const Value *> &visiting,
+    std::unordered_map<const Value *, LocationSet> &readMemo,
+    std::unordered_map<const Value *, LocationSet> &writeMemo) {
+  LocationSet locations;
+  if (!value) {
+    return locations;
+  }
+
+  const Value *stripped = value->stripPointerCasts();
+  auto memoIt = readMemo.find(stripped);
+  if (memoIt != readMemo.end()) {
+    return memoIt->second;
+  }
+  if (!visiting.insert(stripped).second) {
+    return locations;
+  }
+
+  if (isa<AllocaInst>(stripped) || isa<GlobalValue>(stripped) ||
+      isa<Argument>(stripped)) {
+    locations.insert(HandleLocation{stripped, {}, false});
+    visiting.erase(stripped);
+    readMemo.emplace(stripped, locations);
+    return locations;
+  }
+
+  if (const auto *load = dyn_cast<LoadInst>(stripped)) {
+    SmallPtrSet<const Value *, 16> writeVisiting;
+    locations = resolveWriteLocationsImpl(load->getPointerOperand(), layout,
+                                          writeVisiting, writeMemo);
+    visiting.erase(stripped);
+    readMemo.emplace(stripped, locations);
+    return locations;
+  }
+
+  if (const auto *gep = dyn_cast<GEPOperator>(stripped)) {
+    SmallPtrSet<const Value *, 16> writeVisiting;
+    locations = resolveWriteLocationsImpl(gep, layout, writeVisiting, writeMemo);
+    visiting.erase(stripped);
+    readMemo.emplace(stripped, locations);
+    return locations;
+  }
+
+  if (const auto *phi = dyn_cast<PHINode>(stripped)) {
+    for (const Value *incoming : phi->incoming_values()) {
+      auto incomingLocations = resolveReadLocationsImpl(
+          incoming, layout, visiting, readMemo, writeMemo);
+      locations.insert(incomingLocations.begin(), incomingLocations.end());
+    }
+    visiting.erase(stripped);
+    readMemo.emplace(stripped, locations);
+    return locations;
+  }
+
+  if (const auto *select = dyn_cast<SelectInst>(stripped)) {
+    auto trueLocations = resolveReadLocationsImpl(
+        select->getTrueValue(), layout, visiting, readMemo, writeMemo);
+    auto falseLocations = resolveReadLocationsImpl(
+        select->getFalseValue(), layout, visiting, readMemo, writeMemo);
+    locations.insert(trueLocations.begin(), trueLocations.end());
+    locations.insert(falseLocations.begin(), falseLocations.end());
+    visiting.erase(stripped);
+    readMemo.emplace(stripped, locations);
+    return locations;
+  }
+
+  visiting.erase(stripped);
+  readMemo.emplace(stripped, locations);
+  return locations;
+}
+
+} // namespace
+
+std::unordered_set<HandleLocation, HandleLocationHash>
+JoinTargetAnalysis::resolveReadLocations(const Value *value) const {
+  SmallPtrSet<const Value *, 16> visiting;
+  std::unordered_map<const Value *, LocationSet> readMemo;
+  std::unordered_map<const Value *, LocationSet> writeMemo;
+  return resolveReadLocationsImpl(value, m_module.getDataLayout(), visiting,
+                                  readMemo, writeMemo);
+}
+
+std::unordered_set<HandleLocation, HandleLocationHash>
+JoinTargetAnalysis::resolveWriteLocations(const Value *value) const {
+  SmallPtrSet<const Value *, 16> visiting;
+  std::unordered_map<const Value *, LocationSet> writeMemo;
+  return resolveWriteLocationsImpl(value, m_module.getDataLayout(), visiting,
+                                   writeMemo);
 }
 
 } // namespace mhp

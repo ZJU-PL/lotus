@@ -6,24 +6,22 @@ Headers live under `include/Concurrency/`, sources under `lib/Concurrency/`, gro
 
 | Subdirectory | Contents |
 |--------------|----------|
-| **Utils/** | Thread APIs, flow graphs, vector clocks, atomics, and RAII lock support |
-| **MHP/** | May-happen-in-parallel and happens-before analyses |
-| **LockSet/** | Intra- and interprocedural lock-set analysis |
-| **Thread/Sharing/** | Escape and thread-sharing analyses |
-| **Thread/Join/** | Join-target resolution |
-| **Thread/** | Thread creation-tree analysis |
-| **Runtime/** | Runtime models shared by the language front-ends |
+| **Core/** | Shared per-module `ConcurrencyContext`, `ThreadFlowGraph`, `ConcurrencyConfig`, `ConcurrencyRelation`, `CallTarget`, and bit-vector clocks (`BVClock`, `FBVClock`) |
+| **API/** | `ThreadAPI`, `CppAtomics`, and `CppThreading` language models |
+| **MHP/** | May-happen-in-parallel (`MHPAnalysis`, `StaticVectorClockMHP`, `ThreadRegionAnalysis`) and `HappensBeforeAnalysis` |
+| **LockSet/** | Intra- and interprocedural `LockSetAnalysis` and `RAIILockTracker` |
+| **Thread/** | `ThreadCreationTree`, `ThreadMultiplicity`, `Join/` (`JoinTargetAnalysis`), and `Sharing/` (`EscapeAnalysis`, `StaticThreadSharingAnalysis`, `ThreadLocalAnalysis`) |
 | **ValueFlow/** | Thread-aware sparse value-flow refinement |
 | **OpenMP/** | OpenMP semantics, task graphs, and data sharing |
-| **CUDA/** | CUDA semantics, memory model, and kernel protocol analysis |
-| **MPI/** | MPI process, collective, protocol, rank, and RMA analyses |
+| **CUDA/** | CUDA model (`CUDAModel`), semantics, memory model, and kernel protocol analysis |
+| **MPI/** | MPI model, process, collective, protocol, rank, and RMA analyses |
 | **LinuxKernel/** | Linux kernel concurrency and lifetime analyses |
 
 Each source subdirectory owns a `CMakeLists.txt` containing its source manifest.
-The parent directory aggregates those manifests into the stable `Concurrency`
-library target, which preserves compatibility for existing consumers.
+The parent directory aggregates those manifests into the `Concurrency` library
+target alongside the top-level `ConcurrencyFacade`.
 
-Include paths use these subdirs, e.g. `Concurrency/Utils/ThreadAPI.h`, `Concurrency/MHP/MHPAnalysis.h`, `Concurrency/MPI/MPIAnalysis.h`.
+Include paths mirror these subdirectories directly, e.g. `Concurrency/Core/ConcurrencyContext.h`, `Concurrency/API/ThreadAPI.h`, `Concurrency/MHP/MHPAnalysis.h`, `Concurrency/MPI/MPIAnalysis.h`.
 
 ## Utilities
 
@@ -224,17 +222,17 @@ The concurrency analysis framework is designed for easy extensibility to support
 
 ### Adding a New Concurrency Library
 
-1. **Create Language Model** (`include/Concurrency/Utils/LanguageModel/YourLib.h`):
+1. **Create Language Model** (`include/Concurrency/YourLib/YourLibModel.h`):
    - Define inline pattern-matching functions for library operations
    - Group by operation type (fork, join, lock, barrier, etc.)
    - Follow naming convention: `isOperationName(const llvm::StringRef& funcName)`
 
-2. **Extend ThreadAPI Enum** (`include/Concurrency/Utils/ThreadAPI.h`):
+2. **Extend ThreadAPI Enum** (`include/Concurrency/API/ThreadAPI.h`):
    - Add new `TD_TYPE` enum values for library-specific operations
    - Group related operations together
    - Document each enum value
 
-3. **Update ThreadAPI Recognition** (`lib/Concurrency/Utils/ThreadAPI.cpp`):
+3. **Update ThreadAPI Recognition** (`lib/Concurrency/API/ThreadAPI.cpp`):
    - Include your language model header
    - Add recognition logic in `ThreadAPI::getType()`
    - Check operations in order of specificity
@@ -253,7 +251,7 @@ The concurrency analysis framework is designed for easy extensibility to support
 ### Example: Adding CUDA Support
 
 ```cpp
-// include/Concurrency/Utils/LanguageModel/CUDA.h
+// include/Concurrency/CUDA/CUDAModel.h
 namespace CUDAModel {
   inline bool isKernelLaunch(const llvm::StringRef& funcName) {
     return funcName.contains("cudaLaunchKernel");

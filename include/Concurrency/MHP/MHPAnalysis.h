@@ -21,14 +21,16 @@
 #pragma once
 
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
+#include "Concurrency/API/CppAtomics.h"
+#include "Concurrency/API/ThreadAPI.h"
+#include "Concurrency/Core/ConcurrencyContext.h"
+#include "Concurrency/Core/ThreadFlowGraph.h"
 #include "Concurrency/LockSet/LockSetAnalysis.h"
 #include "Concurrency/MHP/IMHPAnalysis.h"
+#include "Concurrency/MHP/ThreadRegionAnalysis.h"
 #include "Concurrency/OpenMP/OpenMPSemantics.h"
 #include "Concurrency/Thread/Join/JoinTargetAnalysis.h"
-#include "Concurrency/Utils/CppAtomics.h"
-#include "Concurrency/Utils/ThreadAPI.h"
-#include "Concurrency/Utils/ThreadFlowGraph.h"
-#include "Concurrency/Utils/ThreadMultiplicity.h"
+#include "Concurrency/Thread/ThreadMultiplicity.h"
 
 namespace ThreadLocal {
 class ThreadLocalAnalysis;
@@ -73,74 +75,6 @@ class ThreadRegionAnalysis;
 using InstructionVector = std::vector<const llvm::Instruction *>;
 using LockID = const llvm::Value *;
 
-// Bitvector for efficient region parallelism representation
-using RegionBitVector = llvm::BitVector;
-
-// ============================================================================
-// Thread Region Analysis
-// ============================================================================
-
-/**
- * @brief Divides program into thread regions based on synchronization
- *
- * A thread region is a maximal sequence of instructions within a single thread
- * that are not separated by any synchronization operations. Regions are the
- * basic units for MHP analysis.
- */
-class ThreadRegionAnalysis {
-public:
-  struct Region {
-    size_t region_id;
-    ThreadID thread_id;
-    SyncNode *start_node;
-    SyncNode *end_node;
-    InstructionSet instructions;
-
-    // Synchronization constraints using bitvectors for efficiency
-    RegionBitVector must_precede_bits; // Regions that must execute before this
-    RegionBitVector must_follow_bits;  // Regions that must execute after this
-    RegionBitVector may_be_parallel_bits; // Regions that may run in parallel
-
-    // Keep set versions for compatibility and iteration
-    std::set<size_t> must_precede;
-    std::set<size_t> must_follow;
-    std::set<size_t> may_be_parallel;
-  };
-
-  ThreadRegionAnalysis(const ThreadFlowGraph &tfg) : m_tfg(tfg) {}
-
-  void analyze();
-
-  // Query interface
-  const Region *getRegion(size_t region_id) const;
-  const Region *getRegionContaining(const llvm::Instruction *inst) const;
-  const std::vector<std::unique_ptr<Region>> &getAllRegions() const {
-    return m_regions;
-  }
-
-  void print(llvm::raw_ostream &os) const;
-
-private:
-  const ThreadFlowGraph &m_tfg;
-
-  std::vector<std::unique_ptr<Region>> m_regions;
-  std::unordered_map<const llvm::Instruction *, const Region *>
-      m_inst_to_region;
-
-  void identifyRegions();
-  void identifyRegionsForThread(ThreadID tid, const llvm::Function *entry);
-  void computeOrderingConstraints();
-  void computeParallelism();
-
-  // CFG-based helpers
-  bool isSyncPoint(const llvm::Instruction *inst) const;
-  std::vector<const llvm::Instruction *>
-  collectSyncPoints(const llvm::Function *func) const;
-
-  // TFG reachability helper
-  bool isReachableInTFG(const SyncNode *from, const SyncNode *to) const;
-};
-
 // ============================================================================
 // MHP Analysis
 // ============================================================================
@@ -164,16 +98,17 @@ private:
  */
 class MHPAnalysis : public IMHPAnalysis {
 public:
-  explicit MHPAnalysis(llvm::Module &module);
+  explicit MHPAnalysis(llvm::Module &module,
+                       lotus::AliasAnalysisWrapper *aliasAnalysis = nullptr);
+  explicit MHPAnalysis(concurrency::ConcurrencyContext &context);
   ~MHPAnalysis();
 
   // Main analysis entry point
   void analyze() override;
 
-  // Alias analysis used internally (also useful for other analyses/checkers).
-  lotus::AliasAnalysisWrapper *getAliasAnalysis() const override {
-    return m_alias_analysis.get();
-  }
+  // Alias analysis used internally (lazily initialized on demand if not
+  // supplied by a ConcurrencyContext or caller).
+  lotus::AliasAnalysisWrapper *getAliasAnalysis() const override;
 
   const OpenMP::OpenMPSemantics *getOpenMPSemantics() const override {
     return m_openmp_semantics.get();
@@ -287,6 +222,7 @@ public:
                                           const SyncNode *target_node,
                                           EdgeKind kind) const;
   const ThreadRegionAnalysis &getThreadRegionAnalysis() const {
+    ensureThreadRegionAnalysis();
     return *m_region_analysis;
   }
 
@@ -330,11 +266,12 @@ private:
 
   llvm::Module &m_module;
   ThreadAPI *m_thread_api;
+  concurrency::ConcurrencyContext *m_context = nullptr;
 
   // Analysis components
   std::unique_ptr<ThreadFlowGraph> m_tfg;
   std::unique_ptr<LockSetAnalysis> m_lockset; // Optional
-  std::unique_ptr<ThreadRegionAnalysis> m_region_analysis;
+  mutable std::unique_ptr<ThreadRegionAnalysis> m_region_analysis;
 
   // Configuration
   bool m_enable_lockset_analysis = false;
@@ -349,14 +286,17 @@ private:
   std::unordered_map<const llvm::Instruction *, ThreadID> m_inst_to_thread;
   std::unordered_map<const llvm::Instruction *, size_t> m_instruction_ordinals;
 
-  // Alias Analysis
-  std::unique_ptr<lotus::AliasAnalysisWrapper> m_alias_analysis;
+  // Alias Analysis (borrowed from caller/context or lazily constructed)
+  mutable lotus::AliasAnalysisWrapper *m_alias_analysis = nullptr;
+  mutable std::unique_ptr<lotus::AliasAnalysisWrapper> m_owned_alias_analysis;
 
   // Call Graph for interprocedural analysis
-  std::unique_ptr<llvm::CallGraph> m_call_graph;
+  std::unique_ptr<llvm::CallGraph> m_owned_call_graph;
+  llvm::CallGraph *m_call_graph = nullptr;
   std::unique_ptr<mhp::JoinTargetAnalysis> m_join_target_analysis;
   std::unique_ptr<concurrency::ThreadMultiplicityAnalysis>
-      m_thread_multiplicity;
+      m_owned_thread_multiplicity;
+  concurrency::ThreadMultiplicityAnalysis *m_thread_multiplicity = nullptr;
 
   // Thread ID allocation
   ThreadID m_next_thread_id = 1; // 0 is reserved for main thread
@@ -430,8 +370,45 @@ private:
   // Query caches (keyed by instruction pointer identity).
   mutable std::unordered_map<InstPair, bool, InstPairHash> m_order_cache;
   mutable std::unordered_map<InstPair, bool, InstPairHash> m_mhp_cache;
+  mutable std::unordered_map<ThreadID, bool> m_multi_instance_overlap_cache;
+  mutable std::vector<uint32_t> m_order_visit_stamp;
+  mutable uint32_t m_order_current_stamp = 0;
+  mutable std::vector<SyncNode *> m_order_bfs_queue;
   bool m_has_multi_context_nodes = false;
+  bool m_single_main_thread_only = false;
   size_t m_analysis_generation = 0;
+
+  // Context-cloning budget state to prevent exponential TFG blowup on large
+  // call graphs while preserving full precision on small/sync-relevant graphs.
+  struct ThreadFuncKey {
+    ThreadID tid;
+    const llvm::Function *func;
+    bool operator==(const ThreadFuncKey &other) const {
+      return tid == other.tid && func == other.func;
+    }
+  };
+  struct ThreadFuncKeyHash {
+    size_t operator()(const ThreadFuncKey &key) const {
+      size_t h1 = std::hash<ThreadID>{}(key.tid);
+      size_t h2 = std::hash<const void *>{}(key.func);
+      return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+    }
+  };
+  static constexpr CallContextID kMergedContextBit = CallContextID{1} << 63;
+  static constexpr size_t kMaxContextsPerFunction = 4;
+  static constexpr size_t kMaxSyncContextsPerFunction = 8;
+  static constexpr size_t kMaxContextDepth = 6;
+  static constexpr size_t kMaxClonedTFGNodes = 100000;
+  static constexpr size_t kMaxPairCacheEntries = 250000;
+  std::unordered_map<ThreadFuncKey, size_t, ThreadFuncKeyHash>
+      m_func_context_count;
+  std::unordered_map<ThreadFuncKey, CallContextID, ThreadFuncKeyHash>
+      m_func_shared_context;
+  CallContextID m_next_merged_context_id = 1;
+  std::unordered_set<const llvm::Function *> m_sync_relevant_functions;
+  void computeSyncRelevantFunctions();
+  CallContextID chooseCalleeContext(ThreadID tid, const llvm::Function *target,
+                                    SyncNode *call_node);
 
   struct PendingJoin {
     const llvm::Instruction *inst = nullptr;
@@ -466,6 +443,7 @@ private:
    *
    * Divides each thread into regions separated by synchronization.
    */
+  void ensureThreadRegionAnalysis() const;
   void analyzeThreadRegions();
 
   /**

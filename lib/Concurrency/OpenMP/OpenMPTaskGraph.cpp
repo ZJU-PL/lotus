@@ -56,16 +56,24 @@ std::pair<const Task *, const Task *> normalizeTaskPair(const Task *lhs,
 
 } // namespace
 
-OpenMPTaskGraph::OpenMPTaskGraph(Module &module)
-    : m_module(module), m_semantics(module) {}
+OpenMPTaskGraph::OpenMPTaskGraph(Module &module,
+                                 const OpenMPSemantics *shared_semantics)
+    : m_module(module), m_semantics(shared_semantics) {
+  if (!m_semantics) {
+    m_owned_semantics = std::make_unique<OpenMPSemantics>(module);
+    m_semantics = m_owned_semantics.get();
+  }
+}
 
 void OpenMPTaskGraph::analyze() {
   errs() << "Starting OpenMP Task Dependency Analysis...\n";
-  m_semantics.analyze();
-  m_summary = m_semantics.getSummary();
+  if (m_owned_semantics) {
+    m_owned_semantics->analyze();
+  }
+  m_summary = m_semantics->getSummary();
   buildDependencyEdges();
 
-  errs() << "Found " << m_semantics.getTasks().size()
+  errs() << "Found " << m_semantics->getTasks().size()
          << " OpenMP tasks with dependencies\n";
   if (m_deferred_wait_deps_count) {
     errs() << "Deferred " << m_deferred_wait_deps_count
@@ -78,16 +86,16 @@ void OpenMPTaskGraph::analyze() {
 }
 
 const Task *OpenMPTaskGraph::getTaskForCreate(const Instruction *inst) const {
-  return m_semantics.getTaskForCreate(inst);
+  return m_semantics->getTaskForCreate(inst);
 }
 
 void OpenMPTaskGraph::buildDependencyEdges() {
-  m_relations = m_semantics.getRelations();
-  m_deferred_reason_counts = m_semantics.getDeferredReasonCounts();
+  m_relations = m_semantics->getRelations();
+  m_deferred_reason_counts = m_semantics->getDeferredReasonCounts();
   m_deferred_imprecise_conflict_count =
-      m_semantics.getDeferredImpreciseConflictCount();
+      m_semantics->getDeferredImpreciseConflictCount();
   m_deferred_wait_deps_count = 0;
-  for (const OpenMPTaskEvent &event : m_semantics.getTaskEvents()) {
+  for (const OpenMPTaskEvent &event : m_semantics->getTaskEvents()) {
     if (event.kind == OpenMPTaskEvent::Kind::TaskwaitDeps &&
         event.is_partial_wait && event.dependencies.empty()) {
       ++m_deferred_wait_deps_count;
@@ -103,7 +111,7 @@ bool OpenMPTaskGraph::dependenciesConflict(const Dependency &d1,
 DependencyConflict
 OpenMPTaskGraph::classifyDependencyConflict(const Dependency &d1,
                                             const Dependency &d2) const {
-  return m_semantics.classifyDependencyConflict(d1, d2);
+  return m_semantics->classifyDependencyConflict(d1, d2);
 }
 
 bool OpenMPTaskGraph::isMutexLikeExclusion(const Dependency &d1,
@@ -151,11 +159,11 @@ size_t OpenMPTaskGraph::getRelationCount(concurrency::RelationKind kind) const {
 }
 
 bool OpenMPTaskGraph::isNestedRegion(size_t region_id) const {
-  return m_semantics.isNestedRegion(region_id);
+  return m_semantics->isNestedRegion(region_id);
 }
 
 size_t OpenMPTaskGraph::getRegionNestingDepth(size_t region_id) const {
-  return m_semantics.getRegionNestingDepth(region_id);
+  return m_semantics->getRegionNestingDepth(region_id);
 }
 
 OpenMPTaskGraph::TaskRelation

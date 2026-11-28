@@ -729,3 +729,28 @@ TEST_F(CUDAAnalysisTest, InvalidMaskedWarpBarrierStillReportsMismatch) {
   analysis.runAnalysis();
   EXPECT_TRUE(analysis.getKernelSummaries().front().has_barrier_mismatch);
 }
+
+TEST_F(CUDAAnalysisTest, IgnoresHostAddrspaceZeroMemcpyAndHandlesRecursiveHelpers) {
+  const char *source = R"(
+    declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1 immarg)
+    define void @host_a(i8* %dst, i8* %src) {
+    entry:
+      call void @llvm.memcpy.p0i8.p0i8.i64(i8* %dst, i8* %src, i64 8, i1 false)
+      call void @host_b(i8* %dst, i8* %src)
+      ret void
+    }
+    define void @host_b(i8* %dst, i8* %src) {
+    entry:
+      call void @host_a(i8* %dst, i8* %src)
+      ret void
+    }
+  )";
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  concurrency::cuda::CUDAAnalysis analysis(*module);
+  analysis.runAnalysis();
+  EXPECT_TRUE(analysis.getKernelSummaries().empty());
+  EXPECT_TRUE(analysis.getMemoryTransfers().empty());
+  EXPECT_EQ(analysis.getOperationCount(), 0u);
+}

@@ -1,10 +1,10 @@
 #pragma once
 
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/CUDA/CUDAAbstractState.h"
 #include "Concurrency/CUDA/CUDAMemoryModel.h"
 #include "Concurrency/CUDA/CUDASymbolicModel.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <array>
 #include <cstdint>
@@ -485,7 +485,8 @@ private:
   size_t m_barrier_count = 0;
   size_t m_warp_barrier_count = 0;
   size_t m_memory_barrier_count = 0;
-  std::string m_module_snapshot;
+  uint64_t m_module_fingerprint = 0;
+  bool m_has_module_fingerprint = false;
 
   void analyzeKernel(const llvm::Function *kernel,
                      const KernelLaunchInfo *launch);

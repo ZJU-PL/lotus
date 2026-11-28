@@ -17,11 +17,15 @@ void LockSetAnalysis::analyzeFunction(Function *func) {
   if (!func || func->isDeclaration())
     return;
 
-  RAIILock::RAIILockTracker raii_tracker;
-  raii_tracker.analyzeFunction(func);
-  m_raii_locks[func] = raii_tracker.getAllLockLifetimes();
+  if (m_functions_with_raii_locks.count(func)) {
+    RAIILock::RAIILockTracker raii_tracker;
+    raii_tracker.analyzeFunction(func);
+    m_raii_locks[func] = raii_tracker.getAllLockLifetimes();
+  }
 
-  detectTryLockSuccessBranches(func);
+  if (m_functions_with_trylocks.count(func)) {
+    detectTryLockSuccessBranches(func);
+  }
   computeIntraproceduralLockSets(func);
 }
 
@@ -305,32 +309,99 @@ void LockSetAnalysis::computeIntraproceduralLockSets(Function *func) {
       };
 
   std::queue<const Instruction *> worklist;
-  std::set<const Instruction *> in_worklist;
+  DenseSet<const Instruction *> in_worklist;
+  DenseSet<const Instruction *> visited_insts;
 
-  unsigned recursive_acquire_limit = 0;
-  auto countRecursiveAcquires = [&](const Function &candidate_func) {
-    for (const Instruction &candidate : instructions(candidate_func)) {
-      const auto *candidate_call = dyn_cast<CallBase>(&candidate);
-      const Function *candidate_callee =
-          candidate_call ? m_thread_api->getCallee(candidate_call) : nullptr;
-      if (candidate_callee &&
-          candidate_callee->getName().contains("recursive_mutex") &&
-          m_thread_api->isTDAcquire(&candidate) &&
-          !m_thread_api->isTryLock(&candidate)) {
-        ++recursive_acquire_limit;
-      }
+  const unsigned recursive_acquire_limit = m_recursive_acquire_limit;
+  const bool func_has_raii = m_raii_locks.count(func) != 0;
+  const bool func_has_trylocks = m_functions_with_trylocks.count(func) != 0;
+
+  auto updateSparseMap = [](auto &map, const Instruction *key,
+                            const auto &val) -> bool {
+    if (val.empty()) {
+      return map.erase(key) > 0;
     }
+    auto it = map.find(key);
+    if (it == map.end()) {
+      map.emplace(key, val);
+      return true;
+    }
+    if (it->second != val) {
+      it->second = val;
+      return true;
+    }
+    return false;
   };
-  if (m_module) {
-    for (const Function &candidate_func : *m_module) {
-      if (!candidate_func.isDeclaration()) {
-        countRecursiveAcquires(candidate_func);
+  auto updateDenseMap = [](auto &map, const Instruction *key,
+                           const auto &val) -> bool {
+    auto it = map.find(key);
+    if (it == map.end()) {
+      map.emplace(key, val);
+      return true;
+    }
+    if (it->second != val) {
+      it->second = val;
+      return true;
+    }
+    return false;
+  };
+  auto lookupOrEmpty = [](const auto &map, const Instruction *key) {
+    auto it = map.find(key);
+    return it != map.end() ? it->second : typename std::decay_t<decltype(map)>::mapped_type();
+  };
+
+  auto mergeDepths = [](const std::vector<RecursiveDepthMap> &inputs,
+                        bool is_must) {
+    RecursiveDepthMap result;
+    if (inputs.empty()) {
+      return result;
+    }
+    if (!is_must) {
+      for (const RecursiveDepthMap &input : inputs) {
+        for (const auto &[lock, depth] : input) {
+          result[lock] = std::max(result[lock], depth);
+        }
+      }
+      return result;
+    }
+
+    result = inputs.front();
+    for (size_t index = 1; index < inputs.size(); ++index) {
+      for (auto it = result.begin(); it != result.end();) {
+        auto other = inputs[index].find(it->first);
+        if (other == inputs[index].end()) {
+          it = result.erase(it);
+        } else {
+          it->second = std::min(it->second, other->second);
+          ++it;
+        }
       }
     }
-  } else {
-    countRecursiveAcquires(*func);
-  }
-  recursive_acquire_limit = std::max(1u, recursive_acquire_limit);
+    return result;
+  };
+
+  auto mergeOwnership = [](const std::vector<RAIIWrapperSet> &inputs,
+                           bool is_must) {
+    RAIIWrapperSet result;
+    if (inputs.empty()) {
+      return result;
+    }
+    if (!is_must) {
+      for (const RAIIWrapperSet &input : inputs) {
+        result.insert(input.begin(), input.end());
+      }
+      return result;
+    }
+    result = inputs.front();
+    for (size_t index = 1; index < inputs.size(); ++index) {
+      RAIIWrapperSet intersection;
+      std::set_intersection(result.begin(), result.end(),
+                            inputs[index].begin(), inputs[index].end(),
+                            std::inserter(intersection, intersection.begin()));
+      result = std::move(intersection);
+    }
+    return result;
+  };
 
   const Instruction *entry = &func->getEntryBlock().front();
   worklist.push(entry);
@@ -341,256 +412,160 @@ void LockSetAnalysis::computeIntraproceduralLockSets(Function *func) {
     worklist.pop();
     in_worklist.erase(inst);
 
-    std::vector<LockSet> may_inputs, must_inputs;
-    std::vector<LockSet> may_read_inputs, may_write_inputs;
-    std::vector<LockSet> must_read_inputs, must_write_inputs;
-    std::vector<RecursiveDepthMap> may_depth_inputs, must_depth_inputs;
-    std::vector<RAIIWrapperSet> may_ownership_inputs, must_ownership_inputs;
+    const BasicBlock *bb = inst->getParent();
+    const bool is_block_head = (inst == &bb->front());
+
+    LockSet may_read_in, may_write_in, must_read_in, must_write_in;
+    RecursiveDepthMap may_depth_in, must_depth_in;
+    RAIIWrapperSet may_ownership_in, must_ownership_in;
 
     if (inst == entry) {
-      may_inputs.push_back(LockSet());
-      must_inputs.push_back(LockSet());
-      may_read_inputs.push_back(LockSet());
-      may_write_inputs.push_back(LockSet());
-      must_read_inputs.push_back(LockSet());
-      must_write_inputs.push_back(LockSet());
-      may_depth_inputs.emplace_back();
-      must_depth_inputs.emplace_back();
-      may_ownership_inputs.emplace_back();
-      must_ownership_inputs.emplace_back();
-    } else {
-      const BasicBlock *bb = inst->getParent();
-      if (inst == &bb->front()) {
-        for (const BasicBlock *pred : predecessors(bb)) {
-          const Instruction *pred_term = pred->getTerminator();
-          if (!pred_term) {
+      // Empty initial entry facts.
+    } else if (is_block_head) {
+      std::vector<LockSet> may_read_inputs, may_write_inputs;
+      std::vector<LockSet> must_read_inputs, must_write_inputs;
+      std::vector<RecursiveDepthMap> may_depth_inputs, must_depth_inputs;
+      std::vector<RAIIWrapperSet> may_ownership_inputs, must_ownership_inputs;
+
+      for (const BasicBlock *pred : predecessors(bb)) {
+        const Instruction *pred_term = pred->getTerminator();
+        if (!pred_term || !visited_insts.count(pred_term)) {
+          continue;
+        }
+
+        LockSet pred_may = lookupOrEmpty(m_may_locksets_exit, pred_term);
+        LockSet pred_must = lookupOrEmpty(m_must_locksets_exit, pred_term);
+        LockSet pred_may_read = lookupOrEmpty(m_may_read_locks_exit, pred_term);
+        LockSet pred_may_write =
+            lookupOrEmpty(m_may_write_locks_exit, pred_term);
+        LockSet pred_must_read =
+            lookupOrEmpty(m_must_read_locks_exit, pred_term);
+        LockSet pred_must_write =
+            lookupOrEmpty(m_must_write_locks_exit, pred_term);
+
+        if (const auto *invoke = dyn_cast<InvokeInst>(pred_term)) {
+          const auto &edge_facts = invoke->getNormalDest() == bb
+                                       ? m_invoke_normal_exit
+                                       : m_invoke_unwind_exit;
+          auto edge_it = edge_facts.find(pred_term);
+          if (edge_it == edge_facts.end()) {
             continue;
           }
+          pred_may = edge_it->second.may_lockset;
+          pred_must = edge_it->second.must_lockset;
+          pred_may_read = edge_it->second.may_read_lockset;
+          pred_may_write = edge_it->second.may_write_lockset;
+          pred_must_read = edge_it->second.must_read_lockset;
+          pred_must_write = edge_it->second.must_write_lockset;
+          may_depth_inputs.push_back(edge_it->second.may_recursive_depth);
+          must_depth_inputs.push_back(edge_it->second.must_recursive_depth);
+        }
 
-          auto it_may = m_may_locksets_exit.find(pred_term);
-          auto it_must = m_must_locksets_exit.find(pred_term);
-          auto it_mr = m_may_read_locks_exit.find(pred_term);
-          auto it_mw = m_may_write_locks_exit.find(pred_term);
-          auto it_ur = m_must_read_locks_exit.find(pred_term);
-          auto it_uw = m_must_write_locks_exit.find(pred_term);
-
-          // Unreached predecessors represent lattice TOP for MUST. Ignore
-          // them until they have a concrete dataflow value.
-          if (it_may == m_may_locksets_exit.end()) {
-            continue;
-          }
-
-          LockSet pred_may = it_may->second;
-          LockSet pred_must = it_must != m_must_locksets_exit.end()
-                                  ? it_must->second
-                                  : LockSet();
-          LockSet pred_may_read =
-              it_mr != m_may_read_locks_exit.end() ? it_mr->second : LockSet();
-          LockSet pred_may_write =
-              it_mw != m_may_write_locks_exit.end() ? it_mw->second : LockSet();
-          LockSet pred_must_read =
-              it_ur != m_must_read_locks_exit.end() ? it_ur->second : LockSet();
-          LockSet pred_must_write = it_uw != m_must_write_locks_exit.end()
-                                        ? it_uw->second
-                                        : LockSet();
-
-          if (const auto *invoke = dyn_cast<InvokeInst>(pred_term)) {
-            const auto &edge_facts = invoke->getNormalDest() == bb
-                                         ? m_invoke_normal_exit
-                                         : m_invoke_unwind_exit;
-            auto edge_it = edge_facts.find(pred_term);
-            if (edge_it == edge_facts.end()) {
-              continue;
-            }
-            pred_may = edge_it->second.may_lockset;
-            pred_must = edge_it->second.must_lockset;
-            pred_may_read = edge_it->second.may_read_lockset;
-            pred_may_write = edge_it->second.may_write_lockset;
-            pred_must_read = edge_it->second.must_read_lockset;
-            pred_must_write = edge_it->second.must_write_lockset;
-            may_depth_inputs.push_back(edge_it->second.may_recursive_depth);
-            must_depth_inputs.push_back(edge_it->second.must_recursive_depth);
-          }
-
+        if (func_has_trylocks) {
           applyTryLockEdgeRefinement(pred, bb, pred_may, pred_must,
                                      pred_may_read, pred_may_write,
                                      pred_must_read, pred_must_write);
-          may_inputs.push_back(std::move(pred_may));
-          must_inputs.push_back(std::move(pred_must));
-          may_read_inputs.push_back(std::move(pred_may_read));
-          may_write_inputs.push_back(std::move(pred_may_write));
-          must_read_inputs.push_back(std::move(pred_must_read));
-          must_write_inputs.push_back(std::move(pred_must_write));
-          if (!isa<InvokeInst>(pred_term)) {
-            auto may_depth_it = m_may_recursive_depth_exit.find(pred_term);
-            auto must_depth_it = m_must_recursive_depth_exit.find(pred_term);
-            may_depth_inputs.push_back(
-                may_depth_it != m_may_recursive_depth_exit.end()
-                    ? may_depth_it->second
-                    : RecursiveDepthMap());
-            must_depth_inputs.push_back(
-                must_depth_it != m_must_recursive_depth_exit.end()
-                    ? must_depth_it->second
-                    : RecursiveDepthMap());
-          }
-          auto may_ownership_it = m_may_raii_ownership_exit.find(pred_term);
-          auto must_ownership_it = m_must_raii_ownership_exit.find(pred_term);
-          may_ownership_inputs.push_back(
-              may_ownership_it != m_may_raii_ownership_exit.end()
-                  ? may_ownership_it->second
-                  : RAIIWrapperSet());
-          must_ownership_inputs.push_back(
-              must_ownership_it != m_must_raii_ownership_exit.end()
-                  ? must_ownership_it->second
-                  : RAIIWrapperSet());
         }
-      } else if (const Instruction *prev = inst->getPrevNode()) {
-        auto it_may = m_may_locksets_exit.find(prev);
-        if (it_may != m_may_locksets_exit.end()) {
-          may_inputs.push_back(it_may->second);
-          auto it_must = m_must_locksets_exit.find(prev);
-          must_inputs.push_back(it_must != m_must_locksets_exit.end()
-                                    ? it_must->second
-                                    : LockSet());
-          auto it_mr = m_may_read_locks_exit.find(prev);
-          may_read_inputs.push_back(
-              it_mr != m_may_read_locks_exit.end() ? it_mr->second : LockSet());
-          auto it_mw = m_may_write_locks_exit.find(prev);
-          may_write_inputs.push_back(it_mw != m_may_write_locks_exit.end()
-                                         ? it_mw->second
-                                         : LockSet());
-          auto it_ur = m_must_read_locks_exit.find(prev);
-          must_read_inputs.push_back(it_ur != m_must_read_locks_exit.end()
-                                         ? it_ur->second
-                                         : LockSet());
-          auto it_uw = m_must_write_locks_exit.find(prev);
-          must_write_inputs.push_back(it_uw != m_must_write_locks_exit.end()
-                                          ? it_uw->second
-                                          : LockSet());
-          auto may_depth_it = m_may_recursive_depth_exit.find(prev);
-          auto must_depth_it = m_must_recursive_depth_exit.find(prev);
-          may_depth_inputs.push_back(may_depth_it !=
-                                             m_may_recursive_depth_exit.end()
-                                         ? may_depth_it->second
-                                         : RecursiveDepthMap());
-          must_depth_inputs.push_back(must_depth_it !=
-                                              m_must_recursive_depth_exit.end()
-                                          ? must_depth_it->second
-                                          : RecursiveDepthMap());
-          auto may_ownership_it = m_may_raii_ownership_exit.find(prev);
-          auto must_ownership_it = m_must_raii_ownership_exit.find(prev);
+        may_read_inputs.push_back(std::move(pred_may_read));
+        may_write_inputs.push_back(std::move(pred_may_write));
+        must_read_inputs.push_back(std::move(pred_must_read));
+        must_write_inputs.push_back(std::move(pred_must_write));
+        if (!isa<InvokeInst>(pred_term)) {
+          may_depth_inputs.push_back(
+              lookupOrEmpty(m_may_recursive_depth_exit, pred_term));
+          must_depth_inputs.push_back(
+              lookupOrEmpty(m_must_recursive_depth_exit, pred_term));
+        }
+        if (func_has_raii) {
           may_ownership_inputs.push_back(
-              may_ownership_it != m_may_raii_ownership_exit.end()
-                  ? may_ownership_it->second
-                  : RAIIWrapperSet());
+              lookupOrEmpty(m_may_raii_ownership_exit, pred_term));
           must_ownership_inputs.push_back(
-              must_ownership_it != m_must_raii_ownership_exit.end()
-                  ? must_ownership_it->second
-                  : RAIIWrapperSet());
+              lookupOrEmpty(m_must_raii_ownership_exit, pred_term));
+        }
+      }
+
+      if (!may_read_inputs.empty()) {
+        may_read_in = merge(may_read_inputs, false);
+        may_write_in = merge(may_write_inputs, false);
+        must_read_in = merge(must_read_inputs, true);
+        must_write_in = merge(must_write_inputs, true);
+      }
+      may_depth_in = mergeDepths(may_depth_inputs, false);
+      must_depth_in = mergeDepths(must_depth_inputs, true);
+      if (func_has_raii) {
+        may_ownership_in = mergeOwnership(may_ownership_inputs, false);
+        must_ownership_in = mergeOwnership(must_ownership_inputs, true);
+      }
+    } else if (const Instruction *prev = inst->getPrevNode()) {
+      if (visited_insts.count(prev)) {
+        may_read_in = lookupOrEmpty(m_may_read_locks_exit, prev);
+        may_write_in = lookupOrEmpty(m_may_write_locks_exit, prev);
+        must_read_in = lookupOrEmpty(m_must_read_locks_exit, prev);
+        must_write_in = lookupOrEmpty(m_must_write_locks_exit, prev);
+        may_depth_in = lookupOrEmpty(m_may_recursive_depth_exit, prev);
+        must_depth_in = lookupOrEmpty(m_must_recursive_depth_exit, prev);
+        if (func_has_raii) {
+          may_ownership_in = lookupOrEmpty(m_may_raii_ownership_exit, prev);
+          must_ownership_in = lookupOrEmpty(m_must_raii_ownership_exit, prev);
         }
       }
     }
 
-    auto mergeDepths = [](const std::vector<RecursiveDepthMap> &inputs,
-                          bool is_must) {
-      RecursiveDepthMap result;
-      if (inputs.empty()) {
-        return result;
-      }
-      if (!is_must) {
-        for (const RecursiveDepthMap &input : inputs) {
-          for (const auto &[lock, depth] : input) {
-            result[lock] = std::max(result[lock], depth);
-          }
-        }
-        return result;
-      }
-
-      result = inputs.front();
-      for (size_t index = 1; index < inputs.size(); ++index) {
-        for (auto it = result.begin(); it != result.end();) {
-          auto other = inputs[index].find(it->first);
-          if (other == inputs[index].end()) {
-            it = result.erase(it);
-          } else {
-            it->second = std::min(it->second, other->second);
-            ++it;
-          }
-        }
-      }
-      return result;
-    };
-
-    RecursiveDepthMap may_depth_in = mergeDepths(may_depth_inputs, false);
-    RecursiveDepthMap must_depth_in = mergeDepths(must_depth_inputs, true);
-    auto mergeOwnership = [](const std::vector<RAIIWrapperSet> &inputs,
-                             bool is_must) {
-      RAIIWrapperSet result;
-      if (inputs.empty()) {
-        return result;
-      }
-      if (!is_must) {
-        for (const RAIIWrapperSet &input : inputs) {
-          result.insert(input.begin(), input.end());
-        }
-        return result;
-      }
-      result = inputs.front();
-      for (size_t index = 1; index < inputs.size(); ++index) {
-        RAIIWrapperSet intersection;
-        std::set_intersection(result.begin(), result.end(),
-                              inputs[index].begin(), inputs[index].end(),
-                              std::inserter(intersection,
-                                            intersection.begin()));
-        result = std::move(intersection);
-      }
-      return result;
-    };
-    RAIIWrapperSet may_ownership_in =
-        mergeOwnership(may_ownership_inputs, false);
-    RAIIWrapperSet must_ownership_in =
-        mergeOwnership(must_ownership_inputs, true);
     const bool may_ownership_entry_changed =
-        m_may_raii_ownership_entry[inst] != may_ownership_in;
+        func_has_raii &&
+        updateSparseMap(m_may_raii_ownership_entry, inst, may_ownership_in);
     const bool must_ownership_entry_changed =
-        m_must_raii_ownership_entry[inst] != must_ownership_in;
-    m_may_raii_ownership_entry[inst] = may_ownership_in;
-    m_must_raii_ownership_entry[inst] = must_ownership_in;
+        func_has_raii &&
+        updateSparseMap(m_must_raii_ownership_entry, inst, must_ownership_in);
     RAIIWrapperSet may_ownership_out =
-        transferRAIIOwnership(inst, may_ownership_in, false);
+        func_has_raii ? transferRAIIOwnership(inst, may_ownership_in, false)
+                      : RAIIWrapperSet();
     RAIIWrapperSet must_ownership_out =
-        transferRAIIOwnership(inst, must_ownership_in, true);
+        func_has_raii ? transferRAIIOwnership(inst, must_ownership_in, true)
+                      : RAIIWrapperSet();
 
-    LockSet may_read_in =
-        may_read_inputs.empty() ? LockSet() : merge(may_read_inputs, false);
-    LockSet may_write_in =
-        may_write_inputs.empty() ? LockSet() : merge(may_write_inputs, false);
-    LockSet must_read_in =
-        must_read_inputs.empty() ? LockSet() : merge(must_read_inputs, true);
-    LockSet must_write_in =
-        must_write_inputs.empty() ? LockSet() : merge(must_write_inputs, true);
     LockSet may_in = may_read_in;
     may_in.insert(may_write_in.begin(), may_write_in.end());
     LockSet must_in = must_read_in;
     must_in.insert(must_write_in.begin(), must_write_in.end());
 
-    LockSet may_read_out, may_write_out, must_read_out, must_write_out;
-    transferReadWrite(inst, may_read_in, may_write_in, may_read_out,
-                      may_write_out, false);
-    transferReadWrite(inst, must_read_in, must_write_in, must_read_out,
-                      must_write_out, true);
+    const CallBase *depth_call = dyn_cast<CallBase>(inst);
+    const Function *direct_callee =
+        depth_call ? depth_call->getCalledFunction() : nullptr;
+    const bool is_lock_transparent_call =
+        depth_call && !func_has_raii && direct_callee &&
+        (direct_callee->isIntrinsic() ||
+         (!direct_callee->isDeclaration() &&
+          !m_lock_relevant_functions.empty() &&
+          m_lock_relevant_functions.count(direct_callee) == 0));
 
-    LockSet may_out = transfer(inst, may_in, false);
-    LockSet must_out = transfer(inst, must_in, true);
+    LockSet may_read_out, may_write_out, must_read_out, must_write_out;
+    LockSet may_out, must_out;
+    if ((!depth_call && !func_has_raii) || is_lock_transparent_call) {
+      may_read_out = may_read_in;
+      may_write_out = may_write_in;
+      must_read_out = must_read_in;
+      must_write_out = must_write_in;
+      may_out = may_in;
+      must_out = must_in;
+    } else {
+      transferReadWrite(inst, may_read_in, may_write_in, may_read_out,
+                        may_write_out, false);
+      transferReadWrite(inst, must_read_in, must_write_in, must_read_out,
+                        must_write_out, true);
+      may_out = transfer(inst, may_in, false);
+      must_out = transfer(inst, must_in, true);
+    }
 
     RecursiveDepthMap may_depth_out = may_depth_in;
     RecursiveDepthMap must_depth_out = must_depth_in;
-    const CallBase *depth_call = dyn_cast<CallBase>(inst);
     const Function *depth_callee =
-        depth_call ? m_thread_api->getCallee(depth_call) : nullptr;
+        (depth_call && !is_lock_transparent_call)
+            ? m_thread_api->getCallee(depth_call)
+            : nullptr;
     const bool depth_lock_operation =
-        depth_call && (m_thread_api->isTDAcquire(inst) ||
-                       m_thread_api->isTDRelease(inst));
+        depth_call && !is_lock_transparent_call &&
+        (m_thread_api->isTDAcquire(inst) || m_thread_api->isTDRelease(inst));
     LockID depth_lock =
         depth_lock_operation ? getLockValue(depth_call) : nullptr;
     const bool known_recursive_mutex =
@@ -630,7 +605,8 @@ void LockSetAnalysis::computeIntraproceduralLockSets(Function *func) {
         applyReleaseDepth(must_depth_out, must_out, must_write_out);
       }
     }
-    if (depth_call && !m_thread_api->isTDAcquire(inst) &&
+    if (depth_call && !is_lock_transparent_call &&
+        !m_thread_api->isTDAcquire(inst) &&
         !m_thread_api->isTDRelease(inst)) {
       for (Function *callee : getCallees(depth_call)) {
         auto summary_it = m_function_summaries.find(callee);
@@ -917,81 +893,54 @@ void LockSetAnalysis::computeIntraproceduralLockSets(Function *func) {
       }
     }
 
-    bool had_entry = m_may_locksets_entry.count(inst);
+    const bool had_entry = !visited_insts.insert(inst).second;
     bool changed = !had_entry || may_ownership_entry_changed ||
                    must_ownership_entry_changed;
-    if (m_may_recursive_depth_entry[inst] != may_depth_in) {
-      m_may_recursive_depth_entry[inst] = may_depth_in;
-      changed = true;
+    changed |=
+        updateSparseMap(m_may_recursive_depth_entry, inst, may_depth_in);
+    changed |=
+        updateSparseMap(m_may_recursive_depth_exit, inst, may_depth_out);
+    changed |=
+        updateSparseMap(m_must_recursive_depth_entry, inst, must_depth_in);
+    changed |=
+        updateSparseMap(m_must_recursive_depth_exit, inst, must_depth_out);
+    if (func_has_raii) {
+      changed |=
+          updateSparseMap(m_may_raii_ownership_exit, inst, may_ownership_out);
+      changed |=
+          updateSparseMap(m_must_raii_ownership_exit, inst, must_ownership_out);
     }
-    if (m_may_recursive_depth_exit[inst] != may_depth_out) {
-      m_may_recursive_depth_exit[inst] = may_depth_out;
-      changed = true;
-    }
-    if (m_must_recursive_depth_entry[inst] != must_depth_in) {
-      m_must_recursive_depth_entry[inst] = must_depth_in;
-      changed = true;
-    }
-    if (m_must_recursive_depth_exit[inst] != must_depth_out) {
-      m_must_recursive_depth_exit[inst] = must_depth_out;
-      changed = true;
-    }
-    if (m_may_raii_ownership_exit[inst] != may_ownership_out) {
-      m_may_raii_ownership_exit[inst] = may_ownership_out;
-      changed = true;
-    }
-    if (m_must_raii_ownership_exit[inst] != must_ownership_out) {
-      m_must_raii_ownership_exit[inst] = must_ownership_out;
-      changed = true;
-    }
-    if (m_may_read_locks_entry[inst] != may_read_in) {
-      m_may_read_locks_entry[inst] = may_read_in;
-      changed = true;
-    }
-    if (m_may_read_locks_exit[inst] != may_read_out) {
-      m_may_read_locks_exit[inst] = may_read_out;
-      changed = true;
-    }
-    if (m_may_write_locks_entry[inst] != may_write_in) {
-      m_may_write_locks_entry[inst] = may_write_in;
-      changed = true;
-    }
-    if (m_may_write_locks_exit[inst] != may_write_out) {
-      m_may_write_locks_exit[inst] = may_write_out;
-      changed = true;
-    }
-    if (m_must_read_locks_entry[inst] != must_read_in) {
-      m_must_read_locks_entry[inst] = must_read_in;
-      changed = true;
-    }
-    if (m_must_read_locks_exit[inst] != must_read_out) {
-      m_must_read_locks_exit[inst] = must_read_out;
-      changed = true;
-    }
-    if (m_must_write_locks_entry[inst] != must_write_in) {
-      m_must_write_locks_entry[inst] = must_write_in;
-      changed = true;
-    }
-    if (m_must_write_locks_exit[inst] != must_write_out) {
-      m_must_write_locks_exit[inst] = must_write_out;
-      changed = true;
-    }
-    if (m_may_locksets_entry[inst] != may_in) {
-      m_may_locksets_entry[inst] = may_in;
-      changed = true;
-    }
-    if (m_may_locksets_exit[inst] != may_out) {
-      m_may_locksets_exit[inst] = may_out;
-      changed = true;
-    }
-    if (m_must_locksets_entry[inst] != must_in) {
-      m_must_locksets_entry[inst] = must_in;
-      changed = true;
-    }
-    if (m_must_locksets_exit[inst] != must_out) {
-      m_must_locksets_exit[inst] = must_out;
-      changed = true;
-    }
+
+    // Only store explicit empty locksets at block heads when try-lock
+    // refinements or multi-predecessor merges require blocking fallback lookups.
+    const BasicBlock *single_pred =
+        is_block_head ? bb->getSinglePredecessor() : nullptr;
+    const bool keep_empty_entry =
+        is_block_head &&
+        (func_has_trylocks || bb->hasNPredecessorsOrMore(2) ||
+         (single_pred && isa<InvokeInst>(single_pred->getTerminator())));
+    const bool keep_empty_exit = false;
+    auto updateEntry = [&](auto &map, const LockSet &val) {
+      return keep_empty_entry ? updateDenseMap(map, inst, val)
+                              : updateSparseMap(map, inst, val);
+    };
+    auto updateExit = [&](auto &map, const LockSet &val) {
+      return keep_empty_exit ? updateDenseMap(map, inst, val)
+                             : updateSparseMap(map, inst, val);
+    };
+
+    changed |= updateEntry(m_may_read_locks_entry, may_read_in);
+    changed |= updateExit(m_may_read_locks_exit, may_read_out);
+    changed |= updateEntry(m_may_write_locks_entry, may_write_in);
+    changed |= updateExit(m_may_write_locks_exit, may_write_out);
+    changed |= updateEntry(m_must_read_locks_entry, must_read_in);
+    changed |= updateExit(m_must_read_locks_exit, must_read_out);
+    changed |= updateEntry(m_must_write_locks_entry, must_write_in);
+    changed |= updateExit(m_must_write_locks_exit, must_write_out);
+    changed |= updateEntry(m_may_locksets_entry, may_in);
+    changed |= updateExit(m_may_locksets_exit, may_out);
+    changed |= updateEntry(m_must_locksets_entry, must_in);
+    changed |= updateExit(m_must_locksets_exit, must_out);
 
     if (!changed) {
       continue;

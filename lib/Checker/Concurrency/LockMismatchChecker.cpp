@@ -4,8 +4,12 @@
  */
 #include "Checker/Concurrency/LockMismatchChecker.h"
 
-#include "Concurrency/Utils/RAIILockTracker.h"
+#include "Concurrency/LockSet/RAIILockTracker.h"
 
+#include <deque>
+#include <unordered_set>
+
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/Support/raw_ostream.h>
@@ -14,6 +18,40 @@ using namespace llvm;
 using namespace mhp;
 
 namespace concurrency {
+
+namespace {
+
+std::vector<const CallBase *> collectDirectCallSites(const Function &target) {
+  std::vector<const CallBase *> sites;
+  std::deque<const Value *> worklist;
+  std::unordered_set<const Value *> visited;
+  worklist.push_back(&target);
+  visited.insert(&target);
+  while (!worklist.empty()) {
+    const Value *cur = worklist.front();
+    worklist.pop_front();
+    for (const Use &use : cur->uses()) {
+      const User *user = use.getUser();
+      if (const auto *cb = dyn_cast<CallBase>(user)) {
+        if (cb->isCallee(&use) &&
+            (cb->getCalledFunction() == &target ||
+             (cb->getCalledOperand() &&
+              cb->getCalledOperand()->stripPointerCasts() == &target))) {
+          sites.push_back(cb);
+        }
+      } else if (const auto *ce = dyn_cast<ConstantExpr>(user)) {
+        if (ce->isCast() || ce->getOpcode() == Instruction::GetElementPtr) {
+          if (visited.insert(ce).second) {
+            worklist.push_back(ce);
+          }
+        }
+      }
+    }
+  }
+  return sites;
+}
+
+} // namespace
 
 LockMismatchChecker::LockMismatchChecker(Module &module,
                                          LockSetAnalysis *locksetAnalysis,
@@ -30,6 +68,33 @@ std::vector<ConcurrencyBugReport> LockMismatchChecker::checkLockMisuse() {
   for (Function &func : m_module) {
     if (func.isDeclaration())
       continue;
+
+    unsigned totalAcq = 0, totalRel = 0;
+    bool hasRAIICtor = false;
+    for (inst_iterator J = inst_begin(func), E = inst_end(func); J != E; ++J) {
+      if (m_threadAPI->isTDAcquire(&*J))
+        ++totalAcq;
+      else if (m_threadAPI->isTDRelease(&*J))
+        ++totalRel;
+      if (!hasRAIICtor && RAIILock::RAIILockTracker::isRAIILockConstructor(&*J))
+        hasRAIICtor = true;
+    }
+
+    if (totalAcq == 0 && totalRel == 0 && !hasRAIICtor) {
+      // Fast-path: still check returns only if the module has any locks at all.
+      if (m_locksetAnalysis->getAllLocks().empty())
+        continue;
+    }
+
+    bool directCallSitesCollected = false;
+    std::vector<const CallBase *> directCallSites;
+    auto getDirectCallSites = [&]() -> const std::vector<const CallBase *> & {
+      if (!directCallSitesCollected) {
+        directCallSites = collectDirectCallSites(func);
+        directCallSitesCollected = true;
+      }
+      return directCallSites;
+    };
 
     for (inst_iterator I = inst_begin(func), E = inst_end(func); I != E; ++I) {
       Instruction *inst = &*I;
@@ -49,14 +114,6 @@ std::vector<ConcurrencyBugReport> LockMismatchChecker::checkLockMisuse() {
             // Skip if a matching acquire appears earlier in the same block
             // (analysis may not propagate).
             bool sameBlockAcquire = false;
-            unsigned totalAcq = 0, totalRel = 0;
-            for (inst_iterator J = inst_begin(func), E = inst_end(func); J != E;
-                 ++J) {
-              if (m_threadAPI->isTDAcquire(&*J))
-                ++totalAcq;
-              else if (m_threadAPI->isTDRelease(&*J))
-                ++totalRel;
-            }
             if (totalAcq == 2 && totalRel == 2)
               sameBlockAcquire = true; // deadlock_safe pattern: lock(A),
                                        // lock(B), unlock(B), unlock(A)
@@ -93,8 +150,8 @@ std::vector<ConcurrencyBugReport> LockMismatchChecker::checkLockMisuse() {
                 return ga && gb && ga->getName() == gb->getName();
               };
               unsigned acqInFunc = 0, relInFunc = 0;
-              for (inst_iterator J = inst_begin(func), E = inst_end(func);
-                   J != E; ++J) {
+              for (inst_iterator J = inst_begin(func), JE = inst_end(func);
+                   J != JE; ++J) {
                 Instruction *o = &*J;
                 if (m_threadAPI->isTDAcquire(o)) {
                   LockID lockVal = m_threadAPI->getAnalysisLockIdentity(o);
@@ -113,19 +170,10 @@ std::vector<ConcurrencyBugReport> LockMismatchChecker::checkLockMisuse() {
               // Interprocedural helper-unlock pattern: if any caller reaches
               // this callee while possibly holding the lock, treat this unlock
               // as contextually matched.
-              for (Function &caller : m_module) {
-                if (caller.isDeclaration() || sameBlockAcquire)
-                  continue;
-                for (inst_iterator K = inst_begin(caller),
-                                   KE = inst_end(caller);
-                     K != KE; ++K) {
-                  const auto *CB = dyn_cast<CallBase>(&*K);
-                  if (!CB || CB->getCalledFunction() != &func)
-                    continue;
-                  if (m_locksetAnalysis->mayHoldLock(&*K, lock)) {
-                    sameBlockAcquire = true;
-                    break;
-                  }
+              for (const CallBase *CB : getDirectCallSites()) {
+                if (m_locksetAnalysis->mayHoldLock(CB, lock)) {
+                  sameBlockAcquire = true;
+                  break;
                 }
               }
             }
@@ -147,28 +195,19 @@ std::vector<ConcurrencyBugReport> LockMismatchChecker::checkLockMisuse() {
               // Fallback when lockset propagation is imprecise: if a caller has
               // an earlier helper call that acquires this lock before invoking
               // the unlock helper, treat it as matched.
-              for (Function &caller : m_module) {
-                if (caller.isDeclaration() || sameBlockAcquire)
-                  continue;
-                for (inst_iterator K = inst_begin(caller),
-                                   KE = inst_end(caller);
-                     K != KE; ++K) {
-                  auto *CB = dyn_cast<CallBase>(&*K);
-                  if (!CB || CB->getCalledFunction() != &func)
+              for (const CallBase *CB : getDirectCallSites()) {
+                for (const Instruction *Prev = CB->getPrevNode(); Prev;
+                     Prev = Prev->getPrevNode()) {
+                  const auto *PrevCB = dyn_cast<CallBase>(Prev);
+                  if (!PrevCB)
                     continue;
-                  for (Instruction *Prev = K->getPrevNode(); Prev;
-                       Prev = Prev->getPrevNode()) {
-                    auto *PrevCB = dyn_cast<CallBase>(Prev);
-                    if (!PrevCB)
-                      continue;
-                    if (calleeAcquiresLock(PrevCB->getCalledFunction())) {
-                      sameBlockAcquire = true;
-                      break;
-                    }
-                  }
-                  if (sameBlockAcquire)
+                  if (calleeAcquiresLock(PrevCB->getCalledFunction())) {
+                    sameBlockAcquire = true;
                     break;
+                  }
                 }
+                if (sameBlockAcquire)
+                  break;
               }
             }
             if (!sameBlockAcquire) {
@@ -191,14 +230,6 @@ std::vector<ConcurrencyBugReport> LockMismatchChecker::checkLockMisuse() {
         if (m_locksetAnalysis->mustHoldLock(inst, lock)) {
           // Skip only when balanced and multiple distinct locks (nested
           // pattern); report when same lock acquired twice.
-          unsigned totalAcq = 0, totalRel = 0;
-          for (inst_iterator J = inst_begin(func), E = inst_end(func); J != E;
-               ++J) {
-            if (m_threadAPI->isTDAcquire(&*J))
-              ++totalAcq;
-            else if (m_threadAPI->isTDRelease(&*J))
-              ++totalRel;
-          }
           LockSet distinctLocks =
               m_locksetAnalysis->getAllLocksInFunction(&func);
           bool skipDoubleLock =
@@ -217,50 +248,45 @@ std::vector<ConcurrencyBugReport> LockMismatchChecker::checkLockMisuse() {
 
     // Check for Lock Leaks at return points: report when *some* path returns
     // with a lock held (use may-lock so we catch early-return-without-unlock).
-    for (auto &bb : func) {
-      if (isa<ReturnInst>(bb.getTerminator())) {
-        const Instruction *term = bb.getTerminator();
-        // Use must-locks to avoid reporting leaks on loops/joins where may-lock
-        // can remain non-empty despite balanced acquire/release.
-        LockSet heldLocks = m_locksetAnalysis->getMustLockSetAt(term);
+    if (!m_locksetAnalysis->getAllLocks().empty()) {
+      for (auto &bb : func) {
+        if (isa<ReturnInst>(bb.getTerminator())) {
+          const Instruction *term = bb.getTerminator();
+          // Use must-locks to avoid reporting leaks on loops/joins where
+          // may-lock can remain non-empty despite balanced acquire/release.
+          LockSet heldLocks = m_locksetAnalysis->getMustLockSetAt(term);
 
-        if (!heldLocks.empty()) {
-          bool intentional = false;
-          StringRef funcName = func.getName();
-          if (funcName.contains("lock") || funcName.contains("Lock") ||
-              funcName.contains("acquire") || funcName.contains("Acquire")) {
-            intentional = true;
-          }
-          if (!intentional) {
-            unsigned acqCount = 0, relCount = 0;
-            for (inst_iterator J = inst_begin(func), E = inst_end(func); J != E;
-                 ++J) {
-              if (m_threadAPI->isTDAcquire(&*J))
-                ++acqCount;
-              else if (m_threadAPI->isTDRelease(&*J))
-                ++relCount;
+          if (!heldLocks.empty()) {
+            bool intentional = false;
+            StringRef funcName = func.getName();
+            if (funcName.contains("lock") || funcName.contains("Lock") ||
+                funcName.contains("acquire") || funcName.contains("Acquire")) {
+              intentional = true;
             }
-            if (acqCount > 0 && relCount == 0)
+            if (!intentional && totalAcq > 0 && totalRel == 0) {
               intentional = true; // lock-acquire helper function
-          }
+            }
 
-          if (!intentional) {
-            for (const auto *lock : heldLocks) {
-              (void)lock;
-              ConcurrencyBugReport report(
-                  ConcurrencyBugType::LOCK_MISMATCH,
-                  "Lock leak: function may return with lock held",
-                  BugDescription::BI_MEDIUM, BugDescription::BC_WARNING);
-              report.addStep(term, "Function return");
-              reports.push_back(report);
+            if (!intentional) {
+              for (const auto *lock : heldLocks) {
+                (void)lock;
+                ConcurrencyBugReport report(
+                    ConcurrencyBugType::LOCK_MISMATCH,
+                    "Lock leak: function may return with lock held",
+                    BugDescription::BI_MEDIUM, BugDescription::BC_WARNING);
+                report.addStep(term, "Function return");
+                reports.push_back(report);
+              }
             }
           }
         }
       }
     }
 
-    // Check for RAII lock misuse patterns
-    checkRAIILockMisuse(func, reports);
+    // Check for RAII lock misuse patterns only when function uses RAII locks.
+    if (hasRAIICtor) {
+      checkRAIILockMisuse(func, reports);
+    }
   }
 
   return reports;

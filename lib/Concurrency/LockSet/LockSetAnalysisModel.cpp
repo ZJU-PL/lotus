@@ -211,22 +211,36 @@ LockID LockSetAnalysis::getCanonicalLock(LockID lock) const {
   if (!lock)
     return nullptr;
 
+  auto cache_it = m_canonical_lock_cache.find(lock);
+  if (cache_it != m_canonical_lock_cache.end()) {
+    return cache_it->second;
+  }
+
+  const LockID orig_lock = lock;
   lock = lock->stripPointerCasts();
+
+  auto cacheAndReturn = [&](LockID result) {
+    m_canonical_lock_cache.try_emplace(orig_lock, result);
+    if (lock != orig_lock) {
+      m_canonical_lock_cache.try_emplace(lock, result);
+    }
+    return result;
+  };
 
   if (const auto *LI = dyn_cast<LoadInst>(lock)) {
     if (m_alias_analysis) {
       std::vector<const Value *> pts;
       if (m_alias_analysis->getPointsToSet(lock, pts) && pts.size() == 1 &&
           pts.front()) {
-        return pts.front()->stripPointerCasts();
+        return cacheAndReturn(pts.front()->stripPointerCasts());
       }
     }
-    return LI;
+    return cacheAndReturn(LI);
   }
 
   if (const auto *GEP = dyn_cast<GetElementPtrInst>(lock)) {
     if (GEP->hasAllConstantIndices()) {
-      return lock;
+      return cacheAndReturn(lock);
     }
     lock = GEP->getPointerOperand()->stripPointerCasts();
   } else if (const Value *base = getUnderlyingObject(lock, 32)) {
@@ -237,11 +251,11 @@ LockID LockSetAnalysis::getCanonicalLock(LockID lock) const {
     std::vector<const Value *> pts;
     if (m_alias_analysis->getPointsToSet(lock, pts) && pts.size() == 1 &&
         pts.front()) {
-      return pts.front()->stripPointerCasts();
+      return cacheAndReturn(pts.front()->stripPointerCasts());
     }
   }
 
-  return lock;
+  return cacheAndReturn(lock);
 }
 
 LockID LockSetAnalysis::getUnderlyingRAIILock(const Instruction *inst,

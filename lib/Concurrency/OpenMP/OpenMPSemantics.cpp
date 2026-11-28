@@ -1,7 +1,7 @@
 #include "Concurrency/OpenMP/OpenMPSemantics.h"
 
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/OpenMP/OpenMPModel.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <deque>
 #include <optional>
@@ -595,9 +595,13 @@ void OpenMPSemantics::analyze() {
   m_next_entity_id = 1;
   m_next_taskgroup_id = 1;
   m_region_nesting_depth.clear();
+  m_omp_relevant_functions.clear();
   m_deferred_imprecise_conflict_count = 0;
   m_deferred_reason_counts.clear();
   identifySemanticStructure();
+  if (m_omp_relevant_functions.empty()) {
+    return;
+  }
   m_summary.task_count = m_tasks.size();
   m_summary.task_with_dependencies_count = 0;
   m_summary.included_task_count = 0;
@@ -822,57 +826,103 @@ void OpenMPSemantics::rebuildWaitBoundaryViews() {
 
 void OpenMPSemantics::identifySemanticStructure() {
   ThreadAPI *api = ThreadAPI::getThreadAPI();
-  std::set<const Function *> directly_called;
+  if (!api->getConfig().enable_openmp()) {
+    return;
+  }
+
+  std::unordered_map<const Function *, std::vector<const Function *>> callers;
+  std::unordered_set<const Function *> direct_omp_funcs;
+  std::unordered_set<const Function *> directly_called;
+
   for (const Function &func : m_module) {
     if (func.isDeclaration()) {
       continue;
     }
+    bool has_direct_omp = false;
     for (const BasicBlock &bb : func) {
       for (const Instruction &inst : bb) {
         const auto *call = dyn_cast<CallBase>(&inst);
         if (!call) {
           continue;
         }
-        const Function *callee = call->getCalledFunction();
-        if (!callee) {
-          if (const Value *called = call->getCalledOperand()) {
-            callee = dyn_cast<Function>(called->stripPointerCasts());
-          }
-        }
+        const Function *callee = api->getCallee(call);
         if (callee && !callee->isDeclaration()) {
           directly_called.insert(callee);
+          callers[callee].push_back(&func);
         }
-        if (api->isForkLike(call)) {
+        const ThreadAPI::TD_TYPE type = api->getType(call);
+        const ThreadAPI::RuntimeLibrary library = api->getRuntimeLibrary(call);
+        if (library == ThreadAPI::RuntimeLibrary::OpenMP ||
+            (callee && callee->hasName() &&
+             (OpenMPModel::isOpenMP(callee->getName()) ||
+              callee->getName().startswith("__kmpc_atomic_"))) ||
+            (type >= ThreadAPI::TD_OMP_TASK &&
+             type <= ThreadAPI::TD_OMP_DOACROSS_SUBMIT)) {
+          has_direct_omp = true;
+        }
+        if (library == ThreadAPI::RuntimeLibrary::OpenMP &&
+            api->isForkLike(call)) {
           if (const auto *fork_target =
                   dyn_cast_or_null<Function>(api->getForkedFun(call))) {
             if (!fork_target->isDeclaration()) {
               directly_called.insert(fork_target);
+              callers[fork_target].push_back(&func);
             }
           }
         }
-        ThreadAPI::TD_TYPE type = api->getType(call);
         if (type == ThreadAPI::TD_OMP_TASK_WITH_DEPS ||
             type == ThreadAPI::TD_OMP_TASK ||
             type == ThreadAPI::TD_OMP_TASKLOOP) {
           if (const Function *task_function = extractTaskFunction(call)) {
             if (!task_function->isDeclaration()) {
               directly_called.insert(task_function);
+              callers[task_function].push_back(&func);
             }
           }
         }
+      }
+    }
+    if (has_direct_omp) {
+      direct_omp_funcs.insert(&func);
+    }
+  }
+
+  // Fast exit: modules with no OpenMP runtime calls have no OpenMP semantics
+  // to construct; avoid walking the entire call graph exponentially.
+  if (direct_omp_funcs.empty()) {
+    return;
+  }
+
+  // Propagate OpenMP relevance backwards along direct call edges so
+  // scanSchedulingContext only traverses functions that can reach OpenMP calls.
+  std::deque<const Function *> worklist(direct_omp_funcs.begin(),
+                                        direct_omp_funcs.end());
+  m_omp_relevant_functions.insert(direct_omp_funcs.begin(),
+                                  direct_omp_funcs.end());
+  while (!worklist.empty()) {
+    const Function *cur = worklist.front();
+    worklist.pop_front();
+    auto it = callers.find(cur);
+    if (it == callers.end()) {
+      continue;
+    }
+    for (const Function *caller : it->second) {
+      if (m_omp_relevant_functions.insert(caller).second) {
+        worklist.push_back(caller);
       }
     }
   }
 
   std::vector<const Function *> roots;
   for (const Function &func : m_module) {
-    if (!func.isDeclaration() && !directly_called.count(&func)) {
+    if (!func.isDeclaration() && m_omp_relevant_functions.count(&func) &&
+        !directly_called.count(&func)) {
       roots.push_back(&func);
     }
   }
   if (roots.empty()) {
     for (const Function &func : m_module) {
-      if (!func.isDeclaration()) {
+      if (!func.isDeclaration() && m_omp_relevant_functions.count(&func)) {
         roots.push_back(&func);
       }
     }
@@ -2097,7 +2147,8 @@ void OpenMPSemantics::scanSchedulingContext(
       }
 
       if (callee && !callee->isDeclaration() && type == ThreadAPI::TD_DUMMY &&
-          !OpenMPModel::isOpenMP(callee->getName())) {
+          !OpenMPModel::isOpenMP(callee->getName()) &&
+          m_omp_relevant_functions.count(callee) != 0) {
         const Instruction *saved_anchor = state.anchor_inst;
         state.anchor_inst = call;
         scanSchedulingContext(callee, state, call_stack);

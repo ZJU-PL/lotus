@@ -4,7 +4,7 @@
 #include "Concurrency/LockSet/LockSetAnalysis.h"
 #include "Checker/Concurrency/ConcurrencyBugReport.h"
 #include "Concurrency/MHP/IMHPAnalysis.h"
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <string>
 #include <vector>

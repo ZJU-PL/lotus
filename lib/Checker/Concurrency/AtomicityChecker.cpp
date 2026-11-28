@@ -75,6 +75,19 @@ void AtomicityChecker::collectCriticalSections() {
     if (F.isDeclaration())
       continue;
 
+    bool hasAcquire = false;
+    bool hasRelease = false;
+    for (Instruction &I : instructions(F)) {
+      if (m_threadAPI->isTDAcquire(&I))
+        hasAcquire = true;
+      else if (m_threadAPI->isTDRelease(&I))
+        hasRelease = true;
+      if (hasAcquire && hasRelease)
+        break;
+    }
+    if (!hasAcquire || !hasRelease)
+      continue;
+
     DominatorTree DT(F);
     PostDominatorTree PDT(F);
 
@@ -114,11 +127,11 @@ void AtomicityChecker::collectCriticalSections() {
         if (!(DT.dominates(Acq, Rel) && PDT.dominates(Rel, Acq)))
           continue;
 
-        // Build the critical section body: all instructions strictly between
+        // Build the critical section body: all memory accesses strictly between
         // Acq and Rel (by dominance).
         CriticalSection CS{Acq, Rel, {}};
         for (Instruction &J : instructions(F)) {
-          if (&J == Acq || &J == Rel)
+          if (&J == Acq || &J == Rel || !isMemoryAccess(&J))
             continue;
           if (DT.dominates(Acq, &J) && PDT.dominates(Rel, &J))
             CS.Body.push_back(&J);
@@ -191,6 +204,15 @@ std::vector<ConcurrencyBugReport> AtomicityChecker::checkAtomicityViolations() {
     }
   }
 
+  DenseMap<const Function *, std::unique_ptr<DominatorTree>> domCache;
+  auto getDomTree = [&](const Function *F) -> DominatorTree & {
+    auto &entry = domCache[F];
+    if (!entry) {
+      entry = std::make_unique<DominatorTree>(const_cast<Function &>(*F));
+    }
+    return *entry;
+  };
+
   for (size_t i = 0; i < AllSections.size(); ++i) {
     const CriticalSection &CS1 = *AllSections[i].first;
     mhp::LockID Lock1 = AllSections[i].second;
@@ -216,7 +238,7 @@ std::vector<ConcurrencyBugReport> AtomicityChecker::checkAtomicityViolations() {
       // Same function with ordered acquires (one dominates the other): not
       // concurrent (e.g. nested locks).
       if (CS1.Acquire->getFunction() == CS2.Acquire->getFunction()) {
-        DominatorTree DT(const_cast<Function &>(*CS1.Acquire->getFunction()));
+        DominatorTree &DT = getDomTree(CS1.Acquire->getFunction());
         if (DT.dominates(CS1.Acquire, CS2.Acquire) ||
             DT.dominates(CS2.Acquire, CS1.Acquire))
           continue;
@@ -270,14 +292,23 @@ std::vector<ConcurrencyBugReport> AtomicityChecker::checkAtomicityViolations() {
       for (const Instruction *I : CS.Body)
         inCS.insert(I);
 
-  SmallVector<std::pair<const Instruction *, const Value *>, 64>
-      unprotectedAccesses;
+  struct UnprotectedAccess {
+    const Instruction *Inst;
+    const Value *Loc;
+    const Function *Func;
+    bool IsWrite;
+    bool MustLockEmpty;
+    mhp::ThreadID Tid;
+  };
+  std::vector<UnprotectedAccess> unprotectedAccesses;
+  std::unordered_map<mhp::ThreadID, bool> threadSelfOverlaps;
   for (Function &F : m_module) {
     if (F.isDeclaration())
       continue;
     // Only consider functions with no critical section at all (avoid FP when CS
     // present but lock set empty).
-    if (!m_csPerFunc[&F].empty())
+    auto csIt = m_csPerFunc.find(&F);
+    if (csIt != m_csPerFunc.end() && !csIt->second.empty())
       continue;
     for (Instruction &I : instructions(F)) {
       if (!isMemoryAccess(&I))
@@ -290,58 +321,128 @@ std::vector<ConcurrencyBugReport> AtomicityChecker::checkAtomicityViolations() {
       const Value *Base = getUnderlyingObject(Loc);
       if (isa<AllocaInst>(Base))
         continue; // thread-local stack slots are not shared across threads
-      unprotectedAccesses.push_back({&I, Loc});
+      const mhp::ThreadID tid = m_mhpAnalysis->getThreadID(&I);
+      if (threadSelfOverlaps.find(tid) == threadSelfOverlaps.end()) {
+        threadSelfOverlaps.emplace(tid,
+                                   m_mhpAnalysis->mayHappenInParallel(&I, &I));
+      }
+      const bool mustEmpty =
+          !m_locksetAnalysis || m_locksetAnalysis->getMustLockSetAt(&I).empty();
+      unprotectedAccesses.push_back(
+          {&I, Loc, &F, isWrite(I), mustEmpty, tid});
     }
   }
 
-  for (size_t i = 0; i < unprotectedAccesses.size(); ++i) {
-    const Instruction *I1 = unprotectedAccesses[i].first;
-    const Value *Loc1 = unprotectedAccesses[i].second;
-    const Function *F1 = I1->getFunction();
+  // Fast exit: if every unprotected access executes on a single non-overlapping
+  // thread, no cross-function interleaving is possible.
+  if (unprotectedAccesses.size() < 2 ||
+      (threadSelfOverlaps.size() == 1 && !threadSelfOverlaps.begin()->second)) {
+    return Reports;
+  }
 
-    for (size_t j = i + 1; j < unprotectedAccesses.size(); ++j) {
-      const Instruction *I2 = unprotectedAccesses[j].first;
-      const Value *Loc2 = unprotectedAccesses[j].second;
-      if (I1->getFunction() != I2->getFunction())
-        continue;
-      if (!mayAlias(Loc1, Loc2))
-        continue;
-      if (!(isWrite(*I1) || isWrite(*I2)))
-        continue;
-
-      if (m_locksetAnalysis &&
-          (!m_locksetAnalysis->getMustLockSetAt(I1).empty() ||
-           !m_locksetAnalysis->getMustLockSetAt(I2).empty()))
-        continue;
-
-      // Unprotected pair (I1, I2) in same function to same location. Check if
-      // another thread may interleave.
-      bool otherMayInterleave = false;
-      for (size_t k = 0; k < unprotectedAccesses.size(); ++k) {
-        const Instruction *K = unprotectedAccesses[k].first;
-        if (K->getFunction() == F1)
-          continue;
-        if (!mayAlias(Loc1, unprotectedAccesses[k].second))
-          continue;
-        if (m_mhpAnalysis->mayHappenInParallel(I1, K) ||
-            m_mhpAnalysis->mayHappenInParallel(I2, K)) {
-          otherMayInterleave = true;
-          break;
+  // Group accesses by underlying/points-to base object to avoid O(N^3) scans
+  // over unrelated objects and unrelated functions.
+  std::unordered_map<const Value *, std::vector<size_t>> byBase;
+  byBase.reserve(unprotectedAccesses.size());
+  for (size_t idx = 0; idx < unprotectedAccesses.size(); ++idx) {
+    const Value *Loc = unprotectedAccesses[idx].Loc;
+    if (!m_aliasAnalysis) {
+      byBase[nullptr].push_back(idx);
+      continue;
+    }
+    const Value *Base = getUnderlyingObject(Loc);
+    byBase[Base].push_back(idx);
+    if (Loc->getType()->isPointerTy()) {
+      std::vector<const Value *> pts;
+      if (m_aliasAnalysis->getPointsToSet(Loc, pts)) {
+        for (const Value *target : pts) {
+          const Value *targetBase = getUnderlyingObject(target);
+          if (targetBase && targetBase != Base) {
+            byBase[targetBase].push_back(idx);
+          }
         }
       }
-      if (!otherMayInterleave)
+    }
+  }
+
+  DenseSet<const Instruction *> reportedFirst;
+  for (auto &kv : byBase) {
+    auto &bucket = kv.second;
+    if (bucket.size() < 3)
+      continue;
+    std::sort(bucket.begin(), bucket.end());
+    bucket.erase(std::unique(bucket.begin(), bucket.end()), bucket.end());
+    if (bucket.size() < 3)
+      continue;
+
+    // Group bucket by function and verify at least two functions access this
+    // object (required for cross-function interleaving).
+    DenseMap<const Function *, SmallVector<size_t, 4>> perFunc;
+    bool hasMultiThreadOrSelfOverlap = false;
+    const mhp::ThreadID firstTid = unprotectedAccesses[bucket[0]].Tid;
+    if (threadSelfOverlaps[firstTid])
+      hasMultiThreadOrSelfOverlap = true;
+    for (size_t idx : bucket) {
+      perFunc[unprotectedAccesses[idx].Func].push_back(idx);
+      if (!hasMultiThreadOrSelfOverlap &&
+          (unprotectedAccesses[idx].Tid != firstTid ||
+           threadSelfOverlaps[unprotectedAccesses[idx].Tid])) {
+        hasMultiThreadOrSelfOverlap = true;
+      }
+    }
+    if (perFunc.size() < 2 || !hasMultiThreadOrSelfOverlap)
+      continue;
+
+    for (const auto &funcEntry : perFunc) {
+      const Function *F1 = funcEntry.first;
+      const auto &funcAccesses = funcEntry.second;
+      if (funcAccesses.size() < 2)
         continue;
 
-      std::string Desc = "Unprotected multi-step access at " + formatLoc(*I1) +
-                         " and " + formatLoc(*I2) +
-                         " may be interleaved with another thread";
-      ConcurrencyBugReport report(ConcurrencyBugType::ATOMICITY_VIOLATION, Desc,
-                                  BugDescription::BI_MEDIUM,
-                                  BugDescription::BC_WARNING);
-      report.addStep(I1, "Access 1 (unprotected)");
-      report.addStep(I2, "Access 2 (unprotected)");
-      Reports.push_back(report);
-      break; // one report per (I1, I2) pair
+      for (size_t a = 0; a < funcAccesses.size(); ++a) {
+        const UnprotectedAccess &A1 = unprotectedAccesses[funcAccesses[a]];
+        if (!A1.MustLockEmpty || reportedFirst.count(A1.Inst))
+          continue;
+
+        for (size_t b = a + 1; b < funcAccesses.size(); ++b) {
+          const UnprotectedAccess &A2 = unprotectedAccesses[funcAccesses[b]];
+          if (!A2.MustLockEmpty)
+            continue;
+          if (!(A1.IsWrite || A2.IsWrite))
+            continue;
+          if (!mayAlias(A1.Loc, A2.Loc))
+            continue;
+
+          bool otherMayInterleave = false;
+          for (size_t kIdx : bucket) {
+            const UnprotectedAccess &AK = unprotectedAccesses[kIdx];
+            if (AK.Func == F1)
+              continue;
+            if (!mayAlias(A1.Loc, AK.Loc))
+              continue;
+            if (m_mhpAnalysis->mayHappenInParallel(A1.Inst, AK.Inst) ||
+                m_mhpAnalysis->mayHappenInParallel(A2.Inst, AK.Inst)) {
+              otherMayInterleave = true;
+              break;
+            }
+          }
+          if (!otherMayInterleave)
+            continue;
+
+          reportedFirst.insert(A1.Inst);
+          std::string Desc = "Unprotected multi-step access at " +
+                             formatLoc(*A1.Inst) + " and " +
+                             formatLoc(*A2.Inst) +
+                             " may be interleaved with another thread";
+          ConcurrencyBugReport report(ConcurrencyBugType::ATOMICITY_VIOLATION,
+                                      Desc, BugDescription::BI_MEDIUM,
+                                      BugDescription::BC_WARNING);
+          report.addStep(A1.Inst, "Access 1 (unprotected)");
+          report.addStep(A2.Inst, "Access 2 (unprotected)");
+          Reports.push_back(report);
+          break; // one report per first access
+        }
+      }
     }
   }
 

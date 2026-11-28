@@ -15,6 +15,7 @@
 #include "Checker/Framework/BugReport.h"
 #include "Checker/Framework/BugReportMgr.h"
 #include "Concurrency/ConcurrencyFacade.h"
+#include "Concurrency/Core/ConcurrencyContext.h"
 #include "Concurrency/LockSet/LockSetAnalysis.h"
 #include "Concurrency/MHP/HappensBeforeAnalysis.h"
 #include "Concurrency/MHP/IMHPAnalysis.h"
@@ -24,7 +25,7 @@
 #include "Concurrency/OpenMP/OpenMPTaskGraph.h"
 #include "Concurrency/Thread/Sharing/EscapeAnalysis.h"
 #include "Concurrency/Thread/Sharing/StaticThreadSharingAnalysis.h"
-#include "Concurrency/Utils/ThreadLocalAnalysis.h"
+#include "Concurrency/Thread/Sharing/ThreadLocalAnalysis.h"
 #include "Concurrency/ValueFlow/WholeProgramSparseRefinement.h"
 
 #include <memory>
@@ -118,6 +119,8 @@ public:
    */
   void setAliasAnalysis(lotus::AliasAnalysisWrapper *aa) {
     m_aliasAnalysis = aa;
+    if (m_context)
+      m_context->setAliasAnalysis(aa);
     if (m_happensBeforeAnalysis)
       m_happensBeforeAnalysis->setAliasAnalysis(aa);
     if (m_locksetAnalysis)
@@ -228,6 +231,7 @@ private:
   std::unique_ptr<lotus::HappensBeforeAnalysis> m_happensBeforeAnalysis;
   std::unique_ptr<llvm::legacy::PassManager> m_staticThreadSharingPM;
   lotus::StaticThreadSharingAnalysis *m_staticThreadSharingAnalysis = nullptr;
+  std::unique_ptr<ConcurrencyContext> m_context;
   std::unique_ptr<OpenMP::OpenMPTaskGraph> m_openMPTaskGraph;
   std::unique_ptr<mpi::MPIAnalysis> m_mpiAnalysis;
   std::unique_ptr<cuda::CUDAAnalysis> m_cudaAnalysis;

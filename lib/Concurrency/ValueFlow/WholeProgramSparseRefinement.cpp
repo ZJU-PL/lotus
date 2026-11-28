@@ -1,6 +1,6 @@
 #include "Concurrency/ValueFlow/WholeProgramSparseRefinement.h"
 
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/SVFGBuilder.h"
 

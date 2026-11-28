@@ -2,7 +2,7 @@
 
 #include "Concurrency/MHP/HappensBeforeAnalysis.h"
 #include "Concurrency/MHP/MHPAnalysis.h"
-#include "Concurrency/Utils/CppAtomics.h"
+#include "Concurrency/API/CppAtomics.h"
 
 #include "TestUtils/LLVMHelpers.h"
 

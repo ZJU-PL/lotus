@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <llvm/IR/Instructions.h>
 

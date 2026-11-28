@@ -188,7 +188,7 @@ mhp_done:
           const Value *ptr = isa<LoadInst>(inst)
                                  ? cast<LoadInst>(inst)->getPointerOperand()
                                  : cast<StoreInst>(inst)->getPointerOperand();
-          if (m_escapeAnalysis->isEscaped(ptr)) {
+          if (m_escapeAnalysis && m_escapeAnalysis->isEscaped(ptr)) {
             shouldShow = true;
           }
         }
@@ -285,7 +285,7 @@ lockset_done:
 
       if (auto *load = dyn_cast<LoadInst>(inst)) {
         const Value *ptr = load->getPointerOperand();
-        if (m_escapeAnalysis->isEscaped(ptr) &&
+        if (m_escapeAnalysis && m_escapeAnalysis->isEscaped(ptr) &&
             shownValues.insert(ptr).second) {
           if (escapedCount++ >= maxEscapedToShow) {
             os << "... (showing first " << maxEscapedToShow
@@ -307,7 +307,7 @@ lockset_done:
         }
       } else if (auto *store = dyn_cast<StoreInst>(inst)) {
         const Value *ptr = store->getPointerOperand();
-        if (m_escapeAnalysis->isEscaped(ptr) &&
+        if (m_escapeAnalysis && m_escapeAnalysis->isEscaped(ptr) &&
             shownValues.insert(ptr).second) {
           if (escapedCount++ >= maxEscapedToShow) {
             os << "... (showing first " << maxEscapedToShow
@@ -660,7 +660,7 @@ lockops_json_done:
 
       if (auto *load = dyn_cast<LoadInst>(inst)) {
         const Value *ptr = load->getPointerOperand();
-        if (m_escapeAnalysis->isEscaped(ptr) &&
+        if (m_escapeAnalysis && m_escapeAnalysis->isEscaped(ptr) &&
             shownValues.insert(ptr).second) {
           if (!firstEscaped)
             os << ",\n";
@@ -682,7 +682,7 @@ lockops_json_done:
         }
       } else if (auto *store = dyn_cast<StoreInst>(inst)) {
         const Value *ptr = store->getPointerOperand();
-        if (m_escapeAnalysis->isEscaped(ptr) &&
+        if (m_escapeAnalysis && m_escapeAnalysis->isEscaped(ptr) &&
             shownValues.insert(ptr).second) {
           if (!firstEscaped)
             os << ",\n";

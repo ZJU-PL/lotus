@@ -13,8 +13,8 @@
 #pragma once
 
 #include "Concurrency/Thread/Join/JoinTargetState.h"
-#include "Concurrency/Utils/ThreadAPI.h"
-#include "Concurrency/Utils/ThreadMultiplicity.h"
+#include "Concurrency/API/ThreadAPI.h"
+#include "Concurrency/Thread/ThreadMultiplicity.h"
 
 #include <memory>
 #include <unordered_map>

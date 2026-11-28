@@ -1,6 +1,6 @@
 #include "Concurrency/Thread/Sharing/EscapeAnalysis.h"
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <deque>
 #include <unordered_set>
@@ -108,14 +108,25 @@ void EscapeAnalysis::runEscapeAnalysis() {
     }
   };
 
-  // 1. Initial seeds
+  // 1. Initial seeds and direct call-site index (avoids O(Args * TotalInsts)
+  // full-module scans during reverse argument propagation).
+  std::unordered_map<const Function *, std::vector<const CallBase *>>
+      directCallSites;
   for (const GlobalValue &gv : m_module.globals()) {
     enqueueEscaped(&gv);
   }
 
   for (Function &F : m_module) {
+    if (F.isDeclaration()) {
+      continue;
+    }
     for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
       if (const auto *call = dyn_cast<CallBase>(&*I)) {
+        if (const Function *callee = resolveInternalCallee(call)) {
+          if (!callee->isDeclaration()) {
+            directCallSites[callee].push_back(call);
+          }
+        }
         seedPotentialSinkArguments(call);
       }
     }
@@ -195,9 +206,10 @@ void EscapeAnalysis::runEscapeAnalysis() {
         } else if (const auto *ret = dyn_cast<ReturnInst>(inst)) {
           // Return value escapes to all call sites
           const Function *F = ret->getFunction();
-          for (const User *FU : F->users()) {
-            if (const auto *cb = dyn_cast<CallBase>(FU)) {
-              if (resolveInternalCallee(cb) == F) enqueueEscaped(cb);
+          auto csIt = directCallSites.find(F);
+          if (csIt != directCallSites.end()) {
+            for (const CallBase *cb : csIt->second) {
+              enqueueEscaped(cb);
             }
           }
         }
@@ -207,21 +219,10 @@ void EscapeAnalysis::runEscapeAnalysis() {
     // Handle Argument -> CallSite (reverse of above)
     if (const auto *arg = dyn_cast<Argument>(curr)) {
       const Function *F = arg->getParent();
-      for (const User *U : F->users()) {
-        if (const auto *cb = dyn_cast<CallBase>(U)) {
-          if (resolveInternalCallee(cb) == F && arg->getArgNo() < cb->arg_size()) {
-            enqueueEscaped(cb->getArgOperand(arg->getArgNo()));
-          }
-        }
-      }
-      for (const Function &moduleFunc : m_module) {
-        for (const BasicBlock &BB : moduleFunc) {
-          for (const Instruction &I : BB) {
-            const auto *cb = dyn_cast<CallBase>(&I);
-            if (!cb || resolveInternalCallee(cb) != F ||
-                arg->getArgNo() >= cb->arg_size()) {
-              continue;
-            }
+      auto csIt = directCallSites.find(F);
+      if (csIt != directCallSites.end()) {
+        for (const CallBase *cb : csIt->second) {
+          if (arg->getArgNo() < cb->arg_size()) {
             enqueueEscaped(cb->getArgOperand(arg->getArgNo()));
           }
         }

@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include "Concurrency/ConcurrencyRelation.h"
+#include "Concurrency/Core/ConcurrencyRelation.h"
 #include "Concurrency/OpenMP/OpenMPSemantics.h"
 
 #include <map>
@@ -35,7 +35,8 @@ public:
 
   enum class TaskRelation { HappensBefore, Excluded, Parallel, Unknown };
 
-  explicit OpenMPTaskGraph(llvm::Module &module);
+  explicit OpenMPTaskGraph(llvm::Module &module,
+                           const OpenMPSemantics *shared_semantics = nullptr);
 
   /**
    * @brief Analyze the module to build task dependency graph
@@ -46,17 +47,17 @@ public:
    * @brief Get all tasks in the program
    */
   const std::vector<std::unique_ptr<Task>> &getAllTasks() const {
-    return m_semantics.getTasks();
+    return m_semantics->getTasks();
   }
 
   const Task *getTaskForCreate(const llvm::Instruction *inst) const;
 
   const std::vector<WaitBoundaryInfo> &getWaitBoundaries() const {
-    return m_semantics.getWaitBoundaryInfos();
+    return m_semantics->getWaitBoundaryInfos();
   }
 
   const AnalysisSummary &getSummary() const { return m_summary; }
-  const OpenMPSemantics &getSemantics() const { return m_semantics; }
+  const OpenMPSemantics &getSemantics() const { return *m_semantics; }
 
   size_t getDeferredWaitDepsCount() const { return m_deferred_wait_deps_count; }
   size_t getDeferredImpreciseConflictCount() const {
@@ -101,7 +102,7 @@ public:
   /**
    * @brief Get the maximum nested parallelism depth encountered
    */
-  size_t getMaxNestedDepth() const { return m_semantics.getMaxNestedDepth(); }
+  size_t getMaxNestedDepth() const { return m_semantics->getMaxNestedDepth(); }
 
   /**
    * @brief Check if a region is nested (true) or flat (false)
@@ -115,7 +116,8 @@ public:
 
 private:
   llvm::Module &m_module;
-  OpenMPSemantics m_semantics;
+  std::unique_ptr<OpenMPSemantics> m_owned_semantics;
+  const OpenMPSemantics *m_semantics = nullptr;
   std::map<std::pair<const Task *, const Task *>, concurrency::Relation>
       m_relations;
   size_t m_deferred_wait_deps_count = 0;

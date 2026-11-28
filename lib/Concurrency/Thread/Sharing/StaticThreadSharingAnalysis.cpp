@@ -36,8 +36,8 @@ shared data.
 #include "Alias/UnificationBased/seadsa/DsaAnalysis.hh"
 #include "Alias/UnificationBased/seadsa/Global.hh"
 #include "Alias/UnificationBased/seadsa/Graph.hh"
-#include "Concurrency/Utils/ThreadAPI.h"
-#include "Concurrency/Utils/ThreadMultiplicity.h"
+#include "Concurrency/API/ThreadAPI.h"
+#include "Concurrency/Thread/ThreadMultiplicity.h"
 
 using namespace llvm;
 using namespace seadsa;
@@ -83,48 +83,71 @@ bool isStableAccessKey(const Value *V) {
                isa<CallBase>(V));
 }
 
-std::vector<const Value *> collectAccessKeys(const Value *Ptr, Node *N,
-                                             Graph &G) {
-  std::set<const Value *> keys;
+std::vector<const Value *> collectAccessKeys(
+    const Value *Ptr, Node *N, Graph &G,
+    std::unordered_map<
+        const Graph *,
+        std::unordered_map<const Node *, std::vector<const Value *>>>
+        &globalKeysCache) {
+  std::vector<const Value *> keys;
+  auto addUnique = [&](const Value *V) {
+    if (V && std::find(keys.begin(), keys.end(), V) == keys.end()) {
+      keys.push_back(V);
+    }
+  };
+
   const auto &allocSites = N->getAllocSites();
   for (const Value *allocSite : allocSites) {
-    keys.insert(allocSite);
+    addUnique(allocSite);
   }
 
   if (keys.empty() && N->getNodeType().global) {
-    for (const auto &KV : G.globals()) {
-      if (!KV.second) {
-        continue;
+    auto cacheIt = globalKeysCache.find(&G);
+    if (cacheIt == globalKeysCache.end()) {
+      auto &nodeToGlobals = globalKeysCache[&G];
+      for (const auto &KV : G.globals()) {
+        if (!KV.second) {
+          continue;
+        }
+        const Node *globalNode = KV.second->getNode();
+        if (!globalNode) {
+          continue;
+        }
+        if (const Value *globalKey = getGlobalAccessKey(KV.first)) {
+          auto &vec = nodeToGlobals[globalNode];
+          if (std::find(vec.begin(), vec.end(), globalKey) == vec.end()) {
+            vec.push_back(globalKey);
+          }
+        }
       }
-      if (KV.second->getNode() != N) {
-        continue;
-      }
-      if (const Value *globalKey = getGlobalAccessKey(KV.first)) {
-        keys.insert(globalKey);
+      cacheIt = globalKeysCache.find(&G);
+    }
+    auto nodeIt = cacheIt->second.find(N);
+    if (nodeIt != cacheIt->second.end()) {
+      for (const Value *globalKey : nodeIt->second) {
+        addUnique(globalKey);
       }
     }
 
     if (keys.empty()) {
       if (const Value *globalKey = getGlobalAccessKey(Ptr)) {
-        keys.insert(globalKey);
+        addUnique(globalKey);
       }
     }
   }
 
   if (keys.empty()) {
     if (isStableAccessKey(Ptr)) {
-      const Value *ptrKey = getAccessKey(Ptr);
-      keys.insert(ptrKey);
+      addUnique(getAccessKey(Ptr));
     }
     if (const Value *obj = getUnderlyingObject(Ptr)) {
       if (isStableAccessKey(obj)) {
-        const Value *objKey = getAccessKey(obj);
-        keys.insert(objKey);
+        addUnique(getAccessKey(obj));
       }
     }
   }
 
-  return std::vector<const Value *>(keys.begin(), keys.end());
+  return keys;
 }
 
 bool isPerInstanceThreadLocalAllocSite(const Value *allocSite) {
@@ -223,6 +246,8 @@ bool StaticThreadSharingAnalysis::runOnModule(Module &M) {
   m_allocAccesses.clear();
   m_threads.clear();
   m_thread_spawn_counts.clear();
+  m_graph_global_keys_cache.clear();
+  m_alloc_classification_cache.clear();
   m_threads_complete = true;
   m_access_paths_complete = true;
 
@@ -369,7 +394,8 @@ void StaticThreadSharingAnalysis::recordAccess(const Value *Ptr, bool isWrite,
   }
 
   const int fieldKey = getAccessFieldKey(Ptr, C, *N);
-  std::vector<const Value *> accessKeys = collectAccessKeys(Ptr, N, G);
+  std::vector<const Value *> accessKeys =
+      collectAccessKeys(Ptr, N, G, m_graph_global_keys_cache);
   if (accessKeys.empty()) {
     m_access_paths_complete = false;
     return;
@@ -399,38 +425,53 @@ StaticThreadSharingAnalysis::classify(const Value *AllocSite) const {
     return SharingClassification::MaybeShared;
   }
 
+  auto cached = m_alloc_classification_cache.find(AllocSite);
+  if (cached != m_alloc_classification_cache.end()) {
+    return cached->second;
+  }
+
+  auto cacheAndReturn = [&](SharingClassification result) {
+    m_alloc_classification_cache.emplace(AllocSite, result);
+    return result;
+  };
+
   auto it = m_allocAccesses.find(AllocSite);
   if (it == m_allocAccesses.end()) {
-    return m_access_paths_complete ? SharingClassification::DefinitelyThreadLocal
-                                   : SharingClassification::MaybeShared;
+    return cacheAndReturn(m_access_paths_complete
+                              ? SharingClassification::DefinitelyThreadLocal
+                              : SharingClassification::MaybeShared);
   }
 
   // Check if any field is shared
+  const bool perInstanceLocal = isPerInstanceThreadLocalAllocSite(AllocSite);
   for (auto &pair : it->second) {
     const AccessInfo &info = pair.second;
-    size_t writerCount = info.Writers.size();
+    const size_t writerCount = info.Writers.size();
+    if (writerCount == 0) {
+      continue;
+    }
 
-    // Create a set of all unique threads accessing this location
-    std::set<const Function *> allThreads = info.Readers;
-    allThreads.insert(info.Writers.begin(), info.Writers.end());
+    size_t distinctThreads = writerCount;
+    for (const Function *reader : info.Readers) {
+      if (info.Writers.count(reader) == 0) {
+        ++distinctThreads;
+        if (distinctThreads > 1) {
+          break;
+        }
+      }
+    }
     bool multi_run_writer =
-        !isPerInstanceThreadLocalAllocSite(AllocSite) &&
+        !perInstanceLocal &&
         std::any_of(info.Writers.begin(), info.Writers.end(),
                     [this](const Function *F) { return isMultiRunThread(F); });
 
-    if (allThreads.size() > 1 || multi_run_writer) {
-      // According to the paper (Section 1, "Limitations of Escape Analysis"
-      // point 4, and Algorithm 3), we must distinguish immutable data. Data is
-      // shared only if there is at least one write. "thread-shared but
-      // immutable data... our algorithm also distinguishes between reads and
-      // writes"
-      if (writerCount > 0) {
-        return SharingClassification::DefinitelyShared;
-      }
+    if (distinctThreads > 1 || multi_run_writer) {
+      return cacheAndReturn(SharingClassification::DefinitelyShared);
     }
   }
-  return m_access_paths_complete ? SharingClassification::DefinitelyThreadLocal
-                                 : SharingClassification::MaybeShared;
+  return cacheAndReturn(m_access_paths_complete
+                            ? SharingClassification::DefinitelyThreadLocal
+                            : SharingClassification::MaybeShared);
 }
 
 bool StaticThreadSharingAnalysis::isShared(const Value *AllocSite) const {
@@ -468,7 +509,8 @@ StaticThreadSharingAnalysis::classify(const Instruction *Inst) const {
       continue;
     }
 
-    std::vector<const Value *> accessKeys = collectAccessKeys(access.Ptr, N, G);
+    std::vector<const Value *> accessKeys =
+        collectAccessKeys(access.Ptr, N, G, m_graph_global_keys_cache);
     if (accessKeys.empty()) {
       strongest = SharingClassification::MaybeShared;
       continue;

@@ -2,9 +2,9 @@
 #include "Concurrency/CUDA/CUDAAnalysisHelpers.h"
 #include "Concurrency/CUDA/CUDAFunctionSummary.h"
 #include "Concurrency/CUDA/CUDAKernelProtocolAnalysis.h"
+#include "Concurrency/CUDA/CUDAModel.h"
 #include "Concurrency/CUDA/CUDAParticipantAnalysis.h"
 #include "Concurrency/CUDA/CUDAStreamAutomaton.h"
-#include "Concurrency/Utils/CUDA.h"
 
 #include <algorithm>
 #include <limits>
@@ -868,6 +868,96 @@ CUDAAnalysis::CUDAAnalysis(Module &module,
 CUDAAnalysis::CUDAAnalysis(Module &module, DeviceConfig config)
     : CUDAAnalysis(module, nullptr, config) {}
 
+namespace {
+
+uint64_t computeModuleStructuralFingerprint(const llvm::Module &module) {
+  auto mix = [](uint64_t h, uint64_t v) -> uint64_t {
+    h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return h;
+  };
+  auto mixStr = [&](uint64_t h, llvm::StringRef s) -> uint64_t {
+    h = mix(h, s.size());
+    for (unsigned char c : s) {
+      h = h * 1315423911ULL + c;
+    }
+    return h;
+  };
+
+  uint64_t h = 0xcbf29ce484222325ULL;
+  h = mixStr(h, module.getModuleIdentifier());
+  h = mixStr(h, module.getTargetTriple());
+  h = mix(h, module.global_size());
+  for (const llvm::GlobalVariable &gv : module.globals()) {
+    h = mixStr(h, gv.getName());
+    h = mix(h, gv.getAddressSpace());
+    h = mix(h, gv.hasInitializer() ? 1u : 0u);
+  }
+  h = mix(h, module.size());
+  for (const llvm::Function &fn : module) {
+    h = mixStr(h, fn.getName());
+    h = mix(h, fn.isDeclaration() ? 0u : 1u);
+    h = mix(h, fn.arg_size());
+    h = mix(h, fn.size());
+    for (const llvm::BasicBlock &bb : fn) {
+      h = mix(h, bb.size());
+      for (const llvm::Instruction &inst : bb) {
+        h = mix(h, inst.getOpcode());
+        h = mix(h, inst.getNumOperands());
+        if (const auto *cb = llvm::dyn_cast<llvm::CallBase>(&inst)) {
+          if (const llvm::Function *callee = cb->getCalledFunction()) {
+            h = mixStr(h, callee->getName());
+          }
+        }
+      }
+    }
+  }
+  return h;
+}
+
+bool moduleMayContainCUDA(const llvm::Module &module,
+                          const ThreadAPI *thread_api) {
+  if (module.getNamedMetadata("nvvm.annotations") != nullptr) {
+    return true;
+  }
+  if (llvm::StringRef(module.getTargetTriple()).contains("nvptx")) {
+    return true;
+  }
+  for (const llvm::GlobalVariable &gv : module.globals()) {
+    const unsigned as = gv.getAddressSpace();
+    if (as == 1 || as == 3 || as == 4 || as == 101) {
+      return true;
+    }
+    const llvm::StringRef name = gv.getName();
+    if (name.contains("cuda") || name.contains("CUDA") ||
+        name.contains("nvvm")) {
+      return true;
+    }
+  }
+  for (const llvm::Function &fn : module) {
+    if (detail::isNVVMKernel(&fn)) {
+      return true;
+    }
+    const llvm::StringRef name = fn.getName();
+    if (CUDAModel::isLegacyKernelConfiguration(name) ||
+        name.contains("GraphLaunch") || name.contains("cuda") ||
+        name.contains("CUDA") || name.contains("nvvm") ||
+        name.contains("__device_stub__")) {
+      return true;
+    }
+    if (thread_api) {
+      const ThreadAPI::TD_TYPE type = thread_api->getType(&fn);
+      if (type != ThreadAPI::TD_DUMMY &&
+          thread_api->getRuntimeLibrary(&fn) ==
+              ThreadAPI::RuntimeLibrary::CUDA) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+} // namespace
+
 void CUDAAnalysis::runAnalysis() {
   m_has_completed_analysis = false;
   m_launches.clear();
@@ -882,12 +972,18 @@ void CUDAAnalysis::runAnalysis() {
   m_barrier_count = 0;
   m_warp_barrier_count = 0;
   m_memory_barrier_count = 0;
-  m_module_snapshot.clear();
+  m_module_fingerprint = 0;
+  m_has_module_fingerprint = false;
   m_cuda_enabled = m_thread_api->getConfig().enable_cuda();
   if (!m_cuda_enabled) {
-    llvm::raw_string_ostream snapshot_stream(m_module_snapshot);
-    snapshot_stream << m_module;
-    snapshot_stream.flush();
+    m_module_fingerprint = computeModuleStructuralFingerprint(m_module);
+    m_has_module_fingerprint = true;
+    m_has_completed_analysis = true;
+    return;
+  }
+  if (!moduleMayContainCUDA(m_module, m_thread_api)) {
+    m_module_fingerprint = computeModuleStructuralFingerprint(m_module);
+    m_has_module_fingerprint = true;
     m_has_completed_analysis = true;
     return;
   }
@@ -1367,21 +1463,16 @@ void CUDAAnalysis::runAnalysis() {
     m_abstract_state.kernel_facts.push_back(fact);
     m_abstract_state.kernel_fact_by_class[fact.kernel_class_id] = fact;
   }
-  llvm::raw_string_ostream snapshot_stream(m_module_snapshot);
-  snapshot_stream << m_module;
-  snapshot_stream.flush();
+  m_module_fingerprint = computeModuleStructuralFingerprint(m_module);
+  m_has_module_fingerprint = true;
   m_has_completed_analysis = true;
 }
 
 bool CUDAAnalysis::hasCurrentModuleSnapshot() const {
-  if (!m_has_completed_analysis) {
+  if (!m_has_completed_analysis || !m_has_module_fingerprint) {
     return false;
   }
-  std::string current_snapshot;
-  llvm::raw_string_ostream snapshot_stream(current_snapshot);
-  snapshot_stream << m_module;
-  snapshot_stream.flush();
-  return current_snapshot == m_module_snapshot;
+  return computeModuleStructuralFingerprint(m_module) == m_module_fingerprint;
 }
 
 void CUDAAnalysis::analyzeInterKernelRaces() {

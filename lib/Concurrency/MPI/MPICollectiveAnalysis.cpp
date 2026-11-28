@@ -8,9 +8,9 @@
 
 #include "Concurrency/MPI/MPICollectiveAnalysis.h"
 
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/MPI/MPIProcessModel.h"
 #include "Concurrency/MPI/MPIRankAnalysis.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <map>
 #include <set>

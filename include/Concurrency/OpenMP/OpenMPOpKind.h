@@ -7,7 +7,7 @@ namespace lotus::concurrency::OpenMP {
 /// Canonical domain enum for fine-grained OpenMP runtime operations.
 ///
 /// Each enumerator corresponds to one TD_OMP_* operation kind recognized by
-/// ThreadAPI (see include/Concurrency/Utils/ThreadAPI.h). Keeping a dedicated
+/// ThreadAPI (see include/Concurrency/API/ThreadAPI.h). Keeping a dedicated
 /// OpenMP-scoped enum decouples OpenMP-specific analyses from the generic
 /// thread-API type space.
 enum class OpenMPOpKind {

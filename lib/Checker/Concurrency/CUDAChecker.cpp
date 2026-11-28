@@ -7,15 +7,19 @@ using namespace llvm;
 namespace concurrency {
 
 CUDAChecker::CUDAChecker(Module &module, cuda::CUDAAnalysis *analysis)
-    : m_module(module), m_analysis(analysis) {
-  if (!m_analysis) {
-    m_owned_analysis = std::make_unique<cuda::CUDAAnalysis>(m_module);
-    m_owned_analysis->runAnalysis();
-    m_analysis = m_owned_analysis.get();
+    : m_module(module), m_analysis(analysis) {}
+
+void CUDAChecker::ensureAnalysis() {
+  if (m_analysis) {
+    return;
   }
+  m_owned_analysis = std::make_unique<cuda::CUDAAnalysis>(m_module);
+  m_owned_analysis->runAnalysis();
+  m_analysis = m_owned_analysis.get();
 }
 
 std::vector<ConcurrencyBugReport> CUDAChecker::checkCUDABugs() {
+  ensureAnalysis();
   std::vector<ConcurrencyBugReport> reports;
   if (!m_analysis) {
     return reports;

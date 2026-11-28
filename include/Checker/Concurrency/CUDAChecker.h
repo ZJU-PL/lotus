@@ -18,6 +18,8 @@ public:
   std::vector<ConcurrencyBugReport> checkCUDABugs();
 
 private:
+  void ensureAnalysis();
+
   llvm::Module &m_module;
   cuda::CUDAAnalysis *m_analysis;
   std::unique_ptr<cuda::CUDAAnalysis> m_owned_analysis;

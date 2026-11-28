@@ -39,22 +39,21 @@ Directory layout
 The source tree is grouped by subdirectory under ``include/Concurrency/`` and
 ``lib/Concurrency/``:
 
-- ``Runtime/``: ``APIRegistry``, ``RuntimeKind``, and language runtime abstractions
+- ``Core/``: ``ConcurrencyContext``, ``ConcurrencyConfig``, ``ConcurrencyRelation``,
+  ``ThreadFlowGraph``, ``CallTarget``, and bit-vector clocks (``BVClock``, ``FBVClock``)
+- ``API/``: ``ThreadAPI``, ``CppAtomics``, and ``CppThreading``
 - ``Thread/``: Core thread model and reasoning:
-  - ``ThreadModel``, ``ThreadModelBuilder``, and ``ThreadCreationTree``
+  - ``ThreadCreationTree`` and ``ThreadMultiplicity``
   - ``Join/``: ``JoinTargetAnalysis``
-  - ``Sharing/``: ``EscapeAnalysis`` and ``StaticThreadSharingAnalysis``
-- ``Utils/``: ``ThreadAPI``, ``ThreadFlowGraph``, vector-clock utilities,
-  RAII lock tracking, and language models for C++, OpenMP, MPI, and Linux kernel
-  APIs
-- ``MHP/``: ``MHPAnalysis``, ``StaticVectorClockMHP``, and
+  - ``Sharing/``: ``EscapeAnalysis``, ``StaticThreadSharingAnalysis``, and ``ThreadLocalAnalysis``
+- ``MHP/``: ``MHPAnalysis``, ``ThreadRegionAnalysis``, ``StaticVectorClockMHP``, and
   ``HappensBeforeAnalysis`` (consumes abstract ``IMHPAnalysis``)
-- ``LockSet/``: ``LockSetAnalysis``
-- ``MPI/``: ``MPIAnalysis``, ``MPISemanticOp``, and its process, collective, rank, and RMA analyses
-- ``CUDA/``: ``CUDAAnalysis``, ``CUDAFunctionSummary``, ``CUDASemantics``, and
+- ``LockSet/``: ``LockSetAnalysis`` and ``RAIILockTracker``
+- ``MPI/``: ``MPIModel``, ``MPIAnalysis``, ``MPISemanticOp``, and its process, collective, rank, and RMA analyses
+- ``CUDA/``: ``CUDAModel``, ``CUDAAnalysis``, ``CUDAFunctionSummary``, ``CUDASemantics``, and
   ``PTXAnalyzer`` for GPU thread/block hierarchy reasoning
 - ``OpenMP/``: ``OpenMPModel``, ``OpenMPSemantics``, ``OpenMPOpKind``,
-  ``OpenMPThreadModelLowering``, and ``OpenMPTaskGraph``
+  ``DataSharingAnalysis``, and ``OpenMPTaskGraph``
 - ``LinuxKernel/``: ``LinuxKernelAnalysis``, ``LinuxKernelLockAnalysis``,
   ``LinuxKernelOperation``, and ``LinuxKernelRCUAnalysis`` for kernel concurrency primitives
 - ``ValueFlow/``: thread-aware sparse value-flow refinement
@@ -165,7 +164,7 @@ termination effects beyond a simple name-based match.
 ThreadAPI
 ~~~~~~~~~
 
-**File**: ``Utils/ThreadAPI.cpp``, ``Utils/ThreadAPI.h``
+**File**: ``API/ThreadAPI.cpp``, ``API/ThreadAPI.h``
 
 Provides a unified interface for identifying and categorizing thread-related
 operations in LLVM IR. Acts as an abstraction layer over different threading
@@ -502,7 +501,7 @@ Usage
 
 .. code-block:: cpp
 
-   #include <Concurrency/Utils/ThreadAPI.h>
+   #include <Concurrency/API/ThreadAPI.h>
 
    ThreadAPI *api = ThreadAPI::getThreadAPI();
    

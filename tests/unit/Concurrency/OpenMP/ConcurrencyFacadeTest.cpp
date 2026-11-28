@@ -1,7 +1,7 @@
 #include "Concurrency/ConcurrencyFacade.h"
 #include "Concurrency/CUDA/CUDAAnalysis.h"
 #include "Concurrency/MPI/MPIAnalysis.h"
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include "TestUtils/LLVMHelpers.h"
 

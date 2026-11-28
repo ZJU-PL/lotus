@@ -25,8 +25,8 @@
 
 #pragma once
 
-#include "Concurrency/Utils/RAIILockTracker.h"
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/LockSet/RAIILockTracker.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <map>
 #include <memory>
@@ -117,6 +117,7 @@ public:
    */
   void setAliasAnalysis(lotus::AliasAnalysisWrapper *aa_wrapper) {
     m_alias_analysis = aa_wrapper;
+    m_canonical_lock_cache.clear();
   }
 
   /**
@@ -220,6 +221,8 @@ public:
    * @return Set of all locks
    */
   LockSet getAllLocksInFunction(const llvm::Function *func) const;
+
+  const std::unordered_set<LockID> &getAllLocks() const { return m_all_locks; }
 
   /**
    * @brief Get lock acquire instructions for a specific lock
@@ -515,6 +518,16 @@ private:
   mutable std::map<std::pair<const llvm::CallBase *, LockID>,
                    std::unique_ptr<llvm::GetElementPtrInst>>
       m_summary_lock_projections;
+
+  mutable llvm::DenseMap<const llvm::Value *, LockID> m_canonical_lock_cache;
+
+  // Pre-scanned lock metadata (computed once per analyze() call)
+  unsigned m_recursive_acquire_limit = 1;
+  std::unordered_set<const llvm::Function *> m_functions_with_direct_lock_ops;
+  std::unordered_set<const llvm::Function *> m_functions_with_raii_locks;
+  std::unordered_set<const llvm::Function *> m_functions_with_trylocks;
+  std::unordered_set<const llvm::Function *> m_lock_relevant_functions;
+  void prescanLockOperations();
 
   // ========================================================================
   // Analysis Implementation

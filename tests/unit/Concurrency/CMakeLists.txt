@@ -1,5 +1,5 @@
-foreach(directory MHP LockSet ValueFlow Thread Utils/Clocks Utils/ThreadAPI
-                  Utils/ThreadLocal OpenMP MPI CUDA LinuxKernel)
+foreach(directory Core API MHP LockSet ValueFlow Thread OpenMP MPI CUDA
+                  LinuxKernel)
   get_filename_component(group "${directory}" NAME)
   string(TOLOWER "${group}" group)
   lotus_test_group_enabled(concurrency "${group}" selected)

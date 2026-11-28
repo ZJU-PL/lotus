@@ -13,8 +13,8 @@
 #pragma once
 
 #include "Concurrency/MPI/MPIProcessModel.h"
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/MPI/MPIProtocolAutomaton.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <map>
 #include <set>

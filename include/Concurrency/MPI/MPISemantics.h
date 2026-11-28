@@ -1,8 +1,8 @@
 #pragma once
 
 #include "Concurrency/MPI/MPINormalization.h"
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/MPI/MPIOperation.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <string>
 

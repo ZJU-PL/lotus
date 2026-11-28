@@ -1,12 +1,13 @@
 #pragma once
 
-#include "Concurrency/ConcurrencyRelation.h"
+#include "Concurrency/Core/ConcurrencyRelation.h"
 #include "Concurrency/OpenMP/DataSharingAnalysis.h"
 
 #include <map>
 #include <memory>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <llvm/IR/Function.h>
@@ -381,6 +382,7 @@ private:
   size_t m_next_entity_id = 1;
   size_t m_next_taskgroup_id = 1;
   std::unordered_map<size_t, size_t> m_region_nesting_depth;
+  std::unordered_set<const llvm::Function *> m_omp_relevant_functions;
   mutable size_t m_deferred_imprecise_conflict_count = 0;
   mutable std::unordered_map<std::string, size_t> m_deferred_reason_counts;
 

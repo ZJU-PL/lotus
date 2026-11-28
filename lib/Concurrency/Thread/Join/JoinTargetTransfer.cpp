@@ -6,11 +6,15 @@
 #include "Concurrency/Thread/Join/JoinTargetAnalysis.h"
 
 #include "Alias/Infrastructure/AliasAnalysisWrapper/AliasAnalysisWrapper.h"
-#include "Concurrency/Utils/CppThreading.h"
+#include "Concurrency/API/CppThreading.h"
 
 #include <algorithm>
+#include <deque>
+#include <stack>
 
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/IR/CFG.h>
+#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 
 using namespace llvm;
@@ -189,6 +193,12 @@ void setCanonicalOffset(std::vector<int64_t> &offsets, int64_t offset) {
   }
 }
 
+bool isEmptyHandleState(const HandleState &state) {
+  return state.instances.empty() && state.preserved_arg_inputs.empty() &&
+         state.provenance_roots.empty() && !state.has_unknown_live_fork &&
+         !state.path_sensitivity_lost;
+}
+
 bool isCppThreadMove(const Function *callee) {
   if (!callee) {
     return false;
@@ -212,54 +222,247 @@ std::size_t ThreadInstanceHash::operator()(
 }
 
 void JoinTargetAnalysis::buildFunctionSummaries() {
-  bool changed = true;
-  while (changed) {
-    changed = false;
+  // Only functions transitively called from join-containing functions can ever
+  // have their summaries consulted by analyzeFunction(). Restricting summary
+  // computation to this downward call closure avoids analyzing tens of
+  // thousands of unrelated functions in large modules.
+  std::unordered_map<const Function *, std::vector<const Function *>> callees,
+      callers;
+  std::unordered_set<const Function *> neededFuncs;
+  std::deque<const Function *> reachQueue;
+  for (const Instruction *joinInst : m_joinInsts) {
+    if (joinInst && joinInst->getFunction() &&
+        !joinInst->getFunction()->isDeclaration()) {
+      reachQueue.push_back(joinInst->getFunction());
+    }
+  }
 
-    for (const Function &func : m_module) {
-      if (func.isDeclaration()) {
-        continue;
-      }
-
-      std::unordered_map<const BasicBlock *, StateMap> inStates;
-      std::unordered_map<const BasicBlock *, StateMap> outStates;
-
-      bool localChanged = true;
-      while (localChanged) {
-        localChanged = false;
-        for (const BasicBlock &block : func) {
-          StateMap inState;
-          if (&block == &func.getEntryBlock()) {
-            inState = getEntryStateForFunction(func);
-          } else {
-            for (const BasicBlock *pred : predecessors(&block)) {
-              auto predIt = outStates.find(pred);
-              if (predIt != outStates.end()) {
-                mergeStateInto(inState, predIt->second);
-              }
+  std::unordered_set<const Function *> scannedForCallees;
+  while (!reachQueue.empty()) {
+    const Function *cur = reachQueue.front();
+    reachQueue.pop_front();
+    if (!scannedForCallees.insert(cur).second) {
+      continue;
+    }
+    DenseSet<const Function *> seenCallees;
+    for (const Instruction &inst : instructions(*cur)) {
+      if (const auto *cb = dyn_cast<CallBase>(&inst)) {
+        if (const Function *target = m_threadAPI->getCallee(cb)) {
+          if (!target->isDeclaration() && seenCallees.insert(target).second) {
+            callees[cur].push_back(target);
+            callers[target].push_back(cur);
+            if (neededFuncs.insert(target).second) {
+              reachQueue.push_back(target);
             }
           }
+        }
+      }
+    }
+  }
 
-          auto inIt = inStates.find(&block);
-          if (inIt == inStates.end() || !(inIt->second == inState)) {
-            inStates[&block] = inState;
-            localChanged = true;
-          }
+  if (neededFuncs.empty()) {
+    return;
+  }
 
-          StateMap outState = inState;
-          for (const Instruction &inst : block) {
-            transferInstruction(inst, outState);
-          }
+  // Mark functions that directly contain or transitively reach thread
+  // lifecycle operations (fork/join/detach/std::thread move). Functions outside
+  // this set cannot create or transition thread instances, so only small pure
+  // handle-forwarding helpers need full flow-sensitive summary construction.
+  std::unordered_set<const Function *> threadOpReachable;
+  std::deque<const Function *> opQueue;
+  for (const Function *func : neededFuncs) {
+    for (const Instruction &inst : instructions(*func)) {
+      const auto *cb = dyn_cast<CallBase>(&inst);
+      if (!cb) {
+        continue;
+      }
+      const Function *callee = m_threadAPI->getCallee(cb);
+      if (m_threadAPI->isTDFork(cb) || m_threadAPI->isTDJoin(cb) ||
+          m_threadAPI->getType(cb) == ThreadAPI::TD_DETACH ||
+          (callee && isCppThreadMove(callee))) {
+        if (threadOpReachable.insert(func).second) {
+          opQueue.push_back(func);
+        }
+        break;
+      }
+    }
+  }
+  while (!opQueue.empty()) {
+    const Function *cur = opQueue.front();
+    opQueue.pop_front();
+    auto callersIt = callers.find(cur);
+    if (callersIt == callers.end()) {
+      continue;
+    }
+    for (const Function *caller : callersIt->second) {
+      if (neededFuncs.count(caller) &&
+          threadOpReachable.insert(caller).second) {
+        opQueue.push_back(caller);
+      }
+    }
+  }
 
-          auto outIt = outStates.find(&block);
-          if (outIt == outStates.end() || !(outIt->second == outState)) {
-            outStates[&block] = outState;
-            localChanged = true;
+  // Keep every function that transitively reaches a thread lifecycle operation
+  // OR can read/write pointer arguments/globals/return values. Functions that
+  // neither reach any thread operation nor accept/return pointers and do not
+  // touch globals cannot affect thread handle states.
+  std::unordered_set<const Function *> summaryFuncs;
+  summaryFuncs.reserve(neededFuncs.size());
+  for (const Function *func : neededFuncs) {
+    if (threadOpReachable.count(func)) {
+      summaryFuncs.insert(func);
+      continue;
+    }
+    bool canTransportHandle = func->getReturnType()->isPointerTy() ||
+                              func->getReturnType()->isIntegerTy(64);
+    if (!canTransportHandle) {
+      for (const Argument &arg : func->args()) {
+        if (arg.getType()->isPointerTy()) {
+          canTransportHandle = true;
+          break;
+        }
+      }
+    }
+    if (canTransportHandle && !func->doesNotAccessMemory()) {
+      summaryFuncs.insert(func);
+    }
+  }
+
+  if (summaryFuncs.empty()) {
+    return;
+  }
+
+  std::vector<const Function *> postOrder;
+  postOrder.reserve(summaryFuncs.size());
+  std::unordered_set<const Function *> visited;
+  std::stack<std::pair<const Function *, bool>> dfsStack;
+  for (const Function *func : summaryFuncs) {
+    if (visited.count(func)) {
+      continue;
+    }
+    dfsStack.push({func, false});
+    while (!dfsStack.empty()) {
+      auto [cur, done] = dfsStack.top();
+      dfsStack.pop();
+      if (done) {
+        postOrder.push_back(cur);
+        continue;
+      }
+      if (!visited.insert(cur).second) {
+        continue;
+      }
+      dfsStack.push({cur, true});
+      auto it = callees.find(cur);
+      if (it == callees.end()) {
+        continue;
+      }
+      for (const Function *target : it->second) {
+        if (summaryFuncs.count(target) && !visited.count(target)) {
+          dfsStack.push({target, false});
+        }
+      }
+    }
+  }
+
+  std::deque<const Function *> funcWorklist(postOrder.begin(), postOrder.end());
+  std::unordered_set<const Function *> funcInWorklist(postOrder.begin(),
+                                                      postOrder.end());
+  std::unordered_map<const Function *, unsigned> evalCount;
+  constexpr unsigned kMaxSummaryEvals = 32;
+  constexpr size_t kMaxBlockEvalsPerFunction = 2048;
+  constexpr size_t kMaxStateLocations = 512;
+
+  while (!funcWorklist.empty()) {
+    const Function *funcPtr = funcWorklist.front();
+    funcWorklist.pop_front();
+    funcInWorklist.erase(funcPtr);
+    if (!funcPtr || funcPtr->isDeclaration() || funcPtr->empty() ||
+        ++evalCount[funcPtr] > kMaxSummaryEvals) {
+      continue;
+    }
+    const Function &func = *funcPtr;
+
+    std::unordered_map<const BasicBlock *, StateMap> inStates;
+    std::unordered_map<const BasicBlock *, StateMap> outStates;
+    std::deque<const BasicBlock *> bbWorklist;
+    DenseSet<const BasicBlock *> bbInWorklist;
+    const BasicBlock *entryBB = &func.getEntryBlock();
+    bbWorklist.push_back(entryBB);
+    bbInWorklist.insert(entryBB);
+    size_t bbEvals = 0;
+    bool stateOverflow = false;
+
+    while (!bbWorklist.empty() && ++bbEvals <= kMaxBlockEvalsPerFunction) {
+      const BasicBlock *block = bbWorklist.front();
+      bbWorklist.pop_front();
+      bbInWorklist.erase(block);
+
+      StateMap inState;
+      if (block == entryBB) {
+        inState = getEntryStateForFunction(func);
+      } else {
+        for (const BasicBlock *pred : predecessors(block)) {
+          auto predIt = outStates.find(pred);
+          if (predIt != outStates.end()) {
+            mergeStateInto(inState, predIt->second);
           }
         }
       }
 
-      FunctionSummary summary;
+      if (inState.size() > kMaxStateLocations) {
+        stateOverflow = true;
+        break;
+      }
+
+      auto inIt = inStates.find(block);
+      const bool inChanged =
+          (inIt == inStates.end() || !(inIt->second == inState));
+      if (inChanged) {
+        inStates[block] = inState;
+      }
+
+      StateMap outState = std::move(inState);
+      for (const Instruction &inst : *block) {
+        transferInstruction(inst, outState);
+        if (outState.size() > kMaxStateLocations) {
+          stateOverflow = true;
+          break;
+        }
+      }
+      if (stateOverflow) {
+        break;
+      }
+
+      auto outIt = outStates.find(block);
+      if (outIt == outStates.end() || !(outIt->second == outState)) {
+        outStates[block] = std::move(outState);
+        for (const BasicBlock *succ : successors(block)) {
+          if (bbInWorklist.insert(succ).second) {
+            bbWorklist.push_back(succ);
+          }
+        }
+      }
+    }
+
+    FunctionSummary summary;
+    if (stateOverflow || bbEvals > kMaxBlockEvalsPerFunction) {
+      // Conservative widening if an unusually large helper exceeds the block
+      // evaluation budget: mark pointer args as unknown/escaped.
+      for (const Argument &arg : func.args()) {
+        if (!arg.getType()->isPointerTy()) {
+          continue;
+        }
+        SummaryLocation loc;
+        loc.arg_no = arg.getArgNo();
+        loc.is_base_wildcard = true;
+        HandleState unknown;
+        unknown.has_unknown_live_fork = true;
+        unknown.path_sensitivity_lost = true;
+        summary.location_exit_states[loc] = std::move(unknown);
+      }
+      summary.return_state.has_unknown_live_fork = true;
+      summary.return_state.path_sensitivity_lost = true;
+    } else {
       for (const BasicBlock &block : func) {
         const Instruction *term = block.getTerminator();
         if (!isa<ReturnInst>(term) && !isa<ResumeInst>(term)) {
@@ -293,15 +496,24 @@ void JoinTargetAnalysis::buildFunctionSummaries() {
           }
         }
       }
+    }
 
-      auto summaryIt = m_functionSummaries.find(&func);
-      if (summaryIt == m_functionSummaries.end() ||
-          summaryIt->second.location_exit_states !=
-              summary.location_exit_states ||
-          summaryIt->second.global_exit_states != summary.global_exit_states ||
-          !(summaryIt->second.return_state == summary.return_state)) {
-        m_functionSummaries[&func] = std::move(summary);
-        changed = true;
+    auto summaryIt = m_functionSummaries.find(&func);
+    if (summaryIt == m_functionSummaries.end() ||
+        summaryIt->second.location_exit_states !=
+            summary.location_exit_states ||
+        summaryIt->second.global_exit_states != summary.global_exit_states ||
+        !(summaryIt->second.return_state == summary.return_state)) {
+      m_functionSummaries[&func] = std::move(summary);
+      auto callersIt = callers.find(&func);
+      if (callersIt != callers.end()) {
+        for (const Function *caller : callersIt->second) {
+          if (summaryFuncs.count(caller) &&
+              evalCount[caller] < kMaxSummaryEvals &&
+              funcInWorklist.insert(caller).second) {
+            funcWorklist.push_back(caller);
+          }
+        }
       }
     }
   }
@@ -345,30 +557,45 @@ JoinTargetAnalysis::mergePredecessorStates(const BasicBlock *block) const {
 void JoinTargetAnalysis::analyzeFunction(const Function &func) {
   m_blockInStates.clear();
   m_blockOutStates.clear();
+  if (func.empty()) {
+    return;
+  }
 
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (const BasicBlock &block : func) {
-      StateMap inState = mergePredecessorStates(&block);
-      auto inIt = m_blockInStates.find(&block);
-      if (inIt == m_blockInStates.end() || !(inIt->second == inState)) {
-        m_blockInStates[&block] = inState;
-        changed = true;
+  std::deque<const BasicBlock *> bbWorklist;
+  DenseSet<const BasicBlock *> bbInWorklist;
+  const BasicBlock *entryBB = &func.getEntryBlock();
+  bbWorklist.push_back(entryBB);
+  bbInWorklist.insert(entryBB);
+
+  constexpr size_t kMaxAnalyzeBlockEvals = 4096;
+  size_t bbEvals = 0;
+
+  while (!bbWorklist.empty() && ++bbEvals <= kMaxAnalyzeBlockEvals) {
+    const BasicBlock *block = bbWorklist.front();
+    bbWorklist.pop_front();
+    bbInWorklist.erase(block);
+
+    StateMap inState = mergePredecessorStates(block);
+    auto inIt = m_blockInStates.find(block);
+    if (inIt == m_blockInStates.end() || !(inIt->second == inState)) {
+      m_blockInStates[block] = inState;
+    }
+
+    StateMap outState = std::move(inState);
+    for (const Instruction &inst : *block) {
+      if (m_threadAPI->isTDJoin(&inst)) {
+        recordJoinState(&inst, outState);
       }
+      transferInstruction(inst, outState);
+    }
 
-      StateMap outState = inState;
-      for (const Instruction &inst : block) {
-        if (m_threadAPI->isTDJoin(&inst)) {
-          recordJoinState(&inst, outState);
+    auto outIt = m_blockOutStates.find(block);
+    if (outIt == m_blockOutStates.end() || !(outIt->second == outState)) {
+      m_blockOutStates[block] = std::move(outState);
+      for (const BasicBlock *succ : successors(block)) {
+        if (bbInWorklist.insert(succ).second) {
+          bbWorklist.push_back(succ);
         }
-        transferInstruction(inst, outState);
-      }
-
-      auto outIt = m_blockOutStates.find(&block);
-      if (outIt == m_blockOutStates.end() || !(outIt->second == outState)) {
-        m_blockOutStates[&block] = outState;
-        changed = true;
       }
     }
   }
@@ -916,6 +1143,9 @@ bool JoinTargetAnalysis::overwriteLocation(StateMap &state,
   }
 
   auto stateIt = state.find(location);
+  if (stateIt == state.end() && isEmptyHandleState(combined)) {
+    return false;
+  }
   if (stateIt != state.end() && stateIt->second == combined) {
     return false;
   }
@@ -1103,17 +1333,30 @@ bool JoinTargetAnalysis::mergeStateInto(StateMap &dst, const StateMap &src) cons
 
 bool JoinTargetAnalysis::mergeHandleState(HandleState &dst,
                                           const HandleState &src) const {
-  const HandleState before = dst;
+  bool changed = false;
   for (const auto &entry : src.instances) {
-    mergeInstanceState(dst.instances[entry.first], entry.second);
+    auto [it, inserted] = dst.instances.emplace(entry.first, entry.second);
+    if (inserted) {
+      changed = true;
+    } else {
+      changed |= mergeInstanceState(it->second, entry.second);
+    }
   }
-  dst.preserved_arg_inputs.insert(src.preserved_arg_inputs.begin(),
-                                  src.preserved_arg_inputs.end());
-  dst.provenance_roots.insert(src.provenance_roots.begin(),
-                              src.provenance_roots.end());
-  dst.has_unknown_live_fork |= src.has_unknown_live_fork;
-  dst.path_sensitivity_lost |= src.path_sensitivity_lost;
-  return !(before == dst);
+  for (unsigned arg : src.preserved_arg_inputs) {
+    changed |= dst.preserved_arg_inputs.insert(arg).second;
+  }
+  for (const Value *root : src.provenance_roots) {
+    changed |= dst.provenance_roots.insert(root).second;
+  }
+  if (src.has_unknown_live_fork && !dst.has_unknown_live_fork) {
+    dst.has_unknown_live_fork = true;
+    changed = true;
+  }
+  if (src.path_sensitivity_lost && !dst.path_sensitivity_lost) {
+    dst.path_sensitivity_lost = true;
+    changed = true;
+  }
+  return changed;
 }
 
 } // namespace mhp

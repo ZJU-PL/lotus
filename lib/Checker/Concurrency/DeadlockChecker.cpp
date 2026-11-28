@@ -33,18 +33,19 @@ DeadlockChecker::DeadlockChecker(Module &module,
       m_threadAPI(threadAPI) {}
 
 void DeadlockChecker::buildLockOrderGraph(LockOrderGraph &graph) const {
-  for (Function &F : m_module) {
-    if (F.isDeclaration())
+  if (!m_locksetAnalysis)
+    return;
+  std::set<std::pair<LockID, LockID>> seenEdges;
+  for (LockID lock : m_locksetAnalysis->getAllLocks()) {
+    if (!lock)
       continue;
-    for (LockID lock : m_locksetAnalysis->getAllLocksInFunction(&F)) {
-      if (!lock)
-        continue;
-      auto acquires = m_locksetAnalysis->getLockAcquires(lock);
-      for (const Instruction *inst : acquires) {
-        LockSet mayHeld = m_locksetAnalysis->getMayLockSetAt(inst);
-        for (LockID held : mayHeld) {
-          if (!held || held == lock)
-            continue;
+    auto acquires = m_locksetAnalysis->getLockAcquires(lock);
+    for (const Instruction *inst : acquires) {
+      LockSet mayHeld = m_locksetAnalysis->getMayLockSetAt(inst);
+      for (LockID held : mayHeld) {
+        if (!held || held == lock)
+          continue;
+        if (seenEdges.emplace(held, lock).second) {
           graph[held].push_back({lock, inst});
         }
       }
@@ -95,39 +96,50 @@ DeadlockChecker::findLockOrderCycles(const LockOrderGraph &graph) const {
   std::vector<std::pair<LockID, const Instruction *>> path;
   std::unordered_set<LockID> pathLocks;
 
-  std::function<void(LockID)> dfs = [&](LockID cur) {
+  constexpr size_t kMaxCycles = 256;
+  constexpr size_t kMaxCycleLength = 16;
+  constexpr size_t kMaxDfsSteps = 100000;
+  size_t dfsSteps = 0;
+
+  std::function<void(LockID, LockID)> dfs = [&](LockID start, LockID cur) {
+    if (uniqueCycles.size() >= kMaxCycles || ++dfsSteps > kMaxDfsSteps)
+      return;
     auto it = graph.find(cur);
     if (it == graph.end())
       return;
     for (const LockOrderEdge &edge : it->second) {
+      if (uniqueCycles.size() >= kMaxCycles || dfsSteps > kMaxDfsSteps)
+        return;
       LockID next = edge.first;
       const Instruction *inst = edge.second;
-      if (pathLocks.count(next)) {
-        size_t idx = 0;
-        for (; idx < path.size() && path[idx].first != next; ++idx) {
-        }
-        if (idx >= path.size())
-          continue;
-        Cycle cycle(path.begin() + idx, path.end());
+      if (next == start) {
+        Cycle cycle(path.begin(), path.end());
         cycle.push_back({next, inst});
         if (cycle.size() >= 2)
           uniqueCycles.insert(rotateCycleToMin(cycle));
         continue;
       }
+      // Symmetry breaking: only explore cycles whose minimum node is `start`.
+      if (std::less<LockID>{}(next, start))
+        continue;
+      if (path.size() >= kMaxCycleLength || pathLocks.count(next))
+        continue;
       path.push_back({next, inst});
       pathLocks.insert(next);
-      dfs(next);
+      dfs(start, next);
       pathLocks.erase(next);
       path.pop_back();
     }
   };
 
   for (const auto &kv : graph) {
+    if (uniqueCycles.size() >= kMaxCycles || dfsSteps > kMaxDfsSteps)
+      break;
     path.clear();
     pathLocks.clear();
     path.push_back({kv.first, nullptr});
     pathLocks.insert(kv.first);
-    dfs(kv.first);
+    dfs(kv.first, kv.first);
   }
 
   return std::vector<Cycle>(uniqueCycles.begin(), uniqueCycles.end());

@@ -214,17 +214,34 @@ void LockSetAnalysis::analyze() {
   m_invoke_unwind_exit.clear();
   m_trylock_edge_refinements.clear();
   m_summary_lock_projections.clear();
+  m_canonical_lock_cache.clear();
+  m_recursive_acquire_limit = 1;
+  m_functions_with_direct_lock_ops.clear();
+  m_functions_with_raii_locks.clear();
+  m_functions_with_trylocks.clear();
+  m_lock_relevant_functions.clear();
+
+  if (m_module && !m_uses_external_call_graph) {
+    m_owned_call_graph = std::make_unique<CallGraph>(*m_module);
+    m_call_graph = m_owned_call_graph.get();
+  }
+
+  prescanLockOperations();
+
+  if (m_functions_with_direct_lock_ops.empty()) {
+    errs() << "Lock Set Analysis Complete!\n";
+    errs() << "Found 0 locks\n";
+    return;
+  }
 
   if (m_module) {
-    if (!m_uses_external_call_graph) {
-      m_owned_call_graph = std::make_unique<CallGraph>(*m_module);
-      m_call_graph = m_owned_call_graph.get();
+    for (const Function *raii_func : m_functions_with_raii_locks) {
+      RAIILock::RAIILockTracker raii_tracker;
+      raii_tracker.analyzeFunction(raii_func);
+      m_raii_locks[raii_func] = raii_tracker.getAllLockLifetimes();
     }
-    // Module-wide analysis
-    for (Function &func : *m_module) {
-      if (!func.isDeclaration()) {
-        analyzeFunction(&func);
-      }
+    for (const Function *trylock_func : m_functions_with_trylocks) {
+      detectTryLockSuccessBranches(const_cast<Function *>(trylock_func));
     }
     computeInterproceduralLockSets();
   } else if (m_single_function) {
@@ -240,6 +257,166 @@ void LockSetAnalysis::analyze() {
 
   errs() << "Lock Set Analysis Complete!\n";
   errs() << "Found " << m_all_locks.size() << " locks\n";
+}
+
+void LockSetAnalysis::prescanLockOperations() {
+  unsigned recursive_acquires = 0;
+  std::unordered_map<const Function *, std::vector<const Function *>>
+      reverse_call_edges;
+
+  auto hasExceptionalExit = [](const Function &func) {
+    for (const BasicBlock &bb : func) {
+      const Instruction *term = bb.getTerminator();
+      if (isa<ResumeInst>(term)) {
+        return true;
+      }
+      if (const auto *cleanup = dyn_cast<CleanupReturnInst>(term)) {
+        if (cleanup->unwindsToCaller()) {
+          return true;
+        }
+      } else if (const auto *catch_switch = dyn_cast<CatchSwitchInst>(term)) {
+        if (catch_switch->unwindsToCaller()) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  auto scanFunction = [&](Function &func) {
+    bool has_lock_op = false;
+    bool has_raii = false;
+    bool has_trylock = false;
+    for (const Instruction &inst : instructions(func)) {
+      const auto *call = dyn_cast<CallBase>(&inst);
+      if (!call) {
+        continue;
+      }
+      const ThreadAPI::TD_TYPE type = m_thread_api->getType(call);
+      if (type != ThreadAPI::TD_DUMMY) {
+        const ThreadAPI::LockSemantics sem =
+            m_thread_api->describeLockSemantics(&inst);
+        if (sem.is_acquire || sem.is_release || isLockOperation(&inst) ||
+            ((type == ThreadAPI::TD_UNIQUE_LOCK_DTOR ||
+              type == ThreadAPI::TD_SHARED_LOCK_DTOR) &&
+             m_thread_api->cppWrapperDestructorReleases(&inst))) {
+          has_lock_op = true;
+        }
+        if (type == ThreadAPI::TD_CPP_LOCK_RELEASE ||
+            type == ThreadAPI::TD_CPP_LOCK_MOVE_CTOR ||
+            type == ThreadAPI::TD_CPP_LOCK_MOVE_ASSIGN ||
+            type == ThreadAPI::TD_CPP_LOCK_SWAP ||
+            type == ThreadAPI::TD_CPP_LOCK_TRY ||
+            RAIILock::RAIILockTracker::isRAIILockConstructor(call) ||
+            RAIILock::RAIILockTracker::isRAIILockDestructor(call)) {
+          has_lock_op = true;
+          has_raii = true;
+        }
+        if (m_thread_api->isConditionalLockAcquire(call)) {
+          has_lock_op = true;
+          has_trylock = true;
+        }
+      } else if (RAIILock::RAIILockTracker::isRAIILockConstructor(call) ||
+                 RAIILock::RAIILockTracker::isRAIILockDestructor(call)) {
+        has_lock_op = true;
+        has_raii = true;
+      }
+      const Function *callee = m_thread_api->getCallee(call);
+      if (callee && callee->getName().contains("recursive_mutex") &&
+          m_thread_api->isTDAcquire(&inst) && !m_thread_api->isTryLock(&inst)) {
+        ++recursive_acquires;
+      }
+      if (m_module) {
+        if (callee && !callee->isDeclaration()) {
+          reverse_call_edges[callee].push_back(&func);
+        } else if (!callee) {
+          if (const Value *called = call->getCalledOperand()) {
+            std::set<Function *> targets;
+            std::unordered_set<const Value *> visited;
+            detail::collectDefinedFunctionTargets(called, targets, visited);
+            for (Function *target : targets) {
+              reverse_call_edges[target].push_back(&func);
+            }
+          }
+        }
+      }
+    }
+    if (has_lock_op) {
+      m_functions_with_direct_lock_ops.insert(&func);
+    }
+    if (has_raii) {
+      m_functions_with_raii_locks.insert(&func);
+    }
+    if (has_trylock) {
+      m_functions_with_trylocks.insert(&func);
+    }
+  };
+
+  if (m_module) {
+    for (Function &func : *m_module) {
+      if (!func.isDeclaration()) {
+        scanFunction(func);
+      }
+    }
+    if (m_call_graph && !m_functions_with_direct_lock_ops.empty()) {
+      for (Function &func : *m_module) {
+        if (func.isDeclaration()) {
+          continue;
+        }
+        if (CallGraphNode *cgNode = (*m_call_graph)[&func]) {
+          for (auto &record : *cgNode) {
+            if (record.second) {
+              if (Function *callee = record.second->getFunction()) {
+                if (!callee->isDeclaration()) {
+                  reverse_call_edges[callee].push_back(&func);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Propagate lock relevance backwards from direct lock functions to all
+    // transitive callers.
+    std::vector<const Function *> worklist(
+        m_functions_with_direct_lock_ops.begin(),
+        m_functions_with_direct_lock_ops.end());
+    m_lock_relevant_functions.insert(worklist.begin(), worklist.end());
+    size_t head = 0;
+    while (head < worklist.size()) {
+      const Function *curr = worklist[head++];
+      auto it = reverse_call_edges.find(curr);
+      if (it == reverse_call_edges.end()) {
+        continue;
+      }
+      for (const Function *caller : it->second) {
+        if (m_lock_relevant_functions.insert(caller).second) {
+          worklist.push_back(caller);
+        }
+      }
+    }
+
+    // Seed exact empty summaries for lock-irrelevant functions so unwind edges
+    // through throwing helpers still preserve caller must-locksets.
+    if (!m_functions_with_direct_lock_ops.empty()) {
+      for (Function &func : *m_module) {
+        if (func.isDeclaration() || m_lock_relevant_functions.count(&func)) {
+          continue;
+        }
+        FunctionSummary &summary = m_function_summaries[&func];
+        summary.is_analyzed = true;
+        summary.has_exceptional_exit = hasExceptionalExit(func);
+      }
+    }
+  } else if (m_single_function && !m_single_function->isDeclaration()) {
+    scanFunction(*m_single_function);
+    if (!m_functions_with_direct_lock_ops.empty()) {
+      m_lock_relevant_functions.insert(m_single_function);
+    }
+  }
+
+  m_recursive_acquire_limit = std::max(1u, recursive_acquires);
 }
 
 // ============================================================================

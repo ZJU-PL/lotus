@@ -3,7 +3,7 @@
 
 #include "Concurrency/OpenMP/OpenMPTaskGraph.h"
 #include "Checker/Concurrency/ConcurrencyBugReport.h"
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <memory>
 #include <vector>

@@ -27,6 +27,10 @@ void JoinTargetAnalysis::analyze() {
   m_blockInStates.clear();
   m_blockOutStates.clear();
 
+  if (m_joinInsts.empty()) {
+    return;
+  }
+
   if (!m_threadMultiplicity) {
     m_threadMultiplicity =
         std::make_unique<concurrency::ThreadMultiplicityAnalysis>(m_module);
@@ -34,10 +38,17 @@ void JoinTargetAnalysis::analyze() {
 
   buildFunctionSummaries();
 
-  for (const Function &func : m_module) {
-    if (!func.isDeclaration()) {
-      analyzeFunction(func);
+  std::unordered_set<const Function *> joinFunctions;
+  joinFunctions.reserve(m_joinInsts.size());
+  for (const Instruction *joinInst : m_joinInsts) {
+    if (joinInst && joinInst->getFunction() &&
+        !joinInst->getFunction()->isDeclaration()) {
+      joinFunctions.insert(joinInst->getFunction());
     }
+  }
+
+  for (const Function *func : joinFunctions) {
+    analyzeFunction(*func);
   }
 
   for (const Instruction *joinInst : m_joinInsts) {

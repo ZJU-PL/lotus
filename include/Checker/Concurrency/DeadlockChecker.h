@@ -5,7 +5,7 @@
 #include "Checker/Concurrency/ConcurrencyBugReport.h"
 #include "Concurrency/MHP/HappensBeforeAnalysis.h"
 #include "Concurrency/MHP/IMHPAnalysis.h"
-#include "Concurrency/Utils/ThreadAPI.h"
+#include "Concurrency/API/ThreadAPI.h"
 
 #include <string>
 #include <unordered_map>

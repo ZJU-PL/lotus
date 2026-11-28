@@ -27,12 +27,6 @@ void LockSetAnalysis::computeInterproceduralLockSets() {
 
   bottomUpTraversal();
 
-  for (Function &func : *m_module) {
-    if (!func.isDeclaration()) {
-      analyzeFunction(&func);
-    }
-  }
-
   errs() << "Interprocedural lock set analysis complete.\n";
 }
 
@@ -151,7 +145,6 @@ void LockSetAnalysis::computeFunctionSummary(Function *func) {
   }
 
   auto &summary = m_function_summaries[func];
-  errs() << "Computing summary for function: " << func->getName() << "\n";
 
   computeIntraproceduralLockSets(func);
 
@@ -205,7 +198,13 @@ void LockSetAnalysis::computeFunctionSummary(Function *func) {
                         [&](LockID held) { return matchesLock(held, lock); });
   };
 
-  DominatorTree dom(*func);
+  std::unique_ptr<DominatorTree> dom;
+  auto getDom = [&]() -> DominatorTree & {
+    if (!dom) {
+      dom = std::make_unique<DominatorTree>(*func);
+    }
+    return *dom;
+  };
   auto intersectMustSets = [&](const LockSet &lhs, const LockSet &rhs) {
     return merge({lhs, rhs}, true);
   };
@@ -296,7 +295,8 @@ void LockSetAnalysis::computeFunctionSummary(Function *func) {
             }
             continue;
           }
-          if (dom.dominates(release_inst->getParent(), exit->getParent())) {
+          if (getDom().dominates(release_inst->getParent(),
+                                 exit->getParent())) {
             return true;
           }
         }
@@ -630,15 +630,6 @@ void LockSetAnalysis::computeFunctionSummary(Function *func) {
   }
 
   summary.is_analyzed = true;
-
-  errs() << "  May acquire delta: " << summary.may_acquire_delta.size()
-         << " locks\n";
-  errs() << "  Must acquire delta: " << summary.must_acquire_delta.size()
-         << " locks\n";
-  errs() << "  May release delta: " << summary.may_release_delta.size()
-         << " locks\n";
-  errs() << "  Must release delta: " << summary.must_release_delta.size()
-         << " locks\n";
 }
 
 bool LockSetAnalysis::applyExceptionalFunctionSummary(
@@ -839,7 +830,8 @@ void LockSetAnalysis::bottomUpTraversal() {
   std::stack<std::pair<Function *, bool>> stack;
 
   for (Function &func : *m_module) {
-    if (func.isDeclaration() || visited.find(&func) != visited.end()) {
+    if (func.isDeclaration() || !m_lock_relevant_functions.count(&func) ||
+        visited.find(&func) != visited.end()) {
       continue;
     }
     stack.push({&func, false});
@@ -864,6 +856,7 @@ void LockSetAnalysis::bottomUpTraversal() {
         for (auto &callRecord : *cgNode) {
           if (Function *callee = callRecord.second->getFunction()) {
             if (callee && !callee->isDeclaration() &&
+                m_lock_relevant_functions.count(callee) &&
                 visited.find(callee) == visited.end()) {
               stack.push({callee, false});
             }

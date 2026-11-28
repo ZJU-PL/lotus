@@ -132,8 +132,7 @@ foreach(group cfg controldependence debuginfo multiplicity nullpointer
               parametersummary profile purity sccp typehierarchy loop)
   list(APPEND _lotus_test_choices "analysis/${group}")
 endforeach()
-foreach(group mhp lockset valueflow thread clocks threadapi threadlocal openmp
-              mpi cuda linuxkernel)
+foreach(group core api mhp lockset valueflow thread openmp mpi cuda linuxkernel)
   list(APPEND _lotus_test_choices "concurrency/${group}")
 endforeach()
 foreach(group ae concurrency framework gsaf kint pulse saber reports typequalifier tpa)

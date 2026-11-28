@@ -1,9 +1,9 @@
 #include "Concurrency/ValueFlow/ThreadAwareSVFG.h"
 
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/LockSet/LockSetAnalysis.h"
 #include "Concurrency/MHP/IMHPAnalysis.h"
 #include "Concurrency/Thread/ThreadCreationTree.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 #include "Concurrency/ValueFlow/LockSpanReasoner.h"
 
 #include <algorithm>

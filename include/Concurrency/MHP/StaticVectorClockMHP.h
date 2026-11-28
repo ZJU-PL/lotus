@@ -12,11 +12,11 @@
 #pragma once
 
 #include "Concurrency/Thread/Join/JoinTargetAnalysis.h"
+#include "Concurrency/API/ThreadAPI.h"
+#include "Concurrency/Core/ThreadFlowGraph.h"
 #include "Concurrency/MHP/IMHPAnalysis.h"
 #include "Concurrency/MHP/MHPAnalysis.h"
-#include "Concurrency/Utils/ThreadAPI.h"
-#include "Concurrency/Utils/ThreadFlowGraph.h"
-#include "Concurrency/Utils/ThreadMultiplicity.h"
+#include "Concurrency/Thread/ThreadMultiplicity.h"
 
 #include <limits>
 #include <memory>

@@ -883,3 +883,56 @@ TEST_F(JoinTargetAnalysisTest, UnknownIndexHandleSlotRemainsAmbiguous) {
   EXPECT_EQ(analysis.getFeasibleJoinedForks(join_inst).size(), 2u);
   EXPECT_EQ(analysis.getDefiniteFeasibleJoinedFork(join_inst), nullptr);
 }
+
+TEST_F(JoinTargetAnalysisTest, CyclicPhiGepHandleDoesNotOverflowStack) {
+  const char *source = R"(
+    declare i32 @pthread_create(i8*, i8*, i8* (i8*)*, i8*)
+    declare i32 @pthread_join(i8*, i8*)
+
+    define i8* @worker(i8* %arg) {
+    entry:
+      ret i8* null
+    }
+
+    define i32 @main(i32 %n) {
+    entry:
+      %arr = alloca [4 x i8]
+      %base = getelementptr inbounds [4 x i8], [4 x i8]* %arr, i32 0, i32 0
+      br label %loop
+
+    loop:
+      %p = phi i8* [ %base, %entry ], [ %next, %loop ]
+      %i = phi i32 [ 0, %entry ], [ %inc, %loop ]
+      call i32 @pthread_create(i8* %p, i8* null, i8* (i8*)* @worker, i8* null)
+      %next = getelementptr inbounds i8, i8* %p, i32 1
+      %inc = add i32 %i, 1
+      %cond = icmp slt i32 %inc, %n
+      br i1 %cond, label %loop, label %done
+
+    done:
+      call i32 @pthread_join(i8* %p, i8* null)
+      ret i32 0
+    }
+  )";
+
+  auto module = parseModule(source);
+  ASSERT_NE(module, nullptr);
+
+  JoinTargetAnalysis analysis(*module);
+  analysis.analyze();
+
+  const Function *main_func = module->getFunction("main");
+  ASSERT_NE(main_func, nullptr);
+  const Instruction *join_inst = nullptr;
+  for (const Instruction &inst : instructions(main_func)) {
+    if (const auto *cb = dyn_cast<CallBase>(&inst)) {
+      if (cb->getCalledFunction() &&
+          cb->getCalledFunction()->getName() == "pthread_join") {
+        join_inst = &inst;
+        break;
+      }
+    }
+  }
+  ASSERT_NE(join_inst, nullptr);
+  EXPECT_FALSE(analysis.getPossibleJoinedForks(join_inst).empty());
+}

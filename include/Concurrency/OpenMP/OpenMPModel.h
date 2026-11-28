@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Concurrency/Utils/CallTarget.h"
+#include "Concurrency/Core/CallTarget.h"
 
 #include <llvm/ADT/StringRef.h>
 #include <llvm/IR/Function.h>
@@ -25,7 +25,7 @@ inline bool isFork(const llvm::StringRef &funcName) {
 inline bool isFork(const llvm::CallBase *callInst) {
   if (!callInst)
     return false;
-  auto const func = lotus::concurrency::resolveCallTarget(callInst);
+  const auto *const func = lotus::concurrency::resolveCallTarget(callInst);
   // Guard against null callee (indirect call) and unnamed functions.
   if (!func || !func->hasName())
     return false;
@@ -156,7 +156,7 @@ inline bool isTask(const llvm::StringRef &funcName) {
 inline bool isTask(const llvm::CallBase *callInst) {
   if (!callInst)
     return false;
-  auto const func = lotus::concurrency::resolveCallTarget(callInst);
+  const auto *const func = lotus::concurrency::resolveCallTarget(callInst);
   if (!func || !func->hasName())
     return false;
   return isTask(func->getName());

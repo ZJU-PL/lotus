@@ -2028,6 +2028,26 @@ void MPIProcessModel::analyzeModule() {
   has_init_thread_level_ = false;
   init_thread_provided_level_ = -1;
   has_provided_init_thread_level_ = false;
+  // Fast check: if the module contains no MPI-like functions at all, skip
+  // rank analysis and per-instruction scanning.
+  bool module_has_mpi = false;
+  for (const Function &F : module_) {
+    if (thread_api_->getRuntimeLibrary(&F) == ThreadAPI::RuntimeLibrary::MPI) {
+      module_has_mpi = true;
+      break;
+    }
+    const StringRef name = F.getName();
+    if (name.startswith_insensitive("mpi_") ||
+        name.startswith_insensitive("pmpi_") ||
+        name.contains("MPI_") || name.contains("PMPI_")) {
+      module_has_mpi = true;
+      break;
+    }
+  }
+  if (!module_has_mpi) {
+    return;
+  }
+
   rank_analysis_ = std::make_unique<MPI::MPIRankAnalysis>(module_);
   rank_analysis_->analyze();
 

@@ -3,10 +3,17 @@
 #include <algorithm>
 #include <deque>
 #include <iterator>
+#include <stack>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/DenseSet.h>
+#include <llvm/ADT/StringSet.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/InstIterator.h>
 
 namespace concurrency {
 namespace {
@@ -67,14 +74,19 @@ void StarvationChecker::addBlockingFunction(std::string name) {
 StarvationChecker::Summary
 StarvationChecker::analyze(const llvm::Function &function) const {
   Summary summary;
-  std::map<const llvm::BasicBlock *, State> inputs, outputs;
-  std::set<const llvm::BasicBlock *> queued, processed;
+  llvm::DenseMap<const llvm::BasicBlock *, State> inputs, outputs;
+  llvm::DenseSet<const llvm::BasicBlock *> queued, processed;
   std::deque<const llvm::BasicBlock *> worklist;
-  inputs.emplace(&function.getEntryBlock(), State{});
+  inputs.try_emplace(&function.getEntryBlock(), State{});
   worklist.push_back(&function.getEntryBlock());
   queued.insert(&function.getEntryBlock());
   const bool ui = function.hasFnAttribute("lotus.ui-thread");
   const bool lockless = function.hasFnAttribute("lotus.lockless");
+
+  llvm::StringSet<> blockingNames;
+  for (const std::string &name : blockingFunctions_) {
+    blockingNames.insert(name);
+  }
 
   auto canonical = [&](mhp::LockID lock) -> mhp::LockID {
     return lock ? locks_.getCanonicalLock(lock) : nullptr;
@@ -103,23 +115,42 @@ StarvationChecker::analyze(const llvm::Function &function) const {
     state.released.erase(lock);
     state.held.emplace(lock, site);
   };
+
+  struct PairKey {
+    EventKind kind;
+    const llvm::Instruction *event;
+    bool operator==(const PairKey &o) const {
+      return kind == o.kind && event == o.event;
+    }
+  };
+  struct PairKeyHash {
+    size_t operator()(const PairKey &k) const {
+      size_t h1 = std::hash<int>{}(static_cast<int>(k.kind));
+      size_t h2 = std::hash<const void *>{}(k.event);
+      return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+    }
+  };
+  std::unordered_map<PairKey, size_t, PairKeyHash> pairIndex;
+  constexpr size_t kMaxCriticalPairsPerSummary = 1024;
   auto emit = [&](CriticalPair pair) {
-    auto existing =
-        std::find_if(summary.criticalPairs.begin(), summary.criticalPairs.end(),
-                     [&](const CriticalPair &p) {
-                       return p.kind == pair.kind && p.event == pair.event;
-                     });
-    if (existing == summary.criticalPairs.end()) {
+    PairKey key{pair.kind, pair.event};
+    auto it = pairIndex.find(key);
+    if (it == pairIndex.end()) {
+      if (summary.criticalPairs.size() >= kMaxCriticalPairsPerSummary) {
+        return;
+      }
+      pairIndex.emplace(key, summary.criticalPairs.size());
       summary.criticalPairs.push_back(std::move(pair));
     } else {
-      existing->held.insert(pair.held.begin(), pair.held.end());
-      existing->releasedBefore =
-          intersection(existing->releasedBefore, pair.releasedBefore);
-      existing->uiThread |= pair.uiThread;
-      existing->lockless |= pair.lockless;
-      existing->nonblockingLock &= pair.nonblockingLock;
-      if (pair.trace.size() < existing->trace.size())
-        existing->trace = std::move(pair.trace);
+      CriticalPair &existing = summary.criticalPairs[it->second];
+      existing.held.insert(pair.held.begin(), pair.held.end());
+      existing.releasedBefore =
+          intersection(existing.releasedBefore, pair.releasedBefore);
+      existing.uiThread |= pair.uiThread;
+      existing.lockless |= pair.lockless;
+      existing.nonblockingLock &= pair.nonblockingLock;
+      if (pair.trace.size() < existing.trace.size())
+        existing.trace = std::move(pair.trace);
     }
   };
 
@@ -127,26 +158,28 @@ StarvationChecker::analyze(const llvm::Function &function) const {
     auto *block = worklist.front();
     worklist.pop_front();
     queued.erase(block);
-    State state = inputs.at(block);
+    State state = inputs.find(block)->second;
     for (const auto &instruction : *block) {
       // Use the lockset service's success/failure refinement for conditional
       // acquisitions in this function. Inherited caller locks are tracked by
       // the summary substitution rather than a context-free lockset query.
-      for (auto it = state.held.begin(); it != state.held.end();) {
-        const auto *origin = it->second;
-        if (origin && origin->getFunction() == &function &&
-            threadAPI_->isConditionalLockAcquire(origin)) {
-          const auto possible = locks_.getMayLockSetAt(&instruction);
-          const bool canHold = std::any_of(
-              possible.begin(), possible.end(), [&](mhp::LockID lock) {
-                return locks_.locksMustMatch(lock, it->first);
-              });
-          if (!canHold) {
-            it = state.held.erase(it);
-            continue;
+      if (!state.held.empty()) {
+        for (auto it = state.held.begin(); it != state.held.end();) {
+          const auto *origin = it->second;
+          if (origin && origin->getFunction() == &function &&
+              threadAPI_->isConditionalLockAcquire(origin)) {
+            const auto possible = locks_.getMayLockSetAt(&instruction);
+            const bool canHold = std::any_of(
+                possible.begin(), possible.end(), [&](mhp::LockID lock) {
+                  return locks_.locksMustMatch(lock, it->first);
+                });
+            if (!canHold) {
+              it = state.held.erase(it);
+              continue;
+            }
           }
+          ++it;
         }
-        ++it;
       }
       const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
       if (!call)
@@ -214,7 +247,7 @@ StarvationChecker::analyze(const llvm::Function &function) const {
       }
       if (!target || target->hasFnAttribute("lotus.arbitrary-code")) {
         emit(makePair(EventKind::Callback));
-      } else if (blockingFunctions_.count(target->getName().str()) ||
+      } else if (blockingNames.count(target->getName()) ||
                  target->hasFnAttribute("lotus.may-block")) {
         emit(makePair(EventKind::BlockingCall));
       }
@@ -266,7 +299,7 @@ StarvationChecker::analyze(const llvm::Function &function) const {
             continue;
       }
       auto *successor = block->getTerminator()->getSuccessor(index);
-      auto inserted = inputs.emplace(successor, state);
+      auto inserted = inputs.try_emplace(successor, state);
       State next =
           inserted.second ? state : join(inserted.first->second, state);
       bool changed = inserted.second || !(next == inserted.first->second);
@@ -281,7 +314,7 @@ StarvationChecker::analyze(const llvm::Function &function) const {
     if (!llvm::isa<llvm::ReturnInst>(block.getTerminator()) ||
         !processed.count(&block))
       continue;
-    const auto &state = outputs.at(&block);
+    const auto &state = outputs.find(&block)->second;
     summary.acquiredOnReturn.insert(state.held.begin(), state.held.end());
     summary.releasedOnReturn =
         firstReturn ? state.released
@@ -298,20 +331,156 @@ StarvationChecker::analyze(const llvm::Function &function) const {
 
 std::vector<ConcurrencyBugReport> StarvationChecker::checkStarvation() {
   summaries_.clear();
-  for (const auto &function : module_)
-    if (!function.isDeclaration())
-      summaries_.emplace(&function, Summary{});
-  for (unsigned iteration = 0; iteration < 32; ++iteration) {
-    bool changed = false;
-    auto next = summaries_;
-    for (const auto &entry : summaries_) {
-      auto summary = analyze(*entry.first);
-      changed |= !summaryEqual(entry.second, summary);
-      next[entry.first] = std::move(summary);
+
+  // Pre-scan call graph and starvation triggers (locks, UI-thread, lockless).
+  std::unordered_map<const llvm::Function *,
+                     std::vector<const llvm::Function *>>
+      callees, callers;
+  std::unordered_set<const llvm::Function *> directLockFuncs;
+  std::unordered_set<const llvm::Function *> restrictedAttrFuncs;
+  for (const auto &function : module_) {
+    if (function.isDeclaration())
+      continue;
+    if (function.hasFnAttribute("lotus.ui-thread") ||
+        function.hasFnAttribute("lotus.lockless")) {
+      restrictedAttrFuncs.insert(&function);
     }
-    summaries_ = std::move(next);
-    if (!changed)
-      break;
+    bool touchesLock = false;
+    llvm::DenseSet<const llvm::Function *> seenCallees;
+    for (const auto &inst : llvm::instructions(function)) {
+      const auto *call = llvm::dyn_cast<llvm::CallBase>(&inst);
+      if (!call)
+        continue;
+      if (threadAPI_->isTDAcquire(call) || threadAPI_->isTDRelease(call) ||
+          threadAPI_->isTDCondWait(call)) {
+        touchesLock = true;
+      }
+      if (const auto *target = callee(*call)) {
+        if (!target->isDeclaration() && seenCallees.insert(target).second) {
+          callees[&function].push_back(target);
+          callers[target].push_back(&function);
+        }
+      }
+    }
+    if (touchesLock) {
+      directLockFuncs.insert(&function);
+    }
+  }
+
+  // Without any locks, UI-thread functions, or lockless functions, no
+  // starvation violation can exist.
+  if (directLockFuncs.empty() && restrictedAttrFuncs.empty()) {
+    return {};
+  }
+
+  // Step A: functions that may acquire/hold a lock locally or via a callee.
+  std::unordered_set<const llvm::Function *> mayHoldLockFuncs(
+      directLockFuncs.begin(), directLockFuncs.end());
+  std::deque<const llvm::Function *> revQueue(directLockFuncs.begin(),
+                                              directLockFuncs.end());
+  while (!revQueue.empty()) {
+    const auto *cur = revQueue.front();
+    revQueue.pop_front();
+    auto it = callers.find(cur);
+    if (it == callers.end())
+      continue;
+    for (const auto *caller : it->second) {
+      if (mayHoldLockFuncs.insert(caller).second) {
+        revQueue.push_back(caller);
+      }
+    }
+  }
+
+  // Step B: functions reachable from lock-holding, UI-thread, or lockless
+  // functions (the only functions whose effects can contribute to a report).
+  std::unordered_set<const llvm::Function *> relevantFuncs;
+  std::deque<const llvm::Function *> fwdQueue;
+  for (const auto *f : mayHoldLockFuncs) {
+    if (relevantFuncs.insert(f).second)
+      fwdQueue.push_back(f);
+  }
+  for (const auto *f : restrictedAttrFuncs) {
+    if (relevantFuncs.insert(f).second)
+      fwdQueue.push_back(f);
+  }
+  while (!fwdQueue.empty()) {
+    const auto *cur = fwdQueue.front();
+    fwdQueue.pop_front();
+    auto it = callees.find(cur);
+    if (it == callees.end())
+      continue;
+    for (const auto *target : it->second) {
+      if (relevantFuncs.insert(target).second) {
+        fwdQueue.push_back(target);
+      }
+    }
+  }
+
+  // Bottom-up post-order over relevant functions, followed by caller-driven
+  // fixpoint propagation (avoids 32 full-module sweeps and copying summaries_).
+  std::vector<const llvm::Function *> postOrder;
+  postOrder.reserve(relevantFuncs.size());
+  std::unordered_set<const llvm::Function *> visited;
+  std::stack<std::pair<const llvm::Function *, bool>> dfsStack;
+  for (const auto &function : module_) {
+    if (function.isDeclaration() || !relevantFuncs.count(&function) ||
+        visited.count(&function))
+      continue;
+    dfsStack.push({&function, false});
+    while (!dfsStack.empty()) {
+      auto [cur, done] = dfsStack.top();
+      dfsStack.pop();
+      if (done) {
+        postOrder.push_back(cur);
+        continue;
+      }
+      if (!visited.insert(cur).second)
+        continue;
+      dfsStack.push({cur, true});
+      auto it = callees.find(cur);
+      if (it == callees.end())
+        continue;
+      for (const auto *target : it->second) {
+        if (relevantFuncs.count(target) && !visited.count(target)) {
+          dfsStack.push({target, false});
+        }
+      }
+    }
+  }
+
+  for (const auto *func : postOrder) {
+    summaries_.emplace(func, Summary{});
+  }
+
+  std::deque<const llvm::Function *> worklist(postOrder.begin(),
+                                              postOrder.end());
+  std::unordered_set<const llvm::Function *> inWorklist(postOrder.begin(),
+                                                        postOrder.end());
+  std::unordered_map<const llvm::Function *, unsigned> evalCount;
+  constexpr unsigned kMaxFunctionEvals = 32;
+
+  while (!worklist.empty()) {
+    const auto *func = worklist.front();
+    worklist.pop_front();
+    inWorklist.erase(func);
+    if (++evalCount[func] > kMaxFunctionEvals)
+      continue;
+
+    Summary nextSummary = analyze(*func);
+    auto &existing = summaries_[func];
+    if (!summaryEqual(existing, nextSummary)) {
+      existing = std::move(nextSummary);
+      auto callersIt = callers.find(func);
+      if (callersIt != callers.end()) {
+        for (const auto *caller : callersIt->second) {
+          if (relevantFuncs.count(caller) &&
+              evalCount[caller] < kMaxFunctionEvals &&
+              inWorklist.insert(caller).second) {
+            worklist.push_back(caller);
+          }
+        }
+      }
+    }
   }
   std::vector<ConcurrencyBugReport> reports;
   std::set<std::tuple<EventKind, const llvm::Instruction *,

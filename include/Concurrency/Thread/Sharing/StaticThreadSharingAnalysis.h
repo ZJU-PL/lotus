@@ -64,6 +64,12 @@ private:
 
   // Reference to SeaDSA analysis result
   seadsa::GlobalAnalysis *m_dsa;
+  mutable std::unordered_map<
+      const seadsa::Graph *,
+      std::unordered_map<const seadsa::Node *, std::vector<const llvm::Value *>>>
+      m_graph_global_keys_cache;
+  mutable std::unordered_map<const llvm::Value *, SharingClassification>
+      m_alloc_classification_cache;
 
   // Set of thread entry functions
   std::vector<const llvm::Function *> m_threads;

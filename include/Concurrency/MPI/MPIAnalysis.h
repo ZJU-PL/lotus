@@ -14,6 +14,7 @@
 #pragma once
 
 #include "Concurrency/MPI/MPIAbstractState.h"
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/MPI/MPICollectiveAnalysis.h"
 #include "Concurrency/MPI/MPIModel.h"
 #include "Concurrency/MPI/MPINormalization.h"
@@ -21,7 +22,6 @@
 #include "Concurrency/MPI/MPIProcessModel.h"
 #include "Concurrency/MPI/MPIRMAAnalysis.h"
 #include "Concurrency/MPI/MPIRankAnalysis.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <map>
 #include <memory>

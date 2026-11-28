@@ -1,9 +1,9 @@
 #include "Concurrency/ConcurrencyFacade.h"
 
+#include "Concurrency/API/ThreadAPI.h"
 #include "Concurrency/CUDA/CUDAAnalysis.h"
 #include "Concurrency/MPI/MPIAnalysis.h"
 #include "Concurrency/OpenMP/OpenMPTaskGraph.h"
-#include "Concurrency/Utils/ThreadAPI.h"
 
 #include <numeric>
 
