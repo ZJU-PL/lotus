@@ -106,6 +106,21 @@ collectBoundaryRoots(const llvm::Function *F, const AbductiveDomain &astate,
   return roots;
 }
 
+static bool isManifestExitState(const AbductiveDomain &astate) {
+  if (astate.hasUnknownValues() || astate.isOverApproximated() ||
+      astate.preHeapHasAssumptions()) {
+    return false;
+  }
+  if (!options::disableSMT() &&
+      !astate.getPathFormula().isProvenSatisfiable()) {
+    return false;
+  }
+  auto is_allocated = [&astate](AbstractValue v) {
+    return astate.isAllocated(v);
+  };
+  return astate.getPathFormula().isManifest(is_allocated);
+}
+
 /**
  * Infer-style retain-cycle checker (PulseRetainCycleChecker.ml):
  * Detects unreachable ownership cycles among strong-refcounted (shared_ptr)
@@ -120,11 +135,7 @@ checkRetainCyclesOnExit(const llvm::Function *F, const AbductiveDomain &astate,
     return cycle_nodes;
   }
 
-  auto is_allocated = [&astate](AbstractValue v) {
-    return astate.isAllocated(v);
-  };
-  if (!astate.getPathFormula().isManifest(is_allocated) ||
-      astate.preHeapHasAssumptions()) {
+  if (!isManifestExitState(astate)) {
     return cycle_nodes;
   }
 
@@ -236,11 +247,7 @@ static void checkLeaksOnExit(const llvm::Function *F,
 
   // Only report leaks on manifest paths (Infer checks manifestness before
   // reporting leaks so caller-conditioned exits don't emit spurious leaks).
-  auto is_allocated = [&astate](AbstractValue v) {
-    return astate.isAllocated(v);
-  };
-  if (!astate.getPathFormula().isManifest(is_allocated) ||
-      astate.preHeapHasAssumptions()) {
+  if (!isManifestExitState(astate)) {
     return;
   }
 
@@ -353,9 +360,26 @@ pruneForSummary(const llvm::Function *F, const AbductiveDomain &astate,
   }
 
   // Simplify formula and retain variables connected via live arithmetic.
+  // Preserve non-ground branch hypotheses over dead local values (e.g.
+  // `e = lookup(); if (!e) return NULL;`) so callers never misread conditional
+  // exits as unconditional specs, while dropping tautological `p != 0` checks
+  // on locally allocated pointers.
+  auto is_local_alloc = [&pruned](AbstractValue v) {
+    AbstractValue c = pruned.getCanonical(v);
+    if (pruned.getPostAttrs().has(c, Attribute::Global)) {
+      return true;
+    }
+    if (pruned.isInPre(c)) {
+      return false;
+    }
+    return pruned.isAllocated(c) || pruned.getAllocationInfo(c).has_value() ||
+           pruned.getInvalidationInfo(c).has_value() ||
+           pruned.getPostAttrs().has(c, Attribute::Stack);
+  };
   std::set<AbstractValue> live_arith =
       pruned.getPathFormula().simplifyForSummary(keep_vars, reachable_pre,
-                                                 keep_non_ground_conditions);
+                                                 keep_non_ground_conditions,
+                                                 is_local_alloc);
   reachable_post.insert(live_arith.begin(), live_arith.end());
   reachable_pre.insert(live_arith.begin(), live_arith.end());
 
@@ -689,7 +713,8 @@ void PulseChecker::createSummary(
 
     std::optional<AbstractValue> root_val = is_exception ? exc_val : ret_val;
     AbductiveDomain pruned = pruneForSummary(
-        F, *astate, root_val, run_leak_check && !is_exception);
+        F, *astate, root_val, run_leak_check && !is_exception, std::nullopt,
+        /*keep_non_ground_conditions=*/true);
 
     // Deduplicate structurally isomorphic summary entries (Infer's leq check).
     bool duplicate = false;

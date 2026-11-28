@@ -69,6 +69,7 @@ computeWidenedInvariant(const llvm::BasicBlock *header,
 
   // Attach LoopInvariantUnderInference marker so the next header visit checks
   // whether this candidate invariant is inductive (Infer PulseAbductiveDomain).
+  joined_opt->markOverApproximated();
   joined_opt->startLoopInvariantInference(header, entry_a->clone());
 
   ExecutionDomain out = ExecutionDomain::continueProgram(

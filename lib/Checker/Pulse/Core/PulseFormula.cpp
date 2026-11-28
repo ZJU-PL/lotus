@@ -1279,6 +1279,7 @@ PulseFormula PulseFormula::merge(const PulseFormula &f1,
   // completely disjoint from f1's relational/arithmetic/disjunctive variables
   // (avoids redundant Z3 re-solving at every callee summary application).
   if (f1.sat_cache_mode_ == 2u && f1.sat_cache_result_ &&
+      !f1.smt_unknown_ && !f2.smt_unknown_ &&
       f2.linear_constraints_.empty() && f2.arithmetic_ops_.empty() &&
       f2.float_ops_.empty() && f2.float_cmps_.empty() &&
       f2.disjunctive_eqs_.empty()) {
@@ -1387,6 +1388,167 @@ PulseFormula::andCalleeFormula(const PulseFormula &caller,
     return std::nullopt;
   }
 
+  // Build deterministic constant assignments reachable from concrete caller
+  // values + literal callee constants through callee SSA arithmetic definitions
+  // (never branch assumptions), so conditions on derived callee locals like
+  // `n1 = n - 1; n1 == 0` are soundly discharged when caller passes `n = 1`.
+  std::set<AbstractValue> caller_cond_vars;
+  for (const auto &ckv : caller.conditions_) {
+    if (!ckv.first.is_ground) {
+      collectConditionVars(ckv.first, caller_cond_vars);
+    }
+  }
+  std::set<AbstractValue> callee_cond_vars;
+  for (const auto &ckv : substituted_callee.conditions_) {
+    if (!ckv.first.is_ground) {
+      collectConditionVars(ckv.first, callee_cond_vars);
+    }
+  }
+  std::map<AbstractValue, int64_t> ground_consts;
+  auto seedGroundConst = [&](const PulseFormula &src,
+                             const std::set<AbstractValue> &guarded_vars) {
+    for (const auto &bkv : src.lower_bounds_) {
+      AbstractValue rep = src.findRepReadOnly(bkv.first);
+      auto uit = src.upper_bounds_.find(rep);
+      if (uit == src.upper_bounds_.end() || uit->second != bkv.second) {
+        continue;
+      }
+      if (guarded_vars.count(rep) > 0) {
+        continue;
+      }
+      ground_consts.emplace(caller.findRepReadOnly(rep), bkv.second);
+    }
+    for (AbstractValue nv : src.null_values_) {
+      AbstractValue rep = src.findRepReadOnly(nv);
+      if (guarded_vars.count(rep) == 0) {
+        ground_consts.emplace(caller.findRepReadOnly(rep), 0);
+      }
+    }
+  };
+  seedGroundConst(caller, caller_cond_vars);
+  seedGroundConst(substituted_callee, callee_cond_vars);
+  if ((!substituted_callee.arithmetic_ops_.empty() ||
+       !substituted_callee.linear_constraints_.empty()) &&
+      !ground_consts.empty()) {
+    bool changed = true;
+    for (unsigned iter = 0; changed && iter < 16; ++iter) {
+      changed = false;
+      for (const auto &lc : substituted_callee.linear_constraints_) {
+        if (lc.kind != ConstraintKind::Equal || lc.terms.size() < 2) {
+          continue;
+        }
+        AbstractValue unknown_var;
+        int64_t unknown_coeff = 0;
+        unsigned unknown_count = 0;
+        __int128 known_sum = 0;
+        for (const auto &t : lc.terms) {
+          AbstractValue r = caller.findRepReadOnly(
+              substituted_callee.findRepReadOnly(t.var));
+          auto it = ground_consts.find(r);
+          if (it != ground_consts.end()) {
+            known_sum += static_cast<__int128>(t.coefficient) *
+                         static_cast<__int128>(it->second);
+          } else {
+            unknown_var = r;
+            unknown_coeff = t.coefficient;
+            ++unknown_count;
+            if (unknown_count > 1) {
+              break;
+            }
+          }
+        }
+        if (unknown_count == 1 && (unknown_coeff == 1 || unknown_coeff == -1)) {
+          __int128 rhs = static_cast<__int128>(lc.constant) - known_sum;
+          __int128 solved = (unknown_coeff == 1) ? rhs : -rhs;
+          if (solved >= std::numeric_limits<int64_t>::min() &&
+              solved <= std::numeric_limits<int64_t>::max()) {
+            if (ground_consts.emplace(unknown_var, static_cast<int64_t>(solved))
+                    .second) {
+              changed = true;
+            }
+          }
+        }
+      }
+      for (const auto &op : substituted_callee.arithmetic_ops_) {
+        AbstractValue r = caller.findRepReadOnly(
+            substituted_callee.findRepReadOnly(op.result));
+        if (ground_consts.count(r) > 0) {
+          continue;
+        }
+        AbstractValue o1 = caller.findRepReadOnly(
+            substituted_callee.findRepReadOnly(op.op1));
+        AbstractValue o2 = caller.findRepReadOnly(
+            substituted_callee.findRepReadOnly(op.op2));
+        auto it1 = ground_consts.find(o1);
+        auto it2 = ground_consts.find(o2);
+        if (it1 == ground_consts.end() || it2 == ground_consts.end()) {
+          continue;
+        }
+        int64_t a = it1->second;
+        int64_t b = it2->second;
+        std::optional<int64_t> val;
+        if (op.op == "+") {
+          __int128 s = static_cast<__int128>(a) + static_cast<__int128>(b);
+          if (s >= std::numeric_limits<int64_t>::min() &&
+              s <= std::numeric_limits<int64_t>::max())
+            val = static_cast<int64_t>(s);
+        } else if (op.op == "-") {
+          __int128 d = static_cast<__int128>(a) - static_cast<__int128>(b);
+          if (d >= std::numeric_limits<int64_t>::min() &&
+              d <= std::numeric_limits<int64_t>::max())
+            val = static_cast<int64_t>(d);
+        } else if (op.op == "*") {
+          __int128 p = static_cast<__int128>(a) * static_cast<__int128>(b);
+          if (p >= std::numeric_limits<int64_t>::min() &&
+              p <= std::numeric_limits<int64_t>::max())
+            val = static_cast<int64_t>(p);
+        } else if (op.op == "/" && b != 0 &&
+                   !(a == std::numeric_limits<int64_t>::min() && b == -1)) {
+          val = a / b;
+        } else if (op.op == "%" && b != 0 &&
+                   !(a == std::numeric_limits<int64_t>::min() && b == -1)) {
+          val = a % b;
+        } else if (op.op == "&") {
+          val = a & b;
+        } else if (op.op == "|") {
+          val = a | b;
+        } else if (op.op == "^") {
+          val = a ^ b;
+        } else if (op.op == "<<" && b >= 0 && b < 63) {
+          val = static_cast<int64_t>(static_cast<uint64_t>(a) << b);
+        } else if (op.op == ">>" && b >= 0 && b < 63) {
+          val = a >> b;
+        }
+        if (val) {
+          ground_consts.emplace(r, *val);
+          changed = true;
+        }
+      }
+    }
+  }
+  auto isImpliedByGroundConsts = [&](const PathConditionAtom &norm) -> bool {
+    AbstractValue lrep =
+        caller.findRepReadOnly(substituted_callee.findRepReadOnly(norm.lhs));
+    auto lit = ground_consts.find(lrep);
+    if (lit == ground_consts.end()) {
+      return false;
+    }
+    if (norm.kind == PathConditionAtom::Kind::EqZero ||
+        norm.kind == PathConditionAtom::Kind::NeZero) {
+      return evalConcreteRel(norm.kind, lit->second, 0);
+    }
+    std::optional<int64_t> rval = norm.const_rhs;
+    if (!rval && norm.rhs.getId() != 0) {
+      AbstractValue rrep =
+          caller.findRepReadOnly(substituted_callee.findRepReadOnly(norm.rhs));
+      auto rit = ground_consts.find(rrep);
+      if (rit != ground_consts.end()) {
+        rval = rit->second;
+      }
+    }
+    return rval && evalConcreteRel(norm.kind, lit->second, *rval);
+  };
+
   // Before merging conditions, discharge any callee condition already implied
   // by the caller's concrete facts (not merely another branch assumption).
   std::map<PathConditionAtom, unsigned> adjusted_conds;
@@ -1394,6 +1556,9 @@ PulseFormula::andCalleeFormula(const PulseFormula &caller,
     PathConditionAtom norm = caller.normalizeConditionAtom(kv.first);
     unsigned depth = kv.second;
     if (norm.is_ground) {
+      continue;
+    }
+    if (isImpliedByGroundConsts(norm)) {
       continue;
     }
     if (caller.isConditionImpliedByFacts(norm)) {
@@ -1803,6 +1968,7 @@ PulseFormula PulseFormula::clone() const {
   f.pending_new_eqs_ = pending_new_eqs_;
   f.sat_cache_mode_ = sat_cache_mode_;
   f.sat_cache_result_ = sat_cache_result_;
+  f.smt_unknown_ = smt_unknown_;
   f.consistent_cache_valid_ = consistent_cache_valid_;
   f.consistent_cache_result_ = consistent_cache_result_;
   return f;
@@ -2001,7 +2167,8 @@ PulseFormula::applySubstitution(const Substitution &substitution,
 std::set<AbstractValue> PulseFormula::simplifyForSummary(
     const std::set<AbstractValue> &keep_vars,
     const std::set<AbstractValue> &precondition_vocab,
-    bool keep_non_ground_conditions) {
+    bool keep_non_ground_conditions,
+    const std::function<bool(AbstractValue)> &is_local_alloc) {
   (void)precondition_vocab;
   std::set<AbstractValue> live_via_arithmetic;
   if (is_contradiction_ || isEmpty()) {
@@ -2336,20 +2503,67 @@ std::set<AbstractValue> PulseFormula::simplifyForSummary(
       (void)simplified.addStringRegexMatch(r, rm.pattern, rm.positive);
     }
   }
+  auto flipAtomKind = [](PathConditionAtom::Kind k) {
+    switch (k) {
+    case PathConditionAtom::Kind::LessThan:
+      return PathConditionAtom::Kind::GreaterThan;
+    case PathConditionAtom::Kind::LessEqual:
+      return PathConditionAtom::Kind::GreaterEqual;
+    case PathConditionAtom::Kind::GreaterThan:
+      return PathConditionAtom::Kind::LessThan;
+    case PathConditionAtom::Kind::GreaterEqual:
+      return PathConditionAtom::Kind::LessEqual;
+    default:
+      return k;
+    }
+  };
   for (const auto &kv : conditions_) {
     PathConditionAtom mapped = kv.first;
     if (mapped.lhs.getId() != 0)
       mapped.lhs = map_rep(mapped.lhs);
     if (!mapped.const_rhs && mapped.rhs.getId() != 0)
       mapped.rhs = map_rep(mapped.rhs);
+    // Fold dead constant operands directly into const_rhs so pruned constant
+    // AVs never lose their integer value inside summary conditions.
+    if (!mapped.const_rhs && mapped.rhs.getId() != 0 &&
+        mapped.kind != PathConditionAtom::Kind::Other &&
+        mapped.kind != PathConditionAtom::Kind::EqZero &&
+        mapped.kind != PathConditionAtom::Kind::NeZero) {
+      auto lc = asConstantInt(kv.first.lhs);
+      auto rc = asConstantInt(kv.first.rhs);
+      if (rc.has_value() && !lc.has_value()) {
+        mapped.const_rhs = *rc;
+        mapped.rhs = AbstractValue();
+      } else if (lc.has_value() && !rc.has_value()) {
+        mapped.kind = flipAtomKind(mapped.kind);
+        mapped.lhs = mapped.rhs;
+        mapped.const_rhs = *lc;
+        mapped.rhs = AbstractValue();
+      }
+    }
+    const bool lhs_live =
+        mapped.lhs.getId() != 0 && live.count(mapped.lhs) > 0;
+    const bool rhs_live = mapped.const_rhs || mapped.rhs.getId() == 0 ||
+                          live.count(mapped.rhs) > 0;
+    // Drop tautological non-null / distinctness checks over dead locally
+    // allocated pointers so they don't pollute callers as non-manifest atoms.
+    if ((!lhs_live || !rhs_live) && is_local_alloc) {
+      const bool lhs_local =
+          mapped.lhs.getId() != 0 && is_local_alloc(mapped.lhs);
+      const bool rhs_local = !mapped.const_rhs && mapped.rhs.getId() != 0 &&
+                             is_local_alloc(mapped.rhs);
+      if ((mapped.kind == PathConditionAtom::Kind::NeZero && lhs_local) ||
+          (mapped.kind == PathConditionAtom::Kind::NotEqual &&
+           mapped.const_rhs && *mapped.const_rhs == 0 && lhs_local) ||
+          (mapped.kind == PathConditionAtom::Kind::NotEqual &&
+           !mapped.const_rhs && lhs_local && rhs_local)) {
+        continue;
+      }
+    }
     bool keep_cond =
         kv.second > 0 || (keep_non_ground_conditions && !mapped.is_ground);
-    if (!keep_cond) {
-      if (mapped.lhs.getId() != 0 && live.count(mapped.lhs) > 0 &&
-          (mapped.const_rhs || mapped.rhs.getId() == 0 ||
-           live.count(mapped.rhs) > 0)) {
-        keep_cond = true;
-      }
+    if (!keep_cond && lhs_live && rhs_live) {
+      keep_cond = true;
     }
     if (keep_cond) {
       simplified.recordCondition(mapped, kv.second);
@@ -2994,6 +3208,7 @@ bool PulseFormula::checkSatisfiability() const {
       (sat_cache_mode_ == 2u && cur_mode == 1u && sat_cache_result_)) {
     return sat_cache_result_;
   }
+  smt_unknown_ = false;
   auto cacheAndReturn = [&](bool res) {
     sat_cache_mode_ = cur_mode;
     sat_cache_result_ = res;
@@ -3776,6 +3991,7 @@ bool PulseFormula::checkSatisfiability() const {
 
   // Bound Z3 query complexity on very large straight-line functions.
   if (active_linear.size() + active_arith_ops.size() > 64) {
+    smt_unknown_ = true;
     return cacheAndReturn(true);
   }
 
@@ -4060,11 +4276,16 @@ bool PulseFormula::checkSatisfiability() const {
           bv_solver.add(z3::mk_or(alts));
         }
       }
-      const bool is_sat = (bv_solver.check() != z3::unsat);
-      if (smt_query_cache.size() >= 8192) {
-        smt_query_cache.clear();
+      z3::check_result bv_res = bv_solver.check();
+      const bool is_sat = (bv_res != z3::unsat);
+      if (bv_res == z3::unknown) {
+        smt_unknown_ = true;
+      } else {
+        if (smt_query_cache.size() >= 8192) {
+          smt_query_cache.clear();
+        }
+        smt_query_cache.emplace(std::move(query_key), is_sat);
       }
-      smt_query_cache.emplace(std::move(query_key), is_sat);
       return cacheAndReturn(is_sat);
     }
 
@@ -4077,6 +4298,7 @@ bool PulseFormula::checkSatisfiability() const {
         auto fit = float_constants_.find(c);
         if (fit != float_constants_.end() && !isZ3SafeDouble(fit->second)) {
           has_floats = false;
+          smt_unknown_ = true;
           break;
         }
       }
@@ -4110,6 +4332,7 @@ bool PulseFormula::checkSatisfiability() const {
     if (has_nonlin_float &&
         (nonlin_float_count > 1 || active_float_ops.size() > 4 ||
          active_float_cmps.size() > 4)) {
+      smt_unknown_ = true;
       if (active_linear.empty() && active_arith_ops.empty() &&
           active_disj_eqs.empty()) {
         return cacheAndReturn(true);
@@ -4121,6 +4344,7 @@ bool PulseFormula::checkSatisfiability() const {
     if (use_nonlin && (nonlin_op_count > 4 || nonlin_float_count > 1 ||
                        active_arith_ops.size() > 8 ||
                        active_linear.size() > 8)) {
+      smt_unknown_ = true;
       return cacheAndReturn(true);
     }
     std::string cache_key;
@@ -4346,7 +4570,9 @@ bool PulseFormula::checkSatisfiability() const {
 
     z3::check_result result = solver.check();
     const bool is_sat = (result != z3::unsat);
-    if (!cache_key.empty()) {
+    if (result == z3::unknown) {
+      smt_unknown_ = true;
+    } else if (!cache_key.empty()) {
       if (smt_query_cache.size() >= 8192) {
         smt_query_cache.clear();
       }
@@ -4355,6 +4581,7 @@ bool PulseFormula::checkSatisfiability() const {
     return cacheAndReturn(is_sat);
 
   } catch (const z3::exception &) {
+    smt_unknown_ = true;
     return cacheAndReturn(isConsistent());
   }
 }

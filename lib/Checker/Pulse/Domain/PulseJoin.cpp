@@ -885,8 +885,67 @@ PulseJoin::joinAbductive(const AbductiveDomain &lhs,
   joined.setTransitiveInfo(
       TransitiveInfo::merge(lhs.getTransitiveInfo(), rhs.getTransitiveInfo()));
 
-  // Merge unknown values flag (OR operation)
+  // Merge unknown values and over-approximation flags (OR operation).
+  // Also mark over-approximated if joining dropped non-ground path conditions
+  // without any complementary branch pair (e.g., merging `{x == 1}` and
+  // `{x == 2}` erases both preconditions, whereas `{c != 0}` + `{c == 0}` or
+  // `{n <= 0}` + `{n > 0, ...}` cancels complementary branch outcomes).
   joined.setUnknownValues(lhs.hasUnknownValues() || rhs.hasUnknownValues());
+  bool over_approx = lhs.isOverApproximated() || rhs.isOverApproximated();
+  if (!over_approx) {
+    auto areComplementary = [](const PathConditionAtom &a,
+                               const PathConditionAtom &b) {
+      if (!(a.lhs == b.lhs) || a.const_rhs != b.const_rhs) {
+        return false;
+      }
+      if (!a.const_rhs && !(a.rhs == b.rhs)) {
+        return false;
+      }
+      using K = PathConditionAtom::Kind;
+      return (a.kind == K::EqZero && b.kind == K::NeZero) ||
+             (a.kind == K::NeZero && b.kind == K::EqZero) ||
+             (a.kind == K::Equal && b.kind == K::NotEqual) ||
+             (a.kind == K::NotEqual && b.kind == K::Equal) ||
+             (a.kind == K::LessThan && b.kind == K::GreaterEqual) ||
+             (a.kind == K::GreaterEqual && b.kind == K::LessThan) ||
+             (a.kind == K::LessEqual && b.kind == K::GreaterThan) ||
+             (a.kind == K::GreaterThan && b.kind == K::LessEqual);
+    };
+    const auto &lconds = lhs.getPathFormula().getConditions();
+    const auto &rconds = rhs.getPathFormula().getConditions();
+    const auto &jconds = joined.getPathFormula().getConditions();
+    std::vector<PathConditionAtom> l_dropped;
+    std::vector<PathConditionAtom> r_dropped;
+    for (const auto &kv : lconds) {
+      if (!kv.first.is_ground && jconds.count(kv.first) == 0) {
+        l_dropped.push_back(kv.first);
+      }
+    }
+    for (const auto &kv : rconds) {
+      if (!kv.first.is_ground && jconds.count(kv.first) == 0) {
+        r_dropped.push_back(kv.first);
+      }
+    }
+    if (!l_dropped.empty() || !r_dropped.empty()) {
+      bool has_complement = false;
+      for (const auto &la : l_dropped) {
+        for (const auto &ra : r_dropped) {
+          if (areComplementary(la, ra)) {
+            has_complement = true;
+            break;
+          }
+        }
+        if (has_complement)
+          break;
+      }
+      if (!has_complement) {
+        over_approx = true;
+      }
+    }
+  }
+  if (over_approx) {
+    joined.markOverApproximated();
+  }
 
   // Merge skipped calls (union)
   for (const std::string &call : lhs.getSkippedCalls()) {

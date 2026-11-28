@@ -135,8 +135,13 @@ static std::optional<uint64_t> mulConstU64(uint64_t a, uint64_t b) {
   return static_cast<uint64_t>(prod);
 }
 
-static void reportOutOfBoundsAccess(const llvm::Instruction *loc,
+static void reportOutOfBoundsAccess(const AbductiveDomain &astate,
+                                    const llvm::Instruction *loc,
                                     const Address &addr, const char *detail) {
+  AbstractValue canon = astate.getCanonical(addr.addr);
+  if (!LatentIssue::isManifest(OperationResult::OutOfBounds, astate, canon)) {
+    return;
+  }
   Trace trace = Trace::fromValueHistory(addr.history);
   trace.addEvent(loc, detail);
   auto diag = std::make_unique<AccessToInvalidAddress>(
@@ -159,7 +164,7 @@ static void checkLengthAgainstAllocation(AbductiveDomain &astate,
   if (!size_opt)
     return;
   if (*len_opt > *size_opt) {
-    reportOutOfBoundsAccess(loc, addr, detail);
+    reportOutOfBoundsAccess(astate, loc, addr, detail);
     astate.getPostAttrs().add(canon, Attribute::OutOfBounds);
   }
 }
@@ -170,6 +175,9 @@ static void reportStackEscapeOnCall(AbductiveDomain &astate,
                                     const char *reason) {
   AbstractValue canon = astate.getCanonical(escaped_addr.addr);
   if (!astate.getPostAttrs().has(canon, Attribute::Stack)) {
+    return;
+  }
+  if (!LatentIssue::isManifest(astate)) {
     return;
   }
 
@@ -1332,19 +1340,25 @@ ModelResult PulseModels::modelFree(const llvm::CallBase *call,
       astate->getPostAttrs().has(canon_ptr, Attribute::Global)) {
     Trace trace = Trace::fromValueHistory(ptr_opt->history);
     trace.addEvent(call, "Invalid free: non-heap pointer");
-    std::string msg = "Invalid free of ";
-    msg += astate->getPostAttrs().has(canon_ptr, Attribute::Stack) ? "stack"
-                                                                   : "global";
-    msg += " memory";
-    auto diag = std::make_unique<InvalidFree>(
-        call, canon_ptr, msg,
-        "Only free heap allocations (malloc/new). Do not free stack/global "
-        "addresses.",
-        std::move(trace));
-    DiagnosticManager::getInstance().report(std::move(diag));
-    astate->setPathFormula(
-        std::make_unique<PulseFormula>(PulseFormula::contradiction()));
-    return ModelResult::success(std::move(state));
+    if (LatentIssue::isManifest(OperationResult::InvalidAccess, *astate,
+                                canon_ptr)) {
+      std::string msg = "Invalid free of ";
+      msg += astate->getPostAttrs().has(canon_ptr, Attribute::Stack) ? "stack"
+                                                                     : "global";
+      msg += " memory";
+      auto diag = std::make_unique<InvalidFree>(
+          call, canon_ptr, msg,
+          "Only free heap allocations (malloc/new). Do not free stack/global "
+          "addresses.",
+          std::move(trace));
+      DiagnosticManager::getInstance().report(std::move(diag));
+      astate->setPathFormula(
+          std::make_unique<PulseFormula>(PulseFormula::contradiction()));
+      return ModelResult::success(std::move(state));
+    }
+    return ModelResult::success({ExecutionDomain::latentAbortProgram(
+        std::make_unique<AbductiveDomain>(astate->clone()), nullptr,
+        OperationResult::InvalidAccess, std::move(trace))});
   }
 
   // Detect freeing an interior pointer (offset != 0 from a heap allocation).
@@ -1356,14 +1370,20 @@ ModelResult PulseModels::modelFree(const llvm::CallBase *call,
     Trace trace = Trace::fromValueHistory(ptr_opt->history);
     trace.addEvent(call,
                    "Invalid free: interior pointer not at start of allocation");
-    auto diag = std::make_unique<InvalidFree>(
-        call, canon_ptr, "Invalid free of interior pointer",
-        "Pass the original pointer returned by malloc/new to free/delete.",
-        std::move(trace));
-    DiagnosticManager::getInstance().report(std::move(diag));
-    astate->setPathFormula(
-        std::make_unique<PulseFormula>(PulseFormula::contradiction()));
-    return ModelResult::success(std::move(state));
+    if (LatentIssue::isManifest(OperationResult::InvalidAccess, *astate,
+                                canon_ptr)) {
+      auto diag = std::make_unique<InvalidFree>(
+          call, canon_ptr, "Invalid free of interior pointer",
+          "Pass the original pointer returned by malloc/new to free/delete.",
+          std::move(trace));
+      DiagnosticManager::getInstance().report(std::move(diag));
+      astate->setPathFormula(
+          std::make_unique<PulseFormula>(PulseFormula::contradiction()));
+      return ModelResult::success(std::move(state));
+    }
+    return ModelResult::success({ExecutionDomain::latentAbortProgram(
+        std::make_unique<AbductiveDomain>(astate->clone()), nullptr,
+        OperationResult::InvalidAccess, std::move(trace))});
   }
 
   if (astate->getPostAttrs().has(canon_ptr, Attribute::Invalid)) {
@@ -1372,11 +1392,20 @@ ModelResult PulseModels::modelFree(const llvm::CallBase *call,
     if (auto inv_info = astate->getInvalidationInfo(canon_ptr)) {
       trace.addEvent(inv_info->second, "First free");
     }
-    auto diag = std::make_unique<AccessToInvalidAddress>(
-        call, "Double free detected", "Freeing already freed memory",
-        "Ensure each allocation is freed exactly once", IssueType::UseAfterFree,
-        std::move(trace), inv_kind);
-    DiagnosticManager::getInstance().report(std::move(diag));
+    if (LatentIssue::isManifest(OperationResult::UseAfterFree, *astate,
+                                canon_ptr)) {
+      auto diag = std::make_unique<AccessToInvalidAddress>(
+          call, "Double free detected", "Freeing already freed memory",
+          "Ensure each allocation is freed exactly once",
+          IssueType::UseAfterFree, std::move(trace), inv_kind);
+      DiagnosticManager::getInstance().report(std::move(diag));
+      return ModelResult::success({ExecutionDomain::abortProgram(
+          std::make_unique<AbductiveDomain>(astate->clone()),
+          OperationResult::UseAfterFree, Trace())});
+    }
+    return ModelResult::success({ExecutionDomain::latentAbortProgram(
+        std::make_unique<AbductiveDomain>(astate->clone()), nullptr,
+        OperationResult::UseAfterFree, std::move(trace))});
   }
 
   ops_.invalidate(*astate, *ptr_opt, call, inv_kind);
@@ -2585,7 +2614,7 @@ ModelResult PulseModels::modelFread(const llvm::CallBase *call,
         AbstractValue canon = astate->getCanonical(ptr_opt->addr);
         auto alloc_size_opt = astate->getAllocationSize(canon);
         if (alloc_size_opt && *total_opt > *alloc_size_opt) {
-          reportOutOfBoundsAccess(call, *ptr_opt,
+          reportOutOfBoundsAccess(*astate, call, *ptr_opt,
                                   "fread writes beyond destination buffer");
           astate->getPostAttrs().add(canon, Attribute::OutOfBounds);
         }
@@ -2622,7 +2651,7 @@ ModelResult PulseModels::modelFwrite(const llvm::CallBase *call,
         AbstractValue canon = astate->getCanonical(ptr_opt->addr);
         auto alloc_size_opt = astate->getAllocationSize(canon);
         if (alloc_size_opt && *total_opt > *alloc_size_opt) {
-          reportOutOfBoundsAccess(call, *ptr_opt,
+          reportOutOfBoundsAccess(*astate, call, *ptr_opt,
                                   "fwrite reads beyond source buffer");
           astate->getPostAttrs().add(canon, Attribute::OutOfBounds);
         }
@@ -2756,7 +2785,7 @@ ModelResult PulseModels::modelStrcat(const llvm::CallBase *call,
       if (auto alloc_sz = astate->getAllocationSize(c_dest)) {
         if (d_str->size() + s_str->size() + 1 > *alloc_sz) {
           reportOutOfBoundsAccess(
-              call, *dest_opt,
+              *astate, call, *dest_opt,
               "strcat writes beyond destination buffer capacity");
           astate->getPostAttrs().add(c_dest, Attribute::OutOfBounds);
         }

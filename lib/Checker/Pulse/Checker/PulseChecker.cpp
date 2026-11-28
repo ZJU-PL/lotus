@@ -10,6 +10,7 @@
 #include "Checker/Pulse/Interproc/PulseModels.h"
 #include "Checker/Pulse/Interproc/PulseSpecialization.h"
 #include "Checker/Pulse/Report/PulseDiagnostic.h"
+#include "Checker/Pulse/Report/PulseLatentIssue.h"
 #include "Checker/Pulse/Report/PulseLogger.h"
 #include "Checker/Pulse/Report/PulseOptions.h"
 #include "Checker/Pulse/Report/PulseReport.h"
@@ -51,37 +52,45 @@ static std::string llvmTypeToString(const llvm::Type *ty) {
 
 static bool isCheapToCopyStructName(llvm::StringRef name) {
   return name.contains("string_view") || name.contains("basic_string_view") ||
-         name.contains("span") || name.contains("iterator") ||
+         name.contains("StringRef") || name.contains("ArrayRef") ||
+         name.contains("Twine") || name.contains("span") ||
+         name.contains("Span") || name.contains("Slice") ||
+         name.contains("iterator") || name.contains("Iterator") ||
          name.contains("unique_ptr") || name.contains("weak_ptr") ||
-         name.contains("reference_wrapper") || name.contains("function_ref");
+         name.contains("reference_wrapper") || name.contains("function_ref") ||
+         name.contains("optional") || name.contains("Optional") ||
+         name.contains("pair") || name.contains("ErrorOr") ||
+         name.contains("Expected");
 }
 
-static bool isNonTrivialConstRefCandidate(const llvm::Argument &arg) {
-  auto isCheapTy = [](const llvm::Type *ty) {
-    if (const auto *ST = llvm::dyn_cast_or_null<llvm::StructType>(ty)) {
+static bool isNonTrivialConstRefCandidate(const llvm::Argument &arg,
+                                          const llvm::DataLayout *DL) {
+  auto isSmallOrCheapTy = [DL](const llvm::Type *ty) {
+    if (!ty) {
+      return true;
+    }
+    if (const auto *ST = llvm::dyn_cast<llvm::StructType>(ty)) {
       if (ST->hasName() && isCheapToCopyStructName(ST->getName())) {
         return true;
       }
     }
+    if (DL && ty->isSized() && DL->getTypeAllocSize(const_cast<llvm::Type *>(ty)) < 24) {
+      return true;
+    }
     return false;
   };
   if (arg.hasByValAttr()) {
-    if (const auto *pty = llvm::dyn_cast<llvm::PointerType>(arg.getType())) {
-      if (isCheapTy(pty->getPointerElementType()))
-        return false;
+    const llvm::Type *byval_ty = arg.getParamByValType();
+    if (!byval_ty) {
+      if (const auto *pty = llvm::dyn_cast<llvm::PointerType>(arg.getType())) {
+        byval_ty = pty->getPointerElementType();
+      }
     }
-    return true;
+    return !isSmallOrCheapTy(byval_ty);
   }
   const llvm::Type *ty = arg.getType();
   if (ty->isStructTy() || ty->isArrayTy()) {
-    return !isCheapTy(ty);
-  }
-  if (const auto *pty = llvm::dyn_cast<llvm::PointerType>(ty)) {
-    if (const llvm::Type *elem = pty->getPointerElementType()) {
-      if (elem->isStructTy() && !arg.onlyReadsMemory()) {
-        return arg.hasByValAttr() && !isCheapTy(elem);
-      }
-    }
+    return !isSmallOrCheapTy(ty);
   }
   return false;
 }
@@ -676,11 +685,14 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
   // Register formal parameters (for interprocedural NonDisjunctiveSummary
   // mutation propagation) and candidate const-refable parameters at entry.
   if (!spec_key && init_state.getAstate()) {
+    const llvm::DataLayout *DL =
+        F->getParent() ? &F->getParent()->getDataLayout() : nullptr;
+    const bool allow_const_ref = !F->hasAddressTaken() && !F->isVarArg();
     unsigned arg_idx = 0;
     for (const auto &Arg : F->args()) {
       AbstractValue av = factory_.getOrCreate(&Arg);
       analysis_non_disj_.registerFormalParam(arg_idx, av);
-      if (isNonTrivialConstRefCandidate(Arg)) {
+      if (allow_const_ref && isNonTrivialConstRefCandidate(Arg, DL)) {
         analysis_non_disj_.registerConstRefCandidate(&Arg, av);
       }
       ++arg_idx;
@@ -806,9 +818,7 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
           pred_bb && loop_abs_ref.isInLoopBody(BB, pred_bb);
       if (from_backedge && loop_abs_ref.hasExactRepeatingState(BB, current_state)) {
         if (const AbductiveDomain *a = current_state.getAstate()) {
-          auto is_allocated = [a](AbstractValue v) { return a->isAllocated(v); };
-          if (!a->hasUnknownValues() &&
-              a->getPathFormula().isManifest(is_allocated)) {
+          if (LatentIssue::isManifest(*a)) {
             const llvm::Instruction *loop_loc = BB->getTerminator()
                                                     ? BB->getTerminator()
                                                     : &BB->front();
@@ -1119,6 +1129,14 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
             continue;
           AbstractValue cond_c = case_astate->getCanonical(cond->addr);
           AbstractValue val_c = case_astate->getCanonical(case_value->addr);
+          const bool cond_already_const =
+              case_astate->getPathFormula().asConstantInt(cond_c).has_value();
+          std::optional<int64_t> case_const;
+          if (const llvm::ConstantInt *ci = case_handle.getCaseValue()) {
+            if (ci->getBitWidth() <= 64) {
+              case_const = ci->getSExtValue();
+            }
+          }
           if (!case_astate->getPathFormula().addEquality(cond_c, val_c)) {
             continue;
           }
@@ -1138,10 +1156,16 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
           if (case_astate->getPathFormula().isUnsat()) {
             continue;
           }
-          PathConditionAtom atom = PathConditionAtom::makeRel(
-              PathConditionAtom::Kind::Equal, cond_c, val_c);
-          atom.is_ground =
-              case_astate->getPathFormula().asConstantInt(cond_c).has_value();
+          PathConditionAtom atom;
+          if (case_const) {
+            atom.kind = PathConditionAtom::Kind::Equal;
+            atom.lhs = cond_c;
+            atom.const_rhs = *case_const;
+          } else {
+            atom = PathConditionAtom::makeRel(PathConditionAtom::Kind::Equal,
+                                              cond_c, val_c);
+          }
+          atom.is_ground = cond_already_const;
           case_astate->getPathFormula().recordCondition(atom, 0);
 
           const llvm::BasicBlock *succ = case_handle.getCaseSuccessor();
@@ -1160,6 +1184,9 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
         if (!cond)
           continue;
 
+        AbstractValue def_cond_c = default_astate->getCanonical(cond->addr);
+        const bool def_cond_const =
+            default_astate->getPathFormula().asConstantInt(def_cond_c).has_value();
         bool feasible = true;
         for (const auto &case_handle : SI->cases()) {
           auto case_value = ops_.eval(*default_astate,
@@ -1170,6 +1197,19 @@ void PulseChecker::analyzeFunctionInternal(const llvm::Function *F,
                   default_astate->getCanonical(case_value->addr))) {
             feasible = false;
             break;
+          }
+          if (!def_cond_const) {
+            PathConditionAtom ne_atom;
+            ne_atom.kind = PathConditionAtom::Kind::NotEqual;
+            ne_atom.lhs = def_cond_c;
+            if (const llvm::ConstantInt *ci = case_handle.getCaseValue();
+                ci && ci->getBitWidth() <= 64) {
+              ne_atom.const_rhs = ci->getSExtValue();
+            } else {
+              ne_atom.rhs = default_astate->getCanonical(case_value->addr);
+            }
+            ne_atom.is_ground = false;
+            default_astate->getPathFormula().recordCondition(ne_atom, 0);
           }
         }
         const llvm::BasicBlock *default_succ = SI->getDefaultDest();

@@ -3000,3 +3000,328 @@ TEST_F(PulseCheckerTest,
         << "disable_smt=" << disable_smt;
   }
 }
+
+TEST_F(PulseCheckerTest,
+       ISLPrecisionConditionalNullSummarySwitchAndOverApproxBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    // 1. Direct unit checks on LatentIssue::isManifest for unknown values,
+    //    over-approximation, and complementary vs non-complementary PulseJoin.
+    {
+      AbductiveDomain dom;
+      AbstractValue av(nullptr, 9501);
+      EXPECT_TRUE(LatentIssue::isManifest(OperationResult::NullDereference, dom,
+                                          av))
+          << "disable_smt=" << disable_smt;
+
+      AbductiveDomain unk = dom.clone();
+      unk.declareUnknownValues();
+      EXPECT_FALSE(LatentIssue::isManifest(OperationResult::NullDereference,
+                                           unk, av))
+          << "disable_smt=" << disable_smt;
+
+      AbductiveDomain over = dom.clone();
+      over.markOverApproximated();
+      EXPECT_FALSE(LatentIssue::isManifest(OperationResult::NullDereference,
+                                           over, av))
+          << "disable_smt=" << disable_smt;
+
+      // Complementary join `{x == 0}` U `{x != 0}` stays exact.
+      AbstractValue x(nullptr, 9502);
+      AbductiveDomain c1;
+      AbductiveDomain c2;
+      PathConditionAtom eq0;
+      eq0.kind = PathConditionAtom::Kind::Equal;
+      eq0.lhs = x;
+      eq0.const_rhs = 0;
+      PathConditionAtom ne0;
+      ne0.kind = PathConditionAtom::Kind::NotEqual;
+      ne0.lhs = x;
+      ne0.const_rhs = 0;
+      c1.getPathFormula().recordCondition(eq0, 0);
+      c2.getPathFormula().recordCondition(ne0, 0);
+      auto exact_join = PulseJoin::joinAbductive(c1, c2);
+      ASSERT_TRUE(exact_join.has_value());
+      EXPECT_FALSE(exact_join->isOverApproximated())
+          << "disable_smt=" << disable_smt;
+
+      // Non-complementary join `{x == 1}` U `{x == 2}` marks over-approximated.
+      AbductiveDomain n1;
+      AbductiveDomain n2;
+      PathConditionAtom eq1;
+      eq1.kind = PathConditionAtom::Kind::Equal;
+      eq1.lhs = x;
+      eq1.const_rhs = 1;
+      PathConditionAtom eq2;
+      eq2.kind = PathConditionAtom::Kind::Equal;
+      eq2.lhs = x;
+      eq2.const_rhs = 2;
+      n1.getPathFormula().recordCondition(eq1, 0);
+      n2.getPathFormula().recordCondition(eq2, 0);
+      auto over_join = PulseJoin::joinAbductive(n1, n2);
+      ASSERT_TRUE(over_join.has_value());
+      EXPECT_TRUE(over_join->isOverApproximated())
+          << "disable_smt=" << disable_smt;
+    }
+
+    // 2. End-to-end ISL precision checks:
+    //    - Conditional return-null callee with dead-local lookup branch -> 0 FP
+    //    - Unconditional return-null callee -> 1 TP
+    //    - Constant-discharged return-null callee -> 1 TP (symbolic -> 0 FP)
+    //    - Symbolic switch case & default -> 0 FP (constant switch -> 1 TP)
+    //    - Conditioned free(&stack), memcpy OOB, return &stack -> 0 FP
+    auto module = parseModule(context, R"(
+      @g_val = global i32 42, align 4
+
+      declare i32* @unknown_lookup(i8*)
+      declare void @free(i8*)
+      declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)
+
+      define i32* @conditional_lookup_return_null(i8* %key) {
+      entry:
+        %e = call i32* @unknown_lookup(i8* %key)
+        %isnull = icmp eq i32* %e, null
+        br i1 %isnull, label %ret_null, label %ret_ok
+      ret_null:
+        ret i32* null
+      ret_ok:
+        ret i32* @g_val
+      }
+
+      define i32 @caller_conditional_lookup(i8* %key) {
+      entry:
+        %p = call i32* @conditional_lookup_return_null(i8* %key)
+        %v = load i32, i32* %p
+        ret i32 %v
+      }
+
+      define i32* @always_null() {
+      entry:
+        ret i32* null
+      }
+
+      define i32 @caller_always_null() {
+      entry:
+        %p = call i32* @always_null()
+        %v = load i32, i32* %p
+        ret i32 %v
+      }
+
+      define i32* @maybe_null_by_flag(i32 %flag) {
+      entry:
+        %z = icmp eq i32 %flag, 0
+        br i1 %z, label %ret_null, label %ret_ok
+      ret_null:
+        ret i32* null
+      ret_ok:
+        ret i32* @g_val
+      }
+
+      define i32 @caller_flag_zero_tp() {
+      entry:
+        %p = call i32* @maybe_null_by_flag(i32 0)
+        %v = load i32, i32* %p
+        ret i32 %v
+      }
+
+      define i32 @caller_flag_symbolic_no_fp(i32 %f) {
+      entry:
+        %p = call i32* @maybe_null_by_flag(i32 %f)
+        %v = load i32, i32* %p
+        ret i32 %v
+      }
+
+      define i32 @switch_symbolic_latent(i32 %x) {
+      entry:
+        switch i32 %x, label %def [
+          i32 1, label %c1
+        ]
+      c1:
+        %v1 = load i32, i32* null
+        ret i32 %v1
+      def:
+        %vd = load i32, i32* null
+        ret i32 %vd
+      }
+
+      define i32 @switch_constant_manifest() {
+      entry:
+        switch i32 1, label %def [
+          i32 1, label %c1
+        ]
+      c1:
+        %v1 = load i32, i32* null
+        ret i32 %v1
+      def:
+        ret i32 0
+      }
+
+      define i8* @conditioned_direct_reports_are_latent(i1 %c, i8* %src) {
+      entry:
+        %buf = alloca [4 x i8], align 1
+        %p = getelementptr inbounds [4 x i8], [4 x i8]* %buf, i64 0, i64 0
+        br i1 %c, label %bad_path, label %ok_path
+      bad_path:
+        call void @free(i8* %p)
+        ret i8* %p
+      ok_path:
+        ret i8* null
+      }
+
+      define void @unknown_call_suppresses_direct_oob(i8* %src) {
+      entry:
+        %buf = alloca [4 x i8], align 1
+        %p = getelementptr inbounds [4 x i8], [4 x i8]* %buf, i64 0, i64 0
+        %u = call i32* @unknown_lookup(i8* %src)
+        call void @llvm.memcpy.p0i8.p0i8.i64(i8* %p, i8* %src, i64 16, i1 false)
+        ret void
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    // Exactly 3 manifest NPDs: caller_always_null, caller_flag_zero_tp,
+    // switch_constant_manifest.
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::NullDereference), 3u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::InvalidFree), 0u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::OutOfBounds), 0u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::StackVariableAddressEscape),
+              0u)
+        << "disable_smt=" << disable_smt;
+  }
+}
+
+TEST_F(PulseCheckerTest,
+       ISLPrecisionLifetimeReuseFormatSinksZExtAndByteInitBothModes) {
+  for (bool disable_smt : {true, false}) {
+    ScopedSMTMode smt_guard(disable_smt);
+    DiagnosticManager::getInstance().clear();
+    BugReportMgr::get_instance().clear_all_reports();
+
+    auto module = parseModule(context, R"(
+      %Alpha = type { [4 x i8] }
+
+      @.fmt = private unnamed_addr constant [4 x i8] c"%s\0A\00", align 1
+
+      declare void @llvm.lifetime.start.p0i8(i64 immarg, i8* nocapture)
+      declare void @llvm.lifetime.end.p0i8(i64 immarg, i8* nocapture)
+      declare i8* @getenv(i8*)
+      declare i32 @printf(i8*, ...)
+      declare i32 @fprintf(i8*, i8*, ...)
+      declare i32 @snprintf(i8*, i64, i8*, ...)
+
+      define i8 @lifetime_reuse_no_uaf() {
+      entry:
+        %slot = alloca [4 x i8], align 1
+        %p0 = getelementptr inbounds [4 x i8], [4 x i8]* %slot, i64 0, i64 0
+        %p1 = getelementptr inbounds [4 x i8], [4 x i8]* %slot, i64 0, i64 1
+        call void @llvm.lifetime.start.p0i8(i64 4, i8* %p0)
+        store i8 1, i8* %p1
+        call void @llvm.lifetime.end.p0i8(i64 4, i8* %p0)
+        call void @llvm.lifetime.start.p0i8(i64 4, i8* %p0)
+        store i8 2, i8* %p1
+        %v = load i8, i8* %p1
+        ret i8 %v
+      }
+
+      define i8 @lifetime_end_without_restart_uaf() {
+      entry:
+        %slot = alloca [4 x i8], align 1
+        %p0 = getelementptr inbounds [4 x i8], [4 x i8]* %slot, i64 0, i64 0
+        %p1 = getelementptr inbounds [4 x i8], [4 x i8]* %slot, i64 0, i64 1
+        call void @llvm.lifetime.start.p0i8(i64 4, i8* %p0)
+        store i8 1, i8* %p1
+        call void @llvm.lifetime.end.p0i8(i64 4, i8* %p0)
+        %v = load i8, i8* %p1
+        ret i8 %v
+      }
+
+      define void @printf_format_precision(i8* %fp) {
+      entry:
+        %buf = alloca [32 x i8], align 1
+        %b0 = getelementptr inbounds [32 x i8], [32 x i8]* %buf, i64 0, i64 0
+        %env = call i8* @getenv(i8* getelementptr inbounds ([4 x i8], [4 x i8]* @.fmt, i64 0, i64 0))
+        ; Safe: constant format string with tainted value argument -> 0 FP
+        %r1 = call i32 (i8*, i8*, ...) @fprintf(i8* %fp, i8* getelementptr inbounds ([4 x i8], [4 x i8]* @.fmt, i64 0, i64 0), i8* %env)
+        %r2 = call i32 (i8*, i64, i8*, ...) @snprintf(i8* %b0, i64 32, i8* getelementptr inbounds ([4 x i8], [4 x i8]* @.fmt, i64 0, i64 0), i8* %env)
+        ; Unsafe: tainted format string -> 2 TPs
+        %r3 = call i32 (i8*, ...) @printf(i8* %env)
+        %r4 = call i32 (i8*, i8*, ...) @fprintf(i8* %fp, i8* %env)
+        ret void
+      }
+
+      define i32 @zext_unsigned_no_false_npd() {
+      entry:
+        %z = zext i8 -1 to i32
+        %bad1 = icmp slt i32 %z, 0
+        br i1 %bad1, label %boom1, label %check2
+      boom1:
+        %n1 = load i32, i32* null
+        ret i32 %n1
+      check2:
+        %bad2 = icmp eq i32 %z, 0
+        br i1 %bad2, label %boom2, label %ok
+      boom2:
+        %n2 = load i32, i32* null
+        ret i32 %n2
+      ok:
+        ret i32 %z
+      }
+
+      define i32 @byte_init_full_no_fp() {
+      entry:
+        %a = alloca %Alpha, align 4
+        %b0 = getelementptr inbounds %Alpha, %Alpha* %a, i64 0, i32 0, i64 0
+        %b1 = getelementptr inbounds %Alpha, %Alpha* %a, i64 0, i32 0, i64 1
+        %b2 = getelementptr inbounds %Alpha, %Alpha* %a, i64 0, i32 0, i64 2
+        %b3 = getelementptr inbounds %Alpha, %Alpha* %a, i64 0, i32 0, i64 3
+        store i8 1, i8* %b0
+        store i8 2, i8* %b1
+        store i8 3, i8* %b2
+        store i8 4, i8* %b3
+        %p32 = bitcast %Alpha* %a to i32*
+        %v = load i32, i32* %p32
+        ret i32 %v
+      }
+
+      define i32 @byte_init_partial_still_reports() {
+      entry:
+        %a = alloca %Alpha, align 4
+        %b0 = getelementptr inbounds %Alpha, %Alpha* %a, i64 0, i32 0, i64 0
+        %b1 = getelementptr inbounds %Alpha, %Alpha* %a, i64 0, i32 0, i64 1
+        %b2 = getelementptr inbounds %Alpha, %Alpha* %a, i64 0, i32 0, i64 2
+        store i8 1, i8* %b0
+        store i8 2, i8* %b1
+        store i8 3, i8* %b2
+        %p32 = bitcast %Alpha* %a to i32*
+        %v = load i32, i32* %p32
+        ret i32 %v
+      }
+    )");
+    ASSERT_NE(module, nullptr);
+
+    BugReportMgr &mgr = BugReportMgr::get_instance();
+    {
+      PulseChecker checker(module.get());
+      checker.analyze();
+    }
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::UseAfterFree), 1u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::TaintError), 2u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::NullDereference), 0u)
+        << "disable_smt=" << disable_smt;
+    EXPECT_EQ(getReportCountForType(mgr, IssueType::UninitializedRead), 1u)
+        << "disable_smt=" << disable_smt;
+  }
+}

@@ -367,11 +367,16 @@ private:
   // 0 = invalid, 1 = cached with SMT disabled, 2 = cached with SMT enabled.
   mutable uint8_t sat_cache_mode_{0};
   mutable bool sat_cache_result_{true};
+  mutable bool smt_unknown_{false};
   mutable bool consistent_cache_valid_{false};
   mutable bool consistent_cache_result_{true};
-  void invalidateSatOnly() { sat_cache_mode_ = 0; }
+  void invalidateSatOnly() {
+    sat_cache_mode_ = 0;
+    smt_unknown_ = false;
+  }
   void invalidateSatCache() {
     sat_cache_mode_ = 0;
+    smt_unknown_ = false;
     consistent_cache_valid_ = false;
   }
 
@@ -629,7 +634,8 @@ public:
   std::set<AbstractValue> simplifyForSummary(
       const std::set<AbstractValue> &keep_vars,
       const std::set<AbstractValue> &precondition_vocab = {},
-      bool keep_non_ground_conditions = false);
+      bool keep_non_ground_conditions = false,
+      const std::function<bool(AbstractValue)> &is_local_alloc = {});
 
   /**
    * Compare two formulas after canonical normalization.
@@ -654,6 +660,8 @@ public:
   std::optional<int64_t> asConstantInt(AbstractValue v) const;
 
   bool isUnsat() const;
+  bool hasSmtUnknown() const { return smt_unknown_; }
+  bool isProvenSatisfiable() const { return !isUnsat() && !smt_unknown_; }
   void simplify();
 
   /**

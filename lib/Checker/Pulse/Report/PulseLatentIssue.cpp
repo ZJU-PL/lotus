@@ -43,7 +43,12 @@ bool LatentIssue::isManifest(const AbductiveDomain &astate) {
   if (options::reportLatentIssues()) {
     return true;
   }
-  if (astate.hasUnknownValues() || astate.preHeapHasAssumptions()) {
+  if (astate.hasUnknownValues() || astate.isOverApproximated() ||
+      astate.preHeapHasAssumptions()) {
+    return false;
+  }
+  if (!options::disableSMT() &&
+      !astate.getPathFormula().isProvenSatisfiable()) {
     return false;
   }
   auto is_allocated = [&astate](AbstractValue v) {
@@ -59,13 +64,20 @@ bool LatentIssue::isManifest(OperationResult diagnostic,
   if (options::reportLatentIssues()) {
     return true;
   }
+  if (astate.hasUnknownValues() || astate.isOverApproximated() ||
+      astate.preHeapHasAssumptions()) {
+    return false;
+  }
+  if (!options::disableSMT() &&
+      !astate.getPathFormula().isProvenSatisfiable()) {
+    return false;
+  }
   auto is_allocated = [&astate](AbstractValue v) {
     return astate.isAllocated(v);
   };
 
   if (diagnostic == OperationResult::OutOfBounds) {
-    return !astate.preHeapHasAssumptions() &&
-           astate.getPathFormula().isManifest(is_allocated,
+    return astate.getPathFormula().isManifest(is_allocated,
                                               /*check_depth_zero=*/false);
   }
 
@@ -74,14 +86,10 @@ bool LatentIssue::isManifest(OperationResult diagnostic,
     if (v && llvm::isa<llvm::Argument>(v)) {
       return false;
     }
-    return !astate.preHeapHasAssumptions() &&
-           astate.getPathFormula().isManifest(is_allocated,
+    return astate.getPathFormula().isManifest(is_allocated,
                                               /*check_depth_zero=*/true);
   }
 
-  if (astate.preHeapHasAssumptions()) {
-    return false;
-  }
   return astate.getPathFormula().isManifest(is_allocated,
                                             /*check_depth_zero=*/true);
 }

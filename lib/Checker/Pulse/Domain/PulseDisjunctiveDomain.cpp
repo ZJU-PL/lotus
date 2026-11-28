@@ -17,7 +17,7 @@ static void reduceDisjuncts(std::vector<DisjunctiveDomain::Disjunct> &disjuncts,
 
   auto is_preferred = [](const DisjunctiveDomain::Disjunct &d) {
     auto *a = d.state.getAstate();
-    return a && !a->hasUnknownValues();
+    return a && !a->hasUnknownValues() && !a->isOverApproximated();
   };
 
   std::vector<DisjunctiveDomain::Disjunct> preferred;
@@ -234,9 +234,11 @@ DisjunctiveDomain::joinAtBlockForPred(const llvm::BasicBlock *BB,
     }
     auto *a_best = best->state.getAstate();
     auto *a_cur = disj.state.getAstate();
-    const bool best_unknown = a_best ? a_best->hasUnknownValues() : true;
-    const bool cur_unknown = a_cur ? a_cur->hasUnknownValues() : true;
-    if (best_unknown && !cur_unknown) {
+    const bool best_imprecise =
+        !a_best || a_best->hasUnknownValues() || a_best->isOverApproximated();
+    const bool cur_imprecise =
+        !a_cur || a_cur->hasUnknownValues() || a_cur->isOverApproximated();
+    if (best_imprecise && !cur_imprecise) {
       best = &disj;
     }
   }
@@ -247,15 +249,24 @@ DisjunctiveDomain::joinAtBlockForPred(const llvm::BasicBlock *BB,
   }
 
   unsigned same_pred_count = 0;
+  unsigned exact_same_pred_count = 0;
   for (const auto &disj : disjuncts) {
     if (!disj.state.isStopped() && disj.path_context == pred_bb) {
       ++same_pred_count;
+      const auto *a = disj.state.getAstate();
+      if (a && !a->hasUnknownValues() && !a->isOverApproximated()) {
+        ++exact_same_pred_count;
+      }
     }
   }
   if (same_pred_count <= 1) {
     return best->state.clone();
   }
 
+  // If multiple exact (non-widened, non-unknown) disjuncts exist on this edge,
+  // join only those exact disjuncts so widened/unknown disjuncts do not poison
+  // concrete witness states.
+  const bool join_exact_only = (exact_same_pred_count >= 2);
   ExecutionDomain out;
   if (const AbductiveDomain *acc_init = best->state.getAstate()) {
     AbductiveDomain acc = acc_init->clone();
@@ -263,6 +274,11 @@ DisjunctiveDomain::joinAtBlockForPred(const llvm::BasicBlock *BB,
     for (const auto &disj : disjuncts) {
       if (&disj == best || disj.state.isStopped() ||
           disj.path_context != pred_bb || !disj.state.getAstate()) {
+        continue;
+      }
+      if (join_exact_only &&
+          (disj.state.getAstate()->hasUnknownValues() ||
+           disj.state.getAstate()->isOverApproximated())) {
         continue;
       }
       if (auto merged = PulseJoin::joinAbductive(acc, *disj.state.getAstate())) {

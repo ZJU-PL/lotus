@@ -69,6 +69,51 @@ extractFunctionFromConstant(const llvm::Constant *C) {
   return llvm::dyn_cast_or_null<llvm::Function>(stripped);
 }
 
+static bool maybeMarkArrayInitialized(AbductiveDomain &astate,
+                                      AbstractValue arr_av,
+                                      const llvm::ArrayType *AT,
+                                      const llvm::DataLayout *DL,
+                                      const llvm::Instruction *loc = nullptr,
+                                      unsigned depth = 0);
+
+static bool maybeMarkBytesInitialized(AbductiveDomain &astate,
+                                      AbstractValue base_av,
+                                      uint64_t total_bytes,
+                                      const llvm::Instruction *loc = nullptr) {
+  if (total_bytes == 0 || total_bytes > 16) {
+    return false;
+  }
+  AbstractValue c_base = astate.getCanonical(base_av);
+  if (!astate.getPostAttrs().has(c_base, Attribute::Uninitialized)) {
+    return true;
+  }
+  AbstractValue root = astate.getAllocationRoot(c_base);
+  int64_t base_off = astate.getAllocationOffset(c_base).value_or(0);
+  std::set<int64_t> written_offsets;
+  for (const auto &kv : astate.getAllocationOffsets()) {
+    AbstractValue av = astate.getCanonical(kv.first);
+    if (av == c_base) {
+      continue;
+    }
+    if (astate.getAllocationRoot(av) == root &&
+        !astate.getPostAttrs().has(av, Attribute::Uninitialized) &&
+        astate.hasWrittenTo(av)) {
+      written_offsets.insert(kv.second);
+    }
+  }
+  if (written_offsets.empty()) {
+    return false;
+  }
+  for (uint64_t b = 0; b < total_bytes; ++b) {
+    if (written_offsets.count(base_off + static_cast<int64_t>(b)) == 0) {
+      return false;
+    }
+  }
+  astate.getPostAttrs().remove(c_base, Attribute::Uninitialized);
+  astate.markWrittenTo(c_base, loc);
+  return true;
+}
+
 static bool maybeMarkStructInitialized(AbductiveDomain &astate,
                                        AbstractValue struct_av,
                                        const llvm::StructType *ST,
@@ -93,6 +138,13 @@ static bool maybeMarkStructInitialized(AbductiveDomain &astate,
     const Address *edge =
         astate.getPostHeap().findEdge(c_struct, Access::field(i, field_off));
     if (!edge) {
+      if (DL && ST->isSized() &&
+          maybeMarkBytesInitialized(astate, c_struct,
+                                    DL->getTypeAllocSize(
+                                        const_cast<llvm::StructType *>(ST)),
+                                    loc)) {
+        return true;
+      }
       return false;
     }
     AbstractValue fc = astate.getCanonical(edge->addr);
@@ -105,13 +157,97 @@ static bool maybeMarkStructInitialized(AbductiveDomain &astate,
                                          depth + 1)) {
             continue;
           }
+        } else if (const auto *sub_at =
+                       llvm::dyn_cast<llvm::ArrayType>(ST->getElementType(i))) {
+          if (maybeMarkArrayInitialized(astate, fc, sub_at, DL, loc,
+                                        depth + 1)) {
+            continue;
+          }
         }
+      }
+      if (DL && ST->isSized() &&
+          maybeMarkBytesInitialized(astate, c_struct,
+                                    DL->getTypeAllocSize(
+                                        const_cast<llvm::StructType *>(ST)),
+                                    loc)) {
+        return true;
       }
       return false;
     }
   }
   astate.getPostAttrs().remove(c_struct, Attribute::Uninitialized);
   astate.markWrittenTo(c_struct, loc);
+  return true;
+}
+
+static bool maybeMarkArrayInitialized(AbductiveDomain &astate,
+                                      AbstractValue arr_av,
+                                      const llvm::ArrayType *AT,
+                                      const llvm::DataLayout *DL,
+                                      const llvm::Instruction *loc,
+                                      unsigned depth) {
+  if (!AT) {
+    return false;
+  }
+  AbstractValue c_arr = astate.getCanonical(arr_av);
+  if (!astate.getPostAttrs().has(c_arr, Attribute::Uninitialized)) {
+    return true;
+  }
+  const uint64_t num_elems = AT->getNumElements();
+  if (num_elems == 0 || num_elems > 16) {
+    return false;
+  }
+  llvm::Type *elem_ty = AT->getElementType();
+  const uint64_t elem_size =
+      (DL && elem_ty && elem_ty->isSized()) ? DL->getTypeAllocSize(elem_ty) : 0;
+
+  AbstractValue root = astate.getAllocationRoot(c_arr);
+  int64_t base_off = astate.getAllocationOffset(c_arr).value_or(0);
+  std::set<int64_t> written_offsets;
+  if (elem_size > 0) {
+    for (const auto &kv : astate.getAllocationOffsets()) {
+      AbstractValue av = astate.getCanonical(kv.first);
+      if (av == c_arr) {
+        continue;
+      }
+      if (astate.getAllocationRoot(av) == root &&
+          !astate.getPostAttrs().has(av, Attribute::Uninitialized) &&
+          astate.hasWrittenTo(av)) {
+        written_offsets.insert(kv.second);
+      }
+    }
+  }
+
+  for (uint64_t i = 0; i < num_elems; ++i) {
+    bool elem_ok = false;
+    if (const Address *edge = astate.getPostHeap().findEdge(
+            c_arr, Access::constArrayIndex(static_cast<int64_t>(i), elem_size))) {
+      AbstractValue ec = astate.getCanonical(edge->addr);
+      if (!astate.getPostAttrs().has(ec, Attribute::Uninitialized) ||
+          astate.hasWrittenTo(ec)) {
+        elem_ok = true;
+      } else if (depth < 4) {
+        if (const auto *sub_st = llvm::dyn_cast<llvm::StructType>(elem_ty)) {
+          elem_ok = maybeMarkStructInitialized(astate, ec, sub_st, DL, loc,
+                                               depth + 1);
+        } else if (const auto *sub_at =
+                       llvm::dyn_cast<llvm::ArrayType>(elem_ty)) {
+          elem_ok = maybeMarkArrayInitialized(astate, ec, sub_at, DL, loc,
+                                              depth + 1);
+        }
+      }
+    }
+    if (!elem_ok && elem_size > 0 &&
+        written_offsets.count(base_off + static_cast<int64_t>(i * elem_size)) >
+            0) {
+      elem_ok = true;
+    }
+    if (!elem_ok) {
+      return false;
+    }
+  }
+  astate.getPostAttrs().remove(c_arr, Attribute::Uninitialized);
+  astate.markWrittenTo(c_arr, loc);
   return true;
 }
 
@@ -1290,12 +1426,25 @@ PulseOperations::readDeref(AbductiveDomain &astate, Address ptr,
       if (const auto *ST =
               llvm::dyn_cast<llvm::StructType>(AI->getAllocatedType())) {
         maybeMarkStructInitialized(astate, canon_ptr, ST, DL, loc);
+      } else if (const auto *AT =
+                     llvm::dyn_cast<llvm::ArrayType>(AI->getAllocatedType())) {
+        maybeMarkArrayInitialized(astate, canon_ptr, AT, DL, loc);
+      } else if (DL && AI->getAllocatedType()->isSized()) {
+        maybeMarkBytesInitialized(
+            astate, canon_ptr, DL->getTypeAllocSize(AI->getAllocatedType()),
+            loc);
       }
     }
     if (astate.getPostAttrs().has(canon_ptr, Attribute::Uninitialized)) {
       if (const auto *LI = llvm::dyn_cast_or_null<llvm::LoadInst>(loc)) {
         if (const auto *ST = llvm::dyn_cast<llvm::StructType>(LI->getType())) {
           maybeMarkStructInitialized(astate, canon_ptr, ST, DL, loc);
+        } else if (const auto *AT =
+                       llvm::dyn_cast<llvm::ArrayType>(LI->getType())) {
+          maybeMarkArrayInitialized(astate, canon_ptr, AT, DL, loc);
+        } else if (DL && LI->getType()->isSized()) {
+          maybeMarkBytesInitialized(astate, canon_ptr,
+                                    DL->getTypeAllocSize(LI->getType()), loc);
         }
       }
     }

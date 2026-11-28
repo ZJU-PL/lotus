@@ -468,6 +468,7 @@ AbductiveDomain AbductiveDomain::clone() const {
   cloned.skipped_calls_ = skipped_calls_;
   cloned.transitive_info_ = transitive_info_.clone();
   cloned.unknown_values_ = unknown_values_;
+  cloned.over_approximated_ = over_approximated_;
   cloned.need_dynamic_type_specialization_ = need_dynamic_type_specialization_;
   cloned.recursive_calls_ = recursive_calls_;
   cloned.recursive_call_edges_ = recursive_call_edges_;

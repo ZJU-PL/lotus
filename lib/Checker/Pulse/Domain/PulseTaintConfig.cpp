@@ -435,10 +435,19 @@ void TaintConfig::initializeDefault() {
                                        "execle", "execv", "execvp", "execve",
                                        "popen", "eval"}),
       {TaintKind::UserInput()}, ProcedureTarget::AllArguments));
+  // Format-string sinks: only the format-string parameter itself is a format
+  // string injection sink (passing tainted data to `%s`/`%d` under a literal
+  // format string like `fprintf(fp, "%s\n", buf)` is NOT a format-string bug).
+  default_config_->addSinkProcedure(ProcedureUnit(
+      ProcedureMatcher::forExactNames({"printf", "vprintf"}),
+      {TaintKind::UserInput()}, ProcedureTarget::ArgumentPositions, {0}));
   default_config_->addSinkProcedure(ProcedureUnit(
       ProcedureMatcher::forExactNames(
-          {"printf", "fprintf", "sprintf", "snprintf"}),
-      {TaintKind::UserInput()}, ProcedureTarget::AllArguments));
+          {"fprintf", "sprintf", "vfprintf", "vsprintf"}),
+      {TaintKind::UserInput()}, ProcedureTarget::ArgumentPositions, {1}));
+  default_config_->addSinkProcedure(ProcedureUnit(
+      ProcedureMatcher::forExactNames({"snprintf", "vsnprintf"}),
+      {TaintKind::UserInput()}, ProcedureTarget::ArgumentPositions, {2}));
 
   // --- Unified default taint sanitizers ---
   default_config_->addSanitizerProcedure(ProcedureUnit(

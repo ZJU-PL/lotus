@@ -329,6 +329,11 @@ private:
   // Did we generate at least one unknown abstract value on this path?
   bool unknown_values_ = false;
 
+  // Did this state undergo an over-approximating join or loop widening?
+  // Under Incorrectness Logic, over-approximated states cannot directly
+  // witness manifest bugs (prevents false positives from lost correlations).
+  bool over_approximated_ = false;
+
   // Values requiring dynamic type specialization
   std::set<AbstractValue> need_dynamic_type_specialization_;
 
@@ -634,10 +639,14 @@ public:
     transitive_info_ = info;
   }
 
-  // Unknown values flag
+  // Unknown values & over-approximation flags
   bool hasUnknownValues() const { return unknown_values_; }
   void setUnknownValues(bool val) { unknown_values_ = val; }
   void declareUnknownValues() { unknown_values_ = true; }
+
+  bool isOverApproximated() const { return over_approximated_; }
+  void setOverApproximated(bool val) { over_approximated_ = val; }
+  void markOverApproximated() { over_approximated_ = true; }
 
   // Dynamic type specialization
   const std::set<AbstractValue> &getNeedDynamicTypeSpecialization() const {

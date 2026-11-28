@@ -560,6 +560,9 @@ static void applyPostCondition(
   if (callee_post->hasUnknownValues()) {
     caller_astate.declareUnknownValues();
   }
+  if (callee_post->isOverApproximated()) {
+    caller_astate.markOverApproximated();
+  }
   caller_astate.setTransitiveInfo(TransitiveInfo::merge(
       caller_astate.getTransitiveInfo(), callee_post->getTransitiveInfo()));
 }
