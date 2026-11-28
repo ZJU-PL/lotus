@@ -81,6 +81,9 @@ protected:
    * contain that location.
    */
   std::map<llvm::BasicBlock *, std::set<const Fragment *>> FragMap_;
+  bool FixpointComputed_ = false;
+
+  void stabilizeAll();
 
   /**
    * Wraps a call to z3::solver::check() with time measurements and records
@@ -182,6 +185,9 @@ public:
    * deallocated.
    */
   AbstractValue *after(llvm::BasicBlock *location);
+
+  const Fragment *findSingleEdgeFragment(llvm::BasicBlock *src,
+                                         llvm::BasicBlock *dst) const;
 
   virtual ~Analyzer() {}
 };

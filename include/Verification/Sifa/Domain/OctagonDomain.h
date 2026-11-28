@@ -66,24 +66,45 @@ public:
   }
 
   OctagonState join(const OctagonState &other) const {
-    if (isBottom_)
+    if (isBottom_ || hasNegativeSelfLoop())
       return other;
-    if (other.isBottom_)
+    if (other.isBottom_ || other.hasNegativeSelfLoop())
       return *this;
-    std::vector<const llvm::Value *> allVars;
-    for (const auto &p : varToIndex_)
-      allVars.push_back(p.first);
-    for (const auto &p : other.varToIndex_) {
-      if (varToIndex_.count(p.first))
-        continue;
-      allVars.push_back(p.first);
+
+    std::vector<const llvm::Value *> thisOrdered(varToIndex_.size(), nullptr);
+    for (const auto &p : varToIndex_) {
+      if (p.second < thisOrdered.size())
+        thisOrdered[p.second] = p.first;
     }
+    std::vector<const llvm::Value *> otherOrdered(other.varToIndex_.size(),
+                                                  nullptr);
+    for (const auto &p : other.varToIndex_) {
+      if (p.second < otherOrdered.size())
+        otherOrdered[p.second] = p.first;
+    }
+
+    std::vector<const llvm::Value *> allVars;
+    allVars.reserve(thisOrdered.size() + otherOrdered.size());
+    for (const llvm::Value *v : thisOrdered) {
+      if (v)
+        allVars.push_back(v);
+    }
+    for (const llvm::Value *v : otherOrdered) {
+      if (v && !varToIndex_.count(v))
+        allVars.push_back(v);
+    }
+
     const std::size_t n = allVars.size();
     std::unordered_map<const llvm::Value *, std::size_t> newVarToIndex;
+    newVarToIndex.reserve(n);
     for (std::size_t i = 0; i < n; ++i)
       newVarToIndex[allVars[i]] = i;
 
-    std::vector<std::size_t> copy1(2 * n, 2 * n), copy2(2 * n, 2 * n);
+    const OctagonMatrix &c1 = closedMatrix();
+    const OctagonMatrix &c2 = other.closedMatrix();
+
+    std::vector<std::size_t> copy1(2 * n, c1.dim());
+    std::vector<std::size_t> copy2(2 * n, c2.dim());
     for (std::size_t i = 0; i < n; ++i) {
       auto it1 = varToIndex_.find(allVars[i]);
       auto it2 = other.varToIndex_.find(allVars[i]);
@@ -96,66 +117,121 @@ public:
         copy2[2 * i + 1] = 2 * it2->second + 1;
       }
     }
-    OctagonMatrix m1 = (matrix_.dim() == 2 * n)
-                           ? matrix_.rearrange(copy1)
-                           : expandAndRearrange(matrix_, copy1, n);
-    OctagonMatrix m2 = (other.matrix_.dim() == 2 * n)
-                           ? other.matrix_.rearrange(copy2)
-                           : expandAndRearrange(other.matrix_, copy2, n);
+    OctagonMatrix m1 = c1.rearrange(copy1);
+    OctagonMatrix m2 = c2.rearrange(copy2);
+
     OctagonState out;
-    out.varToIndex_ = newVarToIndex;
+    out.varToIndex_ = std::move(newVarToIndex);
     out.matrix_ = m1.max(m2);
-    for (const auto &kv : memory_)
-      out.memory_[kv.first] = kv.second;
-    for (const auto &kv : other.memory_) {
-      auto it = out.memory_.find(kv.first);
-      if (it != out.memory_.end())
-        it->second = it->second.join(kv.second);
-      else
-        out.memory_[kv.first] = kv.second;
+    // Absent memory region denotes top; join only intersects regions present in
+    // both states.
+    for (const auto &kv : memory_) {
+      auto it = other.memory_.find(kv.first);
+      if (it == other.memory_.end())
+        continue;
+      out.memory_[kv.first] = kv.second.join(it->second);
     }
     return out;
   }
 
   OctagonState widen(const OctagonState &other) const {
-    if (isBottom_)
+    if (isBottom_ || hasNegativeSelfLoop())
       return other;
-    if (other.isBottom_)
+    if (other.isBottom_ || other.hasNegativeSelfLoop())
       return *this;
-    if (varToIndex_ != other.varToIndex_)
-      return join(other);
+
+    const std::size_t n = varToIndex_.size();
+    const OctagonMatrix &otherClosed = other.closedMatrix();
+    std::vector<std::size_t> copy2(2 * n, otherClosed.dim());
+    for (const auto &kv : varToIndex_) {
+      auto it = other.varToIndex_.find(kv.first);
+      if (it != other.varToIndex_.end()) {
+        copy2[2 * kv.second] = 2 * it->second;
+        copy2[2 * kv.second + 1] = 2 * it->second + 1;
+      }
+    }
+    OctagonMatrix m2 = otherClosed.rearrange(copy2);
+
     OctagonState out;
     out.varToIndex_ = varToIndex_;
-    out.matrix_ = matrix_.widenSimple(other.matrix_);
-    for (const auto &kv : memory_)
-      out.memory_[kv.first] = kv.second;
-    for (const auto &kv : other.memory_) {
-      auto it = out.memory_.find(kv.first);
-      if (it != out.memory_.end())
-        it->second = it->second.widen(kv.second);
-      else
-        out.memory_[kv.first] = kv.second;
+    // Keep LHS unclosed per Miné's octagon widening to ensure termination.
+    out.matrix_ = matrix_.widenSimple(m2);
+    for (const auto &kv : memory_) {
+      auto it = other.memory_.find(kv.first);
+      if (it == other.memory_.end())
+        continue;
+      out.memory_[kv.first] = kv.second.widen(it->second);
     }
     return out;
   }
 
+  bool isContainedIn(const OctagonState &b) const {
+    if (isBottom_ || hasNegativeSelfLoop())
+      return true;
+    if (b.isBottom_ || b.hasNegativeSelfLoop())
+      return false;
+    const OctagonMatrix &aClosed = closedMatrix();
+    const OctagonMatrix &bClosed = b.closedMatrix();
+    for (const auto &kvB1 : b.varToIndex_) {
+      const std::size_t iB = kvB1.second;
+      auto itA1 = varToIndex_.find(kvB1.first);
+      for (const auto &kvB2 : b.varToIndex_) {
+        const std::size_t jB = kvB2.second;
+        auto itA2 = varToIndex_.find(kvB2.first);
+        for (int si = 0; si < 2; ++si) {
+          for (int sj = 0; sj < 2; ++sj) {
+            const std::size_t rowB = 2 * iB + si;
+            const std::size_t colB = 2 * jB + sj;
+            auto cb = bClosed.get(rowB, colB);
+            if (!cb)
+              continue;
+            if (rowB == colB && *cb >= 0)
+              continue;
+            if (itA1 == varToIndex_.end() || itA2 == varToIndex_.end())
+              return false;
+            auto ca =
+                aClosed.get(2 * itA1->second + si, 2 * itA2->second + sj);
+            if (!ca || *ca > *cb)
+              return false;
+          }
+        }
+      }
+    }
+    for (const auto &kv : b.memory_) {
+      auto itA = memory_.find(kv.first);
+      const Interval ia = (itA == memory_.end()) ? Interval::top() : itA->second;
+      if (!IntervalDomain::intervalLeq(ia, kv.second))
+        return false;
+    }
+    return true;
+  }
+
   bool operator==(const OctagonState &o) const {
-    return isBottom_ == o.isBottom_ && varToIndex_ == o.varToIndex_ &&
-           matrix_.dim() == o.matrix_.dim() && memory_ == o.memory_;
+    const bool b1 = isBottom_ || hasNegativeSelfLoop();
+    const bool b2 = o.isBottom_ || o.hasNegativeSelfLoop();
+    if (b1 != b2)
+      return false;
+    if (b1)
+      return true;
+    return isContainedIn(o) && o.isContainedIn(*this);
   }
 
   /// Print the state summary to an output stream.
   void print(llvm::raw_ostream &out) const;
+
+  const OctagonMatrix &closedMatrix() const {
+    if (!closureCache_) {
+      closureCache_ = matrix_.strongClosure();
+    }
+    return *closureCache_;
+  }
 
   /// True if strong closure has a negative self-loop.
   /// The strong closure is computed lazily and cached to avoid O(n³)
   /// recomputation on every isBottom() call in the hot path of the DAG
   /// interpreter.
   bool hasNegativeSelfLoop() const {
-    if (!closureCache_) {
-      closureCache_ = matrix_.strongClosure();
-    }
-    return closureCache_->hasNegativeSelfLoop();
+    return closedMatrix().hasNegativeSelfLoop();
   }
 
   /// Invalidate the cached strong closure (call after mutating matrix_).
@@ -219,49 +295,7 @@ public:
     return s.isBottom() || s.hasNegativeSelfLoop();
   }
   bool leq(const OctagonState &a, const OctagonState &b) const override {
-    if (a.isBottom())
-      return true;
-    if (b.isBottom())
-      return false;
-    // a ⊑ b iff every constraint in a is implied by b, i.e. for all (i,j):
-    // b.matrix[i][j] >= a.matrix[i][j] (looser or equal bound).
-    // We compare after strong closure so both are in canonical form.
-    // Variables must be aligned: if a has a variable not in b, we cannot
-    // determine containment — conservatively return false.
-    for (const auto &kv : a.varToIndex()) {
-      if (!b.varToIndex().count(kv.first))
-        return false;
-    }
-    const OctagonMatrix aClosed = a.matrix().strongClosure();
-    const OctagonMatrix bClosed = b.matrix().strongClosure();
-    // For each pair of indices in a, check that b's bound is >= a's bound.
-    for (const auto &kvA : a.varToIndex()) {
-      auto itB = b.varToIndex().find(kvA.first);
-      if (itB == b.varToIndex().end())
-        return false;
-      std::size_t iA = kvA.second, iB = itB->second;
-      for (const auto &kvA2 : a.varToIndex()) {
-        auto itB2 = b.varToIndex().find(kvA2.first);
-        if (itB2 == b.varToIndex().end())
-          return false;
-        std::size_t jA = kvA2.second, jB = itB2->second;
-        for (int si = 0; si < 2; ++si) {
-          for (int sj = 0; sj < 2; ++sj) {
-            auto ca = aClosed.get(2 * iA + si, 2 * jA + sj);
-            auto cb = bClosed.get(2 * iB + si, 2 * jB + sj);
-            // a has a finite constraint that b does not have (b is +inf): a ⊄
-            // b.
-            if (ca && !cb)
-              return false;
-            // Both finite: a's bound must be <= b's bound (b is looser or
-            // equal).
-            if (ca && cb && *ca > *cb)
-              return false;
-          }
-        }
-      }
-    }
-    return true;
+    return a.isContainedIn(b);
   }
   OctagonState join(const OctagonState &a,
                     const OctagonState &b) const override {

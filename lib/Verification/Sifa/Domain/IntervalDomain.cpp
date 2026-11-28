@@ -69,11 +69,16 @@ IntervalState applyIncomingPhis(const Transition &t, IntervalState out) {
     return out;
   if (!t.source || !t.target || !t.landsAtBlockEntry())
     return out;
+  std::vector<std::pair<const llvm::PHINode *, Interval>> updates;
   for (const llvm::Instruction &I : *t.target) {
     const auto *phi = llvm::dyn_cast<llvm::PHINode>(&I);
     if (!phi)
       break;
-    out.set(phi, getInterval(out, incomingValueForPredecessor(*phi, t.source)));
+    updates.emplace_back(
+        phi, getInterval(out, incomingValueForPredecessor(*phi, t.source)));
+  }
+  for (const auto &upd : updates) {
+    out.set(upd.first, upd.second);
   }
   return out;
 }
@@ -448,40 +453,51 @@ IntervalState mergeReturnState(const Transition &t,
   return out;
 }
 
-/// Restrict interval to signed range of \p bits (e.g. i32 -> [-2^31, 2^31-1]).
+/// Wrap/widen interval to signed range of \p bits (e.g. i32 -> [-2^31, 2^31-1]).
+/// Two's-complement arithmetic/casts wrap on overflow; never returns bottom
+/// unless \p i itself is bottom.
 Interval restrictToSigned(const Interval &i, unsigned bits) {
   if (i.isBottom())
     return i;
+  if (bits == 0)
+    return Interval::top();
   if (bits >= 64)
     return i;
-  int64_t minVal = -(1LL << (bits - 1));
-  int64_t maxVal = (1LL << (bits - 1)) - 1;
-  std::optional<int64_t> lo = i.lo.has_value()
-                                  ? std::max(*i.lo, minVal)
-                                  : std::optional<int64_t>(minVal);
-  std::optional<int64_t> hi = i.hi.has_value()
-                                  ? std::min(*i.hi, maxVal)
-                                  : std::optional<int64_t>(maxVal);
-  if (lo && hi && *lo > *hi)
-    return Interval::bottom();
-  return Interval{lo, hi, false};
+  int64_t minVal = -static_cast<int64_t>(uint64_t{1} << (bits - 1));
+  int64_t maxVal = static_cast<int64_t>((uint64_t{1} << (bits - 1)) - 1);
+  if (i.lo.has_value() && i.hi.has_value() && *i.lo >= minVal && *i.hi <= maxVal)
+    return i;
+  if (i.isPoint()) {
+    uint64_t mask = (uint64_t{1} << bits) - 1;
+    uint64_t v = static_cast<uint64_t>(*i.lo) & mask;
+    uint64_t signBit = uint64_t{1} << (bits - 1);
+    if (v & signBit)
+      v |= ~mask;
+    return Interval::point(static_cast<int64_t>(v));
+  }
+  return Interval{minVal, maxVal, false};
 }
 
-/// Restrict interval to unsigned range [0, 2^bits - 1].
+/// Wrap/widen interval to unsigned range [0, 2^bits - 1] (two's-complement
+/// modular semantics; never returns bottom unless \p i itself is bottom).
 Interval restrictToUnsigned(const Interval &i, unsigned bits) {
   if (i.isBottom())
     return i;
-  if (bits >= 64)
+  if (bits == 0)
+    return Interval::top();
+  if (bits >= 64) {
+    if (i.lo.has_value() && *i.lo >= 0)
+      return i;
+    return Interval::top();
+  }
+  int64_t maxVal = static_cast<int64_t>((uint64_t{1} << bits) - 1);
+  if (i.lo.has_value() && i.hi.has_value() && *i.lo >= 0 && *i.hi <= maxVal)
     return i;
-  int64_t maxVal = (bits == 64) ? INT64_MAX : ((1LL << bits) - 1);
-  std::optional<int64_t> lo = i.lo.has_value() ? std::max(*i.lo, int64_t{0})
-                                                : std::optional<int64_t>(0);
-  std::optional<int64_t> hi = i.hi.has_value()
-                                  ? std::min(*i.hi, maxVal)
-                                  : std::optional<int64_t>(maxVal);
-  if (lo && hi && *lo > *hi)
-    return Interval::bottom();
-  return Interval{lo, hi, false};
+  if (i.isPoint()) {
+    uint64_t mask = (uint64_t{1} << bits) - 1;
+    return Interval::point(static_cast<int64_t>(static_cast<uint64_t>(*i.lo) & mask));
+  }
+  return Interval{int64_t{0}, maxVal, false};
 }
 
 unsigned getBitWidth(const llvm::Value *V) {
@@ -545,13 +561,22 @@ Interval transferInstruction(const llvm::Instruction &I,
   case llvm::Instruction::SRem: {
     auto L = getInterval(state, I.getOperand(0));
     auto R = getInterval(state, I.getOperand(1));
-    if (R.containsZero())
+    if (L.isBottom() || R.isBottom())
+      return Interval::bottom();
+    if (R.containsZero() || !R.lo || !R.hi)
       return restrictToSigned(Interval::top(), getBitWidth(&I));
-    if (!R.lo || !R.hi)
+    auto absU64 = [](int64_t v) -> uint64_t {
+      return v < 0 ? (uint64_t{0} - static_cast<uint64_t>(v))
+                   : static_cast<uint64_t>(v);
+    };
+    uint64_t maxAbs = std::max(absU64(*R.lo), absU64(*R.hi));
+    if (maxAbs == 0)
       return restrictToSigned(Interval::top(), getBitWidth(&I));
-    int64_t rLo = std::abs(*R.lo), rHi = std::abs(*R.hi);
-    int64_t bound = std::max(rLo, rHi) - 1;
-    return restrictToSigned(Interval{-bound, bound, false}, getBitWidth(&I));
+    uint64_t bound = maxAbs - 1;
+    if (bound > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      return restrictToSigned(Interval::top(), getBitWidth(&I));
+    int64_t b = static_cast<int64_t>(bound);
+    return restrictToSigned(Interval{-b, b, false}, getBitWidth(&I));
   }
   case llvm::Instruction::URem: {
     auto R = getInterval(state, I.getOperand(1));
@@ -624,13 +649,23 @@ Interval transferInstruction(const llvm::Instruction &I,
       return Interval::bottom();
     if (!L.lo || !L.hi || !R.lo || !R.hi)
       return restrictToSigned(Interval::top(), getBitWidth(&I));
-    if (*R.hi < 0 || *R.lo > 63)
+    if (*R.lo < 0 || *R.hi > 63)
       return restrictToSigned(Interval::top(), getBitWidth(&I));
-    int64_t shAmt = std::min(*R.lo, int64_t{63});
-    int64_t vLo = *L.lo >> shAmt, vHi = *L.hi >> shAmt;
-    return restrictToSigned(
-        Interval{std::min(vLo, vHi), std::max(vLo, vHi), false},
-        getBitWidth(&I));
+    auto safeAShr = [](int64_t val, int64_t amt) -> int64_t {
+      unsigned s = static_cast<unsigned>(amt);
+      if (s == 0)
+        return val;
+      uint64_t uv = static_cast<uint64_t>(val) >> s;
+      if (val < 0)
+        uv |= (~uint64_t{0} << (64 - s));
+      return static_cast<int64_t>(uv);
+    };
+    int64_t shAmtLo = *R.lo, shAmtHi = *R.hi;
+    int64_t v00 = safeAShr(*L.lo, shAmtLo), v01 = safeAShr(*L.lo, shAmtHi);
+    int64_t v10 = safeAShr(*L.hi, shAmtLo), v11 = safeAShr(*L.hi, shAmtHi);
+    return restrictToSigned(Interval{std::min({v00, v01, v10, v11}),
+                                     std::max({v00, v01, v10, v11}), false},
+                            getBitWidth(&I));
   }
   case llvm::Instruction::And: {
     auto L = getInterval(state, I.getOperand(0));

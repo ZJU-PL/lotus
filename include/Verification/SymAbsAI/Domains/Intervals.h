@@ -58,9 +58,10 @@ protected:
 public:
   Interval(const FunctionContext &fctx, RepresentedValue value)
       : FunctionContext_(fctx), Value_(value) {
-    int64_t bw = fctx.sortForType(value->getType()).bv_size();
-    Max_ = (1L << (bw - 1L)) - 1L;
-    Min_ = (-Max_) - 1L;
+    unsigned bw = fctx.sortForType(value->getType()).bv_size();
+    assert(bw >= 1 && bw <= 64);
+    Max_ = static_cast<int64_t>((uint64_t{1} << (bw - 1)) - 1);
+    Min_ = (-Max_) - 1;
 
     PrevLower_ = Min_;
     PrevUpper_ = Max_;

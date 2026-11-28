@@ -23,15 +23,15 @@ bool Interval::isTop() const { return (Lower_ == Min_) && (Upper_ == Max_); }
 bool Interval::joinWith(const AbstractValue &av_other) {
   auto other = dynamic_cast<const Interval &>(av_other);
 
-  if (Bottom_) {
-    if (!other.isBottom()) {
-      Bottom_ = false;
-      Lower_ = other.Lower_;
-      Upper_ = other.Upper_;
-      assert(checkValid());
-      return true;
-    }
+  if (other.isBottom())
     return false;
+
+  if (Bottom_) {
+    Bottom_ = false;
+    Lower_ = other.Lower_;
+    Upper_ = other.Upper_;
+    assert(checkValid());
+    return true;
   } else {
     if (other.Lower_ < Lower_ || other.Upper_ > Upper_) {
       Lower_ = std::min(other.Lower_, Lower_);
@@ -135,13 +135,15 @@ void Interval::abstractConsequence(const AbstractValue &av_other) {
   if (Bottom_)
     return;
 
-  uint64_t delta_l = Lower_ - other.Lower_;
+  uint64_t delta_l =
+      static_cast<uint64_t>(Lower_) - static_cast<uint64_t>(other.Lower_);
   // positive as Lower_ >= other.Lower_
-  uint64_t delta_u = other.Upper_ - Upper_;
+  uint64_t delta_u =
+      static_cast<uint64_t>(other.Upper_) - static_cast<uint64_t>(Upper_);
   // positive as Upper_ <= other.Upper_
 
-  Lower_ = Lower_ - (delta_l / 2);
-  Upper_ = Upper_ + (delta_u / 2);
+  Lower_ = static_cast<int64_t>(static_cast<uint64_t>(Lower_) - (delta_l / 2));
+  Upper_ = static_cast<int64_t>(static_cast<uint64_t>(Upper_) + (delta_u / 2));
   assert(checkValid());
 }
 
@@ -240,13 +242,17 @@ void ThresholdInterval::abstractConsequence(const AbstractValue &av_other) {
   if (Bottom_)
     return;
 
-  uint64_t delta_l = Lower_ - other.Lower_;
+  uint64_t delta_l =
+      static_cast<uint64_t>(Lower_) - static_cast<uint64_t>(other.Lower_);
   // positive as Lower_ >= other.Lower_
-  uint64_t delta_u = other.Upper_ - Upper_;
+  uint64_t delta_u =
+      static_cast<uint64_t>(other.Upper_) - static_cast<uint64_t>(Upper_);
   // positive as Upper_ <= other.Upper_
 
-  int64_t candidate_l = getLowerThreshold(Lower_ - (delta_l / 2));
-  int64_t candidate_u = getUpperThreshold(Upper_ + (delta_u / 2));
+  int64_t candidate_l = getLowerThreshold(
+      static_cast<int64_t>(static_cast<uint64_t>(Lower_) - (delta_l / 2)));
+  int64_t candidate_u = getUpperThreshold(
+      static_cast<int64_t>(static_cast<uint64_t>(Upper_) + (delta_u / 2)));
 
   if (candidate_l > other.Lower_)
     Lower_ = candidate_l;

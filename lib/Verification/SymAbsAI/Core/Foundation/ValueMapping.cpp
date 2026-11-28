@@ -72,6 +72,9 @@ z3::expr ValueMapping::getFullRepresentation(llvm::Value *value) const {
 
   // form appropriate name for primed/unprimed var
   std::string name = value->getName().str();
+  if (name.empty()) {
+    name = "__anon_" + std::to_string(reinterpret_cast<std::uintptr_t>(value));
+  }
   if (!llvm::isa<llvm::Argument>(value)) {
     if (primed)
       name = name + "_1";
@@ -124,14 +127,7 @@ z3::expr ValueMapping::memory() const {
   }
 
   std::ostringstream name;
-  name << "mem_";
-
-  if (bb == Fragment::EXIT)
-    name << "EXIT";
-  else
-    name << bb->getName().str();
-
-  name << "_" << mem_ops;
+  name << "mem_" << FunctionContext_.getBlockName(bb) << "_" << mem_ops;
 
   auto sort = FunctionContext_.getMemoryModel().sort();
   return FunctionContext_.getZ3().constant(name.str().c_str(), sort);

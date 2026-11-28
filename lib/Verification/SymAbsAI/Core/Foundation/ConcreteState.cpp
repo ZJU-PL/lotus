@@ -36,7 +36,7 @@ ConcreteState::ConcreteState(const ValueMapping &vmap, z3::model model)
     z3::expr e = model.eval(vmap[value], true);
     ManagedValues_.push_back(e);
   }
-  Values_ = &ManagedValues_[0];
+  Values_ = ManagedValues_.empty() ? nullptr : ManagedValues_.data();
 }
 
 /**
@@ -79,7 +79,7 @@ std::ostream &operator<<(std::ostream &out, const ConcreteState &cstate) {
     else
       needs_comma = true;
 
-    return out << repr(rvals[i]) << ": " << repr(cstate.Values_[i]);
+    out << repr(rvals[i]) << ": " << repr(cstate.Values_[i]);
   }
   out << "}";
 

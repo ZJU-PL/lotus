@@ -21,6 +21,8 @@
 #include "Verification/SymAbsAI/Utils/Z3APIExtension.h"
 
 #include <atomic>
+#include <queue>
+#include <unordered_set>
 
 #include <llvm/IR/CFG.h>
 #include <llvm/Support/Timer.h>
@@ -101,6 +103,8 @@ bool Analyzer::bestTransformer(const AbstractValue *input,
                                const Fragment &fragment,
                                AbstractValue *result) const {
   assert(Mode_ != ONLY_DYNAMIC);
+  if (!input || input->isBottom())
+    return false;
   countBestTransformerCall();
 
   VOutBlock vout_block("best transformer for " + repr(fragment));
@@ -148,6 +152,105 @@ bool Analyzer::bestTransformer(const AbstractValue *input,
  * a point’s state gets refined. Dynamic results from `ResultStore` are
  * merged in when available.
  */
+const Fragment *Analyzer::findSingleEdgeFragment(llvm::BasicBlock *src,
+                                                 llvm::BasicBlock *dst) const {
+  if (!src)
+    return nullptr;
+  auto it = FragMap_.find(src);
+  if (it == FragMap_.end())
+    return nullptr;
+  for (const Fragment *f : it->second) {
+    if (f->getStart() == src && f->getEnd() == dst && !f->includesEndBody() &&
+        f->edges().size() == 1 && f->edges().count({src, dst})) {
+      return f;
+    }
+  }
+  return nullptr;
+}
+
+void Analyzer::stabilizeAll() {
+  if (FixpointComputed_)
+    return;
+  FixpointComputed_ = true;
+
+  if (Mode_ != FULL)
+    return;
+
+  std::unordered_map<llvm::BasicBlock *, std::vector<const Fragment *>>
+      incomingByEnd;
+  std::unordered_map<llvm::BasicBlock *, std::vector<const Fragment *>>
+      outgoingByStart;
+  for (const auto &frag : Fragments_) {
+    incomingByEnd[frag.getEnd()].push_back(&frag);
+    outgoingByStart[frag.getStart()].push_back(&frag);
+  }
+
+  for (llvm::BasicBlock *ap : AbstractionPoints_) {
+    if (!Results_[ap])
+      Results_[ap] = createInitialValue(Domain_, ap, false);
+  }
+
+  std::queue<llvm::BasicBlock *> work;
+  std::unordered_set<llvm::BasicBlock *> inWork;
+  auto enqueueSuccs = [&](llvm::BasicBlock *start) {
+    auto it = outgoingByStart.find(start);
+    if (it == outgoingByStart.end())
+      return;
+    for (const Fragment *frag : it->second) {
+      llvm::BasicBlock *dst = frag->getEnd();
+      if (inWork.insert(dst).second)
+        work.push(dst);
+    }
+  };
+
+  auto *entry = &FunctionContext_.getFunction()->getEntryBlock();
+  if (Results_[entry] && !Results_[entry]->isBottom())
+    enqueueSuccs(entry);
+
+  std::unordered_map<llvm::BasicBlock *, unsigned> updateCount;
+  constexpr unsigned kOuterWideningThreshold = 3;
+  constexpr unsigned kOuterHavocCap = 16;
+
+  while (!work.empty()) {
+    llvm::BasicBlock *loc = work.front();
+    work.pop();
+    inWork.erase(loc);
+
+    AbstractValue *output = Results_[loc].get();
+    if (!output)
+      continue;
+
+    bool updated = false;
+    auto inIt = incomingByEnd.find(loc);
+    if (inIt != incomingByEnd.end()) {
+      for (const Fragment *frag : inIt->second) {
+        AbstractValue *input = Results_[frag->getStart()].get();
+        if (!input || input->isBottom())
+          continue;
+        if (bestTransformer(input, *frag, output))
+          updated = true;
+      }
+    }
+
+    if (updated) {
+      unsigned &cnt = updateCount[loc];
+      ++cnt;
+      if (cnt >= kOuterHavocCap) {
+        if (!output->isTop())
+          output->havoc();
+        else
+          continue;
+      } else if (cnt >= kOuterWideningThreshold) {
+        output->widen();
+      }
+      enqueueSuccs(loc);
+    }
+  }
+
+  for (llvm::BasicBlock *ap : AbstractionPoints_)
+    Stable_.insert(ap);
+}
+
 AbstractValue *Analyzer::at(llvm::BasicBlock *location) {
   auto *store = FunctionContext_.getModuleContext().getResultStore();
   if (store) {
@@ -175,20 +278,18 @@ AbstractValue *Analyzer::at(llvm::BasicBlock *location) {
       if (Mode_ == ONLY_DYNAMIC) {
         vout << "Results for non-abstraction point " << repr(location)
              << " are not being computed in the ONLY_DYNAMIC mode\n";
-        // result always will be a bottom
         goto end;
       }
 
+      stabilizeAll();
       for (auto *parent_frag : FragMap_[location]) {
-        // create a sub-fragment and derive a result from the fragment
-        // start
         auto sub_frag = FragmentDecomposition::SubFragment(
             *parent_frag, parent_frag->getStart(), location);
 
         VOutBlock vb("Computing result for non-abstraction point: " +
                      repr(sub_frag));
 
-        AbstractValue *input = at(sub_frag.getStart());
+        AbstractValue *input = Results_[sub_frag.getStart()].get();
         bestTransformer(input, sub_frag, Results_[location].get());
       }
 
@@ -201,9 +302,6 @@ AbstractValue *Analyzer::at(llvm::BasicBlock *location) {
     if (!Results_[location])
       Results_[location] = createInitialValue(Domain_, location, false);
 
-    // in the ONLY_DYNAMIC and ABS_POINTS_DYNAMIC mode we return the result
-    // that is already present without computing the fixpoint, i.e., either
-    // the dynamically-computed value or bottom
     if (Mode_ != FULL) {
       vout << "Result at abstraction point " << repr(location)
            << " will not be computed in unsound mode.\n";
@@ -214,36 +312,7 @@ AbstractValue *Analyzer::at(llvm::BasicBlock *location) {
       goto end;
     }
 
-    VOutBlock vo("Computing result at abstraction point: " + repr(location));
-    Stable_.insert(location);
-    bool updated = false;
-
-    for (auto *frag : FragMap_[location]) {
-      if (frag->getEnd() == location) {
-        AbstractValue *input = at(frag->getStart());
-        AbstractValue *output = Results_[location].get();
-        bool this_updated = bestTransformer(input, *frag, output);
-        updated = updated || this_updated;
-        Infl_[frag->getStart()].insert(location);
-      }
-    }
-
-    if (updated) {
-      std::set<llvm::BasicBlock *> invalid = Infl_[location];
-      Infl_[location].clear();
-
-      for (auto *to_update : invalid) {
-        vout << "Invalidating " + repr(to_update) + " because " +
-                    repr(location) + " was updated.\n";
-        Stable_.erase(to_update);
-      }
-
-      for (auto *post : invalid) {
-        at(post); // force stabilization
-      }
-    }
-
-    assert(Stable_.find(location) != Stable_.end());
+    stabilizeAll();
   }
 
 end:

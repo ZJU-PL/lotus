@@ -67,14 +67,51 @@ public:
     pred->connectOutgoingInternal(this);
   }
 
+  /// Fast O(1) edge insertion when caller guarantees \p pred is not yet
+  /// connected to this node and this node is not in \p pred's outgoing list.
+  void connectIncomingUnique(RegexDagNode<L> *pred) {
+    if (!pred || pred == this) {
+      return;
+    }
+    incoming_.push_back(pred);
+    pred->outgoing_.push_back(this);
+  }
+
+  /// Fast O(1) edge insertion when caller guarantees \p succ is not yet
+  /// connected to this node and this node is not in \p succ's incoming list.
+  void connectOutgoingUnique(RegexDagNode<L> *succ) {
+    if (!succ || succ == this) {
+      return;
+    }
+    outgoing_.push_back(succ);
+    succ->incoming_.push_back(this);
+  }
+
   void removeOutgoing(RegexDagNode<L> *succ) {
     outgoing_.erase(std::remove(outgoing_.begin(), outgoing_.end(), succ),
                     outgoing_.end());
   }
 
+  template <typename Pred> void removeOutgoingIf(Pred &&pred) {
+    outgoing_.erase(
+        std::remove_if(outgoing_.begin(), outgoing_.end(), std::forward<Pred>(pred)),
+        outgoing_.end());
+  }
+
   void removeIncoming(RegexDagNode<L> *pred) {
     incoming_.erase(std::remove(incoming_.begin(), incoming_.end(), pred),
                     incoming_.end());
+  }
+
+  template <typename Pred> void removeIncomingIf(Pred &&pred) {
+    incoming_.erase(
+        std::remove_if(incoming_.begin(), incoming_.end(), std::forward<Pred>(pred)),
+        incoming_.end());
+  }
+
+  void clearEdges() {
+    outgoing_.clear();
+    incoming_.clear();
   }
 
 private:

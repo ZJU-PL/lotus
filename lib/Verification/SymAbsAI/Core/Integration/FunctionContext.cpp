@@ -19,8 +19,10 @@
 #include "Verification/SymAbsAI/Utils/Z3APIExtension.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <queue>
 #include <string>
+#include <unordered_set>
 
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
@@ -39,12 +41,14 @@ struct ValueNameCompare {
     // give globals high ids to make ids a bit less configuration-dependent
     bool a_global = llvm::isa<llvm::GlobalVariable>(a);
     bool b_global = llvm::isa<llvm::GlobalVariable>(b);
-    if (a_global && !b_global)
-      return false;
-    else if (!a_global && b_global)
-      return true;
-    else
-      return a->getName().str() < b->getName().str();
+    if (a_global != b_global)
+      return !a_global;
+    std::string a_name = a->getName().str();
+    std::string b_name = b->getName().str();
+    if (a_name != b_name)
+      return a_name < b_name;
+    return reinterpret_cast<std::uintptr_t>(a) <
+           reinterpret_cast<std::uintptr_t>(b);
   }
 };
 } // namespace
@@ -62,45 +66,66 @@ FunctionContext::FunctionContext(llvm::Function *func,
   MemoryModel_ = MemoryModel::New(*this);
   FloatingPointModel_ = FloatingPointModel::New(*this);
 
-  // Use a set to avoid duplicates. Comparator needs to be reproducible since
-  // the order determines RepresentedValue::id()
-  std::set<Value *, ValueNameCompare> represented;
-
-  // add all instructions and parameters to represented values (only those
-  // that appear in the function's ValueSymbolTable, i.e. have a name).
-  // Unnamed SSA values (e.g. many PHIs) are omitted unless
-  // RepresentAllInstructions is true.
-  for (auto &entry : *Function_->getValueSymbolTable()) {
-    Value *val = entry.getValue();
-
-    // Do not represent `invoke`. It's currently unsupported and
-    // problematic since it's a terminator instruction but can also
-    // define a value.
-    if (isa<InvokeInst>(val))
-      continue;
-
-    Type *type = val->getType();
-    if (type->isIntegerTy() || type->isPointerTy())
-      represented.insert(val);
-
-    if (type->isFloatingPointTy() && FloatingPointModel_->supportsType(type)) {
-      represented.insert(val);
+  // Assign deterministic, collision-free block identifiers for edge variables
+  // and memory variables (handles functions whose basic blocks are unnamed).
+  std::unordered_set<std::string> used_block_names;
+  used_block_names.insert("EXIT");
+  used_block_names.insert("_EXIT_");
+  unsigned bbIdx = 0;
+  for (auto &BB : *Function_) {
+    std::string bname = BB.hasName() ? BB.getName().str() : "";
+    if (bname.empty() || !used_block_names.insert(bname).second) {
+      do {
+        bname = "__bb_" + std::to_string(bbIdx++);
+      } while (!used_block_names.insert(bname).second);
     }
+    BlockNames_.emplace(&BB, std::move(bname));
+  }
+
+  std::vector<Value *> candidates;
+  std::unordered_set<Value *> seen_vals;
+  auto addCandidate = [&](Value *val) {
+    if (!val || isa<InvokeInst>(val))
+      return;
+    Type *type = val->getType();
+    bool ok = type->isIntegerTy() || type->isPointerTy() ||
+              (type->isFloatingPointTy() &&
+               FloatingPointModel_->supportsType(type));
+    if (ok && seen_vals.insert(val).second)
+      candidates.push_back(val);
+  };
+
+  // Add all named values from the function's ValueSymbolTable.
+  for (auto &entry : *Function_->getValueSymbolTable()) {
+    addCandidate(entry.getValue());
   }
 
   if (Config_.get<bool>("FunctionContext", "RepresentAllInstructions", false)) {
+    unsigned symabsArgId = 0;
+    for (auto &arg : Function_->args()) {
+      if (arg.getName().empty()) {
+        Type *type = arg.getType();
+        if (type->isIntegerTy() || type->isPointerTy() ||
+            (type->isFloatingPointTy() &&
+             FloatingPointModel_->supportsType(type))) {
+          arg.setName("symabs.arg." + std::to_string(symabsArgId++));
+        }
+      }
+      addCandidate(&arg);
+    }
     unsigned symabsId = 0;
     for (auto &BB : *Function_) {
       for (auto &I : BB) {
-        if (represented.count(&I))
-          continue;
-        if (isa<InvokeInst>(&I))
+        if (seen_vals.count(&I) || isa<InvokeInst>(&I))
           continue;
         Type *type = I.getType();
-        if (type->isIntegerTy() || type->isPointerTy()) {
+        bool ok = type->isIntegerTy() || type->isPointerTy() ||
+                  (type->isFloatingPointTy() &&
+                   FloatingPointModel_->supportsType(type));
+        if (ok) {
           if (I.getName().empty())
             I.setName("symabs." + std::to_string(symabsId++));
-          represented.insert(&I);
+          addCandidate(&I);
         }
       }
     }
@@ -123,27 +148,57 @@ FunctionContext::FunctionContext(llvm::Function *func,
         used_globals.push_back(&global);
     }
 
-    // Globals and locals have separate namespaces in LLVM. We alter names
-    // of locals in case of a name clash.
     std::set<std::string> global_names;
-    for (auto *global : used_globals)
-      global_names.insert(global->getName().str());
+    for (auto *g : used_globals) {
+      if (!g->getName().empty())
+        global_names.insert(g->getName().str());
+    }
+    unsigned gvIdx = 0;
+    for (auto *g : used_globals) {
+      if (g->getName().empty()) {
+        std::string gname;
+        do {
+          gname = "__symabs_gv_" + std::to_string(gvIdx++);
+        } while (!global_names.insert(gname).second);
+        g->setName(gname);
+      }
+    }
 
-    for (auto *local : represented) {
+    // Globals and locals have separate namespaces in LLVM. Alter names of
+    // locals before sorting so comparator ordering stays consistent.
+    for (auto *local : candidates) {
       while (global_names.find(local->getName().str()) != global_names.end()) {
-
         local->setName(local->getName().str() + "_");
       }
     }
 
-    // we can now safely add used_globals to RepresentedValues
-    std::copy(used_globals.begin(), used_globals.end(),
-              std::inserter(represented, represented.begin()));
+    for (auto *g : used_globals) {
+      if (seen_vals.insert(g).second)
+        candidates.push_back(g);
+    }
   }
+
+  // Ensure every represented value has a non-empty unique name before sorting.
+  std::unordered_set<std::string> used_val_names;
+  unsigned anonIdx = 0;
+  for (auto *value : candidates) {
+    if (value->getName().empty() ||
+        !used_val_names.insert(value->getName().str()).second) {
+      std::string vname;
+      std::string base =
+          value->getName().empty() ? "__symabs_v_" : value->getName().str() + "_";
+      do {
+        vname = base + std::to_string(anonIdx++);
+      } while (!used_val_names.insert(vname).second);
+      value->setName(vname);
+    }
+  }
+
+  std::sort(candidates.begin(), candidates.end(), ValueNameCompare());
 
   // populate RepresentedValues_ with instances with appropriate indices
   unsigned i = 0;
-  for (auto *value : represented) {
+  for (auto *value : candidates) {
     assert(value->getName().str().length() > 0);
     RepresentedValues_.push_back(RepresentedValue(i, value));
     ++i;
@@ -375,6 +430,17 @@ FunctionContext::findRepresentedValue(const llvm::Value *value) const {
   return nullptr;
 }
 
+std::string FunctionContext::getBlockName(const llvm::BasicBlock *bb) const {
+  if (bb == Fragment::EXIT)
+    return "EXIT";
+  auto it = BlockNames_.find(bb);
+  if (it != BlockNames_.end())
+    return it->second;
+  if (bb && bb->hasName())
+    return bb->getName().str();
+  return "__bb_ptr_" + std::to_string(reinterpret_cast<std::uintptr_t>(bb));
+}
+
 z3::expr FunctionContext::getEdgeVariable(llvm::BasicBlock *bb_from,
                                           llvm::BasicBlock *bb_to) const {
   assert(bb_from != nullptr);
@@ -395,10 +461,10 @@ z3::expr FunctionContext::getEdgeVariable(llvm::BasicBlock *bb_from,
   std::string name;
 
   if (bb_to == Fragment::EXIT) {
-    name = EDGE_VAR_PREFIX + bb_from->getName().str() + "_TO__EXIT_";
+    name = EDGE_VAR_PREFIX + getBlockName(bb_from) + "_TO__EXIT_";
   } else {
-    name = EDGE_VAR_PREFIX + bb_from->getName().str() + "_TO_" +
-           bb_to->getName().str();
+    name = EDGE_VAR_PREFIX + getBlockName(bb_from) + "_TO_" +
+           getBlockName(bb_to);
   }
 
   return getZ3().bool_const(name.c_str());

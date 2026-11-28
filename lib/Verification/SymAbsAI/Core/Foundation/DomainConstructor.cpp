@@ -22,6 +22,7 @@
 #include "Verification/SymAbsAI/Utils/Config.h"
 
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -258,7 +259,10 @@ DomainConstructor::DomainConstructor(const configparser::Config &config) {
   *this = config.get<DomainConstructor>("AbstractDomain", "Variant",
                                         DomainConstructor());
 
-  assert(!isInvalid()); // default value is never used in config.get
+  if (isInvalid()) {
+    throw std::invalid_argument(
+        "Unknown or invalid AbstractDomain.Variant in configuration");
+  }
 }
 
 /**

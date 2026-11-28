@@ -27,8 +27,10 @@ ProcedureResources::ProcedureResources(
 
   std::uint32_t nextMarkerId = 1;
   for (llvm::BasicBlock *loi : lois) {
-    auto *loiNode = pg.getBlockEntryNode(*loi);
-    auto expr = exprBetween(stats, pe, entry, loiNode);
+    auto *loiNode = loi ? pg.getBlockEntryNode(*loi) : nullptr;
+    auto expr = (loiNode && pg.graph().getNodes().count(loiNode))
+                    ? exprBetween(stats, pe, entry, loiNode)
+                    : lotus::pathexpressions::Regex<Transition>::emptySet();
     auto marked = markRegex(expr, loi, nextMarkerId++);
     loiMarkers.push_back(addToDag(stats, regexToDag, marked));
   }
@@ -73,8 +75,10 @@ ProcedureResources::ProcedureResources(
   // We start at 1 to avoid the common "0 means uninitialized" convention.
   std::uint32_t nextMarkerId = 1;
   for (llvm::BasicBlock *loi : lois) {
-    auto *loiNode = pg.getBlockEntryNode(*loi);
-    auto expr = exprBetween(stats, pe, entry, loiNode);
+    auto *loiNode = loi ? pg.getBlockEntryNode(*loi) : nullptr;
+    auto expr = (loiNode && pg.graph().getNodes().count(loiNode))
+                    ? exprBetween(stats, pe, entry, loiNode)
+                    : lotus::pathexpressions::Regex<Transition>::emptySet();
     auto marked = markRegex(expr, loi, nextMarkerId++);
     loiMarkers.push_back(addToDag(stats, regexToDag, marked));
   }

@@ -107,3 +107,58 @@ TEST(PathExpressionsTest, RegexToCompactTgf) {
   const std::string tgf = RegexToCompactTgf<char>::apply(u2);
   EXPECT_EQ(tgf, std::string("0 ∪\n1 a\n2 b\n3 c\n#\n0 1 0\n0 2 1\n0 3 2\n"));
 }
+
+TEST(PathExpressionsTest, FactorsCommonPrefixSuffixAndFlattensNestedStar) {
+  auto a = Regex<char>::literal('a');
+  auto b = Regex<char>::literal('b');
+  auto c = Regex<char>::literal('c');
+
+  auto ab = Regex<char>::concat(a, b);
+  auto ac = Regex<char>::concat(a, c);
+  auto factoredPrefix = Regex<char>::simplifiedUnion(ab, ac);
+  auto expectedPrefix = Regex<char>::concat(a, Regex<char>::union_(b, c));
+  EXPECT_TRUE(factoredPrefix->equals(*expectedPrefix));
+
+  auto ba = Regex<char>::concat(b, a);
+  auto ca = Regex<char>::concat(c, a);
+  auto factoredSuffix = Regex<char>::simplifiedUnion(ba, ca);
+  auto expectedSuffix = Regex<char>::concat(Regex<char>::union_(b, c), a);
+  EXPECT_TRUE(factoredSuffix->equals(*expectedSuffix));
+
+  auto starA = Regex<char>::simplifiedStar(a);
+  auto starStarA = Regex<char>::simplifiedStar(starA);
+  EXPECT_TRUE(starStarA->equals(*starA));
+}
+
+TEST(PathExpressionsTest, SequentialDiamondsRemainCompactAndDeterministic) {
+  auto buildChain = []() {
+    GenericLabeledGraph<int, int> g;
+    constexpr int kStages = 20;
+    g.addNode(0);
+    int edgeId = 0;
+    for (int s = 0; s < kStages; ++s) {
+      int base = 3 * s;
+      int next = base + 3;
+      g.addNode(base + 1);
+      g.addNode(base + 2);
+      g.addNode(next);
+      g.addEdge(base, edgeId++, base + 1);
+      g.addEdge(base, edgeId++, base + 2);
+      g.addEdge(base + 1, edgeId++, next);
+      g.addEdge(base + 2, edgeId++, next);
+    }
+    PathExpressionComputer<int, int> comp(g);
+    return comp.exprBetween(0, 3 * kStages);
+  };
+
+  auto re1 = buildChain();
+  auto re2 = buildChain();
+  ASSERT_NE(re1, nullptr);
+  ASSERT_NE(re2, nullptr);
+  EXPECT_FALSE(re1->isEmptySet());
+  EXPECT_TRUE(re1->equals(*re2));
+  EXPECT_EQ(re1->toString(), re2->toString());
+  // Without common-prefix/suffix factoring + min-fill ordering, 20 diamonds
+  // produce >= 2^20 nodes.
+  EXPECT_LT(re1->toString().size(), 4096u);
+}

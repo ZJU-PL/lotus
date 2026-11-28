@@ -21,3 +21,10 @@ add_lotus_collected_test_suite(verification_tests
     CanaryParallel
     ${Z3_LIBRARIES}
   TIMEOUT 900)
+
+# Ensure static-archive DomainConstructor::Register initializers in
+# SymAbsAIAnalysis are linked into verification_tests (matches lotus-verify-sifa).
+if(APPLE)
+  target_link_options(verification_tests PRIVATE
+    "LINKER:-force_load,$<TARGET_FILE:SymAbsAIAnalysis>")
+endif()

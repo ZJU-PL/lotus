@@ -13,6 +13,7 @@
 #include "Verification/SymAbsAI/Utils/Config.h"
 #include "Verification/SymAbsAI/Utils/Utils.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 
@@ -31,6 +32,8 @@ namespace symabs_ai {
 bool UnilateralAnalyzer::bestTransformer(const AbstractValue *input,
                                          const Fragment &fragment,
                                          AbstractValue *result) const {
+  if (!input || input->isBottom())
+    return false;
   Analyzer::countBestTransformerCall();
   if (std::getenv("LOTUS_TRACE_BEST_TRANSFORMER")) {
     std::cerr << "  [UnilateralAnalyzer::bestTransformer entered #"
@@ -89,11 +92,13 @@ bool UnilateralAnalyzer::bestTransformer(const AbstractValue *input,
     for (auto &ind_var : cache_entry->ind_vars)
       assumptions.push_back(!ind_var);
 
-    // create a fresh indication variable and construct the input formula
+    // Create a fresh activation literal and guard `av_formula` by
+    // `ind_var => av_formula` (NOT `==`, otherwise assuming `!ind_var` on
+    // later calls asserts `!av_formula`, making overlapping/top inputs UNSAT).
     std::ostringstream ind_var_name;
     ind_var_name << INPUT_VAR_PREFIX << cache_entry->ind_vars.size();
     z3::expr ind_var = ctx.bool_const(ind_var_name.str().c_str());
-    cache_entry->solver.add(ind_var == av_formula);
+    cache_entry->solver.add(z3::implies(ind_var, av_formula));
     assumptions.push_back(ind_var);
     cache_entry->ind_vars.push_back(ind_var);
   } else {
@@ -131,8 +136,21 @@ bool UnilateralAnalyzer::strongestConsequence(
   bool changed = false;
   unsigned int loop_count = 0;
   auto config = FunctionContext_.getConfig();
-  int widen_delay = config.get<int>("Analyzer", "WideningDelay", 20);
-  int widen_frequency = config.get<int>("Analyzer", "WideningFrequency", 10);
+  int widen_delay = std::max(0, config.get<int>("Analyzer", "WideningDelay", 20));
+  int widen_frequency =
+      std::max(1, config.get<int>("Analyzer", "WideningFrequency", 10));
+
+  struct SolverPushGuard {
+    z3::solver *s;
+    explicit SolverPushGuard(z3::solver *sol) : s(sol) {
+      if (s)
+        s->push();
+    }
+    ~SolverPushGuard() {
+      if (s)
+        s->pop();
+    }
+  } pushGuard(solver);
 
   while (true) {
     vout << "loop iteration: " << ++loop_count << "\n";
@@ -150,7 +168,11 @@ bool UnilateralAnalyzer::strongestConsequence(
     }
 
     auto z3_answer = checkWithStats(solver, assumptions);
-    assert(z3_answer != z3::unknown);
+    if (z3_answer == z3::unknown) {
+      bool wasTop = result->isTop();
+      result->havoc();
+      return changed || !wasTop;
+    }
 
     if (z3_answer == z3::unsat)
       break;
@@ -167,9 +189,10 @@ bool UnilateralAnalyzer::strongestConsequence(
         vout << *result;
       }
       assert(here_changed);
+      break;
     }
 
-    int widen_n = loop_count - widen_delay;
+    int widen_n = static_cast<int>(loop_count) - widen_delay;
     if (widen_n >= 0 && (widen_n % widen_frequency) == 0) {
       vout << "widening!\n";
       result->widen();

@@ -55,7 +55,12 @@ bool BilateralAnalyzer::strongestConsequence(AbstractValue *result,
     solver.add(!p->toFormula(vmap, phi.ctx()));
 
     auto z3_answer = checkWithStats(&solver);
-    assert(z3_answer != z3::unknown);
+    if (z3_answer == z3::unknown) {
+      solver.pop();
+      bool wasTop = result->isTop();
+      result->havoc();
+      return changed || !wasTop;
+    }
 
     if (z3_answer == z3::unsat) {
       vout << "unsat\n"

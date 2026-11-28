@@ -12,6 +12,7 @@
 #include <memory>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace lotus {
 namespace pathexpressions {
@@ -52,12 +53,20 @@ template <typename N, typename L> struct EdgePtrEq {
 /// Directed labeled graph: nodes and edges with labels.
 /// Faithfully mirrors Ultimate's Java interface: both nodes and edges are sets.
 template <typename N, typename L> struct ILabeledGraph {
+  using EdgePtr = std::shared_ptr<const ILabeledEdge<N, L>>;
+
   virtual ~ILabeledGraph() = default;
   virtual const std::unordered_set<N> &getNodes() const = 0;
-  virtual const std::unordered_set<std::shared_ptr<const ILabeledEdge<N, L>>,
-                                   detail::EdgePtrHash<N, L>,
+  virtual const std::unordered_set<EdgePtr, detail::EdgePtrHash<N, L>,
                                    detail::EdgePtrEq<N, L>> &
   getEdges() const = 0;
+
+  /// Optional deterministic insertion-ordered views (avoids pointer-hash
+  /// non-determinism in path expression computation).
+  virtual const std::vector<N> *getOrderedNodes() const { return nullptr; }
+  virtual const std::vector<EdgePtr> *getOrderedEdges() const {
+    return nullptr;
+  }
 };
 
 /// Concrete labeled edge.
@@ -95,22 +104,41 @@ private:
 template <typename N, typename L>
 class GenericLabeledGraph : public ILabeledGraph<N, L> {
 public:
+  using EdgePtr = typename ILabeledGraph<N, L>::EdgePtr;
+
   const std::unordered_set<N> &getNodes() const override { return nodes_; }
 
-  const std::unordered_set<std::shared_ptr<const ILabeledEdge<N, L>>,
-                           detail::EdgePtrHash<N, L>, detail::EdgePtrEq<N, L>> &
+  const std::unordered_set<EdgePtr, detail::EdgePtrHash<N, L>,
+                           detail::EdgePtrEq<N, L>> &
   getEdges() const override {
     return edges_;
   }
 
-  bool addNode(N node) { return nodes_.insert(std::move(node)).second; }
+  const std::vector<N> *getOrderedNodes() const override {
+    return &orderedNodes_;
+  }
+  const std::vector<EdgePtr> *getOrderedEdges() const override {
+    return &orderedEdges_;
+  }
+
+  bool addNode(N node) {
+    if (nodes_.insert(node).second) {
+      orderedNodes_.push_back(std::move(node));
+      return true;
+    }
+    return false;
+  }
 
   bool addEdge(std::shared_ptr<const ILabeledEdge<N, L>> edge) {
     if (!edge)
       return false;
     addNode(edge->getSource());
     addNode(edge->getTarget());
-    return edges_.insert(std::move(edge)).second;
+    if (edges_.insert(edge).second) {
+      orderedEdges_.push_back(std::move(edge));
+      return true;
+    }
+    return false;
   }
 
   bool addEdge(N source, L label, N target) {
@@ -120,9 +148,11 @@ public:
 
 private:
   std::unordered_set<N> nodes_;
-  std::unordered_set<std::shared_ptr<const ILabeledEdge<N, L>>,
-                     detail::EdgePtrHash<N, L>, detail::EdgePtrEq<N, L>>
+  std::unordered_set<EdgePtr, detail::EdgePtrHash<N, L>,
+                     detail::EdgePtrEq<N, L>>
       edges_;
+  std::vector<N> orderedNodes_;
+  std::vector<EdgePtr> orderedEdges_;
 };
 
 } // namespace pathexpressions

@@ -26,25 +26,282 @@ using namespace lotus::sifa;
 
 namespace {
 
-OctagonState addVarUnconstrained(const OctagonState &s, const llvm::Value *v);
-std::optional<std::size_t> getVarIndex(const OctagonState &s,
-                                       const llvm::Value *v);
-Interval intervalForValue(const OctagonState &s, const llvm::Value *v);
-OctagonState assignCopy(const OctagonState &s, const llvm::Value *res,
-                        const llvm::Value *src);
-OctagonState assignConstant(const OctagonState &s, const llvm::Value *res,
-                            int64_t c);
-OctagonState havocVar(const OctagonState &s, const llvm::Value *v);
 std::optional<int64_t> getConstant(const llvm::Value *V);
-OctagonState assignInterval(const OctagonState &s, const llvm::Value *res,
-                            const Interval &interval);
 bool isFunctionLocalValue(const llvm::Function *F, const llvm::Value *v);
-OctagonState refineForTakenEdge(const Transition &t, OctagonState out);
-OctagonState projectCallState(const Transition &t,
-                              const OctagonState &callerState);
-OctagonState mergeReturnState(const Transition &t,
-                              const OctagonState &callerState,
-                              const OctagonState &calleeSummary);
+
+struct WorkingOctagon {
+  bool isBottom = false;
+  std::unordered_map<const llvm::Value *, std::size_t> varToIndex;
+  OctagonMatrix matrix;
+  std::unordered_map<const llvm::Value *, Interval> memory;
+
+  explicit WorkingOctagon(const OctagonState &s)
+      : isBottom(s.isBottom() || s.hasNegativeSelfLoop()),
+        varToIndex(s.varToIndex()), matrix(s.matrix()), memory(s.memory()) {}
+
+  OctagonState toState(bool closeAndCheck = true) && {
+    if (isBottom)
+      return OctagonState(true);
+    if (closeAndCheck) {
+      OctagonMatrix closed = matrix.strongClosure();
+      if (closed.hasNegativeSelfLoop())
+        return OctagonState(true);
+      OctagonState out(std::move(varToIndex), std::move(closed), false);
+      for (const auto &kv : memory)
+        out.setMemory(kv.first, kv.second);
+      return out;
+    }
+    OctagonState out(std::move(varToIndex), std::move(matrix), false);
+    for (const auto &kv : memory)
+      out.setMemory(kv.first, kv.second);
+    return out;
+  }
+};
+
+std::optional<std::size_t> ensureVar(WorkingOctagon &w, const llvm::Value *v) {
+  if (!v || llvm::isa<llvm::Constant>(v))
+    return std::nullopt;
+  auto it = w.varToIndex.find(v);
+  if (it != w.varToIndex.end())
+    return it->second;
+  const std::size_t n = w.varToIndex.size();
+  w.varToIndex[v] = n;
+  OctagonMatrix next(n + 1);
+  const std::size_t oldDim = w.matrix.dim();
+  for (std::size_t i = 0; i < oldDim; ++i) {
+    for (std::size_t j = 0; j < oldDim; ++j) {
+      auto c = w.matrix.get(i, j);
+      if (c)
+        next.set(i, j, *c);
+    }
+  }
+  w.matrix = std::move(next);
+  return n;
+}
+
+std::optional<std::size_t> getVarIndex(const WorkingOctagon &w,
+                                       const llvm::Value *v) {
+  auto it = w.varToIndex.find(v);
+  if (it == w.varToIndex.end())
+    return std::nullopt;
+  return it->second;
+}
+
+int64_t floorDiv(int64_t numerator, int64_t denominator) {
+  int64_t quotient = numerator / denominator;
+  int64_t remainder = numerator % denominator;
+  if (remainder != 0 && ((remainder > 0) != (denominator > 0)))
+    --quotient;
+  return quotient;
+}
+
+Interval intervalForClosedVar(const OctagonMatrix &closed, std::size_t idx) {
+  std::optional<int64_t> lower;
+  std::optional<int64_t> upper;
+  if (auto lo = closed.get(2 * idx, 2 * idx + 1))
+    lower = -floorDiv(*lo, 2);
+  if (auto hi = closed.get(2 * idx + 1, 2 * idx))
+    upper = floorDiv(*hi, 2);
+  if (lower && upper && *lower > *upper)
+    return Interval::bottom();
+  return Interval{lower, upper, false};
+}
+
+Interval intervalForValue(const OctagonState &s, const llvm::Value *v) {
+  if (!v)
+    return Interval::top();
+  if (const auto constant = getConstant(v))
+    return Interval::point(*constant);
+  if (s.isBottom())
+    return Interval::bottom();
+  auto it = s.varToIndex().find(v);
+  if (it == s.varToIndex().end())
+    return Interval::top();
+  const OctagonMatrix &closed = s.closedMatrix();
+  if (closed.hasNegativeSelfLoop())
+    return Interval::bottom();
+  return intervalForClosedVar(closed, it->second);
+}
+
+Interval intervalForWorkingValue(const WorkingOctagon &w,
+                                 const llvm::Value *v) {
+  if (!v)
+    return Interval::top();
+  if (const auto constant = getConstant(v))
+    return Interval::point(*constant);
+  if (w.isBottom)
+    return Interval::bottom();
+  auto idx = getVarIndex(w, v);
+  if (!idx)
+    return Interval::top();
+  const OctagonMatrix closed = w.matrix.strongClosure();
+  if (closed.hasNegativeSelfLoop())
+    return Interval::bottom();
+  return intervalForClosedVar(closed, *idx);
+}
+
+/// Difference constraint v_lhs - v_rhs <= bound in DBM form:
+///   (+v_lhs) - (+v_rhs) <= bound  ==> m[2*rhs, 2*lhs]     <= bound
+///   (-v_rhs) - (-v_lhs) <= bound  ==> m[2*lhs+1, 2*rhs+1] <= bound
+void setDifferenceMin(OctagonMatrix &m, std::size_t lhsIdx,
+                      std::size_t rhsIdx, int64_t bound) {
+  m.setMin(2 * rhsIdx, 2 * lhsIdx, bound);
+  m.setMin(2 * lhsIdx + 1, 2 * rhsIdx + 1, bound);
+}
+
+void havocWorkingVar(WorkingOctagon &w, const llvm::Value *v) {
+  if (!v)
+    return;
+  auto it = w.varToIndex.find(v);
+  if (it != w.varToIndex.end())
+    w.matrix.relaxVarInPlace(it->second);
+}
+
+void assignWorkingConstant(WorkingOctagon &w, const llvm::Value *res,
+                           int64_t c) {
+  auto ri = ensureVar(w, res);
+  if (!ri)
+    return;
+  std::size_t r = *ri;
+  w.matrix.relaxVarInPlace(r);
+  int64_t twoC, negTwoC;
+  if (__builtin_mul_overflow(c, int64_t{2}, &twoC) ||
+      __builtin_sub_overflow(int64_t{0}, twoC, &negTwoC))
+    return;
+  w.matrix.set(2 * r + 1, 2 * r, twoC);
+  w.matrix.set(2 * r, 2 * r + 1, negTwoC);
+}
+
+void assignWorkingCopy(WorkingOctagon &w, const llvm::Value *res,
+                       const llvm::Value *src) {
+  if (!res || llvm::isa<llvm::Constant>(res))
+    return;
+  if (res == src)
+    return;
+  if (auto c = getConstant(src)) {
+    assignWorkingConstant(w, res, *c);
+    return;
+  }
+  auto ri = ensureVar(w, res);
+  if (!ri)
+    return;
+  w.matrix.relaxVarInPlace(*ri);
+  if (!src)
+    return;
+  auto si = ensureVar(w, src);
+  if (!si)
+    return;
+  setDifferenceMin(w.matrix, *ri, *si, 0);
+  setDifferenceMin(w.matrix, *si, *ri, 0);
+}
+
+void assignWorkingAffine(WorkingOctagon &w, const llvm::Value *res,
+                         const llvm::Value *src, int64_t k) {
+  int64_t negK;
+  if (__builtin_sub_overflow(int64_t{0}, k, &negK)) {
+    havocWorkingVar(w, res);
+    return;
+  }
+  if (res == src) {
+    if (k != 0)
+      havocWorkingVar(w, res);
+    return;
+  }
+  if (auto c = getConstant(src)) {
+    int64_t sum;
+    if (__builtin_add_overflow(*c, k, &sum))
+      havocWorkingVar(w, res);
+    else
+      assignWorkingConstant(w, res, sum);
+    return;
+  }
+  auto ri = ensureVar(w, res);
+  if (!ri)
+    return;
+  w.matrix.relaxVarInPlace(*ri);
+  auto si = ensureVar(w, src);
+  if (!si)
+    return;
+  setDifferenceMin(w.matrix, *ri, *si, k);
+  setDifferenceMin(w.matrix, *si, *ri, negK);
+}
+
+void assignWorkingInterval(WorkingOctagon &w, const llvm::Value *res,
+                           const Interval &interval) {
+  if (interval.isBottom()) {
+    w.isBottom = true;
+    return;
+  }
+  if (interval.isTop()) {
+    havocWorkingVar(w, res);
+    return;
+  }
+  if (interval.isPoint() && interval.lo) {
+    assignWorkingConstant(w, res, *interval.lo);
+    return;
+  }
+  auto ri = ensureVar(w, res);
+  if (!ri)
+    return;
+  std::size_t r = *ri;
+  w.matrix.relaxVarInPlace(r);
+  if (interval.hi) {
+    int64_t twoHi;
+    if (!__builtin_mul_overflow(*interval.hi, int64_t{2}, &twoHi))
+      w.matrix.set(2 * r + 1, 2 * r, twoHi);
+  }
+  if (interval.lo) {
+    int64_t twoLo, negTwoLo;
+    if (!__builtin_mul_overflow(*interval.lo, int64_t{2}, &twoLo) &&
+        !__builtin_sub_overflow(int64_t{0}, twoLo, &negTwoLo))
+      w.matrix.set(2 * r, 2 * r + 1, negTwoLo);
+  }
+}
+
+void tightenWorkingInterval(WorkingOctagon &w, const llvm::Value *value,
+                            const Interval &interval) {
+  if (!value || llvm::isa<llvm::Constant>(value) || w.isBottom)
+    return;
+  if (interval.isBottom()) {
+    w.isBottom = true;
+    return;
+  }
+  if (interval.isTop())
+    return;
+  auto ri = ensureVar(w, value);
+  if (!ri)
+    return;
+  std::size_t r = *ri;
+  if (interval.hi) {
+    int64_t twoHi;
+    if (!__builtin_mul_overflow(*interval.hi, int64_t{2}, &twoHi))
+      w.matrix.setMin(2 * r + 1, 2 * r, twoHi);
+  }
+  if (interval.lo) {
+    int64_t twoLo, negTwoLo;
+    if (!__builtin_mul_overflow(*interval.lo, int64_t{2}, &twoLo) &&
+        !__builtin_sub_overflow(int64_t{0}, twoLo, &negTwoLo))
+      w.matrix.setMin(2 * r, 2 * r + 1, negTwoLo);
+  }
+}
+
+/// Get constant from \p V if ConstantInt (fits in 64 bits), else None.
+std::optional<int64_t> getConstant(const llvm::Value *V) {
+  const auto *C = llvm::dyn_cast<llvm::ConstantInt>(V);
+  if (!C || C->getBitWidth() > 64)
+    return std::nullopt;
+  return C->getSExtValue();
+}
+
+bool isFunctionLocalValue(const llvm::Function *F, const llvm::Value *v) {
+  if (!F || !v)
+    return false;
+  if (const auto *I = llvm::dyn_cast<llvm::Instruction>(v))
+    return I->getFunction() == F;
+  if (const auto *A = llvm::dyn_cast<llvm::Argument>(v))
+    return A->getParent() == F;
+  return false;
+}
 
 llvm::BasicBlock::const_iterator
 segmentBegin(const llvm::BasicBlock *bb,
@@ -71,205 +328,47 @@ const llvm::Value *incomingValueForPredecessor(const llvm::PHINode &phi,
 }
 
 OctagonState applyIncomingPhis(const Transition &t, OctagonState out) {
-  if (out.isBottom())
-    return out;
+  if (out.isBottom() || out.hasNegativeSelfLoop())
+    return OctagonState(true);
   if (!t.source || !t.target || !t.landsAtBlockEntry())
     return out;
+
+  struct PhiUpdate {
+    const llvm::PHINode *phi;
+    const llvm::Value *incoming;
+    Interval interval;
+    bool incomingTracked;
+  };
+  std::vector<PhiUpdate> updates;
   for (const llvm::Instruction &I : *t.target) {
     const auto *phi = llvm::dyn_cast<llvm::PHINode>(&I);
     if (!phi)
       break;
     const llvm::Value *incoming = incomingValueForPredecessor(*phi, t.source);
-    out = addVarUnconstrained(out, phi);
     const Interval incomingInterval = intervalForValue(out, incoming);
-    if (incomingInterval.isBottom()) {
+    if (incomingInterval.isBottom())
       return OctagonState(true);
-    }
-    if (!incomingInterval.isTop()) {
-      out = assignInterval(out, phi, incomingInterval);
-    } else if (incoming && getVarIndex(out, incoming)) {
-      out = assignCopy(out, phi, incoming);
+    updates.push_back(PhiUpdate{
+        phi, incoming, incomingInterval,
+        incoming && !llvm::isa<llvm::Constant>(incoming) &&
+            out.varToIndex().count(incoming) > 0});
+  }
+  if (updates.empty())
+    return out;
+
+  WorkingOctagon w(out);
+  for (const auto &upd : updates) {
+    if (!upd.interval.isTop()) {
+      assignWorkingInterval(w, upd.phi, upd.interval);
+    } else if (upd.incomingTracked) {
+      assignWorkingCopy(w, upd.phi, upd.incoming);
     } else {
-      out = havocVar(out, phi);
+      havocWorkingVar(w, upd.phi);
     }
+    if (w.isBottom)
+      return OctagonState(true);
   }
-  return out;
-}
-
-/// Add variable \p v to state with no constraints (top for that variable).
-OctagonState addVarUnconstrained(const OctagonState &s, const llvm::Value *v) {
-  auto varToIndex = s.varToIndex();
-  if (varToIndex.count(v))
-    return s;
-  const std::size_t n = varToIndex.size();
-  std::unordered_map<const llvm::Value *, std::size_t> newVarToIndex(
-      varToIndex);
-  newVarToIndex[v] = n;
-
-  OctagonMatrix newMat(n + 1);
-  const OctagonMatrix &old = s.matrix();
-  for (std::size_t i = 0; i < old.dim(); ++i)
-    for (std::size_t j = 0; j < old.dim(); ++j) {
-      auto c = old.get(i, j);
-      if (c)
-        newMat.set(i, j, *c);
-    }
-  return OctagonState(std::move(newVarToIndex), std::move(newMat),
-                      s.isBottom());
-}
-
-/// Get index of \p v in state, or None if not present.
-std::optional<std::size_t> getVarIndex(const OctagonState &s,
-                                       const llvm::Value *v) {
-  auto it = s.varToIndex().find(v);
-  if (it == s.varToIndex().end())
-    return std::nullopt;
-  return it->second;
-}
-
-int64_t floorDiv(int64_t numerator, int64_t denominator) {
-  int64_t quotient = numerator / denominator;
-  int64_t remainder = numerator % denominator;
-  if (remainder != 0 && ((remainder > 0) != (denominator > 0)))
-    --quotient;
-  return quotient;
-}
-
-Interval intervalForValue(const OctagonState &s, const llvm::Value *v) {
-  if (!v)
-    return Interval::top();
-  if (const auto constant = getConstant(v))
-    return Interval::point(*constant);
-  auto index = getVarIndex(s, v);
-  if (!index)
-    return Interval::top();
-  const OctagonMatrix closed = s.matrix().strongClosure();
-  std::optional<int64_t> lower;
-  std::optional<int64_t> upper;
-  if (auto lo = closed.get(2 * *index, 2 * *index + 1))
-    lower = -floorDiv(*lo, 2);
-  if (auto hi = closed.get(2 * *index + 1, 2 * *index))
-    upper = floorDiv(*hi, 2);
-  if (lower && upper && *lower > *upper)
-    return Interval::bottom();
-  return Interval{lower, upper, false};
-}
-
-/// Assign res = src (both must be in state). Octagon: res - src ≤ 0 and src -
-/// res ≤ 0.
-OctagonState assignCopy(const OctagonState &s, const llvm::Value *res,
-                        const llvm::Value *src) {
-  auto ri = getVarIndex(s, res);
-  auto si = getVarIndex(s, src);
-  if (!ri || !si)
-    return s;
-  std::size_t r = *ri, srcIdx = *si;
-  OctagonMatrix m = s.matrix();
-  m.set(2 * r, 2 * srcIdx + 1, 0);
-  m.set(2 * srcIdx, 2 * r + 1, 0);
-  m = m.strongClosure();
-  if (m.hasNegativeSelfLoop())
-    return OctagonState(true);
-  return OctagonState(s.varToIndex(), std::move(m), false);
-}
-
-/// Assign res = c (constant). Octagon: 2*res ≤ 2c and -2*res ≤ -2c.
-OctagonState assignConstant(const OctagonState &s, const llvm::Value *res,
-                            int64_t c) {
-  auto ri = getVarIndex(s, res);
-  if (!ri)
-    return s;
-  std::size_t r = *ri;
-  int64_t twoC;
-  if (__builtin_mul_overflow(c, 2, &twoC))
-    return s;
-  OctagonMatrix m = s.matrix();
-  m.set(2 * r + 1, 2 * r, twoC);
-  m.set(2 * r, 2 * r + 1, -twoC);
-  m = m.strongClosure();
-  if (m.hasNegativeSelfLoop())
-    return OctagonState(true);
-  return OctagonState(s.varToIndex(), std::move(m), false);
-}
-
-/// Assign res = src + k (affine). Octagon: res - src ≤ k and src - res ≤ -k.
-OctagonState assignAffine(const OctagonState &s, const llvm::Value *res,
-                          const llvm::Value *src, int64_t k) {
-  auto ri = getVarIndex(s, res);
-  auto si = getVarIndex(s, src);
-  if (!ri || !si)
-    return s;
-  std::size_t r = *ri, srcIdx = *si;
-  OctagonMatrix m = s.matrix();
-  m.set(2 * r, 2 * srcIdx + 1, k);
-  m.set(2 * srcIdx, 2 * r + 1, -k);
-  m = m.strongClosure();
-  if (m.hasNegativeSelfLoop())
-    return OctagonState(true);
-  return OctagonState(s.varToIndex(), std::move(m), false);
-}
-
-/// Havoc variable \p v: relax all constraints involving v (sound
-/// over-approximation).
-OctagonState havocVar(const OctagonState &s, const llvm::Value *v) {
-  auto it = s.varToIndex().find(v);
-  if (it == s.varToIndex().end())
-    return s;
-  OctagonMatrix m = s.matrix().relaxVar(it->second);
-  if (m.hasNegativeSelfLoop())
-    return OctagonState(true);
-  return OctagonState(s.varToIndex(), std::move(m), false);
-}
-
-/// Get constant from \p V if ConstantInt (fits in 64 bits), else None.
-std::optional<int64_t> getConstant(const llvm::Value *V) {
-  const auto *C = llvm::dyn_cast<llvm::ConstantInt>(V);
-  if (!C || C->getBitWidth() > 64)
-    return std::nullopt;
-  return C->getSExtValue();
-}
-
-bool isFunctionLocalValue(const llvm::Function *F, const llvm::Value *v) {
-  if (!F || !v)
-    return false;
-  if (const auto *I = llvm::dyn_cast<llvm::Instruction>(v))
-    return I->getFunction() == F;
-  if (const auto *A = llvm::dyn_cast<llvm::Argument>(v))
-    return A->getParent() == F;
-  return false;
-}
-
-/// Constrain result variable to interval [lo, hi]. Point => assignConstant; top
-/// => havoc.
-OctagonState assignInterval(const OctagonState &s, const llvm::Value *res,
-                            const Interval &interval) {
-  auto ri = getVarIndex(s, res);
-  if (!ri)
-    return s;
-  std::size_t r = *ri;
-  if (interval.isBottom())
-    return OctagonState(true);
-  if (interval.isPoint() && interval.lo)
-    return assignConstant(s, res, *interval.lo);
-  if (interval.isTop())
-    return havocVar(s, res);
-  OctagonMatrix m = s.matrix();
-  if (interval.hi) {
-    int64_t twoHi;
-    if (__builtin_mul_overflow(*interval.hi, 2, &twoHi))
-      return havocVar(s, res);
-    m.set(2 * r + 1, 2 * r, twoHi);
-  }
-  if (interval.lo) {
-    int64_t twoLo;
-    if (__builtin_mul_overflow(*interval.lo, 2, &twoLo))
-      return havocVar(s, res);
-    m.set(2 * r, 2 * r + 1, -twoLo);
-  }
-  m = m.strongClosure();
-  if (m.hasNegativeSelfLoop())
-    return OctagonState(true);
-  return OctagonState(s.varToIndex(), std::move(m), false);
+  return std::move(w).toState(/*closeAndCheck=*/true);
 }
 
 bool evaluatePredicate(llvm::CmpInst::Predicate predicate, int64_t lhs,
@@ -303,24 +402,22 @@ bool evaluatePredicate(llvm::CmpInst::Predicate predicate, int64_t lhs,
 OctagonState addDifferenceConstraint(const OctagonState &s,
                                      const llvm::Value *lhs,
                                      const llvm::Value *rhs, int64_t bound) {
-  auto lhsIndex = getVarIndex(s, lhs);
-  auto rhsIndex = getVarIndex(s, rhs);
+  WorkingOctagon w(s);
+  auto lhsIndex = ensureVar(w, lhs);
+  auto rhsIndex = ensureVar(w, rhs);
   if (!lhsIndex || !rhsIndex)
     return s;
-  OctagonMatrix matrix = s.matrix();
-  matrix.set(2 * *lhsIndex, 2 * *rhsIndex + 1, bound);
-  matrix = matrix.strongClosure();
-  if (matrix.hasNegativeSelfLoop())
-    return OctagonState(true);
-  return OctagonState(s.varToIndex(), std::move(matrix), false);
+  setDifferenceMin(w.matrix, *lhsIndex, *rhsIndex, bound);
+  return std::move(w).toState(/*closeAndCheck=*/true);
 }
 
 OctagonState constrainToInterval(OctagonState state, const llvm::Value *value,
                                  const Interval &interval) {
   if (!value || llvm::isa<llvm::Constant>(value))
     return state;
-  state = addVarUnconstrained(state, value);
-  return assignInterval(state, value, interval);
+  WorkingOctagon w(state);
+  tightenWorkingInterval(w, value, interval);
+  return std::move(w).toState(/*closeAndCheck=*/true);
 }
 
 OctagonState refineForPredicate(OctagonState out, const llvm::ICmpInst &cmp,
@@ -348,84 +445,72 @@ OctagonState refineForPredicate(OctagonState out, const llvm::ICmpInst &cmp,
 
   switch (predicate) {
   case llvm::CmpInst::ICMP_EQ:
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(lhsValue))
-      return constrainToInterval(std::move(out), rhsValue,
-                                 Interval::point(constant->getSExtValue()));
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(rhsValue))
-      return constrainToInterval(std::move(out), lhsValue,
-                                 Interval::point(constant->getSExtValue()));
-    out = addVarUnconstrained(out, lhsValue);
-    out = addVarUnconstrained(out, rhsValue);
-    out = addDifferenceConstraint(out, lhsValue, rhsValue, 0);
-    return addDifferenceConstraint(out, rhsValue, lhsValue, 0);
+    if (const auto c = getConstant(lhsValue))
+      return constrainToInterval(std::move(out), rhsValue, Interval::point(*c));
+    if (const auto c = getConstant(rhsValue))
+      return constrainToInterval(std::move(out), lhsValue, Interval::point(*c));
+    {
+      WorkingOctagon w(out);
+      auto l = ensureVar(w, lhsValue);
+      auto r = ensureVar(w, rhsValue);
+      if (l && r) {
+        setDifferenceMin(w.matrix, *l, *r, 0);
+        setDifferenceMin(w.matrix, *r, *l, 0);
+      }
+      return std::move(w).toState(/*closeAndCheck=*/true);
+    }
   case llvm::CmpInst::ICMP_NE:
     if (lhs.isPoint() && rhs.isPoint() && lhs.lo == rhs.lo)
       return OctagonState(true);
     return out;
   case llvm::CmpInst::ICMP_SLT:
   case llvm::CmpInst::ICMP_ULT:
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(rhsValue)) {
-      if (constant->getSExtValue() == std::numeric_limits<int64_t>::min())
+    if (const auto c = getConstant(rhsValue)) {
+      if (*c == std::numeric_limits<int64_t>::min())
         return OctagonState(true);
-      return constrainToInterval(
-          std::move(out), lhsValue,
-          Interval{std::nullopt, constant->getSExtValue() - 1, false});
+      return constrainToInterval(std::move(out), lhsValue,
+                                 Interval{std::nullopt, *c - 1, false});
     }
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(lhsValue)) {
-      if (constant->getSExtValue() == std::numeric_limits<int64_t>::max())
+    if (const auto c = getConstant(lhsValue)) {
+      if (*c == std::numeric_limits<int64_t>::max())
         return OctagonState(true);
-      return constrainToInterval(
-          std::move(out), rhsValue,
-          Interval{constant->getSExtValue() + 1, std::nullopt, false});
+      return constrainToInterval(std::move(out), rhsValue,
+                                 Interval{*c + 1, std::nullopt, false});
     }
-    out = addVarUnconstrained(out, lhsValue);
-    out = addVarUnconstrained(out, rhsValue);
-    return addDifferenceConstraint(out, lhsValue, rhsValue, -1);
+    return addDifferenceConstraint(std::move(out), lhsValue, rhsValue, -1);
   case llvm::CmpInst::ICMP_SLE:
   case llvm::CmpInst::ICMP_ULE:
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(rhsValue))
-      return constrainToInterval(
-          std::move(out), lhsValue,
-          Interval{std::nullopt, constant->getSExtValue(), false});
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(lhsValue))
-      return constrainToInterval(
-          std::move(out), rhsValue,
-          Interval{constant->getSExtValue(), std::nullopt, false});
-    out = addVarUnconstrained(out, lhsValue);
-    out = addVarUnconstrained(out, rhsValue);
-    return addDifferenceConstraint(out, lhsValue, rhsValue, 0);
+    if (const auto c = getConstant(rhsValue))
+      return constrainToInterval(std::move(out), lhsValue,
+                                 Interval{std::nullopt, *c, false});
+    if (const auto c = getConstant(lhsValue))
+      return constrainToInterval(std::move(out), rhsValue,
+                                 Interval{*c, std::nullopt, false});
+    return addDifferenceConstraint(std::move(out), lhsValue, rhsValue, 0);
   case llvm::CmpInst::ICMP_SGT:
   case llvm::CmpInst::ICMP_UGT:
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(rhsValue)) {
-      if (constant->getSExtValue() == std::numeric_limits<int64_t>::max())
+    if (const auto c = getConstant(rhsValue)) {
+      if (*c == std::numeric_limits<int64_t>::max())
         return OctagonState(true);
-      return constrainToInterval(
-          std::move(out), lhsValue,
-          Interval{constant->getSExtValue() + 1, std::nullopt, false});
+      return constrainToInterval(std::move(out), lhsValue,
+                                 Interval{*c + 1, std::nullopt, false});
     }
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(lhsValue)) {
-      if (constant->getSExtValue() == std::numeric_limits<int64_t>::min())
+    if (const auto c = getConstant(lhsValue)) {
+      if (*c == std::numeric_limits<int64_t>::min())
         return OctagonState(true);
-      return constrainToInterval(
-          std::move(out), rhsValue,
-          Interval{std::nullopt, constant->getSExtValue() - 1, false});
+      return constrainToInterval(std::move(out), rhsValue,
+                                 Interval{std::nullopt, *c - 1, false});
     }
-    out = addVarUnconstrained(out, lhsValue);
-    out = addVarUnconstrained(out, rhsValue);
-    return addDifferenceConstraint(out, rhsValue, lhsValue, -1);
+    return addDifferenceConstraint(std::move(out), rhsValue, lhsValue, -1);
   case llvm::CmpInst::ICMP_SGE:
   case llvm::CmpInst::ICMP_UGE:
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(rhsValue))
-      return constrainToInterval(
-          std::move(out), lhsValue,
-          Interval{constant->getSExtValue(), std::nullopt, false});
-    if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(lhsValue))
-      return constrainToInterval(
-          std::move(out), rhsValue,
-          Interval{std::nullopt, constant->getSExtValue(), false});
-    out = addVarUnconstrained(out, lhsValue);
-    out = addVarUnconstrained(out, rhsValue);
-    return addDifferenceConstraint(out, rhsValue, lhsValue, 0);
+    if (const auto c = getConstant(rhsValue))
+      return constrainToInterval(std::move(out), lhsValue,
+                                 Interval{*c, std::nullopt, false});
+    if (const auto c = getConstant(lhsValue))
+      return constrainToInterval(std::move(out), rhsValue,
+                                 Interval{std::nullopt, *c, false});
+    return addDifferenceConstraint(std::move(out), rhsValue, lhsValue, 0);
   default:
     return out;
   }
@@ -505,27 +590,30 @@ OctagonState refineForTakenEdge(const Transition &t, OctagonState out) {
 
 OctagonState projectCallState(const Transition &t,
                               const OctagonState &callerState) {
-  if (callerState.isBottom() || !t.call || !t.callee)
-    return callerState;
-  OctagonState projected;
+  if (callerState.isBottom() || callerState.hasNegativeSelfLoop() ||
+      !t.call || !t.callee)
+    return callerState.isBottom() || callerState.hasNegativeSelfLoop()
+               ? OctagonState(true)
+               : callerState;
+  WorkingOctagon projected{OctagonState(false)};
   const llvm::Function *caller = t.source ? t.source->getParent() : nullptr;
   for (const auto &kv : callerState.varToIndex()) {
     if (!isFunctionLocalValue(caller, kv.first))
-      projected = constrainToInterval(std::move(projected), kv.first,
-                                      intervalForValue(callerState, kv.first));
+      assignWorkingInterval(projected, kv.first,
+                            intervalForValue(callerState, kv.first));
   }
   for (const auto &kv : callerState.memory())
-    projected.setMemory(kv.first, kv.second);
+    projected.memory[kv.first] = kv.second;
   unsigned actualIndex = 0;
   for (const llvm::Argument &formal : t.callee->args()) {
     if (actualIndex >= t.call->arg_size())
       break;
-    projected = constrainToInterval(
-        std::move(projected), &formal,
+    assignWorkingInterval(
+        projected, &formal,
         intervalForValue(callerState, t.call->getArgOperand(actualIndex)));
     ++actualIndex;
   }
-  return projected;
+  return std::move(projected).toState(/*closeAndCheck=*/true);
 }
 
 Interval returnedInterval(const llvm::Function &callee,
@@ -547,21 +635,22 @@ Interval returnedInterval(const llvm::Function &callee,
 OctagonState mergeReturnState(const Transition &t,
                               const OctagonState &callerState,
                               const OctagonState &calleeSummary) {
-  if (callerState.isBottom() || calleeSummary.isBottom())
+  if (callerState.isBottom() || callerState.hasNegativeSelfLoop() ||
+      calleeSummary.isBottom() || calleeSummary.hasNegativeSelfLoop())
     return OctagonState(true);
-  OctagonState out = callerState;
+  WorkingOctagon out(callerState);
   const llvm::Function *callee = t.callee;
   for (const auto &kv : calleeSummary.varToIndex()) {
     if (!isFunctionLocalValue(callee, kv.first))
-      out = constrainToInterval(std::move(out), kv.first,
-                                intervalForValue(calleeSummary, kv.first));
+      assignWorkingInterval(out, kv.first,
+                            intervalForValue(calleeSummary, kv.first));
   }
   for (const auto &kv : calleeSummary.memory())
-    out.setMemory(kv.first, kv.second);
+    out.memory[kv.first] = kv.second;
   if (t.call && !t.call->getType()->isVoidTy())
-    out = constrainToInterval(std::move(out), t.call,
-                              returnedInterval(*callee, calleeSummary));
-  return out;
+    assignWorkingInterval(out, t.call,
+                          returnedInterval(*callee, calleeSummary));
+  return std::move(out).toState(/*closeAndCheck=*/true);
 }
 
 } // namespace
@@ -575,9 +664,9 @@ OctagonState
 OctagonDomain::applyBlockTransfer(llvm::BasicBlock *bb, const OctagonState &in,
                                   const llvm::Instruction *segmentStart,
                                   const llvm::Instruction *stopBefore) const {
-  if (in.isBottom())
-    return in;
-  OctagonState out = in;
+  if (in.isBottom() || in.hasNegativeSelfLoop())
+    return OctagonState(true);
+  WorkingOctagon out(in);
 
   lotus::AliasAnalysisWrapper *AA = getAliasAnalysis();
   std::vector<const llvm::Value *> regions;
@@ -595,12 +684,12 @@ OctagonDomain::applyBlockTransfer(llvm::BasicBlock *bb, const OctagonState &in,
       if (AA && llvm::isa<llvm::StoreInst>(&I)) {
         auto *SI = llvm::cast<llvm::StoreInst>(&I);
         const llvm::Value *ptr = SI->getPointerOperand();
-        Interval val = Interval::top(); // Conservative: don't extract interval
-                                        // from octagon yet
+        Interval val = Interval::top();
         resolvePointerToRegions(AA, ptr, regions, resolved);
         for (const llvm::Value *r : resolved) {
-          auto cur = out.getMemory(r);
-          out.setMemory(r, cur ? cur->join(val) : val);
+          auto curIt = out.memory.find(r);
+          out.memory[r] =
+              curIt != out.memory.end() ? curIt->second.join(val) : val;
         }
       }
       continue;
@@ -610,8 +699,8 @@ OctagonDomain::applyBlockTransfer(llvm::BasicBlock *bb, const OctagonState &in,
 
     const llvm::Value *res = &I;
     if (AA && llvm::isa<llvm::AllocaInst>(&I)) {
-      out = addVarUnconstrained(out, res);
-      out.setMemory(&I, Interval::top());
+      havocWorkingVar(out, res);
+      out.memory[&I] = Interval::top();
       continue;
     }
     if (AA && llvm::isa<llvm::LoadInst>(&I) && I.getType()->isIntegerTy()) {
@@ -620,99 +709,189 @@ OctagonDomain::applyBlockTransfer(llvm::BasicBlock *bb, const OctagonState &in,
       resolvePointerToRegions(AA, ptr, regions, resolved);
       Interval loadVal = Interval::bottom();
       for (const llvm::Value *r : resolved) {
-        auto cur = out.getMemory(r);
-        Interval ir = cur ? *cur : Interval::top();
+        auto curIt = out.memory.find(r);
+        Interval ir = curIt != out.memory.end() ? curIt->second : Interval::top();
         loadVal = loadVal.isBottom() ? ir : loadVal.join(ir);
       }
       if (loadVal.isBottom())
         loadVal = Interval::top();
-      out = addVarUnconstrained(out, res);
-      out = assignInterval(out, res, loadVal);
+      assignWorkingInterval(out, res, loadVal);
+      if (out.isBottom)
+        return OctagonState(true);
       continue;
     }
     if (AA && llvm::isa<llvm::GetElementPtrInst>(&I)) {
-      out = addVarUnconstrained(out, res);
-      out = havocVar(out, res);
+      havocWorkingVar(out, res);
       continue;
     }
+
     switch (I.getOpcode()) {
     case llvm::Instruction::PHI:
-      out = addVarUnconstrained(out, res);
-      out = havocVar(out, res);
+    case llvm::Instruction::Select:
+    case llvm::Instruction::ICmp:
+      havocWorkingVar(out, res);
       break;
-    case llvm::Instruction::Select: {
-      out = addVarUnconstrained(out, res);
-      out = havocVar(out, res);
-      break;
-    }
     case llvm::Instruction::Add: {
+      const unsigned bw = I.getType()->getIntegerBitWidth();
       auto c0 = getConstant(I.getOperand(0));
       auto c1 = getConstant(I.getOperand(1));
-      out = addVarUnconstrained(out, res);
       if (c0 && c1) {
         int64_t sum;
-        if (__builtin_add_overflow(*c0, *c1, &sum))
-          out = havocVar(out, res);
-        else
-          out = assignConstant(out, res, sum);
-      } else if (c1 && *c1 == 0) {
-        out = assignCopy(out, res, I.getOperand(0));
-      } else if (c1) {
-        out = assignAffine(out, res, I.getOperand(0), *c1);
-      } else if (c0 && *c0 == 0) {
-        out = assignCopy(out, res, I.getOperand(1));
-      } else if (c0) {
-        out = assignAffine(out, res, I.getOperand(1), *c0);
+        if (__builtin_add_overflow(*c0, *c1, &sum)) {
+          havocWorkingVar(out, res);
+        } else {
+          if (bw < 64 && bw >= 1) {
+            uint64_t mask = (uint64_t{1} << bw) - 1;
+            uint64_t u = static_cast<uint64_t>(sum) & mask;
+            if (u & (uint64_t{1} << (bw - 1)))
+              u |= ~mask;
+            sum = static_cast<int64_t>(u);
+          }
+          assignWorkingConstant(out, res, sum);
+        }
+      } else if (bw >= 32 || I.hasNoSignedWrap()) {
+        if (bw == 1) {
+          havocWorkingVar(out, res);
+        } else if (c1 && *c1 == 0) {
+          assignWorkingCopy(out, res, I.getOperand(0));
+        } else if (c1) {
+          assignWorkingAffine(out, res, I.getOperand(0), *c1);
+        } else if (c0 && *c0 == 0) {
+          assignWorkingCopy(out, res, I.getOperand(1));
+        } else if (c0) {
+          assignWorkingAffine(out, res, I.getOperand(1), *c0);
+        } else {
+          havocWorkingVar(out, res);
+        }
       } else {
-        out = havocVar(out, res);
+        havocWorkingVar(out, res);
       }
       break;
     }
     case llvm::Instruction::Sub: {
+      const unsigned bw = I.getType()->getIntegerBitWidth();
       auto c0 = getConstant(I.getOperand(0));
       auto c1 = getConstant(I.getOperand(1));
-      out = addVarUnconstrained(out, res);
       if (c0 && c1) {
         int64_t diff;
-        if (__builtin_sub_overflow(*c0, *c1, &diff))
-          out = havocVar(out, res);
-        else
-          out = assignConstant(out, res, diff);
-      } else if (c1 && *c1 == 0) {
-        out = assignCopy(out, res, I.getOperand(0));
-      } else if (c1) {
-        out = assignAffine(out, res, I.getOperand(0), -(*c1));
-      } else if (c0) {
-        out = havocVar(out, res);
+        if (__builtin_sub_overflow(*c0, *c1, &diff)) {
+          havocWorkingVar(out, res);
+        } else {
+          if (bw < 64 && bw >= 1) {
+            uint64_t mask = (uint64_t{1} << bw) - 1;
+            uint64_t u = static_cast<uint64_t>(diff) & mask;
+            if (u & (uint64_t{1} << (bw - 1)))
+              u |= ~mask;
+            diff = static_cast<int64_t>(u);
+          }
+          assignWorkingConstant(out, res, diff);
+        }
+      } else if (bw >= 32 || I.hasNoSignedWrap()) {
+        if (bw == 1) {
+          havocWorkingVar(out, res);
+        } else if (c1 && *c1 == 0) {
+          assignWorkingCopy(out, res, I.getOperand(0));
+        } else if (c1) {
+          int64_t negC1;
+          if (__builtin_sub_overflow(int64_t{0}, *c1, &negC1))
+            havocWorkingVar(out, res);
+          else
+            assignWorkingAffine(out, res, I.getOperand(0), negC1);
+        } else {
+          havocWorkingVar(out, res);
+        }
       } else {
-        out = havocVar(out, res);
+        havocWorkingVar(out, res);
       }
       break;
     }
-    case llvm::Instruction::Trunc:
-    case llvm::Instruction::ZExt:
-    case llvm::Instruction::SExt:
-    case llvm::Instruction::PtrToInt:
-    case llvm::Instruction::IntToPtr:
-    case llvm::Instruction::BitCast: {
-      out = addVarUnconstrained(out, res);
-      if (auto c = getConstant(I.getOperand(0)))
-        out = assignConstant(out, res, *c);
-      else
-        out = assignCopy(out, res, I.getOperand(0));
+    case llvm::Instruction::Trunc: {
+      const llvm::Value *op0 = I.getOperand(0);
+      const unsigned w = I.getType()->getIntegerBitWidth();
+      if (w == 0 || w > 64) {
+        havocWorkingVar(out, res);
+        break;
+      }
+      if (auto c = getConstant(op0)) {
+        if (w < 64) {
+          uint64_t mask = (uint64_t{1} << w) - 1;
+          assignWorkingConstant(
+              out, res, static_cast<int64_t>(static_cast<uint64_t>(*c) & mask));
+        } else {
+          assignWorkingConstant(out, res, *c);
+        }
+        break;
+      }
+      if (w < 64) {
+        const int64_t maxVal = static_cast<int64_t>((uint64_t{1} << w) - 1);
+        const Interval iv = intervalForWorkingValue(out, op0);
+        if (iv.isBottom())
+          return OctagonState(true);
+        if (iv.lo && iv.hi && *iv.lo >= 0 && *iv.hi <= maxVal) {
+          assignWorkingCopy(out, res, op0);
+        } else {
+          assignWorkingInterval(out, res, Interval{0, maxVal, false});
+        }
+      } else {
+        assignWorkingCopy(out, res, op0);
+      }
       break;
     }
-    case llvm::Instruction::ICmp:
-      out = addVarUnconstrained(out, res);
-      out = havocVar(out, res);
+    case llvm::Instruction::ZExt: {
+      const llvm::Value *op0 = I.getOperand(0);
+      if (!op0->getType()->isIntegerTy() ||
+          op0->getType()->getIntegerBitWidth() > 64 ||
+          I.getType()->getIntegerBitWidth() > 64) {
+        havocWorkingVar(out, res);
+        break;
+      }
+      const unsigned wIn = op0->getType()->getIntegerBitWidth();
+      if (auto c = getConstant(op0)) {
+        if (wIn < 64) {
+          uint64_t mask = (uint64_t{1} << wIn) - 1;
+          assignWorkingConstant(
+              out, res, static_cast<int64_t>(static_cast<uint64_t>(*c) & mask));
+        } else {
+          assignWorkingConstant(out, res, *c);
+        }
+        break;
+      }
+      if (wIn < 64) {
+        const int64_t maxIn = static_cast<int64_t>((uint64_t{1} << wIn) - 1);
+        const Interval iv = intervalForWorkingValue(out, op0);
+        if (iv.isBottom())
+          return OctagonState(true);
+        if (iv.lo && *iv.lo >= 0 && (!iv.hi || *iv.hi <= maxIn)) {
+          assignWorkingCopy(out, res, op0);
+        } else {
+          assignWorkingInterval(out, res, Interval{0, maxIn, false});
+        }
+      } else {
+        havocWorkingVar(out, res);
+      }
       break;
+    }
+    case llvm::Instruction::SExt:
+    case llvm::Instruction::BitCast: {
+      const llvm::Value *op0 = I.getOperand(0);
+      if (auto c = getConstant(op0))
+        assignWorkingConstant(out, res, *c);
+      else if (op0->getType()->isIntegerTy() && I.getType()->isIntegerTy() &&
+               op0->getType()->getIntegerBitWidth() <= 64 &&
+               I.getType()->getIntegerBitWidth() <= 64)
+        assignWorkingCopy(out, res, op0);
+      else
+        havocWorkingVar(out, res);
+      break;
+    }
+    case llvm::Instruction::PtrToInt:
+    case llvm::Instruction::IntToPtr:
     default:
-      out = addVarUnconstrained(out, res);
-      out = havocVar(out, res);
+      havocWorkingVar(out, res);
       break;
     }
   }
-  return out;
+  return std::move(out).toState(/*closeAndCheck=*/true);
 }
 
 OctagonState OctagonDomain::applyBlockWiseHavoc(llvm::BasicBlock *bb,
@@ -724,10 +903,9 @@ OctagonState
 OctagonDomain::applyBlockWiseHavoc(llvm::BasicBlock *bb, const OctagonState &in,
                                    const llvm::Instruction *segmentStart,
                                    const llvm::Instruction *stopBefore) const {
-  if (in.isBottom())
-    return in;
-  OctagonState out = in;
-  // memory_ already copied from in
+  if (in.isBottom() || in.hasNegativeSelfLoop())
+    return OctagonState(true);
+  WorkingOctagon out(in);
   for (llvm::BasicBlock::const_iterator it = segmentBegin(bb, segmentStart),
                                         end = bb->end();
        it != end; ++it) {
@@ -737,15 +915,15 @@ OctagonDomain::applyBlockWiseHavoc(llvm::BasicBlock *bb, const OctagonState &in,
     if (I.getType()->isVoidTy())
       continue;
     if (I.getType()->isIntegerTy() || I.getType()->isPointerTy())
-      out = addVarUnconstrained(out, &I);
+      havocWorkingVar(out, &I);
   }
-  return out;
+  return std::move(out).toState(/*closeAndCheck=*/false);
 }
 
 OctagonState OctagonDomain::post(const Transition &t,
                                  const OctagonState &in) const {
-  if (in.isBottom())
-    return in;
+  if (in.isBottom() || in.hasNegativeSelfLoop())
+    return OctagonState(true);
   if (t.kind == TransitionKind::Marker)
     return in;
   if (t.kind == TransitionKind::EnterCall)

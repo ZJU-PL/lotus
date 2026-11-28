@@ -23,8 +23,13 @@
 #include "Verification/Sifa/Domain/AbstractDomain.h"
 #include "Verification/Sifa/RegionMemory.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace lotus {
 class AliasAnalysisWrapper;
@@ -133,22 +138,18 @@ public:
       return true;
     if (b.isBottom())
       return false;
-    for (const auto &kv : a.map_) {
-      auto ob = b.get(kv.first);
-      if (!ob.has_value() || ob->isTop())
-        continue;
-      if (kv.second.isTop())
+    for (const auto &kv : b.map_) {
+      auto oa = a.get(kv.first);
+      if (!oa.has_value() || oa->isTop())
         return false;
-      if (kv.second.value != ob->value)
+      if (*oa->value != *kv.second.value)
         return false;
     }
-    for (const auto &kv : a.memory_) {
-      auto ob = b.getMemory(kv.first);
-      if (!ob.has_value() || ob->isTop())
-        continue;
-      if (kv.second.isTop())
+    for (const auto &kv : b.memory_) {
+      auto oa = a.getMemory(kv.first);
+      if (!oa.has_value() || oa->isTop())
         return false;
-      if (kv.second.value != ob->value)
+      if (*oa->value != *kv.second.value)
         return false;
     }
     return true;
@@ -276,8 +277,7 @@ public:
         } else {
           res = transferInstruction(I, out);
         }
-        if (!res.isTop())
-          out.set(&I, res);
+        out.set(&I, res);
       }
     }
     out = refineForTakenEdge(t, std::move(out));
@@ -357,12 +357,16 @@ private:
       return out;
     if (!t.source || !t.target || !t.landsAtBlockEntry())
       return out;
+    std::vector<std::pair<const llvm::PHINode *, ExplicitValue>> updates;
     for (const llvm::Instruction &I : *t.target) {
       const auto *phi = llvm::dyn_cast<llvm::PHINode>(&I);
       if (!phi)
         break;
-      out.set(phi, getConst(out, incomingValueForPredecessor(*phi, t.source)));
+      updates.emplace_back(
+          phi, getConst(out, incomingValueForPredecessor(*phi, t.source)));
     }
+    for (const auto &u : updates)
+      out.set(u.first, u.second);
     return out;
   }
 
@@ -558,38 +562,74 @@ private:
     case llvm::Instruction::Add: {
       auto L = getConst(state, I.getOperand(0));
       auto R = getConst(state, I.getOperand(1));
-      if (!L.isTop() && !R.isTop())
-        return ExplicitValue::constant(*L.value + *R.value);
+      int64_t sum;
+      if (!L.isTop() && !R.isTop() &&
+          !__builtin_add_overflow(*L.value, *R.value, &sum))
+        return ExplicitValue::constant(sum);
       return ExplicitValue::top();
     }
     case llvm::Instruction::Sub: {
       auto L = getConst(state, I.getOperand(0));
       auto R = getConst(state, I.getOperand(1));
-      if (!L.isTop() && !R.isTop())
-        return ExplicitValue::constant(*L.value - *R.value);
+      int64_t diff;
+      if (!L.isTop() && !R.isTop() &&
+          !__builtin_sub_overflow(*L.value, *R.value, &diff))
+        return ExplicitValue::constant(diff);
       return ExplicitValue::top();
     }
     case llvm::Instruction::Mul: {
       auto L = getConst(state, I.getOperand(0));
       auto R = getConst(state, I.getOperand(1));
-      if (!L.isTop() && !R.isTop())
-        return ExplicitValue::constant(*L.value * *R.value);
+      int64_t prod;
+      if (!L.isTop() && !R.isTop() &&
+          !__builtin_mul_overflow(*L.value, *R.value, &prod))
+        return ExplicitValue::constant(prod);
       return ExplicitValue::top();
     }
-    case llvm::Instruction::SDiv:
-    case llvm::Instruction::UDiv: {
+    case llvm::Instruction::SDiv: {
       auto L = getConst(state, I.getOperand(0));
       auto R = getConst(state, I.getOperand(1));
-      if (!L.isTop() && !R.isTop() && *R.value != 0)
+      if (!L.isTop() && !R.isTop() && *R.value != 0 &&
+          !(*L.value == std::numeric_limits<int64_t>::min() && *R.value == -1))
         return ExplicitValue::constant(*L.value / *R.value);
       return ExplicitValue::top();
     }
-    case llvm::Instruction::SRem:
+    case llvm::Instruction::UDiv: {
+      auto L = getConst(state, I.getOperand(0));
+      auto R = getConst(state, I.getOperand(1));
+      unsigned w = I.getType()->isIntegerTy()
+                       ? I.getType()->getIntegerBitWidth()
+                       : 64;
+      if (!L.isTop() && !R.isTop() && w <= 64) {
+        uint64_t mask = (w == 64) ? ~uint64_t{0} : ((uint64_t{1} << w) - 1);
+        uint64_t ul = static_cast<uint64_t>(*L.value) & mask;
+        uint64_t ur = static_cast<uint64_t>(*R.value) & mask;
+        if (ur != 0)
+          return ExplicitValue::constant(static_cast<int64_t>(ul / ur));
+      }
+      return ExplicitValue::top();
+    }
+    case llvm::Instruction::SRem: {
+      auto L = getConst(state, I.getOperand(0));
+      auto R = getConst(state, I.getOperand(1));
+      if (!L.isTop() && !R.isTop() && *R.value != 0 &&
+          !(*L.value == std::numeric_limits<int64_t>::min() && *R.value == -1))
+        return ExplicitValue::constant(*L.value % *R.value);
+      return ExplicitValue::top();
+    }
     case llvm::Instruction::URem: {
       auto L = getConst(state, I.getOperand(0));
       auto R = getConst(state, I.getOperand(1));
-      if (!L.isTop() && !R.isTop() && *R.value != 0)
-        return ExplicitValue::constant(*L.value % *R.value);
+      unsigned w = I.getType()->isIntegerTy()
+                       ? I.getType()->getIntegerBitWidth()
+                       : 64;
+      if (!L.isTop() && !R.isTop() && w <= 64) {
+        uint64_t mask = (w == 64) ? ~uint64_t{0} : ((uint64_t{1} << w) - 1);
+        uint64_t ul = static_cast<uint64_t>(*L.value) & mask;
+        uint64_t ur = static_cast<uint64_t>(*R.value) & mask;
+        if (ur != 0)
+          return ExplicitValue::constant(static_cast<int64_t>(ul % ur));
+      }
       return ExplicitValue::top();
     }
     case llvm::Instruction::Trunc:

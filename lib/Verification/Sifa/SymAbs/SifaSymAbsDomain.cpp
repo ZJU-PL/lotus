@@ -83,7 +83,7 @@ z3::expr directCallSummaryFormula(const symabs_ai::FunctionContext &fctx,
   for (; formalIt != formalEnd && actualIt != actualEnd;
        ++formalIt, ++actualIt) {
     llvm::Value *actual = *actualIt;
-    if (actual->getType()->isMetadataTy()) {
+    if (actual->getType()->isMetadataTy() || !formalIt->hasName()) {
       continue;
     }
     z3::expr actualExpr = vmBefore.getFullRepresentation(actual);
@@ -465,12 +465,7 @@ SymAbsState SifaSymAbsDomain::post(const Label &t, const State &in) const {
   const symabs_ai::Analyzer &analyzer = bundle.analyzer ? *bundle.analyzer
                                                         : analyzer_;
   llvm::BasicBlock *src = t.source;
-  llvm::BasicBlock *dst = t.target;
-
-  std::set<symabs_ai::Fragment::edge> edges;
-  edges.insert({src, dst});
-  const symabs_ai::Fragment frag(fctx, src, dst, edges,
-                                 /*includes_end_body=*/false);
+  llvm::BasicBlock *dst = transitionTarget(t);
 
   // Result is a bottom at the end location (state at dst after phi nodes).
   auto out = (bundle.fctx ? bundle.domainCtor.makeBottom(fctx, dst, false)
@@ -488,7 +483,16 @@ SymAbsState SifaSymAbsDomain::post(const Label &t, const State &in) const {
                         ": " + srcName + " -> " + dstName);
     }
   }
-  analyzer.bestTransformer(in.get(), frag, out.get());
+  if (const symabs_ai::Fragment *cachedFrag =
+          analyzer.findSingleEdgeFragment(src, dst)) {
+    analyzer.bestTransformer(in.get(), *cachedFrag, out.get());
+  } else {
+    std::set<symabs_ai::Fragment::edge> edges;
+    edges.insert({src, dst});
+    const symabs_ai::Fragment frag(fctx, src, dst, edges,
+                                   /*includes_end_body=*/false);
+    analyzer.bestTransformer(in.get(), frag, out.get());
+  }
   return SymAbsState(out.release());
 }
 

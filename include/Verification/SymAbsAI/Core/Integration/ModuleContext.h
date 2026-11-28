@@ -9,6 +9,7 @@
 #include "Verification/SymAbsAI/Utils/Config.h"
 #include "Verification/SymAbsAI/Utils/Utils.h"
 
+#include <map>
 #include <set>
 
 #include <llvm/Analysis/TargetLibraryInfo.h>
@@ -39,6 +40,8 @@ private:
   mutable unique_ptr<z3::context> Z3Context_;
   unique_ptr<ResultStore> Store_;
   mutable std::set<llvm::Function *> RecurFuncs_;
+  mutable std::map<llvm::Function *, z3::expr> FormulaCache_;
+  mutable bool CycleHit_ = false;
   unique_ptr<llvm::DataLayout> DataLayout_;
   unique_ptr<llvm::TargetLibraryInfo> TLI_;
 

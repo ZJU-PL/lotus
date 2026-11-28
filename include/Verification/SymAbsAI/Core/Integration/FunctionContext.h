@@ -9,6 +9,9 @@
 #include "Verification/SymAbsAI/Utils/Config.h"
 #include "Verification/SymAbsAI/Utils/Utils.h"
 
+#include <string>
+#include <unordered_map>
+
 #include <llvm/ADT/iterator_range.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
@@ -45,6 +48,7 @@ private:
   std::unique_ptr<FloatingPointModel> FloatingPointModel_;
   configparser::Config Config_;
   mutable std::unique_ptr<llvm::DominatorTreeWrapperPass> DominatorTreePass_;
+  std::unordered_map<const llvm::BasicBlock *, std::string> BlockNames_;
 
   /**
    * Returns a reference to the DominatorTree of the function.
@@ -85,6 +89,8 @@ public:
 
   z3::expr getEdgeVariable(llvm::BasicBlock *bb_from,
                            llvm::BasicBlock *bb_to) const;
+
+  std::string getBlockName(const llvm::BasicBlock *bb) const;
 
   int getPointerSize() const;
 

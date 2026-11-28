@@ -153,6 +153,8 @@ bool Zone::updateWith(const ConcreteState &cstate) {
     Top_ = false;
     Lower_ = diff;
     Upper_ = diff;
+    PrevLower_ = Lower_;
+    PrevUpper_ = Upper_;
     return true;
   }
 
@@ -160,8 +162,13 @@ bool Zone::updateWith(const ConcreteState &cstate) {
     Top_ = false;
     Lower_ = diff;
     Upper_ = diff;
+    PrevLower_ = Lower_;
+    PrevUpper_ = Upper_;
     return true;
   }
+
+  PrevLower_ = Lower_;
+  PrevUpper_ = Upper_;
 
   // Widen bounds if needed to include new concrete value
   int64_t old_lower = Lower_;
@@ -173,6 +180,22 @@ bool Zone::updateWith(const ConcreteState &cstate) {
     Upper_ = diff;
 
   return (Lower_ != old_lower || Upper_ != old_upper);
+}
+
+void Zone::widen() {
+  if (isBottom() || isTop()) {
+    PrevLower_ = Lower_;
+    PrevUpper_ = Upper_;
+    return;
+  }
+  if (Lower_ < PrevLower_)
+    Lower_ = NINF;
+  if (Upper_ > PrevUpper_)
+    Upper_ = INF;
+  if (Lower_ == NINF && Upper_ == INF)
+    Top_ = true;
+  PrevLower_ = Lower_;
+  PrevUpper_ = Upper_;
 }
 
 z3::expr Zone::toFormula(const ValueMapping &vmap, z3::context &ctx) const {

@@ -913,8 +913,18 @@ z3::expr InstructionSemantics::visitAddrSpaceCast(llvm::AddrSpaceCastInst &I) {
 // "Other" Instructions
 
 z3::expr InstructionSemantics::visitICmp(llvm::ICmpInst &I) {
-  return integerCompare(I.getPredicate(), rValue(I.getOperand(0)),
-                        rValue(I.getOperand(1))) ==
+  z3::expr in0 = rValue(I.getOperand(0));
+  z3::expr in1 = rValue(I.getOperand(1));
+  if (!in0.is_bv() || !in1.is_bv()) {
+    if (I.getPredicate() == llvm::CmpInst::ICMP_EQ)
+      return (in0 == in1) == (lValue() == Z3Context_->bv_val(1, 1));
+    if (I.getPredicate() == llvm::CmpInst::ICMP_NE)
+      return (in0 != in1) == (lValue() == Z3Context_->bv_val(1, 1));
+    // Non-BV pointer sorts (e.g. BlockModel pair sort) do not support integer
+    // orderings; leave the icmp result unconstrained for soundness.
+    return Z3Context_->bool_val(true);
+  }
+  return integerCompare(I.getPredicate(), in0, in1) ==
          (lValue() == Z3Context_->bv_val(1, 1));
 }
 
@@ -990,6 +1000,8 @@ z3::expr InstructionSemantics::visitCall(llvm::CallInst &I) {
     if ((*actual_itr)->getType()->isMetadataTy())
       continue;
 
+    if (!formal_itr->hasName())
+      continue;
     auto actual_rval = rValue(*actual_itr);
     src.push_back(Z3Context_->constant(formal_itr->getName().str().c_str(),
                                        actual_rval.get_sort()));

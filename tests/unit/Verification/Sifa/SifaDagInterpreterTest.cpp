@@ -14,6 +14,7 @@
 #include "Verification/Sifa/Interpreter/IEnterCallRegistrar.h"
 #include "Verification/Sifa/Procedure/ProcedureGraphBuilder.h"
 #include "Verification/Sifa/Procedure/ProcedureResources.h"
+#include "Verification/Sifa/RegexDag/RegexDagCompressor.h"
 #include "Verification/Sifa/RegexDag/RegexDagUtils.h"
 #include "Verification/Sifa/RegexDag/RegexToDag.h"
 #include "Verification/Sifa/Sifa.h"
@@ -24,9 +25,12 @@
 
 #include "TestUtils/LLVMHelpers.h"
 #include <llvm/AsmParser/Parser.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/Support/SourceMgr.h>
 
 #include "gtest/gtest.h"
+
+#include <limits>
 
 using namespace llvm;
 using namespace lotus::unittest;
@@ -715,6 +719,276 @@ TEST(SifaDagInterpreter, AnalyzeToReturnPreservesBottomInitialState) {
   lotus::sifa::OctagonState octagonResult =
       lotus::sifa::analyzeToReturnWithOctagonDomain(*F, octagonBottom);
   EXPECT_TRUE(octagonResult.isBottom());
+}
+
+TEST(SifaDagInterpreter, RegexDagCompressorEliminatesGhostsAndHandlesDiamonds) {
+  using Transition = lotus::sifa::Transition;
+  using Regex = lotus::pathexpressions::Regex<Transition>;
+
+  lotus::sifa::RegexToDag<Transition> toDag;
+  auto a = Regex::literal(Transition::makeMarker(1, nullptr));
+  auto b = Regex::literal(Transition::makeMarker(2, nullptr));
+  auto c = Regex::literal(Transition::makeMarker(3, nullptr));
+  auto eps = Regex::epsilon();
+
+  auto r1 = Regex::concat(Regex::union_(a, eps), Regex::union_(b, c));
+  auto r2 = Regex::concat(Regex::union_(a, eps), b);
+  toDag.add(r1);
+  toDag.add(r2);
+
+  lotus::sifa::RegexDag<Transition> dag = toDag.getDagAndReset();
+  lotus::sifa::RegexDagCompressor<Transition> compressor;
+  compressor.compress(dag);
+
+  lotus::sifa::TopsortCache<Transition> topsortCache;
+  std::vector<lotus::sifa::RegexDagNode<Transition> *> order;
+  EXPECT_NO_THROW(order = topsortCache.topsort(dag));
+  ASSERT_FALSE(order.empty());
+  for (auto *n : order) {
+    ASSERT_NE(n, nullptr);
+  }
+}
+
+TEST(SifaDagInterpreter, RegexDagCompressorHandlesWideDuplicateFanout) {
+  using Transition = lotus::sifa::Transition;
+  using Regex = lotus::pathexpressions::Regex<Transition>;
+
+  lotus::sifa::RegexToDag<Transition> toDag;
+  auto common = Regex::literal(Transition::makeMarker(1, nullptr));
+  auto tail = Regex::literal(Transition::makeMarker(2, nullptr));
+  for (int i = 0; i < 200; ++i) {
+    toDag.add(Regex::concat(common, tail));
+  }
+  lotus::sifa::RegexDag<Transition> dag = toDag.getDagAndReset();
+  lotus::sifa::RegexDagCompressor<Transition> compressor;
+  compressor.compress(dag);
+
+  lotus::sifa::TopsortCache<Transition> topsortCache;
+  auto order = topsortCache.topsort(dag);
+  EXPECT_FALSE(order.empty());
+  EXPECT_LT(order.size(), 10u);
+}
+
+TEST(SifaDagInterpreter, ProcedureResourcesUnreachableLoiWithMultipleExits) {
+  const char *ir = R"IR(
+    define void @f(i1 %cond) {
+    entry:
+      br i1 %cond, label %left, label %right
+    left:
+      ret void
+    right:
+      ret void
+    dead:
+      ret void
+    }
+  )IR";
+
+  llvm::LLVMContext ctx;
+  auto M = parseModuleChecked(ctx, ir, "UnreachableLoi");
+  const llvm::Function *F = getFunctionChecked(*M, "f");
+  const llvm::BasicBlock *dead = getBlockByName(*F, "dead");
+  ASSERT_NE(dead, nullptr);
+
+  EXPECT_FALSE(lotus::sifa::isReachable(*F, *dead));
+  auto iv = lotus::sifa::analyzeToWithIntervalDomain(
+      *F, *dead, lotus::sifa::IntervalState{});
+  EXPECT_TRUE(iv.isBottom());
+  auto oct = lotus::sifa::analyzeToWithOctagonDomain(
+      *F, *dead, lotus::sifa::OctagonState{});
+  EXPECT_TRUE(oct.isBottom());
+}
+
+TEST(SifaDagInterpreter, IntervalDomainLatticeAndTransferEdgeCases) {
+  const char *ir = R"IR(
+    define i32 @f(i32 %x, i64 %a) {
+    entry:
+      %t = trunc i32 -1 to i1
+      %d = sdiv i64 -9223372036854775808, -1
+      %r = srem i64 -9223372036854775808, -1
+      %s = ashr i32 -16, 2
+      br label %loop
+
+    loop:
+      %pa = phi i32 [ 10, %entry ], [ %pb, %loop ]
+      %pb = phi i32 [ 20, %entry ], [ %pa, %loop ]
+      %cmp = icmp eq i32 %x, 0
+      br i1 %cmp, label %loop, label %exit
+
+    exit:
+      ret i32 %pa
+    }
+  )IR";
+
+  llvm::LLVMContext ctx;
+  auto M = parseModuleChecked(ctx, ir, "IntervalEdgeCases");
+  llvm::Function *F = getFunctionChecked(*M, "f");
+  const llvm::BasicBlock *entry = getBlockByName(*F, "entry");
+  const llvm::BasicBlock *loop = getBlockByName(*F, "loop");
+  const llvm::BasicBlock *exitBB = getBlockByName(*F, "exit");
+  ASSERT_NE(entry, nullptr);
+  ASSERT_NE(loop, nullptr);
+  ASSERT_NE(exitBB, nullptr);
+
+  const llvm::Value *xArg = F->getArg(0);
+  const llvm::Value *yArg = F->getArg(1);
+
+  lotus::sifa::IntervalDomain dom;
+  lotus::sifa::IntervalState s1(false);
+  s1.set(xArg, lotus::sifa::Interval{0, 10, false});
+  EXPECT_TRUE(dom.leq(s1, dom.top()));
+  EXPECT_FALSE(dom.leq(dom.top(), s1));
+
+  lotus::sifa::IntervalState sNegInf(false);
+  sNegInf.set(xArg, lotus::sifa::Interval{std::nullopt, 5, false});
+  lotus::sifa::IntervalState sNegInfWide(false);
+  sNegInfWide.set(xArg, lotus::sifa::Interval{std::nullopt, 10, false});
+  EXPECT_TRUE(dom.leq(sNegInf, sNegInfWide));
+  EXPECT_FALSE(dom.leq(sNegInf, s1));
+
+  lotus::sifa::IntervalState sOtherKey(false);
+  sOtherKey.set(yArg, lotus::sifa::Interval{1, 2, false});
+  lotus::sifa::IntervalState joined = dom.join(s1, sOtherKey);
+  EXPECT_FALSE(joined.get(xArg).has_value());
+  EXPECT_FALSE(joined.get(yArg).has_value());
+
+  auto widened = sNegInf.get(xArg)->widen(*sNegInfWide.get(xArg));
+  EXPECT_FALSE(widened.hasLower());
+  EXPECT_FALSE(widened.hasUpper());
+
+  auto out = lotus::sifa::analyzeToWithIntervalDomain(
+      *F, *exitBB, lotus::sifa::IntervalState(false));
+  EXPECT_FALSE(out.isBottom());
+  const llvm::Instruction *truncInst = &*entry->begin();
+  auto tVal = out.get(truncInst);
+  ASSERT_TRUE(tVal.has_value());
+  EXPECT_FALSE(tVal->isBottom());
+
+  // Single-step parallel PHI swap on loop -> loop.
+  lotus::sifa::IntervalState phiIn(false);
+  const llvm::PHINode *pa = getPhiByName(*loop, "pa");
+  const llvm::PHINode *pb = getPhiByName(*loop, "pb");
+  ASSERT_NE(pa, nullptr);
+  ASSERT_NE(pb, nullptr);
+  phiIn.set(pa, lotus::sifa::Interval::point(10));
+  phiIn.set(pb, lotus::sifa::Interval::point(20));
+  lotus::sifa::Transition loopEdge = lotus::sifa::Transition::makeEdge(
+      0, const_cast<llvm::BasicBlock *>(loop),
+      const_cast<llvm::BasicBlock *>(loop));
+  lotus::sifa::IntervalState swapped = dom.post(loopEdge, phiIn);
+  EXPECT_EQ(swapped.get(pa), lotus::sifa::Interval::point(20));
+  EXPECT_EQ(swapped.get(pb), lotus::sifa::Interval::point(10));
+}
+
+TEST(SifaDagInterpreter, OctagonDomainNegativeEqualityAndLoopConvergence) {
+  const char *ir = R"IR(
+    define i32 @neg_eq() {
+    entry:
+      %x = add i32 0, -5
+      %c = icmp eq i32 %x, -5
+      br i1 %c, label %then, label %else
+    then:
+      ret i32 %x
+    else:
+      ret i32 0
+    }
+
+    define i8 @loop_i8() {
+    entry:
+      br label %loop
+    loop:
+      %i = phi i8 [ 0, %entry ], [ %inc, %body ]
+      %cmp = icmp ne i8 %i, 120
+      br i1 %cmp, label %body, label %exit
+    body:
+      %inc = add i8 %i, 1
+      br label %loop
+    exit:
+      ret i8 %i
+    }
+  )IR";
+
+  llvm::LLVMContext ctx;
+  auto M = parseModuleChecked(ctx, ir, "OctagonSoundness");
+  llvm::Function *negFn = getFunctionChecked(*M, "neg_eq");
+  const llvm::BasicBlock *entry = getBlockByName(*negFn, "entry");
+  const llvm::BasicBlock *thenBB = getBlockByName(*negFn, "then");
+  const llvm::BasicBlock *elseBB = getBlockByName(*negFn, "else");
+  ASSERT_NE(entry, nullptr);
+  ASSERT_NE(thenBB, nullptr);
+  ASSERT_NE(elseBB, nullptr);
+  const llvm::Value *xInst = &*entry->begin();
+
+  auto thenState = lotus::sifa::analyzeToWithOctagonDomain(
+      *negFn, *thenBB, lotus::sifa::OctagonState(false));
+  EXPECT_FALSE(thenState.isBottom());
+  EXPECT_FALSE(thenState.hasNegativeSelfLoop());
+  expectOctagonPoint(thenState, xInst, -5);
+
+  auto elseState = lotus::sifa::analyzeToWithOctagonDomain(
+      *negFn, *elseBB, lotus::sifa::OctagonState(false));
+  EXPECT_TRUE(elseState.isBottom() || elseState.hasNegativeSelfLoop());
+
+  llvm::Function *loopFn = getFunctionChecked(*M, "loop_i8");
+  const llvm::BasicBlock *loopExit = getBlockByName(*loopFn, "exit");
+  ASSERT_NE(loopExit, nullptr);
+  auto exitState = lotus::sifa::analyzeToWithOctagonDomain(
+      *loopFn, *loopExit, lotus::sifa::OctagonState(false));
+  EXPECT_FALSE(exitState.isBottom());
+  EXPECT_FALSE(exitState.hasNegativeSelfLoop());
+}
+
+TEST(SifaDagInterpreter, EqDomainJoinPartitionAndExplicitValueLeq) {
+  const char *ir = R"IR(
+    define void @f(i1 %cond, i32 %a, i32 %b, i32 %c) {
+    entry:
+      %cmp1 = icmp eq i32 %a, %b
+      br i1 %cmp1, label %guard, label %exit
+    guard:
+      br i1 %cond, label %left, label %right
+    left:
+      %cmp2 = icmp eq i32 %b, %c
+      br i1 %cmp2, label %leftOk, label %exit
+    leftOk:
+      br label %merge
+    right:
+      br label %merge
+    merge:
+      ret void
+    exit:
+      ret void
+    }
+  )IR";
+
+  llvm::LLVMContext ctx;
+  auto M = parseModuleChecked(ctx, ir, "EqAndExplicit");
+  llvm::Function *F = getFunctionChecked(*M, "f");
+  const llvm::BasicBlock *merge = getBlockByName(*F, "merge");
+  ASSERT_NE(merge, nullptr);
+  const llvm::Value *a = F->getArg(1);
+  const llvm::Value *b = F->getArg(2);
+  const llvm::Value *c = F->getArg(3);
+
+  auto eqOut = lotus::sifa::analyzeToWithEqDomain(
+      *F, *merge, lotus::sifa::EqState(false));
+  EXPECT_FALSE(eqOut.isBottom());
+  EXPECT_EQ(eqOut.find(a), eqOut.find(b));
+  EXPECT_NE(eqOut.find(a), eqOut.find(c));
+
+  // Representation-independent equality and ordering.
+  lotus::sifa::EqState u1, u2;
+  u1.unite(a, b);
+  u2.unite(b, a);
+  lotus::sifa::EqDomain eqDom;
+  EXPECT_TRUE(eqDom.leq(u1, u2));
+  EXPECT_TRUE(eqDom.leq(u2, u1));
+  EXPECT_TRUE(u1 == u2);
+
+  lotus::sifa::ExplicitValueDomain expDom;
+  lotus::sifa::ExplicitValueState topState(false);
+  lotus::sifa::ExplicitValueState constState(false);
+  constState.set(a, lotus::sifa::ExplicitValue::constant(7));
+  EXPECT_FALSE(expDom.leq(topState, constState));
+  EXPECT_TRUE(expDom.leq(constState, topState));
 }
 
 } // namespace

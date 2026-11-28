@@ -25,6 +25,7 @@ class AliasAnalysisWrapper;
 #include "llvm/IR/Value.h"
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 
@@ -86,16 +87,24 @@ struct Interval {
     if (rhs.isBottom())
       return *this;
     Interval r;
-    r.lo = (lo && rhs.lo && *rhs.lo < *lo) ? std::nullopt : rhs.lo;
-    r.hi = (hi && rhs.hi && *rhs.hi > *hi) ? std::nullopt : rhs.hi;
+    r.lo = (!lo || !rhs.lo || *rhs.lo < *lo) ? std::nullopt : lo;
+    r.hi = (!hi || !rhs.hi || *rhs.hi > *hi) ? std::nullopt : hi;
     return r;
   }
   Interval negate() const {
     if (isBottom())
       return bottom();
     Interval r;
-    r.lo = hi ? std::optional<int64_t>(-*hi) : std::nullopt;
-    r.hi = lo ? std::optional<int64_t>(-*lo) : std::nullopt;
+    if (hi) {
+      int64_t negHi;
+      if (!__builtin_sub_overflow(int64_t{0}, *hi, &negHi))
+        r.lo = negHi;
+    }
+    if (lo) {
+      int64_t negLo;
+      if (!__builtin_sub_overflow(int64_t{0}, *lo, &negLo))
+        r.hi = negLo;
+    }
     return r;
   }
   Interval add(const Interval &rhs) const {
@@ -158,8 +167,16 @@ struct Interval {
       return top();
     if (!lo || !hi || !rhs.lo || !rhs.hi)
       return top();
-    int64_t v00 = *lo / *rhs.lo, v01 = *lo / *rhs.hi, v10 = *hi / *rhs.lo,
-            v11 = *hi / *rhs.hi;
+    auto safeDiv = [](int64_t a, int64_t b, int64_t &out) -> bool {
+      if (b == 0 || (a == std::numeric_limits<int64_t>::min() && b == -1))
+        return false;
+      out = a / b;
+      return true;
+    };
+    int64_t v00, v01, v10, v11;
+    if (!safeDiv(*lo, *rhs.lo, v00) || !safeDiv(*lo, *rhs.hi, v01) ||
+        !safeDiv(*hi, *rhs.lo, v10) || !safeDiv(*hi, *rhs.hi, v11))
+      return top();
     return {std::min({v00, v01, v10, v11}), std::max({v00, v01, v10, v11}),
             false};
   }
@@ -187,10 +204,16 @@ struct Interval {
       return top();
     if (!hasLower() && !hasUpper())
       return bottom();
-    if (hasLower() && !hasUpper())
+    if (hasLower() && !hasUpper()) {
+      if (*lo == std::numeric_limits<int64_t>::min())
+        return bottom();
       return {std::nullopt, std::optional<int64_t>(*lo - 1), false};
-    if (!hasLower() && hasUpper())
+    }
+    if (!hasLower() && hasUpper()) {
+      if (*hi == std::numeric_limits<int64_t>::max())
+        return bottom();
       return {std::optional<int64_t>(*hi + 1), std::nullopt, false};
+    }
     return top();
   }
   SatisfyingInputs satisfyEqual(const Interval &rhs) const;
@@ -334,31 +357,31 @@ public:
   }
   bool isBottom(const State &s) const override { return s.isBottom(); }
 
+  static bool intervalLeq(const Interval &ia, const Interval &ib) {
+    if (ia.isBottom())
+      return true;
+    if (ib.isBottom())
+      return false;
+    if (ib.lo.has_value() && (!ia.lo.has_value() || *ia.lo < *ib.lo))
+      return false;
+    if (ib.hi.has_value() && (!ia.hi.has_value() || *ia.hi > *ib.hi))
+      return false;
+    return true;
+  }
+
   bool leq(const State &a, const State &b) const override {
     if (a.isBottom())
       return true;
     if (b.isBottom())
       return false;
-    for (const auto &kv : a.intervals()) {
-      auto ob = b.get(kv.first);
-      if (!ob)
-        continue;
-      const Interval &ia = kv.second;
-      const Interval &ib = *ob;
-      if (ia.lo.has_value() && (!ib.lo.has_value() || *ia.lo < *ib.lo))
-        return false;
-      if (ia.hi.has_value() && (!ib.hi.has_value() || *ia.hi > *ib.hi))
+    for (const auto &kv : b.intervals()) {
+      const Interval ia = a.get(kv.first).value_or(Interval::top());
+      if (!intervalLeq(ia, kv.second))
         return false;
     }
-    for (const auto &kv : a.memory()) {
-      auto ob = b.getMemory(kv.first);
-      if (!ob)
-        continue;
-      const Interval &ia = kv.second;
-      const Interval &ib = *ob;
-      if (ia.lo.has_value() && (!ib.lo.has_value() || *ia.lo < *ib.lo))
-        return false;
-      if (ia.hi.has_value() && (!ib.hi.has_value() || *ia.hi > *ib.hi))
+    for (const auto &kv : b.memory()) {
+      const Interval ia = a.getMemory(kv.first).value_or(Interval::top());
+      if (!intervalLeq(ia, kv.second))
         return false;
     }
     return true;
@@ -370,50 +393,25 @@ public:
     if (b.isBottom())
       return a;
     State r(false);
-    for (const auto &kv : a.intervals())
-      r.set(kv.first, kv.second);
-    for (const auto &kv : b.intervals()) {
-      const llvm::Value *v = kv.first;
-      const Interval &i = kv.second;
-      auto oa = r.get(v);
-      if (!oa) {
-        r.set(v, i);
+    // Absent key denotes top ([-inf, +inf]); join with top stays top (omitted).
+    for (const auto &kv : a.intervals()) {
+      auto ob = b.get(kv.first);
+      if (!ob)
         continue;
-      }
-      Interval hull;
-      hull.lo = (oa->lo && i.lo)
-                    ? std::optional<int64_t>(std::min(*oa->lo, *i.lo))
-                    : std::nullopt;
-      hull.hi = (oa->hi && i.hi)
-                    ? std::optional<int64_t>(std::max(*oa->hi, *i.hi))
-                    : std::nullopt;
-      r.set(v, hull);
+      r.set(kv.first, kv.second.join(*ob));
     }
-    for (const auto &kv : a.memory())
-      r.setMemory(kv.first, kv.second);
-    for (const auto &kv : b.memory()) {
-      const llvm::Value *reg = kv.first;
-      const Interval &i = kv.second;
-      auto oa = r.getMemory(reg);
-      if (!oa) {
-        r.setMemory(reg, i);
+    for (const auto &kv : a.memory()) {
+      auto ob = b.getMemory(kv.first);
+      if (!ob)
         continue;
-      }
-      Interval hull;
-      hull.lo = (oa->lo && i.lo)
-                    ? std::optional<int64_t>(std::min(*oa->lo, *i.lo))
-                    : std::nullopt;
-      hull.hi = (oa->hi && i.hi)
-                    ? std::optional<int64_t>(std::max(*oa->hi, *i.hi))
-                    : std::nullopt;
-      r.setMemory(reg, hull);
+      r.setMemory(kv.first, kv.second.join(*ob));
     }
     return r;
   }
 
   State widen(const State &previous, const State &next) const override {
     if (next.isBottom())
-      return next;
+      return previous;
     if (previous.isBottom())
       return next;
     State r(false);
@@ -421,39 +419,18 @@ public:
       const llvm::Value *v = kv.first;
       const Interval &in = kv.second;
       auto op = previous.get(v);
-      if (!op) {
-        r.set(v, in);
+      // Absent in previous means previous[v] == top; widening top stays top.
+      if (!op)
         continue;
-      }
-      Interval w;
-      if (op->lo.has_value() && in.lo.has_value() && *in.lo < *op->lo)
-        w.lo = std::nullopt;
-      else
-        w.lo = in.lo;
-      if (op->hi.has_value() && in.hi.has_value() && *in.hi > *op->hi)
-        w.hi = std::nullopt;
-      else
-        w.hi = in.hi;
-      r.set(v, w);
+      r.set(v, op->widen(in));
     }
     for (const auto &kv : next.memory()) {
       const llvm::Value *reg = kv.first;
       const Interval &in = kv.second;
       auto op = previous.getMemory(reg);
-      if (!op) {
-        r.setMemory(reg, in);
+      if (!op)
         continue;
-      }
-      Interval w;
-      if (op->lo.has_value() && in.lo.has_value() && *in.lo < *op->lo)
-        w.lo = std::nullopt;
-      else
-        w.lo = in.lo;
-      if (op->hi.has_value() && in.hi.has_value() && *in.hi > *op->hi)
-        w.hi = std::nullopt;
-      else
-        w.hi = in.hi;
-      r.setMemory(reg, w);
+      r.setMemory(reg, op->widen(in));
     }
     return r;
   }

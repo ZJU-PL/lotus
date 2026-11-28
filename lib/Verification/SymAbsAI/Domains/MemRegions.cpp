@@ -5,6 +5,7 @@
 #include "Verification/SymAbsAI/Core/Foundation/MemoryModel.h"
 #include "Verification/SymAbsAI/Core/Foundation/ParamStrategy.h"
 
+#include <stdexcept>
 #include <string>
 // #include "Verification/SymAbsAI/Domains/Combinators.h"
 #include "Verification/SymAbsAI/Utils/Utils.h"
@@ -55,7 +56,8 @@ NoAlias::NoAlias(const FunctionContext &fctx, const RepresentedValue left,
     : BooleanValue(fctx), Left_(left), Right_(right) {
   MM_ = dynamic_cast<const memory::BlockModel *>(&fctx.getMemoryModel());
   if (!MM_) {
-    llvm_unreachable("Inappropriate MemoryModel for ValidRegion domain!");
+    throw std::invalid_argument(
+        "NoAlias domain requires MemoryModel.Variant = BlockModel");
   }
 }
 
@@ -91,7 +93,8 @@ ValidRegion::ValidRegion(const FunctionContext &fctx, RepresentedValue ptr)
     : BooleanValue(fctx), Ptr_(ptr) {
   MM_ = dynamic_cast<const memory::BlockModel *>(&fctx.getMemoryModel());
   if (!MM_) {
-    llvm_unreachable("Inappropriate MemoryModel for ValidRegion domain!");
+    throw std::invalid_argument(
+        "ValidRegion domain requires MemoryModel.Variant = BlockModel");
   }
 }
 
@@ -127,7 +130,10 @@ ConstantRegion::ConstantRegion(const FunctionContext &fctx,
                                RepresentedValue value)
     : SimpleConstProp(fctx, value), Ptr_(value) {
   MM_ = dynamic_cast<const memory::BlockModel *>(&fctx.getMemoryModel());
-  assert(MM_ && "Inappropriate MemoryModel for ConstantRegion domain!");
+  if (!MM_) {
+    throw std::invalid_argument(
+        "ConstantRegion domain requires MemoryModel.Variant = BlockModel");
+  }
 }
 
 AbstractValue *ConstantRegion::clone() const {
@@ -205,7 +211,10 @@ VariableRegion::VariableRegion(const FunctionContext &fctx,
                                const Expression &factor)
     : BooleanValue(fctx), Ptr_(ptr), Expr_(expr), Fact_(factor) {
   MM_ = dynamic_cast<const memory::BlockModel *>(&fctx.getMemoryModel());
-  assert(MM_ && "Inappropriate MemoryModel for VariableRegion domain!");
+  if (!MM_) {
+    throw std::invalid_argument(
+        "VariableRegion domain requires MemoryModel.Variant = BlockModel");
+  }
 }
 
 void VariableRegion::prettyPrint(PrettyPrinter &out) const {

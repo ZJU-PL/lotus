@@ -264,7 +264,7 @@ public:
 
   virtual z3::expr transferCmp(llvm::CmpInst::Predicate pred, z3::expr res,
                                z3::expr in0, z3::expr in1) const override {
-    return transferCmp(pred, res, in0, in1);
+    return IEEE_.transferCmp(pred, res, in0, in1);
   }
 
   virtual z3::expr transferConversion(z3::expr res, llvm::Instruction *inst,

@@ -25,6 +25,8 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace lotus {
 class AliasAnalysisWrapper;
@@ -73,6 +75,50 @@ public:
       parent_[v] = v;
   }
 
+  /// Remove \p v from its equivalence class (making {v} a singleton) while
+  /// preserving equivalences among all other members and memory regions.
+  void isolate(const llvm::Value *v) {
+    if (!v)
+      return;
+    const llvm::Value *oldRoot = find(v);
+    for (auto &kv : parent_) {
+      find(kv.first);
+    }
+    const llvm::Value *newRoot = nullptr;
+    for (const auto &kv : parent_) {
+      if (kv.first != v && kv.second == oldRoot) {
+        newRoot = kv.first;
+        break;
+      }
+    }
+    if (oldRoot == v) {
+      if (newRoot) {
+        parent_[newRoot] = newRoot;
+        for (auto &kv : parent_) {
+          if (kv.first != v && kv.second == v)
+            kv.second = newRoot;
+        }
+        for (auto &kv : memory_) {
+          if (kv.second == v)
+            kv.second = newRoot;
+        }
+      } else {
+        for (auto it = memory_.begin(); it != memory_.end();) {
+          if (it->second == v)
+            it = memory_.erase(it);
+          else
+            ++it;
+        }
+      }
+    } else if (newRoot) {
+      for (auto &kv : memory_) {
+        if (kv.second == v)
+          kv.second = oldRoot;
+      }
+    }
+    parent_[v] = v;
+  }
+
   /// All keys (values that have been seen).
   std::unordered_set<const llvm::Value *> keys() const {
     std::unordered_set<const llvm::Value *> k;
@@ -105,56 +151,76 @@ public:
     if (other.isBottom_)
       return *this;
     EqState out;
-    for (const llvm::Value *v : keys())
-      out.ensure(v);
-    for (const llvm::Value *v : other.keys())
-      out.ensure(v);
-    for (const llvm::Value *v : keys())
-      out.unite(v, find(v));
-    for (const llvm::Value *v : other.keys())
-      out.unite(v, other.find(v));
-    for (const auto &kv : memory_)
-      out.ensure(kv.second);
-    for (const auto &kv : other.memory_)
-      out.ensure(kv.second);
-    for (const auto &kv : memory_) {
-      auto it = other.memory_.find(kv.first);
-      if (it != other.memory_.end())
-        out.unite(kv.second, it->second);
-      out.setMemory(kv.first, out.find(kv.second));
-    }
-    for (const auto &kv : other.memory_) {
-      if (out.memory_.find(kv.first) != out.memory_.end())
+    struct PairHash {
+      std::size_t operator()(
+          const std::pair<const llvm::Value *, const llvm::Value *> &p) const {
+        return std::hash<const llvm::Value *>()(p.first) ^
+               (std::hash<const llvm::Value *>()(p.second) << 1);
+      }
+    };
+    std::unordered_map<std::pair<const llvm::Value *, const llvm::Value *>,
+                       const llvm::Value *, PairHash>
+        repByPair;
+    for (const auto &kv : parent_) {
+      const llvm::Value *v = kv.first;
+      if (!v)
         continue;
-      out.setMemory(kv.first, out.find(kv.second));
+      auto key = std::make_pair(find(v), other.find(v));
+      auto it = repByPair.find(key);
+      if (it == repByPair.end()) {
+        repByPair.emplace(key, v);
+        out.ensure(v);
+      } else {
+        out.ensure(v);
+        out.unite(v, it->second);
+      }
+    }
+    for (const auto &kv : memory_) {
+      auto itO = other.memory_.find(kv.first);
+      if (itO == other.memory_.end())
+        continue;
+      auto key = std::make_pair(find(kv.second), other.find(itO->second));
+      auto repIt = repByPair.find(key);
+      if (repIt != repByPair.end()) {
+        out.setMemory(kv.first, repIt->second);
+      } else if (key.first == key.second && key.first) {
+        out.ensure(key.first);
+        out.setMemory(kv.first, key.first);
+      }
     }
     return out;
   }
 
   EqState widen(const EqState &other) const { return join(other); }
 
-  bool operator==(const EqState &o) const {
-    if (isBottom_ != o.isBottom_)
+  bool isContainedIn(const EqState &b) const {
+    if (isBottom_)
+      return true;
+    if (b.isBottom_)
       return false;
-    auto k1 = keys(), k2 = o.keys();
-    if (k1.size() != k2.size())
-      return false;
-    for (const llvm::Value *v : k1) {
-      if (!k2.count(v))
-        return false;
-      if (find(v) != o.find(v))
+    for (const auto &kv : b.parent_) {
+      const llvm::Value *v = kv.first;
+      const llvm::Value *rb = b.find(v);
+      if (rb != v && find(v) != find(rb))
         return false;
     }
-    if (memory_.size() != o.memory_.size())
-      return false;
-    for (const auto &kv : memory_) {
-      auto it = o.memory_.find(kv.first);
-      if (it == o.memory_.end())
+    for (const auto &kv : b.memory_) {
+      const llvm::Value *ma = getMemory(kv.first);
+      if (!ma)
         return false;
-      if (find(kv.second) != o.find(it->second))
+      const llvm::Value *mb = b.find(kv.second);
+      if (find(ma) != find(mb))
         return false;
     }
     return true;
+  }
+
+  bool operator==(const EqState &o) const {
+    if (isBottom_ != o.isBottom_)
+      return false;
+    if (isBottom_)
+      return true;
+    return isContainedIn(o) && o.isContainedIn(*this);
   }
 
 private:
@@ -194,24 +260,7 @@ public:
   EqState bottom() const override { return EqState(true); }
   bool isBottom(const EqState &s) const override { return s.isBottom(); }
   bool leq(const EqState &a, const EqState &b) const override {
-    if (a.isBottom())
-      return true;
-    if (b.isBottom())
-      return false;
-    for (const llvm::Value *v : a.keys()) {
-      if (!b.keys().count(v))
-        continue;
-      if (a.find(v) != b.find(v))
-        return false;
-    }
-    for (const auto &kv : a.memory()) {
-      auto it = b.memory().find(kv.first);
-      if (it == b.memory().end())
-        continue;
-      if (a.find(kv.second) != b.find(it->second))
-        return false;
-    }
-    return true;
+    return a.isContainedIn(b);
   }
   EqState join(const EqState &a, const EqState &b) const override {
     return a.join(b);
@@ -277,31 +326,35 @@ public:
       }
       if (I.getType()->isIntegerTy() || I.getType()->isPointerTy()) {
         if (AA && llvm::isa<llvm::AllocaInst>(&I)) {
-          out.ensure(&I);
+          out.isolate(&I);
           // Region exists; content unknown until first store (no setMemory).
         } else if (AA && llvm::isa<llvm::LoadInst>(&I) &&
                    I.getType()->isIntegerTy()) {
           const llvm::Value *ptr =
               llvm::cast<llvm::LoadInst>(&I)->getPointerOperand();
           resolvePointerToRegions(AA, ptr, regions, resolved);
-          out.ensure(&I);
+          std::vector<const llvm::Value *> reps;
           for (const llvm::Value *r : resolved) {
-            const llvm::Value *rep = out.getMemory(r);
-            if (rep)
-              out.unite(&I, rep);
+            if (const llvm::Value *rep = out.getMemory(r))
+              reps.push_back(rep);
           }
+          out.isolate(&I);
+          for (const llvm::Value *rep : reps)
+            out.unite(&I, rep);
         } else if (AA && llvm::isa<llvm::GetElementPtrInst>(&I)) {
-          out.ensure(&I);
-        } else if (auto *Phi = llvm::dyn_cast<llvm::PHINode>(&I)) {
-          for (unsigned i = 0, e = Phi->getNumIncomingValues(); i < e; ++i)
-            out.unite(&I, Phi->getIncomingValue(i));
+          out.isolate(&I);
         } else if (auto *Cast = llvm::dyn_cast<llvm::CastInst>(&I)) {
-          out.unite(&I, Cast->getOperand(0));
+          const llvm::Value *src = Cast->getOperand(0);
+          out.isolate(&I);
+          out.unite(&I, src);
         } else if (auto *Sel = llvm::dyn_cast<llvm::SelectInst>(&I)) {
-          out.unite(&I, Sel->getTrueValue());
-          out.unite(&I, Sel->getFalseValue());
+          const llvm::Value *rt = out.find(Sel->getTrueValue());
+          const llvm::Value *rf = out.find(Sel->getFalseValue());
+          out.isolate(&I);
+          if (rt && rt == rf)
+            out.unite(&I, rt);
         } else {
-          out.ensure(&I);
+          out.isolate(&I);
         }
       }
     }
@@ -572,14 +625,51 @@ private:
       return out;
     if (!t.source || !t.target || !t.landsAtBlockEntry())
       return out;
+    std::vector<std::pair<const llvm::PHINode *, const llvm::Value *>> phis;
+    std::unordered_set<const llvm::Value *> targetPhiSet;
     for (const llvm::Instruction &I : *t.target) {
       const auto *phi = llvm::dyn_cast<llvm::PHINode>(&I);
       if (!phi)
         break;
-      out.ensure(phi);
-      if (const llvm::Value *incoming =
-              incomingValueForPredecessor(*phi, t.source)) {
-        out.unite(phi, incoming);
+      phis.emplace_back(phi, incomingValueForPredecessor(*phi, t.source));
+      targetPhiSet.insert(phi);
+    }
+    if (phis.empty())
+      return out;
+    std::vector<std::pair<const llvm::PHINode *, const llvm::Value *>>
+        assignments;
+    assignments.reserve(phis.size());
+    std::unordered_map<const llvm::Value *, const llvm::Value *> nonPhiRep;
+    for (const auto &entry : phis) {
+      if (!entry.second) {
+        assignments.emplace_back(entry.first, nullptr);
+        continue;
+      }
+      const llvm::Value *oldRoot = out.find(entry.second);
+      assignments.emplace_back(entry.first, oldRoot);
+      if (!targetPhiSet.count(oldRoot)) {
+        nonPhiRep.emplace(oldRoot, oldRoot);
+      }
+    }
+    for (const llvm::Value *k : out.keys()) {
+      if (targetPhiSet.count(k))
+        continue;
+      const llvm::Value *r = out.find(k);
+      if (!nonPhiRep.count(r))
+        nonPhiRep.emplace(r, k);
+    }
+    for (const auto &entry : phis)
+      out.isolate(entry.first);
+    for (const auto &kv : assignments) {
+      out.ensure(kv.first);
+      if (!kv.second)
+        continue;
+      auto repIt = nonPhiRep.find(kv.second);
+      if (repIt != nonPhiRep.end()) {
+        out.ensure(repIt->second);
+        out.unite(kv.first, repIt->second);
+      } else {
+        nonPhiRep.emplace(kv.second, kv.first);
       }
     }
     return out;

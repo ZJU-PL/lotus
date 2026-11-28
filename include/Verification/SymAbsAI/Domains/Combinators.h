@@ -39,13 +39,13 @@ public:
   }
 
   virtual bool joinWith(const AbstractValue &other) override {
-    auto *spec = static_cast<const Wrapper<T> *>(&other);
+    auto *spec = dynamic_cast<const Wrapper<T> *>(&other);
     assert(spec);
     return Value_->joinWith(*spec->Value_.get());
   }
 
   virtual bool meetWith(const AbstractValue &other) override {
-    auto *spec = static_cast<const Wrapper<T> *>(&other);
+    auto *spec = dynamic_cast<const Wrapper<T> *>(&other);
     assert(spec);
     return Value_->meetWith(*spec->Value_.get());
   }
@@ -71,7 +71,7 @@ public:
   }
 
   virtual bool isJoinableWith(const AbstractValue &av_other) const override {
-    auto *other = static_cast<const Wrapper<T> *>(&av_other);
+    auto *other = dynamic_cast<const Wrapper<T> *>(&av_other);
     if (other == nullptr)
       return false;
     return Value_->isJoinableWith(*other->Value_);
@@ -87,13 +87,14 @@ public:
   }
 
   virtual bool operator<=(const AbstractValue &av_other) const override {
-    auto *other = static_cast<const Wrapper<T> *>(&av_other);
-    assert(other != nullptr);
+    auto *other = dynamic_cast<const Wrapper<T> *>(&av_other);
+    if (other == nullptr)
+      return false;
     return *Value_ <= *other->Value_;
   }
 
   virtual bool operator==(const AbstractValue &av_other) const override {
-    auto *other = static_cast<const Wrapper<T> *>(&av_other);
+    auto *other = dynamic_cast<const Wrapper<T> *>(&av_other);
     if (other == nullptr)
       return false;
 
@@ -176,7 +177,7 @@ public:
   virtual bool isBottom() const override { return Value_->isBottom(); }
 
   virtual bool isJoinableWith(const AbstractValue &av_other) const override {
-    auto *other = static_cast<decltype(this)>(&av_other);
+    auto *other = dynamic_cast<const If *>(&av_other);
     if (other == nullptr)
       return false;
 

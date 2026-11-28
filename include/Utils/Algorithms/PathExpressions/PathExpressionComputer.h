@@ -13,9 +13,12 @@
 #include "Utils/Algorithms/PathExpressions/LabeledGraph.h"
 #include "Utils/Algorithms/PathExpressions/Regex.h"
 
+#include <algorithm>
 #include <cassert>
+#include <limits>
 #include <memory>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -76,9 +79,153 @@ private:
   bool eliminated_ = false;
 
   void mapNodesToInt() {
-    int nextInt = 0;
-    for (const N &node : graph_.getNodes()) {
-      nodeToInt_[node] = nextInt++;
+    std::vector<N> nodes;
+    if (const auto *ordered = graph_.getOrderedNodes()) {
+      nodes = *ordered;
+    } else {
+      const auto &rawNodes = graph_.getNodes();
+      nodes.assign(rawNodes.begin(), rawNodes.end());
+      if constexpr (!std::is_pointer<N>::value) {
+        std::sort(nodes.begin(), nodes.end());
+      }
+    }
+
+    const std::size_t n = nodes.size();
+    if (n == 0) {
+      return;
+    }
+
+    std::unordered_map<N, std::size_t> rawIdx;
+    rawIdx.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+      rawIdx.emplace(nodes[i], i);
+    }
+
+    // Build a deterministic min-fill (minimum inDeg * outDeg) elimination order,
+    // keeping entry (inDeg == 0) and exit (outDeg == 0) nodes last so interior
+    // diamonds/loops contract locally before reaching source/sink.
+    std::vector<std::vector<std::size_t>> succs(n), preds(n);
+    auto addAdj = [&](const auto &edge) {
+      auto itS = rawIdx.find(edge->getSource());
+      auto itT = rawIdx.find(edge->getTarget());
+      if (itS == rawIdx.end() || itT == rawIdx.end()) {
+        return;
+      }
+      const std::size_t u = itS->second;
+      const std::size_t v = itT->second;
+      if (u == v) {
+        return;
+      }
+      succs[u].push_back(v);
+      preds[v].push_back(u);
+    };
+    if (const auto *orderedEdges = graph_.getOrderedEdges()) {
+      for (const auto &edge : *orderedEdges) {
+        addAdj(edge);
+      }
+    } else {
+      for (const auto &edge : graph_.getEdges()) {
+        addAdj(edge);
+      }
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      std::sort(succs[i].begin(), succs[i].end());
+      succs[i].erase(std::unique(succs[i].begin(), succs[i].end()),
+                     succs[i].end());
+      std::sort(preds[i].begin(), preds[i].end());
+      preds[i].erase(std::unique(preds[i].begin(), preds[i].end()),
+                     preds[i].end());
+    }
+
+    std::vector<std::size_t> order;
+    order.reserve(n);
+    if (n <= 1024) {
+      std::vector<bool> eliminated(n, false);
+      std::vector<std::size_t> inDeg(n, 0), outDeg(n, 0);
+      for (std::size_t i = 0; i < n; ++i) {
+        inDeg[i] = preds[i].size();
+        outDeg[i] = succs[i].size();
+      }
+      // Dense adjacency bitset/byte table for fast min-fill simulation on
+      // medium-sized CFGs.
+      std::vector<uint8_t> hasEdge(n * n, 0);
+      for (std::size_t u = 0; u < n; ++u) {
+        for (std::size_t v : succs[u]) {
+          hasEdge[u * n + v] = 1;
+        }
+      }
+      for (std::size_t step = 0; step < n; ++step) {
+        std::size_t best = n;
+        std::size_t bestTier = 3;
+        std::size_t bestScore = std::numeric_limits<std::size_t>::max();
+        for (std::size_t v = 0; v < n; ++v) {
+          if (eliminated[v]) {
+            continue;
+          }
+          // Tier 0: interior nodes (in > 0 && out > 0)
+          // Tier 1: pure exits (out == 0, in > 0)
+          // Tier 2: pure entries / isolated (in == 0)
+          const std::size_t tier =
+              (inDeg[v] == 0) ? 2 : ((outDeg[v] == 0) ? 1 : 0);
+          const std::size_t score = inDeg[v] * outDeg[v];
+          if (tier < bestTier || (tier == bestTier && score < bestScore)) {
+            best = v;
+            bestTier = tier;
+            bestScore = score;
+            if (bestTier == 0 && bestScore <= 1) {
+              break;
+            }
+          }
+        }
+        eliminated[best] = true;
+        order.push_back(best);
+        // Simulate eliminating `best` for remaining vertices.
+        std::vector<std::size_t> livePreds, liveSuccs;
+        for (std::size_t u : preds[best]) {
+          if (!eliminated[u]) {
+            livePreds.push_back(u);
+          }
+        }
+        for (std::size_t w : succs[best]) {
+          if (!eliminated[w]) {
+            liveSuccs.push_back(w);
+          }
+        }
+        for (std::size_t u : livePreds) {
+          if (outDeg[u] > 0) {
+            --outDeg[u];
+          }
+        }
+        for (std::size_t w : liveSuccs) {
+          if (inDeg[w] > 0) {
+            --inDeg[w];
+          }
+        }
+        for (std::size_t u : livePreds) {
+          for (std::size_t w : liveSuccs) {
+            if (u == w) {
+              continue;
+            }
+            if (!hasEdge[u * n + w]) {
+              hasEdge[u * n + w] = 1;
+              succs[u].push_back(w);
+              preds[w].push_back(u);
+              ++outDeg[u];
+              ++inDeg[w];
+            }
+          }
+        }
+      }
+    } else {
+      for (std::size_t i = 0; i < n; ++i) {
+        order.push_back(i);
+      }
+    }
+
+    intToNode_.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+      const N &node = nodes[order[i]];
+      nodeToInt_[node] = static_cast<int>(i);
       intToNode_.push_back(node);
     }
   }
@@ -109,14 +256,22 @@ private:
     if (eliminated_)
       return;
 
-    const int n = static_cast<int>(graph_.getNodes().size());
-    // initialization of table P(u,v) not necessary due to default values
-    for (const auto &edge : graph_.getEdges()) {
+    const int n = static_cast<int>(intToNode_.size());
+    auto insertEdge = [&](const auto &edge) {
       const int head = intOf(edge->getSource());
       const int tail = intOf(edge->getTarget());
       auto pht = pathExpr(head, tail);
       pht = Regex<L>::simplifiedUnion(Regex<L>::literal(edge->getLabel()), pht);
       updatePathExpr(head, tail, std::move(pht));
+    };
+    if (const auto *orderedEdges = graph_.getOrderedEdges()) {
+      for (const auto &edge : *orderedEdges) {
+        insertEdge(edge);
+      }
+    } else {
+      for (const auto &edge : graph_.getEdges()) {
+        insertEdge(edge);
+      }
     }
 
     for (int v = 0; v < n; v++) {

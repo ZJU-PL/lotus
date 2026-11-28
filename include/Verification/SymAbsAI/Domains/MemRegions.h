@@ -42,7 +42,7 @@ public:
   virtual AbstractValue *clone() const override { return new NoAlias(*this); }
 
   virtual bool isJoinableWith(const AbstractValue &other) const override {
-    auto *other_val = static_cast<const NoAlias *>(&other);
+    auto *other_val = dynamic_cast<const NoAlias *>(&other);
     if (other_val) {
       if (other_val->Left_ == Left_ && other_val->Right_ == Right_) {
         return true;
@@ -97,7 +97,7 @@ public:
   }
 
   virtual bool isJoinableWith(const AbstractValue &other) const override {
-    auto *other_val = static_cast<const ValidRegion *>(&other);
+    auto *other_val = dynamic_cast<const ValidRegion *>(&other);
     if (other_val) {
       if (other_val->Ptr_ == Ptr_) {
         return true;
@@ -194,9 +194,10 @@ public:
   }
 
   virtual bool isJoinableWith(const AbstractValue &other) const override {
-    auto *other_val = static_cast<const VariableRegion *>(&other);
+    auto *other_val = dynamic_cast<const VariableRegion *>(&other);
     if (other_val) {
-      if (other_val->Expr_ == Expr_ && other_val->Fact_ == Fact_) {
+      if (other_val->Ptr_ == Ptr_ && other_val->Expr_ == Expr_ &&
+          other_val->Fact_ == Fact_) {
         return true;
       }
     }

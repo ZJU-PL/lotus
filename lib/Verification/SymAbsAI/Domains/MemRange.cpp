@@ -439,8 +439,14 @@ public:
 
     // rank values by accuracy
     std::vector<PrintAsDereference *> values;
-    for (auto &avalue : getValues())
-      values.push_back(dynamic_cast<PrintAsDereference *>(avalue.get()));
+    for (auto &avalue : getValues()) {
+      if (auto *p = dynamic_cast<PrintAsDereference *>(avalue.get()))
+        values.push_back(p);
+    }
+    if (values.empty()) {
+      out << "<unknown>";
+      return;
+    }
 
     std::sort(values.begin(), values.end(),
               [](PrintAsDereference *a, PrintAsDereference *b) {
@@ -490,14 +496,16 @@ public:
     std::vector<RepresentedValue> parameters;
 
     // use function arguments as parameters
-    for (auto &arg : function->args())
-      parameters.push_back(*fctx.findRepresentedValue(&arg));
+    for (auto &arg : function->args()) {
+      if (auto *arg_rv = fctx.findRepresentedValue(&arg))
+        parameters.push_back(*arg_rv);
+    }
 
     // use represented (i.e. appearing in this function) globals
     for (auto &glob : function->getParent()->globals()) {
       auto *glob_rv = fctx.findRepresentedValue(&glob);
       if (glob_rv != nullptr)
-        parameters.push_back(*fctx.findRepresentedValue(&glob));
+        parameters.push_back(*glob_rv);
     }
 
     // use results of loads as parameters

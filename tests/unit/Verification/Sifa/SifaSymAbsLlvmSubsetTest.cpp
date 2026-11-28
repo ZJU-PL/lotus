@@ -87,5 +87,39 @@ TEST(SifaSymAbs, ValidSubsetDoesNotThrow) {
   EXPECT_NO_THROW((void)lotus::sifa::isReachableSymAbs(*M, *F, F->getEntryBlock(), opt));
 }
 
+TEST(SifaSymAbs, RejectsUnsupportedInstructionInReachableCallee) {
+  const char *ir = R"IR(
+    %pair = type { i32, i32 }
+
+    define i32 @helper(%pair %p) {
+    entry:
+      %x = extractvalue %pair %p, 0
+      ret i32 %x
+    }
+
+    define i32 @caller(i32 %n) {
+    entry:
+      %r = call i32 @helper(%pair { i32 1, i32 2 })
+      %s = add i32 %r, %n
+      ret i32 %s
+    }
+  )IR";
+
+  llvm::LLVMContext ctx;
+  llvm::SMDiagnostic err;
+  std::unique_ptr<llvm::Module> M = llvm::parseAssemblyString(ir, err, ctx);
+  ASSERT_NE(M, nullptr);
+
+  llvm::Function *caller = M->getFunction("caller");
+  ASSERT_NE(caller, nullptr);
+
+  lotus::sifa::SifaSymAbsOptions opt;
+  opt.validateLlvmSubset = true;
+  opt.recursive = true;
+
+  EXPECT_THROW((void)lotus::sifa::analyzeSymAbsToReturn(*M, *caller, opt),
+               std::invalid_argument);
+}
+
 } // namespace
 

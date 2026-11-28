@@ -90,16 +90,23 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
     ~StopTimer() { stats.stop(SifaStats::Key::PROCEDURE_GRAPH_BUILDER_TIME); }
   } stopTimer{stats_};
 
-  if (!restrictToReachable || locationsOfInterest.empty()) {
+  if (!restrictToReachable) {
     return ProcedureGraph(F_);
   }
 
-  std::unordered_set<Block> reachable;
+  std::unordered_set<Block> requestedLois;
+  for (Block loi : locationsOfInterest) {
+    if (loi) {
+      requestedLois.insert(loi);
+    }
+  }
+
+  std::unordered_set<Block> backwardReachable;
   std::queue<Block> work;
   work.push(nullptr);
-  reachable.insert(nullptr);
+  backwardReachable.insert(nullptr);
   for (Block loi : locationsOfInterest) {
-    if (loi && reachable.insert(loi).second) {
+    if (loi && backwardReachable.insert(loi).second) {
       work.push(loi);
     }
   }
@@ -111,7 +118,7 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
       for (const llvm::BasicBlock &BB : F_) {
         if (exitsViaReturn(const_cast<llvm::BasicBlock *>(&BB))) {
           Block pred = const_cast<llvm::BasicBlock *>(&BB);
-          if (reachable.insert(pred).second) {
+          if (backwardReachable.insert(pred).second) {
             work.push(pred);
           }
         }
@@ -120,17 +127,43 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
     }
 
     for (Block pred : llvm::predecessors(cur)) {
-      if (reachable.insert(pred).second) {
+      if (backwardReachable.insert(pred).second) {
         work.push(pred);
       }
     }
   }
 
+  Block entry = const_cast<llvm::BasicBlock *>(&F_.getEntryBlock());
+  std::unordered_set<Block> forwardReachable;
+  std::queue<Block> fwork;
+  forwardReachable.insert(entry);
+  fwork.push(entry);
+  while (!fwork.empty()) {
+    Block cur = fwork.front();
+    fwork.pop();
+    if (exitsViaReturn(cur)) {
+      forwardReachable.insert(nullptr);
+    }
+    for (const llvm::BasicBlock *succBB : llvm::successors(cur)) {
+      Block succ = const_cast<llvm::BasicBlock *>(succBB);
+      if (forwardReachable.insert(succ).second) {
+        fwork.push(succ);
+      }
+    }
+  }
+
+  std::unordered_set<Block> reachable;
+  for (Block bb : forwardReachable) {
+    if (backwardReachable.count(bb)) {
+      reachable.insert(bb);
+    }
+  }
+
   ProcedureGraph pg;
-  pg.setEntryNode(pg.getOrCreateBlockEntryNode(
-      const_cast<llvm::BasicBlock *>(&F_.getEntryBlock())));
-  for (Block bb : reachable) {
-    if (bb) {
+  pg.setEntryNode(pg.getOrCreateBlockEntryNode(entry));
+  for (const llvm::BasicBlock &BB : F_) {
+    Block bb = const_cast<llvm::BasicBlock *>(&BB);
+    if (reachable.count(bb) || requestedLois.count(bb)) {
       pg.getOrCreateBlockEntryNode(bb);
     }
   }
@@ -157,11 +190,20 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
 
   Block entry = const_cast<llvm::BasicBlock *>(&F_.getEntryBlock());
 
+  std::unordered_set<Block> requestedLois;
+  for (Block loi : locationsOfInterest) {
+    if (loi) {
+      requestedLois.insert(loi);
+    }
+  }
+
   std::unordered_set<const llvm::Function *> enterCallSet(
       enterCallsOfInterest.begin(), enterCallsOfInterest.end());
   std::unordered_map<const llvm::Function *, std::vector<Block>> enterCallPreds;
+  std::unordered_map<Block, std::vector<Block>> enterTargetsByCaller;
   std::unordered_map<Block, std::vector<Block>> summaryPreds;
   std::unordered_set<Block> requestedEnterTargets;
+  std::vector<Block> requestedEnterTargetsOrdered;
 
   for (const llvm::BasicBlock &BB : F_) {
     Block src = const_cast<llvm::BasicBlock *>(&BB);
@@ -186,7 +228,10 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
         Block calleeEntry =
             const_cast<llvm::BasicBlock *>(&callee->getEntryBlock());
         enterCallPreds[callee].push_back(src);
-        requestedEnterTargets.insert(calleeEntry);
+        enterTargetsByCaller[src].push_back(calleeEntry);
+        if (requestedEnterTargets.insert(calleeEntry).second) {
+          requestedEnterTargetsOrdered.push_back(calleeEntry);
+        }
       }
     }
   }
@@ -196,7 +241,7 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
     for (const llvm::BasicBlock &BB : F_) {
       reachable.insert(const_cast<llvm::BasicBlock *>(&BB));
     }
-    for (Block enterTarget : requestedEnterTargets) {
+    for (Block enterTarget : requestedEnterTargetsOrdered) {
       reachable.insert(enterTarget);
     }
     for (const llvm::BasicBlock &BB : F_) {
@@ -206,16 +251,17 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
       }
     }
   } else {
+    std::unordered_set<Block> backwardReachable;
     std::queue<Block> work;
     work.push(nullptr);
-    reachable.insert(nullptr);
+    backwardReachable.insert(nullptr);
     for (Block loi : locationsOfInterest) {
-      if (loi && reachable.insert(loi).second) {
+      if (loi && backwardReachable.insert(loi).second) {
         work.push(loi);
       }
     }
-    for (Block enterTarget : requestedEnterTargets) {
-      if (reachable.insert(enterTarget).second) {
+    for (Block enterTarget : requestedEnterTargetsOrdered) {
+      if (backwardReachable.insert(enterTarget).second) {
         work.push(enterTarget);
       }
     }
@@ -227,7 +273,7 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
         for (const llvm::BasicBlock &BB : F_) {
           if (exitsViaReturn(const_cast<llvm::BasicBlock *>(&BB))) {
             Block pred = const_cast<llvm::BasicBlock *>(&BB);
-            if (reachable.insert(pred).second) {
+            if (backwardReachable.insert(pred).second) {
               work.push(pred);
             }
           }
@@ -242,7 +288,7 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
           continue;
         }
         for (Block pred : it->second) {
-          if (reachable.insert(pred).second) {
+          if (backwardReachable.insert(pred).second) {
             work.push(pred);
           }
         }
@@ -250,26 +296,62 @@ ProcedureGraph ProcedureGraphBuilder::graphOfProcedure(
       }
 
       for (Block pred : llvm::predecessors(cur)) {
-        if (reachable.insert(pred).second) {
+        if (backwardReachable.insert(pred).second) {
           work.push(pred);
         }
       }
       auto sumIt = summaryPreds.find(cur);
       if (sumIt != summaryPreds.end()) {
         for (Block pred : sumIt->second) {
-          if (reachable.insert(pred).second) {
+          if (backwardReachable.insert(pred).second) {
             work.push(pred);
           }
         }
+      }
+    }
+
+    std::unordered_set<Block> forwardReachable;
+    std::queue<Block> fwork;
+    forwardReachable.insert(entry);
+    fwork.push(entry);
+    while (!fwork.empty()) {
+      Block cur = fwork.front();
+      fwork.pop();
+      if (exitsViaReturn(cur)) {
+        forwardReachable.insert(nullptr);
+      }
+      auto etIt = enterTargetsByCaller.find(cur);
+      if (etIt != enterTargetsByCaller.end()) {
+        for (Block calleeEntry : etIt->second) {
+          forwardReachable.insert(calleeEntry);
+        }
+      }
+      for (const llvm::BasicBlock *succBB : llvm::successors(cur)) {
+        Block succ = const_cast<llvm::BasicBlock *>(succBB);
+        if (forwardReachable.insert(succ).second) {
+          fwork.push(succ);
+        }
+      }
+    }
+
+    for (Block bb : forwardReachable) {
+      if (backwardReachable.count(bb)) {
+        reachable.insert(bb);
       }
     }
   }
 
   ProcedureGraph pg;
   pg.setEntryNode(pg.getOrCreateBlockEntryNode(entry));
-  for (Block bb : reachable) {
-    if (bb) {
+  for (const llvm::BasicBlock &BB : F_) {
+    Block bb = const_cast<llvm::BasicBlock *>(&BB);
+    if (reachable.count(bb) || requestedLois.count(bb)) {
       pg.getOrCreateBlockEntryNode(bb);
+    }
+  }
+  for (Block enterTarget : requestedEnterTargetsOrdered) {
+    if (reachable.count(enterTarget)) {
+      pg.getOrCreateBlockEntryNode(enterTarget);
     }
   }
 

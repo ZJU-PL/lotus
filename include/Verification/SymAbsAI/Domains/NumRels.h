@@ -74,7 +74,7 @@ public:
   virtual void resetToBottom() override { Rel_ = BOTTOM; }
 
   virtual bool isJoinableWith(const AbstractValue &other) const override {
-    auto *other_val = static_cast<const NumRels *>(&other);
+    auto *other_val = dynamic_cast<const NumRels *>(&other);
     if (other_val) {
       if (other_val->IsSigned_ == IsSigned_ && other_val->Left_ == Left_ &&
           other_val->Right_ == Right_) {

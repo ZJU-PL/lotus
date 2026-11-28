@@ -126,27 +126,36 @@ public:
 
 template <typename L> class Literal final : public IRegex<L> {
 public:
-  explicit Literal(L letter) : letter_(std::move(letter)) {}
+  explicit Literal(L letter)
+      : letter_(std::move(letter)), hash_(std::hash<L>()(letter_)) {}
 
   const L &getLetter() const { return letter_; }
 
   std::string toString() const override {
     return detail::toStringViaStream(letter_);
   }
-  std::size_t hashCode() const override { return std::hash<L>()(letter_); }
+  std::size_t hashCode() const override { return hash_; }
   bool equals(const IRegex<L> &other) const override {
+    if (this == &other)
+      return true;
+    if (hash_ != other.hashCode())
+      return false;
     const auto *o = dynamic_cast<const Literal<L> *>(&other);
     return o != nullptr && letter_ == o->letter_;
   }
 
 private:
   L letter_;
+  std::size_t hash_;
 };
 
 template <typename L> class Union final : public IRegex<L> {
 public:
   Union(RegexRef<L> first, RegexRef<L> second)
-      : first_(std::move(first)), second_(std::move(second)) {}
+      : first_(std::move(first)), second_(std::move(second)),
+        hash_(detail::hashCombine(
+            detail::hashCombine(0x554E49u, first_->hashCode()),
+            second_->hashCode())) {}
 
   const RegexRef<L> &getFirst() const { return first_; }
   const RegexRef<L> &getSecond() const { return second_; }
@@ -154,10 +163,12 @@ public:
   std::string toString() const override {
     return "{" + first_->toString() + " ∪ " + second_->toString() + "}";
   }
-  std::size_t hashCode() const override {
-    return detail::hashCombine(first_->hashCode(), second_->hashCode());
-  }
+  std::size_t hashCode() const override { return hash_; }
   bool equals(const IRegex<L> &other) const override {
+    if (this == &other)
+      return true;
+    if (hash_ != other.hashCode())
+      return false;
     const auto *o = dynamic_cast<const Union<L> *>(&other);
     return o != nullptr && first_->equals(*o->first_) &&
            second_->equals(*o->second_);
@@ -166,12 +177,16 @@ public:
 private:
   RegexRef<L> first_;
   RegexRef<L> second_;
+  std::size_t hash_;
 };
 
 template <typename L> class Concatenation final : public IRegex<L> {
 public:
   Concatenation(RegexRef<L> first, RegexRef<L> second)
-      : first_(std::move(first)), second_(std::move(second)) {}
+      : first_(std::move(first)), second_(std::move(second)),
+        hash_(detail::hashCombine(
+            detail::hashCombine(0x434F4Eu, first_->hashCode()),
+            second_->hashCode())) {}
 
   const RegexRef<L> &getFirst() const { return first_; }
   const RegexRef<L> &getSecond() const { return second_; }
@@ -179,10 +194,12 @@ public:
   std::string toString() const override {
     return "(" + first_->toString() + "·" + second_->toString() + ")";
   }
-  std::size_t hashCode() const override {
-    return detail::hashCombine(first_->hashCode(), second_->hashCode());
-  }
+  std::size_t hashCode() const override { return hash_; }
   bool equals(const IRegex<L> &other) const override {
+    if (this == &other)
+      return true;
+    if (hash_ != other.hashCode())
+      return false;
     const auto *o = dynamic_cast<const Concatenation<L> *>(&other);
     return o != nullptr && first_->equals(*o->first_) &&
            second_->equals(*o->second_);
@@ -191,25 +208,33 @@ public:
 private:
   RegexRef<L> first_;
   RegexRef<L> second_;
+  std::size_t hash_;
 };
 
 template <typename L> class Star final : public IRegex<L> {
 public:
-  explicit Star(RegexRef<L> inner) : inner_(std::move(inner)) {}
+  explicit Star(RegexRef<L> inner)
+      : inner_(std::move(inner)),
+        hash_(detail::hashCombine(0x535441u, inner_->hashCode())) {}
 
   const RegexRef<L> &getInner() const { return inner_; }
 
   std::string toString() const override {
     return "[" + inner_->toString() + "]* ";
   }
-  std::size_t hashCode() const override { return 257u * inner_->hashCode(); }
+  std::size_t hashCode() const override { return hash_; }
   bool equals(const IRegex<L> &other) const override {
+    if (this == &other)
+      return true;
+    if (hash_ != other.hashCode())
+      return false;
     const auto *o = dynamic_cast<const Star<L> *>(&other);
     return o != nullptr && inner_->equals(*o->inner_);
   }
 
 private:
   RegexRef<L> inner_;
+  std::size_t hash_;
 };
 
 template <typename L> struct Regex {
@@ -251,6 +276,20 @@ template <typename L> struct Regex {
     if (a->equals(*b)) {
       return a;
     }
+    // Distribute common prefix/suffix out of unions to prevent exponential
+    // blowup in RegexToDag across sequential diamond paths.
+    if (const auto *ca = dynamic_cast<const Concatenation<L> *>(a.get())) {
+      if (const auto *cb = dynamic_cast<const Concatenation<L> *>(b.get())) {
+        if (ca->getFirst()->equals(*cb->getFirst())) {
+          return simplifiedConcatenation(
+              ca->getFirst(), simplifiedUnion(ca->getSecond(), cb->getSecond()));
+        }
+        if (ca->getSecond()->equals(*cb->getSecond())) {
+          return simplifiedConcatenation(
+              simplifiedUnion(ca->getFirst(), cb->getFirst()), ca->getSecond());
+        }
+      }
+    }
     return union_(std::move(a), std::move(b));
   }
 
@@ -270,6 +309,9 @@ template <typename L> struct Regex {
   static RegexRef<L> simplifiedStar(RegexRef<L> reg) {
     if (reg->isEmptySet() || reg->isEpsilon()) {
       return epsilon();
+    }
+    if (dynamic_cast<const Star<L> *>(reg.get())) {
+      return reg;
     }
     return star(std::move(reg));
   }

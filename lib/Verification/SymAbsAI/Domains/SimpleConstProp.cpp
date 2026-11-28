@@ -21,8 +21,9 @@ bool SimpleConstProp::joinWith(const AbstractValue &av_other) {
     return false;
 
   if (other.isTop()) {
+    bool changed = !isTop();
     havoc();
-    return false;
+    return changed;
   }
 
   // at this point none of the abstract values are top

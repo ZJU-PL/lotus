@@ -29,6 +29,7 @@ protected:
   values_t Values_;
   const FunctionContext &FunctionContext_;
   bool Finalized_;
+  bool EmptyIsBottom_ = true;
   std::mt19937 RNG_;
   unsigned int KeepPercent_;
 
@@ -91,13 +92,37 @@ public:
 
   virtual bool joinWith(const AbstractValue &av_other) override {
     assert(Finalized_);
-    auto &other = static_cast<const Product &>(av_other);
+    const auto *other = dynamic_cast<const Product *>(&av_other);
+    if (!other)
+      return false;
+    if (Values_.empty() && other->Values_.empty()) {
+      if (EmptyIsBottom_ && !other->EmptyIsBottom_) {
+        EmptyIsBottom_ = false;
+        return true;
+      }
+      return false;
+    }
+    if (Values_.empty()) {
+      if (EmptyIsBottom_ && !other->isBottom()) {
+        EmptyIsBottom_ = false;
+        return true;
+      }
+      return false;
+    }
+    if (other->Values_.empty()) {
+      if (!other->isBottom()) {
+        bool wasTop = isTop();
+        havoc();
+        return !wasTop;
+      }
+      return false;
+    }
     // Allow different sizes (e.g. parameterized domains with location-dependent
     // param sets).
-    const size_t n = std::min(Values_.size(), other.Values_.size());
+    const size_t n = std::min(Values_.size(), other->Values_.size());
     bool changed = false;
     for (size_t i = 0; i < n; i++) {
-      if (Values_[i]->joinWith(*other.Values_[i]))
+      if (Values_[i]->joinWith(*other->Values_[i]))
         changed = true;
     }
     return changed;
@@ -105,11 +130,27 @@ public:
 
   virtual bool meetWith(const AbstractValue &av_other) override {
     assert(Finalized_);
-    auto &other = static_cast<const Product &>(av_other);
-    const size_t n = std::min(Values_.size(), other.Values_.size());
+    const auto *other = dynamic_cast<const Product *>(&av_other);
+    if (!other)
+      return false;
+    if (Values_.empty()) {
+      if (!EmptyIsBottom_ && other->isBottom()) {
+        EmptyIsBottom_ = true;
+        return true;
+      }
+      return false;
+    }
+    if (other->Values_.empty()) {
+      if (other->isBottom() && !isBottom()) {
+        resetToBottom();
+        return true;
+      }
+      return false;
+    }
+    const size_t n = std::min(Values_.size(), other->Values_.size());
     bool changed = false;
     for (size_t i = 0; i < n; i++) {
-      if (Values_[i]->meetWith(*other.Values_[i]))
+      if (Values_[i]->meetWith(*other->Values_[i]))
         changed = true;
     }
     return changed;
@@ -117,6 +158,7 @@ public:
 
   virtual void havoc() override {
     assert(Finalized_);
+    EmptyIsBottom_ = false;
     for (unsigned i = 0; i < Values_.size(); i++) {
       Values_[i]->havoc();
     }
@@ -131,6 +173,7 @@ public:
   virtual AbstractValue *clone() const override {
     assert(Finalized_);
     Product *result = new Product(FunctionContext_);
+    result->EmptyIsBottom_ = EmptyIsBottom_;
     for (auto &value : Values_) {
       result->add(unique_ptr<AbstractValue>(value->clone()));
     }
@@ -140,6 +183,13 @@ public:
 
   virtual bool updateWith(const ConcreteState &cstate) override {
     assert(Finalized_);
+    if (Values_.empty()) {
+      if (EmptyIsBottom_) {
+        EmptyIsBottom_ = false;
+        return true;
+      }
+      return false;
+    }
     bool changed = false;
 
     for (unsigned i = 0; i < Values_.size(); i++) {
@@ -153,6 +203,8 @@ public:
   virtual z3::expr toFormula(const ValueMapping &vmap,
                              z3::context &zctx) const override {
     assert(Finalized_);
+    if (Values_.empty())
+      return zctx.bool_val(!EmptyIsBottom_);
     z3::expr result = zctx.bool_val(true);
 
     for (auto &x : Values_)
@@ -162,6 +214,8 @@ public:
   }
 
   virtual bool isTop() const override {
+    if (Values_.empty())
+      return !EmptyIsBottom_;
     for (auto &x : Values_) {
       if (!x->isTop())
         return false;
@@ -170,6 +224,8 @@ public:
   }
 
   virtual bool isBottom() const override {
+    if (Values_.empty())
+      return EmptyIsBottom_;
     for (auto &x : Values_) {
       if (!x->isBottom())
         return false;
@@ -204,6 +260,8 @@ public:
       AbstractValue *ati = const_cast<AbstractValue *>(all_this[i]);
       av_pairs.push_back({ati, all_other[i]});
     }
+    if (av_pairs.empty())
+      return;
     std::shuffle(av_pairs.begin(), av_pairs.end(), RNG_);
 
     int to_keep = std::max<int>(1, (KeepPercent_ * Values_.size()) / 100);
@@ -224,13 +282,16 @@ public:
   }
 
   virtual void resetToBottom() override {
+    EmptyIsBottom_ = true;
     for (auto &val : Values_) {
       val->resetToBottom();
     }
   }
 
   virtual bool isJoinableWith(const AbstractValue &other) const override {
-    if (const auto *oth_val = static_cast<const Product *>(&other)) {
+    if (const auto *oth_val = dynamic_cast<const Product *>(&other)) {
+      if (Values_.empty() && oth_val->Values_.empty())
+        return true;
       const size_t n = std::min(Values_.size(), oth_val->Values_.size());
       for (size_t i = 0; i < n; ++i) {
         if (!(oth_val->Values_[i])->isJoinableWith(*Values_[i]))

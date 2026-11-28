@@ -57,6 +57,8 @@ class Zone : public AbstractValue {
   // Bounds: Lower_ <= (Left - Right) <= Upper_
   int64_t Upper_ = std::numeric_limits<int64_t>::max();
   int64_t Lower_ = std::numeric_limits<int64_t>::min();
+  int64_t PrevUpper_ = std::numeric_limits<int64_t>::max();
+  int64_t PrevLower_ = std::numeric_limits<int64_t>::min();
 
   bool isInconsistent() const { return Lower_ > Upper_; }
   void checkConsistency() {
@@ -74,12 +76,15 @@ public:
   bool meetWith(const AbstractValue &other) override;
   bool updateWith(const ConcreteState &cstate) override;
   z3::expr toFormula(const ValueMapping &vmap, z3::context &ctx) const override;
+  void widen() override;
 
   void havoc() override {
     Top_ = true;
     Bottom_ = false;
     Upper_ = std::numeric_limits<int64_t>::max();
     Lower_ = std::numeric_limits<int64_t>::min();
+    PrevUpper_ = Upper_;
+    PrevLower_ = Lower_;
   }
 
   void resetToBottom() override {
@@ -87,6 +92,8 @@ public:
     Bottom_ = true;
     Upper_ = std::numeric_limits<int64_t>::min();
     Lower_ = std::numeric_limits<int64_t>::max();
+    PrevUpper_ = std::numeric_limits<int64_t>::max();
+    PrevLower_ = std::numeric_limits<int64_t>::min();
   }
 
   bool isTop() const override { return Top_ && !Bottom_; }

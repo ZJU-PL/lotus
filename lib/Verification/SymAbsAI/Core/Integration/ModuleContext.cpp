@@ -78,9 +78,10 @@ z3::expr ModuleContext::substituteReturn(z3::expr formula, ValueMapping vmap,
       unsigned bits = as_const->getBitWidth();
       ret_expr = ConcreteState::Value(Z3Context_.get(),
                                       as_const->getZExtValue(), bits);
-    } else {
-      assert(as_rv != nullptr);
+    } else if (as_rv != nullptr) {
       ret_expr = vmap[*as_rv];
+    } else {
+      return formula;
     }
 
     z3::expr ret_sym =
@@ -132,11 +133,19 @@ z3::expr ModuleContext::formulaFor(llvm::Function *function) const {
   assert(function != nullptr);
   bool recursive = Config_.get<bool>("ModuleContext", "Recursive", false);
 
+  auto cached = FormulaCache_.find(function);
+  if (cached != FormulaCache_.end())
+    return cached->second;
+
   // avoid infinite recursion if we're already generating a formula for this
   // function
-  if (RecurFuncs_.find(function) != RecurFuncs_.end())
+  if (RecurFuncs_.find(function) != RecurFuncs_.end()) {
+    CycleHit_ = true;
     return Z3Context_->bool_val(true);
+  }
 
+  const bool savedCycle = CycleHit_;
+  CycleHit_ = false;
   RecurFuncs_.insert(function);
   z3::expr result = Z3Context_->bool_val(true);
 
@@ -199,6 +208,9 @@ z3::expr ModuleContext::formulaFor(llvm::Function *function) const {
   }
 
   RecurFuncs_.erase(function);
+  if (!CycleHit_)
+    FormulaCache_.emplace(function, result);
+  CycleHit_ = CycleHit_ || savedCycle;
   return result;
 }
 } // namespace symabs_ai

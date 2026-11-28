@@ -91,48 +91,53 @@ template <typename L>
 std::vector<typename TopsortCache<L>::Node *>
 TopsortCache<L>::compute(const Dag &dag) {
   using Node = typename TopsortCache<L>::Node;
-  // Work on reachable subgraph from source.
-  std::unordered_set<Node *> nodes;
+  // Work on reachable subgraph from source in deterministic BFS order.
+  std::unordered_set<Node *> seen;
+  std::vector<Node *> nodes;
   std::queue<Node *> q;
   if (dag.getSource()) {
     q.push(dag.getSource());
-    nodes.insert(dag.getSource());
+    seen.insert(dag.getSource());
+    nodes.push_back(dag.getSource());
   }
   while (!q.empty()) {
     Node *cur = q.front();
     q.pop();
     for (Node *n : cur->getOutgoingNodes()) {
-      if (nodes.insert(n).second) {
+      if (seen.insert(n).second) {
         q.push(n);
+        nodes.push_back(n);
       }
     }
   }
 
   std::unordered_map<Node *, int> indeg;
+  indeg.reserve(nodes.size());
   for (Node *n : nodes) {
     indeg[n] = 0;
   }
   for (Node *n : nodes) {
     for (Node *m : n->getOutgoingNodes()) {
-      if (nodes.count(m)) {
+      if (seen.count(m)) {
         indeg[m] += 1;
       }
     }
   }
 
   std::queue<Node *> zeros;
-  for (auto &kv : indeg) {
-    if (kv.second == 0)
-      zeros.push(kv.first);
+  for (Node *n : nodes) {
+    if (indeg[n] == 0)
+      zeros.push(n);
   }
 
   std::vector<Node *> out;
+  out.reserve(nodes.size());
   while (!zeros.empty()) {
     Node *n = zeros.front();
     zeros.pop();
     out.push_back(n);
     for (Node *m : n->getOutgoingNodes()) {
-      if (!nodes.count(m))
+      if (!seen.count(m))
         continue;
       int &next = indeg[m];
       next -= 1;
