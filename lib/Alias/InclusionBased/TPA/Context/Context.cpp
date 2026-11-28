@@ -29,7 +29,16 @@ std::mutex &contextRegistryMutex() {
   static std::mutex mutex;
   return mutex;
 }
+uint64_t nextContextId = 1;
 } // namespace
+
+const Context *Context::insertUnlocked(const Context &candidate,
+                                       bool isGlobal) {
+  auto res = ctxSet.insert(candidate);
+  if (res.second && !isGlobal)
+    res.first->id = nextContextId++;
+  return &(*res.first);
+}
 
 // Pushes a new context frame onto the current context stack.
 // This version takes a ProgramPoint, extracting the context and instruction
@@ -47,12 +56,7 @@ const Context *Context::pushContext(const ProgramPoint &pp) {
 const Context *Context::pushContext(const Context *ctx,
                                     const Instruction *inst) {
   std::lock_guard<std::mutex> lock(contextRegistryMutex());
-  // Create a temporary context object
-  auto newCtx = Context(inst, ctx);
-  // Insert into the set. If it exists, 'itr' points to the existing one.
-  // If not, it points to the newly inserted one.
-  auto itr = ctxSet.insert(newCtx).first;
-  return &(*itr);
+  return insertUnlocked(Context(inst, ctx), false);
 }
 
 // Pushes a new call site while keeping at most the k most recent call sites
@@ -62,11 +66,11 @@ const Context *Context::pushContextWithLimit(const Context *ctx,
                                              size_t k) {
   std::lock_guard<std::mutex> lock(contextRegistryMutex());
   auto getGlobalUnlocked = []() -> const Context * {
-    return &(*ctxSet.insert(Context()).first);
+    return insertUnlocked(Context(), true);
   };
   auto pushUnlocked = [](const Context *base,
                          const Instruction *cs) -> const Context * {
-    return &(*ctxSet.insert(Context(cs, base)).first);
+    return insertUnlocked(Context(cs, base), false);
   };
 
   if (k == 0)
@@ -103,8 +107,7 @@ const Context *Context::popContext(const Context *ctx) {
 // Used for global variables and the entry point of the analysis.
 const Context *Context::getGlobalContext() {
   std::lock_guard<std::mutex> lock(contextRegistryMutex());
-  auto itr = ctxSet.insert(Context()).first;
-  return &(*itr);
+  return insertUnlocked(Context(), true);
 }
 
 // Helper to retrieve all created contexts.

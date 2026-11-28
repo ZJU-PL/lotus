@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Checker/TPA/Engine/EvalSuccessor.h"
+#include "Checker/TPA/Support/TaintMap.h"
 #include "Checker/TPA/Support/TaintStore.h"
 
 #include <cstddef>
@@ -26,7 +27,7 @@ private:
   const TaintStore *baseStore = nullptr;
   // Sparse per-object writes applied by this transfer (empty for passthrough
   // nodes like Entry, Return, Resume, InternalCall, IgnoredCall).
-  TaintStore overrides;
+  TaintMap<const tpa::MemoryObject *> overrides;
 
   std::vector<ProgramPoint> topSuccs;
   std::vector<DirectMemProp> directMemProps;
@@ -42,7 +43,9 @@ public:
 
   void setBaseStore(const TaintStore *s) { baseStore = s; }
   const TaintStore *getBaseStore() const { return baseStore; }
-  const TaintStore &getOverrides() const { return overrides; }
+  const TaintMap<const tpa::MemoryObject *> &getOverrides() const {
+    return overrides;
+  }
 
   bool hasOverride(const tpa::MemoryObject *obj) const {
     return overrides.findValue(obj) != nullptr;

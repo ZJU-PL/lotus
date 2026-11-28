@@ -47,6 +47,9 @@ private:
   using ValueMap = llvm::DenseMap<const llvm::Value *, const CFGNode *>;
   ValueMap valueMap;
 
+  uint32_t id = 0;
+  uint32_t nextNodeId = 0;
+
   // Special nodes
   EntryCFGNode *entryNode;
   const ReturnCFGNode *exitNode;
@@ -59,6 +62,9 @@ public:
 
   // Constructor
   CFG(const llvm::Function &);
+
+  uint32_t getId() const noexcept { return id; }
+  void setId(uint32_t cfgId) noexcept { id = cfgId; }
 
   // Access function
   const llvm::Function &getFunction() const { return func; }
@@ -104,6 +110,7 @@ public:
     // private
     auto node = new Node(std::forward<Args>(args)...);
     node->setCFG(*this);
+    node->setId(nextNodeId++);
     nodes.emplace_back(node);
     return node;
   }

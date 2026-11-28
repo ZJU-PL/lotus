@@ -25,21 +25,21 @@ TaintLattice SinkViolationChecker::lookupTaint(const TaintValue &tv,
   case TClass::ValueOnly:
     return env.lookup(tv);
   case TClass::DirectMemory: {
-    if (!store)
-      return TaintLattice::Unknown;
     auto pSet = ptrAnalysis.getPtsSet(tv.getContext(), tv.getValue());
     if (pSet.empty())
       return TaintLattice::Unknown;
     auto res = TaintLattice::Unknown;
     for (const auto *loc : pSet) {
+      if (loc->isUniversalObject())
+        return TaintLattice::Either;
+      if (loc->isNullObject() || !store)
+        continue;
       auto val = store->lookup(loc);
       res = Lattice<TaintLattice>::merge(res, val);
     }
     return res;
   }
   case TClass::ReachableMemory: {
-    if (!store)
-      return TaintLattice::Unknown;
     auto pSet = ptrAnalysis.getPtsSet(tv.getContext(), tv.getValue());
     if (pSet.empty())
       return TaintLattice::Unknown;
@@ -47,7 +47,7 @@ TaintLattice SinkViolationChecker::lookupTaint(const TaintValue &tv,
     for (const auto *obj : pSet) {
       if (obj->isUniversalObject())
         return TaintLattice::Either;
-      if (obj->isNullObject())
+      if (obj->isNullObject() || !store)
         continue;
       for (const auto *field :
            ptrAnalysis.getMemoryManager().getReachableMemoryObjects(obj))
@@ -89,8 +89,12 @@ void SinkViolationChecker::checkCallSiteWithEntry(
     checkValueWithTClass(argVal, entry.getTaintClass(), idx, store, violations);
   };
   if (taintPos.isAfterArgPosition()) {
-    for (size_t i = taintPos.getArgIndex(), e = cs->arg_size(); i < e; ++i)
+    for (size_t i = taintPos.getArgIndex(), e = cs->arg_size(); i < e; ++i) {
+      if (entry.getTaintClass() != TClass::ValueOnly &&
+          !cs->getArgOperand(i)->getType()->isPointerTy())
+        continue;
       checkArgument(i);
+    }
   } else {
     checkArgument(taintPos.getArgIndex());
   }

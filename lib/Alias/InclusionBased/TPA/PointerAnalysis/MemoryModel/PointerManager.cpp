@@ -135,11 +135,13 @@ const Pointer *PointerManager::buildPointer(const context::Context *ctx,
 const Pointer *PointerManager::internPointer(const context::Context *ctx,
                                              const llvm::Value *val,
                                              bool visible) {
-  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+  std::unique_lock<std::recursive_mutex> lock(*registryMutex, std::defer_lock);
+  if (threadSafe)
+    lock.lock();
   auto ptr = Pointer(ctx, val);
   auto itr = ptrSet.find(ptr);
   if (itr != ptrSet.end()) {
-    if (visible)
+    if (visible && trackPublished)
       published.insert(&*itr);
     return &*itr;
   }
@@ -148,7 +150,7 @@ const Pointer *PointerManager::internPointer(const context::Context *ctx,
   const auto *ret = &*itr;
   // Record reverse mapping: Value -> List of Pointers (one per context)
   valuePtrMap[val].push_back(ret);
-  if (visible)
+  if (visible && trackPublished)
     published.insert(ret);
   return ret;
 }
@@ -184,7 +186,9 @@ const Pointer *PointerManager::getNullPointer() const {
 // Handles special cases (Null, Undef/Universal, Globals).
 const Pointer *PointerManager::getPointer(const Context *ctx,
                                           const llvm::Value *val) const {
-  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+  std::unique_lock<std::recursive_mutex> lock(*registryMutex, std::defer_lock);
+  if (threadSafe || base != nullptr)
+    lock.lock();
   assert(ctx != nullptr && val != nullptr);
 
   val = canonicalizeValue(val);
@@ -200,6 +204,8 @@ const Pointer *PointerManager::getPointer(const Context *ctx,
   const PointerManager &owner = base ? *base : *this;
   const auto itr = owner.ptrSet.find(Pointer(ctx, val));
   const Pointer *canonical = itr == owner.ptrSet.end() ? nullptr : &*itr;
+  if (!base && !owner.trackPublished)
+    return canonical;
   if (base && canonical && staged.count(canonical))
     return canonical;
   const Pointer *result =
@@ -212,7 +218,9 @@ const Pointer *PointerManager::getPointer(const Context *ctx,
 // Retrieves a pointer, creating it if it doesn't exist.
 const Pointer *PointerManager::getOrCreatePointer(const Context *ctx,
                                                   const llvm::Value *val) {
-  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+  std::unique_lock<std::recursive_mutex> lock(*registryMutex, std::defer_lock);
+  if (threadSafe || base != nullptr)
+    lock.lock();
   assert(ctx != nullptr && val != nullptr);
 
   val = canonicalizeValue(val);
@@ -230,7 +238,9 @@ const Pointer *PointerManager::getOrCreatePointer(const Context *ctx,
 // Finds all Pointers associated with a given LLVM Value across all contexts.
 PointerManager::PointerVector
 PointerManager::getPointersWithValue(const llvm::Value *val) const {
-  std::lock_guard<std::recursive_mutex> lock(*registryMutex);
+  std::unique_lock<std::recursive_mutex> lock(*registryMutex, std::defer_lock);
+  if (threadSafe || base != nullptr)
+    lock.lock();
   PointerVector vec;
 
   val = canonicalizeValue(val);
@@ -253,10 +263,13 @@ PointerManager::getPointersWithValue(const llvm::Value *val) const {
   else {
     const PointerManager &owner = base ? *base : *this;
     auto itr = owner.valuePtrMap.find(val);
-    if (itr != owner.valuePtrMap.end())
+    if (itr != owner.valuePtrMap.end()) {
+      if (!base && !owner.trackPublished)
+        return itr->second;
       for (const Pointer *pointer : itr->second)
         if (owner.published.count(pointer) || staged.count(pointer))
           vec.push_back(pointer);
+    }
   }
 
   return vec;

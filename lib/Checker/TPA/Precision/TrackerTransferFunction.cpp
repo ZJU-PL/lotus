@@ -237,17 +237,20 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
   case Instruction::GetElementPtr:
   case Instruction::PHI: {
     auto valueSet = evalAllOperands(pp);
-    LocalTracker(workList).trackValue(pp, valueSet);
+    LocalTracker(workList, trackerState.getDefUseModule())
+        .trackValue(pp, valueSet);
     break;
   }
   case Instruction::Store: {
     auto valueSet = evalStore(pp);
-    LocalTracker(workList).trackValue(pp, valueSet);
+    LocalTracker(workList, trackerState.getDefUseModule())
+        .trackValue(pp, valueSet);
     break;
   }
   case Instruction::AtomicRMW:
   case Instruction::AtomicCmpXchg: {
-    LocalTracker(workList).trackValue(pp, evalAllOperands(pp));
+    LocalTracker localTracker(workList, trackerState.getDefUseModule());
+    localTracker.trackValue(pp, evalAllOperands(pp));
     if (store) {
       const auto *rmw = dyn_cast<AtomicRMWInst>(inst);
       const auto *cx = dyn_cast<AtomicCmpXchgInst>(inst);
@@ -255,14 +258,15 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
           rmw ? rmw->getPointerOperand() : cx->getPointerOperand();
       auto pts =
           trackerState.getPointerAnalysis().getPtsSet(pp.getContext(), ptr);
-      LocalTracker(workList).trackMemory(pp, evalPtsSet(pp, pts, *store));
+      localTracker.trackMemory(pp, evalPtsSet(pp, pts, *store));
     }
     break;
   }
   case Instruction::Load: {
     if (store != nullptr) {
       auto memSet = evalLoad(pp, *store);
-      LocalTracker(workList).trackMemory(pp, memSet);
+      LocalTracker(workList, trackerState.getDefUseModule())
+          .trackMemory(pp, memSet);
     }
     break;
   }
@@ -273,24 +277,32 @@ void TrackerTransferFunction::evalInst(const ProgramPoint &pp,
     break;
   }
   case Instruction::Ret: {
+    LocalTracker localTracker(workList, trackerState.getDefUseModule());
     auto *retVal = cast<ReturnInst>(inst)->getReturnValue();
     if (retVal != nullptr) {
       auto valueSet = evalAllOperands(pp);
-      LocalTracker(workList).trackValue(pp, valueSet);
+      localTracker.trackValue(pp, valueSet);
+    }
+    if (store != nullptr) {
+      std::vector<const tpa::MemoryObject *> objects;
+      const auto &memo = trackerState.getMemo();
+      store->forEachEither(
+          [&](uint32_t objId) { objects.push_back(memo.getObjectById(objId)); });
+      localTracker.trackMemory(pp, objects);
     }
     break;
   }
   case Instruction::LandingPad:
     break; // Runtime-produced handle: no modeled value provenance.
   case Instruction::Resume: {
-    MemorySet objects;
-    if (store)
-      pp.getDefUseInstruction()->forEachMemPred(
-          [&](const tpa::MemoryObject *loc, const auto &) {
-            if (store->lookup(loc) == TaintLattice::Either)
-              objects.insert(loc);
-          });
-    LocalTracker(workList).trackMemory(pp, objects);
+    if (store != nullptr) {
+      std::vector<const tpa::MemoryObject *> objects;
+      const auto &memo = trackerState.getMemo();
+      store->forEachEither(
+          [&](uint32_t objId) { objects.push_back(memo.getObjectById(objId)); });
+      LocalTracker(workList, trackerState.getDefUseModule())
+          .trackMemory(pp, objects);
+    }
     break;
   }
   case Instruction::VAArg: {

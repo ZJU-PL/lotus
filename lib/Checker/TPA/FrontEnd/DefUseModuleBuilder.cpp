@@ -123,13 +123,13 @@ void DefUseModuleBuilder::buildDefUseFunction(
 DefUseModule DefUseModuleBuilder::buildDefUseModule(const Module &module) {
   if (!validateModule(module, llvm::errs()))
     throw std::invalid_argument("Unsupported module for TPA taint");
-  DefUseModule duModule(
-      module, reachableFunctions(module, ptrAnalysis, unmodeledPolicy));
+  auto reachable = reachableFunctions(module, ptrAnalysis, unmodeledPolicy);
+  DefUseModule duModule(module, reachable);
 
   // Obtain mod ref summary first
   auto moduleSummary =
       ModRefModuleAnalysis(ptrAnalysis, modRefTable, unmodeledPolicy)
-          .runOnModule(module);
+          .runOnModule(module, reachable);
 
   for (auto &duFunc : duModule)
     buildDefUseFunction(duFunc, moduleSummary);

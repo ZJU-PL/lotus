@@ -3,8 +3,10 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/MemoryBlock.h"
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace tpa {
 
@@ -14,6 +16,11 @@ private:
   size_t offset;
   bool summary;
   mutable uint32_t id;
+  // Lock-free cache of [this, reachable pointer fields at offset > this->offset]
+  // owned by MemoryManager::reachablePtrStorage (never populated on static
+  // special objects uObj/nObj).
+  mutable std::atomic<const std::vector<const MemoryObject *> *>
+      reachablePtrCache{nullptr};
 
   // Private constructor - created by MemoryManager only
   MemoryObject(const MemoryBlock *b, size_t o, bool s, uint32_t objId = 0)
@@ -22,6 +29,22 @@ private:
   }
 
 public:
+  MemoryObject(const MemoryObject &other) noexcept
+      : memBlock(other.memBlock), offset(other.offset), summary(other.summary),
+        id(other.id), reachablePtrCache(nullptr) {}
+  MemoryObject(MemoryObject &&other) noexcept
+      : memBlock(other.memBlock), offset(other.offset), summary(other.summary),
+        id(other.id), reachablePtrCache(nullptr) {}
+  MemoryObject &operator=(const MemoryObject &other) noexcept {
+    if (this != &other) {
+      memBlock = other.memBlock;
+      offset = other.offset;
+      summary = other.summary;
+      id = other.id;
+      reachablePtrCache.store(nullptr, std::memory_order_relaxed);
+    }
+    return *this;
+  }
   // Dense unique ID within a MemoryManager (0 = universal, 1 = null, 2+ =
   // interned objects). Used as radix key for persistent Store trees.
   uint32_t getId() const { return id; }

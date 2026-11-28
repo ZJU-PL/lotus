@@ -21,6 +21,8 @@
 #include <chrono>
 #include <stdexcept>
 
+#include <llvm/ADT/ScopeExit.h>
+
 namespace tpa {
 
 // Main entry point for the analysis on a semi-sparse program.
@@ -53,6 +55,15 @@ void SemiSparsePointerAnalysis::runOnProgram(const SemiSparseProgram &ssProg,
     throw std::invalid_argument("TPA parallel lookahead must be positive");
   program = &ssProg;
   stats = {};
+  if (!config.parallel) {
+    ptrManager.setThreadSafe(false);
+    ptrManager.disablePublishedTracking();
+    memManager.setThreadSafe(false);
+  }
+  auto restoreLocks = llvm::make_scope_exit([&] {
+    ptrManager.setThreadSafe(true);
+    memManager.setThreadSafe(true);
+  });
   const auto started = std::chrono::steady_clock::now();
   LOG_INFO("Phase 1: Analyzing global pointers and initializers...");
   auto initStore = Store();

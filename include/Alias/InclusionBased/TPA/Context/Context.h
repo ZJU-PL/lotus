@@ -3,6 +3,7 @@
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <unordered_set>
 
 #include <llvm/IR/Instruction.h>
@@ -48,18 +49,22 @@ private:
   const llvm::Instruction *callSite;
   const Context *predContext;
   size_t sz;
+  mutable uint64_t id = 0;
 
   static std::unordered_set<Context> ctxSet;
+  static const Context *insertUnlocked(const Context &candidate, bool isGlobal);
 
   // Private constructors - use static methods to create contexts
   // Global context constructor (empty call stack)
-  Context() : callSite(nullptr), predContext(nullptr), sz(0) {}
+  Context() : callSite(nullptr), predContext(nullptr), sz(0), id(0) {}
   // Non-global context constructor (adds a call site to existing context)
   // Parameters: c - the call instruction, p - the predecessor context
   Context(const llvm::Instruction *c, const Context *p)
-      : callSite(c), predContext(p), sz(p == nullptr ? 1 : p->sz + 1) {}
+      : callSite(c), predContext(p), sz(p == nullptr ? 1 : p->sz + 1), id(0) {}
 
 public:
+  // Deterministic sequential ID assigned at interning time (0 = global).
+  uint64_t getId() const noexcept { return id; }
   // Get the call instruction at the top of this context's call stack
   const llvm::Instruction *getCallSite() const { return callSite; }
   // Get the depth of this context (number of call sites in the call stack)

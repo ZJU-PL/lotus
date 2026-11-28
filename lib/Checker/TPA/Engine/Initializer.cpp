@@ -36,6 +36,7 @@ void Initializer::initializeMainArgs(TaintStore &store) {
 
       // *argv and **argv are tainted
       const auto *argvObj = ptrAnalysis.getMemoryManager().getArgvObject();
+      memo.registerObject(argvObj);
       store.strongUpdate(argvObj, TaintLattice::Tainted);
 
       if (entryFunc.arg_size() > 2) {
@@ -44,6 +45,7 @@ void Initializer::initializeMainArgs(TaintStore &store) {
                          TaintLattice::Untainted);
 
         const auto *envpObj = ptrAnalysis.getMemoryManager().getEnvpObject();
+        memo.registerObject(envpObj);
         store.strongUpdate(envpObj, TaintLattice::Tainted);
       }
     }
@@ -60,12 +62,15 @@ void Initializer::initializeGlobalVariables(TaintStore &store) {
     for (const auto *obj : pSet) {
       if (!obj->isSpecialObject())
         for (const auto *field :
-             ptrAnalysis.getMemoryManager().getReachableMemoryObjects(obj))
+             ptrAnalysis.getMemoryManager().getReachableMemoryObjects(obj)) {
+          memo.registerObject(field);
           store.strongUpdate(field, TaintLattice::Untainted);
+        }
     }
   }
-  store.strongUpdate(tpa::MemoryManager::getUniversalObject(),
-                     TaintLattice::Either);
+  const auto *uObj = tpa::MemoryManager::getUniversalObject();
+  memo.registerObject(uObj);
+  store.strongUpdate(uObj, TaintLattice::Either);
 }
 
 WorkList Initializer::runOnInitState(TaintStore &&initStore) {

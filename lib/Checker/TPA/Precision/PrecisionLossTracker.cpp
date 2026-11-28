@@ -36,6 +36,17 @@ void PrecisionLossTracker::initializeWorkList(
       auto *argVal = cs->getArgOperand(violation.argPos);
       if (violation.what == annotation::TClass::ValueOnly) {
         trackedValues.insert(argVal);
+      } else if (violation.what == annotation::TClass::ReachableMemory) {
+        auto pSet = ptrAnalysis.getPtsSet(ctx, argVal);
+        if (pSet.empty())
+          continue;
+        auto const &memManager = ptrAnalysis.getMemoryManager();
+        for (const auto *obj : pSet) {
+          if (obj->isSpecialObject())
+            continue;
+          auto fields = memManager.getReachableMemoryObjects(obj);
+          trackedObjects.insert(fields.begin(), fields.end());
+        }
       } else {
         auto pSet = ptrAnalysis.getPtsSet(ctx, argVal);
         if (pSet.empty())
@@ -45,7 +56,7 @@ void PrecisionLossTracker::initializeWorkList(
       }
     }
 
-    LocalTracker tracker(workList);
+    LocalTracker tracker(workList, globalState.getDefUseModule());
     tracker.trackValue(pp, trackedValues);
     tracker.trackMemory(pp, trackedObjects);
   }
@@ -53,7 +64,6 @@ void PrecisionLossTracker::initializeWorkList(
 
 ProgramPointSet
 PrecisionLossTracker::trackImprecision(const SinkViolationRecord &record) {
-  globalState.getDefUseModule().ensureMemPreds();
   ProgramPointSet ppSet;
 
   // Prepare the tracker state

@@ -12,6 +12,10 @@
 
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Program/SemiSparseProgram.h"
 
+#include "Alias/InclusionBased/TPA/Context/Context.h"
+#include "Alias/InclusionBased/TPA/PointerAnalysis/Support/FunctionContext.h"
+#include "Alias/InclusionBased/TPA/PointerAnalysis/Support/ProgramPoint.h"
+
 #include <llvm/IR/Module.h>
 
 using namespace llvm;
@@ -31,8 +35,10 @@ SemiSparseProgram::SemiSparseProgram(const llvm::Module &m) : module(m) {
 // Lazy initialization of CFGs.
 CFG &SemiSparseProgram::getOrCreateCFGForFunction(const llvm::Function &f) {
   auto itr = cfgMap.find(&f);
-  if (itr == cfgMap.end())
+  if (itr == cfgMap.end()) {
     itr = cfgMap.emplace(&f, f).first;
+    itr->second.setId(nextCfgId++);
+  }
   return itr->second;
 }
 
@@ -69,6 +75,44 @@ const CFG *SemiSparseProgram::getEntryCFG() const {
 
   // No suitable entry found.
   return nullptr;
+}
+
+bool ProgramPoint::operator<(const ProgramPoint &rhs) const {
+  if (ctx != rhs.ctx) {
+    const uint64_t lCtx = ctx->getId();
+    const uint64_t rCtx = rhs.ctx->getId();
+    if (lCtx != rCtx)
+      return lCtx < rCtx;
+    return ctx < rhs.ctx;
+  }
+  if (node == rhs.node)
+    return false;
+  const uint32_t lCfg = node->getCFG().getId();
+  const uint32_t rCfg = rhs.node->getCFG().getId();
+  if (lCfg != rCfg)
+    return lCfg < rCfg;
+  const uint32_t lNode = node->getId();
+  const uint32_t rNode = rhs.node->getId();
+  if (lNode != rNode)
+    return lNode < rNode;
+  return node < rhs.node;
+}
+
+bool FunctionContext::operator<(const FunctionContext &rhs) const {
+  if (ctx != rhs.ctx) {
+    const uint64_t lCtx = ctx->getId();
+    const uint64_t rCtx = rhs.ctx->getId();
+    if (lCtx != rCtx)
+      return lCtx < rCtx;
+    return ctx < rhs.ctx;
+  }
+  if (func == rhs.func)
+    return false;
+  const auto lName = func->getName();
+  const auto rName = rhs.func->getName();
+  if (lName != rName)
+    return lName < rName;
+  return func < rhs.func;
 }
 
 } // namespace tpa

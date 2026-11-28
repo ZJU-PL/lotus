@@ -177,7 +177,8 @@ bool TransferFunction::evalMallocWithSize(const context::Context *ctx,
 // Logic for Alloc effects.
 void TransferFunction::evalExternalAlloc(
     const context::Context *ctx, const CallCFGNode &callNode,
-    EvalResult &evalResult, const PointerAllocEffect &allocEffect) {
+    EvalResult &evalResult, const PointerAllocEffect &allocEffect,
+    Store *&modifiedStore, bool &envChanged) {
   const auto *sizeVal =
       allocEffect.hasSizePosition()
           ? getArgument(callNode, allocEffect.getSizePosition())
@@ -194,16 +195,12 @@ void TransferFunction::evalExternalAlloc(
           const auto *mem = globalState.getMemoryManager().allocateHeapMemory(
               ctx, callNode.getCallSite(),
               TypeLayout::getByteArrayTypeLayout());
-          auto &store = evalResult.getNewStore(*localState);
-          weakUpdateStore(dstSet, PtsSet::getSingletonSet(mem), store);
-          addMemLevelSuccessors(ProgramPoint(ctx, &callNode), store,
-                                evalResult);
-          return;
+          if (modifiedStore == nullptr)
+            modifiedStore = &evalResult.getNewStore(*localState);
+          weakUpdateStore(dstSet, PtsSet::getSingletonSet(mem), *modifiedStore);
         }
       }
     }
-    addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState,
-                          evalResult);
     return;
   }
 
@@ -211,18 +208,17 @@ void TransferFunction::evalExternalAlloc(
   const auto *dstVal = callNode.getDest();
   if (dstVal != nullptr) {
     auto *mallocType = getMallocType(callNode.getCallSite());
-    if (evalMallocWithSize(ctx, dstVal, mallocType, sizeVal))
-      addTopLevelSuccessors(ProgramPoint(ctx, &callNode), evalResult);
+    envChanged |= evalMallocWithSize(ctx, dstVal, mallocType, sizeVal);
   }
-  addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState, evalResult);
 }
 
 // Helper to simulate memcpy semantics on the store.
 // Copies values from srcObjs to dstObj (and reachable objects).
 void TransferFunction::evalMemcpyPtsSet(
-    const MemoryObject *dstObj,
-    const std::vector<const MemoryObject *> &srcObjs, size_t startingOffset,
-    Store &store) {
+    const MemoryObject *dstObj, llvm::ArrayRef<const MemoryObject *> srcObjs,
+    size_t startingOffset, Store &store) {
+  if (dstObj->isSpecialObject())
+    return;
   auto &memManager = globalState.getMemoryManager();
   for (const auto *srcObj : srcObjs) {
     auto srcSet = store.lookup(srcObj);
@@ -254,10 +250,21 @@ bool TransferFunction::evalMemcpyPointer(const Pointer *dst, const Pointer *src,
 
   auto &memManager = globalState.getMemoryManager();
   for (const auto *srcObj : srcSet) {
-    // Get all objects reachable from the source pointer's object (deep copy?)
-    // Actually, getReachablePointerObjects usually returns the object +
-    // sub-objects (fields/array elements).
-    auto srcObjs = memManager.getReachablePointerObjects(srcObj);
+    if (srcObj->isNullObject())
+      continue;
+    if (srcObj->isUniversalObject()) {
+      const auto uSet =
+          PtsSet::getSingletonSet(MemoryManager::getUniversalObject());
+      for (const auto *dstObj : dstSet) {
+        if (dstObj->isSpecialObject())
+          continue;
+        for (const auto *tgtObj :
+             memManager.getReachablePointerObjectsRef(dstObj))
+          store.weakUpdate(tgtObj, uSet);
+      }
+      continue;
+    }
+    auto srcObjs = memManager.getReachablePointerObjectsRef(srcObj);
     for (const auto *dstObj : dstSet)
       evalMemcpyPtsSet(dstObj, srcObjs, srcObj->getOffset(), store);
   }
@@ -338,9 +345,8 @@ void TransferFunction::fillPtsSetWith(const Pointer *ptr, PtsSet srcSet,
     if (obj->isSpecialObject())
       continue;
 
-    auto candidateObjs =
-        globalState.getMemoryManager().getReachablePointerObjects(obj);
-    for (const auto *tgtObj : candidateObjs)
+    for (const auto *tgtObj :
+         globalState.getMemoryManager().getReachablePointerObjectsRef(obj))
       store.weakUpdate(tgtObj, srcSet);
   }
 }
@@ -350,61 +356,54 @@ void TransferFunction::evalExternalCopyDest(const context::Context *ctx,
                                             const CallCFGNode &callNode,
                                             EvalResult &evalResult,
                                             const CopyDest &dest,
-                                            PtsSet srcSet) {
-  // If the return value is not used, don't bother process it
-  bool envChanged = false;
-  if (!(callNode.getDest() == nullptr &&
-        dest.getPosition().isReturnPosition())) {
-    const auto *dstArg = getArgument(callNode, dest.getPosition());
-    if (dstArg == nullptr) {
-      addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState,
-                            evalResult);
-      return;
-    }
-    const auto *dstPtr =
-        globalState.getPointerManager().getOrCreatePointer(ctx, dstArg);
-    switch (dest.getType()) {
-    case CopyDest::DestType::Value: {
-      envChanged = globalState.getEnv().weakUpdate(dstPtr, srcSet);
-      addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState,
-                            evalResult);
-      break;
-    }
-    case CopyDest::DestType::DirectMemory: {
-      // Destination is memory pointed to by argument (e.g., *p = ...)
-      auto dstSet = globalState.getEnv().lookup(dstPtr);
-      if (dstSet.empty()) {
-        // Destination not yet resolved; still propagate the unmodified store
-        // so mem-level successors are not silently dropped.
-        addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState,
-                              evalResult);
-        return;
-      }
+                                            PtsSet srcSet,
+                                            Store *&modifiedStore,
+                                            bool &envChanged) {
+  // If the return value is not a pointer (e.g. void), skip writing it.
+  if (callNode.getDest() == nullptr && dest.getPosition().isReturnPosition())
+    return;
 
-      auto &store = evalResult.getNewStore(*localState);
-      weakUpdateStore(dstSet, srcSet, store);
-      addMemLevelSuccessors(ProgramPoint(ctx, &callNode), store, evalResult);
-      break;
-    }
-    case CopyDest::DestType::ReachableMemory: {
-      // Destination is all memory reachable from argument
-      auto &store = evalResult.getNewStore(*localState);
-      fillPtsSetWith(dstPtr, srcSet, store);
-      addMemLevelSuccessors(ProgramPoint(ctx, &callNode), store, evalResult);
-      break;
-    }
-    }
+  const auto *dstArg = getArgument(callNode, dest.getPosition());
+  if (dstArg == nullptr)
+    return;
+
+  const auto *dstPtr =
+      globalState.getPointerManager().getOrCreatePointer(ctx, dstArg);
+  switch (dest.getType()) {
+  case CopyDest::DestType::Value: {
+    envChanged |= globalState.getEnv().weakUpdate(dstPtr, srcSet);
+    break;
   }
+  case CopyDest::DestType::DirectMemory: {
+    // Destination is memory pointed to by argument (e.g., *p = ...)
+    auto dstSet = globalState.getEnv().lookup(dstPtr);
+    if (dstSet.empty())
+      return;
 
-  if (envChanged)
-    addTopLevelSuccessors(ProgramPoint(ctx, &callNode), evalResult);
+    if (modifiedStore == nullptr)
+      modifiedStore = &evalResult.getNewStore(*localState);
+    weakUpdateStore(dstSet, srcSet, *modifiedStore);
+    break;
+  }
+  case CopyDest::DestType::ReachableMemory: {
+    // Destination is all memory reachable from argument
+    if (globalState.getEnv().lookup(dstPtr).empty())
+      return;
+    if (modifiedStore == nullptr)
+      modifiedStore = &evalResult.getNewStore(*localState);
+    fillPtsSetWith(dstPtr, srcSet, *modifiedStore);
+    break;
+  }
+  }
 }
 
 // Dispatches copy effects (assignment, load, store, memcpy).
 void TransferFunction::evalExternalCopy(const context::Context *ctx,
                                         const CallCFGNode &callNode,
                                         EvalResult &evalResult,
-                                        const PointerCopyEffect &copyEffect) {
+                                        const PointerCopyEffect &copyEffect,
+                                        Store *&modifiedStore,
+                                        bool &envChanged) {
   auto const &src = copyEffect.getSource();
   auto const &dest = copyEffect.getDest();
 
@@ -413,17 +412,19 @@ void TransferFunction::evalExternalCopy(const context::Context *ctx,
     assert(dest.getType() == CopyDest::DestType::ReachableMemory &&
            "R src can only be assigned to R dest");
 
-    auto &store = evalResult.getNewStore(*localState);
-    auto storeChanged =
-        evalMemcpy(ctx, callNode, store, dest.getPosition(), src.getPosition());
-
-    addMemLevelSuccessors(ProgramPoint(ctx, &callNode),
-                          storeChanged ? store : *localState, evalResult);
+    Store &targetStore = modifiedStore != nullptr
+                             ? *modifiedStore
+                             : evalResult.getNewStore(*localState);
+    if (evalMemcpy(ctx, callNode, targetStore, dest.getPosition(),
+                   src.getPosition())) {
+      modifiedStore = &targetStore;
+    }
   } else {
     // General case: src is Value/DirectMemory/etc.
     auto srcSet = evalExternalCopySource(ctx, callNode, src);
     if (!srcSet.empty())
-      evalExternalCopyDest(ctx, callNode, evalResult, dest, srcSet);
+      evalExternalCopyDest(ctx, callNode, evalResult, dest, srcSet,
+                           modifiedStore, envChanged);
   }
 }
 
@@ -431,18 +432,24 @@ void TransferFunction::evalExternalCopy(const context::Context *ctx,
 void TransferFunction::evalExternalCallByEffect(const context::Context *ctx,
                                                 const CallCFGNode &callNode,
                                                 const PointerEffect &effect,
-                                                EvalResult &evalResult) {
+                                                EvalResult &evalResult,
+                                                Store *&modifiedStore,
+                                                bool &envChanged,
+                                                bool &hasExit) {
   switch (effect.getType()) {
   case PointerEffectType::Alloc: {
-    evalExternalAlloc(ctx, callNode, evalResult, effect.getAsAllocEffect());
+    evalExternalAlloc(ctx, callNode, evalResult, effect.getAsAllocEffect(),
+                      modifiedStore, envChanged);
     break;
   }
   case PointerEffectType::Copy: {
-    evalExternalCopy(ctx, callNode, evalResult, effect.getAsCopyEffect());
+    evalExternalCopy(ctx, callNode, evalResult, effect.getAsCopyEffect(),
+                     modifiedStore, envChanged);
     break;
   }
   case PointerEffectType::Exit:
     // Exit effect: do not add any successors, terminating the path.
+    hasExit = true;
     break;
   }
 }
@@ -494,11 +501,9 @@ void TransferFunction::evalExternalCall(const context::Context *ctx,
         if (modifiedStore == nullptr)
           modifiedStore = &evalResult.getNewStore(*localState);
         // Weak-update all reachable pointer fields with Universal.
-        auto reachable =
-            globalState.getMemoryManager().getReachablePointerObjects(obj);
-        for (const auto *rObj : reachable)
+        for (const auto *rObj :
+             globalState.getMemoryManager().getReachablePointerObjectsRef(obj))
           modifiedStore->weakUpdate(rObj, uSet);
-        modifiedStore->weakUpdate(obj, uSet);
       }
     }
 
@@ -523,9 +528,21 @@ void TransferFunction::evalExternalCall(const context::Context *ctx,
     addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState,
                           evalResult);
   } else {
-    // Apply all recorded effects
+    // Apply all recorded effects onto a single optional Store and propagate
+    // memory/top-level successors once (avoiding dropped propagation on empty
+    // copy sources / void returns and redundant duplicate Store merges).
+    Store *modifiedStore = nullptr;
+    bool envChanged = false;
+    bool hasExit = false;
     for (auto const &effect : *summary)
-      evalExternalCallByEffect(ctx, callNode, effect, evalResult);
+      evalExternalCallByEffect(ctx, callNode, effect, evalResult, modifiedStore,
+                               envChanged, hasExit);
+    if (envChanged)
+      addTopLevelSuccessors(ProgramPoint(ctx, &callNode), evalResult);
+    if (!hasExit)
+      addMemLevelSuccessors(
+          ProgramPoint(ctx, &callNode),
+          modifiedStore != nullptr ? *modifiedStore : *localState, evalResult);
   }
 }
 

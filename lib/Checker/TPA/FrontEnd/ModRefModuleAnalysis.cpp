@@ -729,12 +729,20 @@ void ModRefModuleAnalysis::collectProcedureSummary(
 }
 
 ModRefModuleSummary ModRefModuleAnalysis::runOnModule(const Module &module) {
+  auto reachable = reachableFunctions(module, ptrAnalysis, unmodeledPolicy);
+  return runOnModule(module, reachable);
+}
+
+ModRefModuleSummary ModRefModuleAnalysis::runOnModule(
+    const Module &module,
+    const std::unordered_set<const Function *> &reachable) {
+  (void)module;
   ModRefModuleSummary moduleSummary;
   CallGraphMap callGraph;
   std::vector<const Function *> funcs;
+  funcs.reserve(reachable.size());
 
-  for (const auto *function :
-       reachableFunctions(module, ptrAnalysis, unmodeledPolicy)) {
+  for (const auto *function : reachable) {
     funcs.push_back(function);
     const auto &f = *function;
     auto &summary = moduleSummary.getSummary(&f);

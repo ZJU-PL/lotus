@@ -61,7 +61,7 @@ private:
                        EvalResult &);
   TaintLattice getTaintForOperands(const context::Context *,
                                    const llvm::Instruction *);
-  TaintLattice loadTaintFromPtsSet(tpa::PtsSet, const TaintStore &);
+  TaintLattice loadTaintFromPtsSet(tpa::PtsSet, const TaintStore *);
   void weakUpdateStore(tpa::PtsSet, TaintLattice, EvalResult &);
 
   std::vector<TaintLattice> collectArgumentTaintValue(const context::Context *,
@@ -70,7 +70,7 @@ private:
   bool updateParamTaintValue(const context::Context *, const llvm::Function *,
                              const std::vector<TaintLattice> &);
   void evalInternalCall(const ProgramPoint &, const tpa::FunctionContext &,
-                        EvalResult &, bool);
+                        EvalResult &);
   void applyReturn(const ProgramPoint &, const ProgramPoint &, TaintLattice,
                    EvalResult &);
 

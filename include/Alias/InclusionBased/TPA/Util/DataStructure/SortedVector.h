@@ -234,7 +234,7 @@ public:
     newVec.reserve(prevSize + rhs.size());
 
     std::merge(vec.begin(), vec.end(), rhs.vec.begin(), rhs.vec.end(),
-               std::back_inserter(newVec));
+               std::back_inserter(newVec), comp);
     newVec.erase(std::unique(newVec.begin(), newVec.end()), newVec.end());
 
     vec.swap(newVec);

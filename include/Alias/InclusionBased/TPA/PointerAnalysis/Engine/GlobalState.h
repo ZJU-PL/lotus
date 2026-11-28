@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Alias/InclusionBased/TPA/PointerAnalysis/Engine/StorePruner.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/CallGraph.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/Env.h"
 #include "Alias/InclusionBased/TPA/PointerAnalysis/Support/FunctionContext.h"
@@ -41,6 +42,7 @@ private:
 
   Env &env;
   CallGraph<ProgramPoint, FunctionContext> callGraph;
+  StorePrunerCache storePrunerCache;
 
 public:
   // Constructor
@@ -71,6 +73,8 @@ public:
   // Access call graph
   decltype(callGraph) &getCallGraph() { return callGraph; }
   const decltype(callGraph) &getCallGraph() const { return callGraph; }
+
+  StorePrunerCache &getStorePrunerCache() { return storePrunerCache; }
 };
 
 } // namespace tpa

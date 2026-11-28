@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/BasicBlock.h>
@@ -234,6 +235,10 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
   std::vector<uint8_t> hasEntryDef;
   std::vector<uint8_t> isReadOrExit;
   std::vector<uint8_t> isExitWrite;
+  std::vector<uint32_t> readStamp;
+  std::vector<uint32_t> writeStamp;
+  uint32_t curReadStamp = 0;
+  uint32_t curWriteStamp = 0;
 
   auto getOrCreateLoc = [&](const MemoryObject *loc) -> uint32_t {
     auto res = locToId.try_emplace(loc, static_cast<uint32_t>(idToLoc.size()));
@@ -242,6 +247,8 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
       hasEntryDef.push_back(0);
       isReadOrExit.push_back(0);
       isExitWrite.push_back(0);
+      readStamp.push_back(0);
+      writeStamp.push_back(0);
     }
     return res.first->second;
   };
@@ -277,32 +284,89 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
     uint32_t begin;
     uint32_t end;
   };
+  struct CalleeSlice {
+    uint32_t rBegin = 0;
+    uint32_t rEnd = 0;
+    uint32_t wBegin = 0;
+    uint32_t wEnd = 0;
+  };
+  struct CalleeListHash {
+    size_t operator()(const std::vector<const Function *> &v) const {
+      size_t h = v.size();
+      for (const Function *f : v) {
+        size_t x = reinterpret_cast<uintptr_t>(f) >> 3;
+        h ^= x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+      }
+      return h;
+    }
+  };
 
   std::vector<uint32_t> readLocPool;
   std::vector<uint32_t> writeLocPool;
   std::vector<std::vector<ReadSite>> bbReads(numBB);
   std::vector<std::vector<WriteSite>> bbWrites(numBB);
   std::vector<DefUseInstruction *> bbExitDu(numBB, nullptr);
+  llvm::DenseMap<const Function *, CalleeSlice> calleeSliceCache;
+  std::unordered_map<std::vector<const Function *>, CalleeSlice, CalleeListHash>
+      multiCalleeSliceCache;
 
-  auto appendPtsLocs = [&](const Value *v, bool isReachable,
-                           std::vector<uint32_t> &pool) {
+  auto pushReadLoc = [&](uint32_t id) {
+    if (readStamp[id] != curReadStamp) {
+      readStamp[id] = curReadStamp;
+      readLocPool.push_back(id);
+    }
+  };
+  auto pushWriteLoc = [&](uint32_t id) {
+    if (writeStamp[id] != curWriteStamp) {
+      writeStamp[id] = curWriteStamp;
+      writeLocPool.push_back(id);
+    }
+  };
+
+  auto appendPtsLocs = [&](const Value *v, bool isReachable, bool isWrite) {
     auto pSet = ptrAnalysis.getPtsSet(v);
     for (const auto *obj : pSet) {
       if (isReachable) {
-        for (const auto *oLoc : memManager.getReachableMemoryObjects(obj))
-          pool.push_back(getOrCreateLoc(oLoc));
+        for (const auto *oLoc : memManager.getReachableMemoryObjects(obj)) {
+          uint32_t id = getOrCreateLoc(oLoc);
+          if (isWrite)
+            pushWriteLoc(id);
+          else
+            pushReadLoc(id);
+        }
       } else {
-        pool.push_back(getOrCreateLoc(obj));
+        uint32_t id = getOrCreateLoc(obj);
+        if (isWrite)
+          pushWriteLoc(id);
+        else
+          pushReadLoc(id);
       }
     }
   };
 
-  auto dedupTail = [](std::vector<uint32_t> &pool, uint32_t begin) -> uint32_t {
-    if (pool.size() - begin > 1) {
-      std::sort(pool.begin() + begin, pool.end());
-      pool.erase(std::unique(pool.begin() + begin, pool.end()), pool.end());
+  auto getOrBuildCalleeSlice = [&](const Function *callee) -> CalleeSlice {
+    auto itr = calleeSliceCache.find(callee);
+    if (itr != calleeSliceCache.end())
+      return itr->second;
+    const auto &calleeSummary = summaryMap.getSummary(callee);
+    CalleeSlice slice;
+    ++curReadStamp;
+    ++curWriteStamp;
+    slice.rBegin = static_cast<uint32_t>(readLocPool.size());
+    slice.wBegin = static_cast<uint32_t>(writeLocPool.size());
+    for (const auto *obj : calleeSummary.mem_reads())
+      pushReadLoc(getOrCreateLoc(obj));
+    for (const auto *obj : calleeSummary.mem_writes()) {
+      uint32_t id = getOrCreateLoc(obj);
+      pushReadLoc(id);
+      pushWriteLoc(id);
     }
-    return static_cast<uint32_t>(pool.size());
+    slice.rEnd = static_cast<uint32_t>(readLocPool.size());
+    slice.wEnd = static_cast<uint32_t>(writeLocPool.size());
+    for (uint32_t i = slice.rBegin; i < slice.rEnd; ++i)
+      isReadOrExit[readLocPool[i]] = 1;
+    calleeSliceCache.try_emplace(callee, slice);
+    return slice;
   };
 
   for (uint32_t b = 0; b < numBB; ++b) {
@@ -321,9 +385,10 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
       }
 
       if (const auto *allocInst = dyn_cast<AllocaInst>(&inst)) {
+        ++curWriteStamp;
         uint32_t wBegin = static_cast<uint32_t>(writeLocPool.size());
-        appendPtsLocs(allocInst, false, writeLocPool);
-        uint32_t wEnd = dedupTail(writeLocPool, wBegin);
+        appendPtsLocs(allocInst, false, true);
+        uint32_t wEnd = static_cast<uint32_t>(writeLocPool.size());
         if (wEnd > wBegin) {
           uint32_t defId = static_cast<uint32_t>(idToDefDu.size());
           idToDefDu.push_back(duInst);
@@ -333,9 +398,10 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
       }
 
       if (const auto *loadInst = dyn_cast<LoadInst>(&inst)) {
+        ++curReadStamp;
         uint32_t rBegin = static_cast<uint32_t>(readLocPool.size());
-        appendPtsLocs(loadInst->getPointerOperand(), false, readLocPool);
-        uint32_t rEnd = dedupTail(readLocPool, rBegin);
+        appendPtsLocs(loadInst->getPointerOperand(), false, false);
+        uint32_t rEnd = static_cast<uint32_t>(readLocPool.size());
         if (rEnd > rBegin) {
           for (uint32_t i = rBegin; i < rEnd; ++i)
             isReadOrExit[readLocPool[i]] = 1;
@@ -347,12 +413,13 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
       if (const auto *storeInst = dyn_cast<StoreInst>(&inst)) {
         auto pSet = ptrAnalysis.getPtsSet(storeInst->getPointerOperand());
         if (!pSet.empty()) {
+          ++curWriteStamp;
           uint32_t wBegin = static_cast<uint32_t>(writeLocPool.size());
           bool strong =
               (pSet.size() == 1 && !(*pSet.begin())->isSummaryObject());
           for (const auto *obj : pSet)
-            writeLocPool.push_back(getOrCreateLoc(obj));
-          uint32_t wEnd = dedupTail(writeLocPool, wBegin);
+            pushWriteLoc(getOrCreateLoc(obj));
+          uint32_t wEnd = static_cast<uint32_t>(writeLocPool.size());
           uint32_t defId = static_cast<uint32_t>(idToDefDu.size());
           idToDefDu.push_back(duInst);
           bbWrites[b].push_back({curIdx, defId, strong, wBegin, wEnd});
@@ -367,17 +434,19 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
                 : cast<AtomicCmpXchgInst>(&inst)->getPointerOperand();
         auto pSet = ptrAnalysis.getPtsSet(ptr);
         if (!pSet.empty()) {
+          ++curReadStamp;
+          ++curWriteStamp;
           uint32_t rBegin = static_cast<uint32_t>(readLocPool.size());
           uint32_t wBegin = static_cast<uint32_t>(writeLocPool.size());
           bool strong =
               (pSet.size() == 1 && !(*pSet.begin())->isSummaryObject());
           for (const auto *obj : pSet) {
             uint32_t id = getOrCreateLoc(obj);
-            readLocPool.push_back(id);
-            writeLocPool.push_back(id);
+            pushReadLoc(id);
+            pushWriteLoc(id);
           }
-          uint32_t rEnd = dedupTail(readLocPool, rBegin);
-          uint32_t wEnd = dedupTail(writeLocPool, wBegin);
+          uint32_t rEnd = static_cast<uint32_t>(readLocPool.size());
+          uint32_t wEnd = static_cast<uint32_t>(writeLocPool.size());
           for (uint32_t i = rBegin; i < rEnd; ++i)
             isReadOrExit[readLocPool[i]] = 1;
           bbReads[b].push_back({curIdx, duInst, rBegin, rEnd});
@@ -393,70 +462,139 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
         if (callTgts.empty())
           continue;
 
+        if (callTgts.size() == 1 && !callTgts[0]->isDeclaration()) {
+          CalleeSlice slice = getOrBuildCalleeSlice(callTgts[0]);
+          if (slice.rEnd > slice.rBegin)
+            bbReads[b].push_back({curIdx, duInst, slice.rBegin, slice.rEnd});
+          if (slice.wEnd > slice.wBegin) {
+            uint32_t defId = static_cast<uint32_t>(idToDefDu.size());
+            idToDefDu.push_back(duInst);
+            bbWrites[b].push_back(
+                {curIdx, defId, false, slice.wBegin, slice.wEnd});
+          }
+          continue;
+        }
+
+        bool allInternal = true;
+        for (const auto *callee : callTgts) {
+          if (callee->isDeclaration()) {
+            allInternal = false;
+            break;
+          }
+        }
+        if (allInternal && callTgts.size() > 1) {
+          std::sort(callTgts.begin(), callTgts.end());
+          callTgts.erase(std::unique(callTgts.begin(), callTgts.end()),
+                         callTgts.end());
+          auto mItr = multiCalleeSliceCache.find(callTgts);
+          CalleeSlice slice;
+          if (mItr != multiCalleeSliceCache.end()) {
+            slice = mItr->second;
+          } else {
+            // Materialize each callee slice first so readLocPool/writeLocPool
+            // ranges do not interleave with our merged slice.
+            llvm::SmallVector<CalleeSlice, 8> childSlices;
+            childSlices.reserve(callTgts.size());
+            for (const auto *callee : callTgts)
+              childSlices.push_back(getOrBuildCalleeSlice(callee));
+            ++curReadStamp;
+            ++curWriteStamp;
+            slice.rBegin = static_cast<uint32_t>(readLocPool.size());
+            slice.wBegin = static_cast<uint32_t>(writeLocPool.size());
+            for (const auto &child : childSlices) {
+              for (uint32_t i = child.rBegin; i < child.rEnd; ++i)
+                pushReadLoc(readLocPool[i]);
+              for (uint32_t i = child.wBegin; i < child.wEnd; ++i)
+                pushWriteLoc(writeLocPool[i]);
+            }
+            slice.rEnd = static_cast<uint32_t>(readLocPool.size());
+            slice.wEnd = static_cast<uint32_t>(writeLocPool.size());
+            for (uint32_t i = slice.rBegin; i < slice.rEnd; ++i)
+              isReadOrExit[readLocPool[i]] = 1;
+            multiCalleeSliceCache.emplace(std::move(callTgts), slice);
+          }
+          if (slice.rEnd > slice.rBegin)
+            bbReads[b].push_back({curIdx, duInst, slice.rBegin, slice.rEnd});
+          if (slice.wEnd > slice.wBegin) {
+            uint32_t defId = static_cast<uint32_t>(idToDefDu.size());
+            idToDefDu.push_back(duInst);
+            bbWrites[b].push_back(
+                {curIdx, defId, false, slice.wBegin, slice.wEnd});
+          }
+          continue;
+        }
+
+        // Mixed or external call targets: pre-build any internal callee slices
+        // before opening the merged read/write pool slices.
+        llvm::SmallVector<CalleeSlice, 4> internalSlices;
+        for (const auto *callee : callTgts)
+          if (!callee->isDeclaration())
+            internalSlices.push_back(getOrBuildCalleeSlice(callee));
+
+        ++curReadStamp;
+        ++curWriteStamp;
         uint32_t rBegin = static_cast<uint32_t>(readLocPool.size());
         uint32_t wBegin = static_cast<uint32_t>(writeLocPool.size());
 
+        for (const auto &child : internalSlices) {
+          for (uint32_t i = child.rBegin; i < child.rEnd; ++i)
+            pushReadLoc(readLocPool[i]);
+          for (uint32_t i = child.wBegin; i < child.wEnd; ++i)
+            pushWriteLoc(writeLocPool[i]);
+        }
+
         for (const auto *callee : callTgts) {
-          if (callee->isDeclaration()) {
-            const auto &extSummary =
-                lookupModRefSummary(modRefTable, *callee, unmodeledPolicy);
-            for (const auto &effect : extSummary) {
-              const auto &pos = effect.getPosition();
-              if (effect.isRefEffect()) {
-                if (pos.isReturnPosition())
-                  continue;
+          if (!callee->isDeclaration())
+            continue;
+          const auto &extSummary =
+              lookupModRefSummary(modRefTable, *callee, unmodeledPolicy);
+          for (const auto &effect : extSummary) {
+            const auto &pos = effect.getPosition();
+            if (effect.isRefEffect()) {
+              if (pos.isReturnPosition())
+                continue;
+              const auto &argPos = pos.getAsArgPosition();
+              unsigned idx = argPos.getArgIndex();
+              if (!argPos.isAfterArgPosition()) {
+                if (idx < cs->arg_size())
+                  appendPtsLocs(cs->getArgOperand(idx),
+                                effect.onReachableMemory(), false);
+              } else {
+                for (unsigned i = idx, e = cs->arg_size(); i < e; ++i)
+                  if (cs->getArgOperand(i)->getType()->isPointerTy())
+                    appendPtsLocs(cs->getArgOperand(i),
+                                  effect.onReachableMemory(), false);
+              }
+            } else if (effect.isModEffect()) {
+              if (pos.isReturnPosition()) {
+                appendPtsLocs(cs->stripPointerCasts(),
+                              effect.onReachableMemory(), true);
+              } else {
                 const auto &argPos = pos.getAsArgPosition();
                 unsigned idx = argPos.getArgIndex();
                 if (!argPos.isAfterArgPosition()) {
                   if (idx < cs->arg_size())
-                    appendPtsLocs(cs->getArgOperand(idx),
-                                  effect.onReachableMemory(), readLocPool);
+                    appendPtsLocs(cs->getArgOperand(idx)->stripPointerCasts(),
+                                  effect.onReachableMemory(), true);
                 } else {
                   for (unsigned i = idx, e = cs->arg_size(); i < e; ++i)
                     if (cs->getArgOperand(i)->getType()->isPointerTy())
-                      appendPtsLocs(cs->getArgOperand(i),
-                                    effect.onReachableMemory(), readLocPool);
-                }
-              } else if (effect.isModEffect()) {
-                if (pos.isReturnPosition()) {
-                  appendPtsLocs(cs->stripPointerCasts(),
-                                effect.onReachableMemory(), writeLocPool);
-                } else {
-                  const auto &argPos = pos.getAsArgPosition();
-                  unsigned idx = argPos.getArgIndex();
-                  if (!argPos.isAfterArgPosition()) {
-                    if (idx < cs->arg_size())
-                      appendPtsLocs(cs->getArgOperand(idx)->stripPointerCasts(),
-                                    effect.onReachableMemory(), writeLocPool);
-                  } else {
-                    for (unsigned i = idx, e = cs->arg_size(); i < e; ++i)
-                      if (cs->getArgOperand(i)->getType()->isPointerTy())
-                        appendPtsLocs(
-                            cs->getArgOperand(i)->stripPointerCasts(),
-                            effect.onReachableMemory(), writeLocPool);
-                  }
+                      appendPtsLocs(
+                          cs->getArgOperand(i)->stripPointerCasts(),
+                          effect.onReachableMemory(), true);
                 }
               }
-            }
-          } else {
-            const auto &calleeSummary = summaryMap.getSummary(callee);
-            for (const auto *obj : calleeSummary.mem_reads())
-              readLocPool.push_back(getOrCreateLoc(obj));
-            for (const auto *obj : calleeSummary.mem_writes()) {
-              uint32_t id = getOrCreateLoc(obj);
-              readLocPool.push_back(id);
-              writeLocPool.push_back(id);
             }
           }
         }
 
-        uint32_t rEnd = dedupTail(readLocPool, rBegin);
+        uint32_t rEnd = static_cast<uint32_t>(readLocPool.size());
         if (rEnd > rBegin) {
           for (uint32_t i = rBegin; i < rEnd; ++i)
             isReadOrExit[readLocPool[i]] = 1;
           bbReads[b].push_back({curIdx, duInst, rBegin, rEnd});
         }
-        uint32_t wEnd = dedupTail(writeLocPool, wBegin);
+        uint32_t wEnd = static_cast<uint32_t>(writeLocPool.size());
         if (wEnd > wBegin) {
           uint32_t defId = static_cast<uint32_t>(idToDefDu.size());
           idToDefDu.push_back(duInst);
@@ -543,11 +681,15 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
       }
     };
 
+    llvm::DenseSet<std::pair<uint32_t, uint32_t>> refinedWriteSlices;
+    llvm::DenseSet<std::pair<uint32_t, uint32_t>> refinedReadSlices;
     for (uint32_t b = 0; b < numBB; ++b) {
       for (const auto &ws : bbWrites[b])
-        refineBySlice(writeLocPool, ws.begin, ws.end);
+        if (refinedWriteSlices.insert({ws.begin, ws.end}).second)
+          refineBySlice(writeLocPool, ws.begin, ws.end);
       for (const auto &rs : bbReads[b])
-        refineBySlice(readLocPool, rs.begin, rs.end);
+        if (refinedReadSlices.insert({rs.begin, rs.end}).second)
+          refineBySlice(readLocPool, rs.begin, rs.end);
     }
   }
 
@@ -564,15 +706,28 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
     memGroups.locToGroup.try_emplace(loc, g);
     memGroups.groupLocs[g].push_back(loc);
   }
+  memGroups.buildChunkMasks();
 
-  // Collapse every WriteSite and ReadSite from location IDs to group IDs.
+  // Collapse every WriteSite and ReadSite from location IDs to group IDs,
+  // caching shared pool slices so repeated calls collapse only once.
   std::vector<uint32_t> writeGroupPool;
   std::vector<uint32_t> readGroupPool;
   {
     std::vector<uint32_t> groupStamp(numGroups, 0);
     uint32_t stamp = 0;
+    llvm::DenseMap<std::pair<uint32_t, uint32_t>, std::pair<uint32_t, uint32_t>>
+        writeCollapseCache;
+    llvm::DenseMap<std::pair<uint32_t, uint32_t>, std::pair<uint32_t, uint32_t>>
+        readCollapseCache;
     for (uint32_t b = 0; b < numBB; ++b) {
       for (auto &ws : bbWrites[b]) {
+        auto key = std::make_pair(ws.begin, ws.end);
+        auto itr = writeCollapseCache.find(key);
+        if (itr != writeCollapseCache.end()) {
+          ws.begin = itr->second.first;
+          ws.end = itr->second.second;
+          continue;
+        }
         ++stamp;
         uint32_t gBegin = static_cast<uint32_t>(writeGroupPool.size());
         for (uint32_t i = ws.begin; i < ws.end; ++i) {
@@ -582,10 +737,19 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
             writeGroupPool.push_back(g);
           }
         }
+        uint32_t gEnd = static_cast<uint32_t>(writeGroupPool.size());
+        writeCollapseCache.try_emplace(key, std::make_pair(gBegin, gEnd));
         ws.begin = gBegin;
-        ws.end = static_cast<uint32_t>(writeGroupPool.size());
+        ws.end = gEnd;
       }
       for (auto &rs : bbReads[b]) {
+        auto key = std::make_pair(rs.begin, rs.end);
+        auto itr = readCollapseCache.find(key);
+        if (itr != readCollapseCache.end()) {
+          rs.begin = itr->second.first;
+          rs.end = itr->second.second;
+          continue;
+        }
         ++stamp;
         uint32_t gBegin = static_cast<uint32_t>(readGroupPool.size());
         for (uint32_t i = rs.begin; i < rs.end; ++i) {
@@ -595,8 +759,10 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
             readGroupPool.push_back(g);
           }
         }
+        uint32_t gEnd = static_cast<uint32_t>(readGroupPool.size());
+        readCollapseCache.try_emplace(key, std::make_pair(gBegin, gEnd));
         rs.begin = gBegin;
-        rs.end = static_cast<uint32_t>(readGroupPool.size());
+        rs.end = gEnd;
       }
     }
   }

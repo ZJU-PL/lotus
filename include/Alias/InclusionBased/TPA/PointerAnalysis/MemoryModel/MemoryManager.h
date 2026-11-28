@@ -5,12 +5,14 @@
 #include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/MemoryObject.h"
 
 #include <cstddef>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/DenseMap.h>
 
 namespace tpa {
@@ -39,6 +41,10 @@ class MemoryManager {
 private:
   std::shared_ptr<std::recursive_mutex> registryMutex =
       std::make_shared<std::recursive_mutex>();
+  bool threadSafe = true;
+  // Pointer-stable backing storage for per-MemoryObject cached reachable
+  // pointer-field lists.
+  mutable std::deque<std::vector<const MemoryObject *>> reachablePtrStorage;
   // Maps allocation sites to memory blocks
   // Memory blocks contain type layout information
   using AllocMap = std::unordered_map<AllocSite, MemoryBlock>;
@@ -93,6 +99,9 @@ public:
   // Parameters: pSize - size of a pointer in bytes (default 8)
   MemoryManager(size_t pSize = 8u);
 
+  // Enable/disable internal locking (serial solver disables locking).
+  void setThreadSafe(bool enabled) noexcept { threadSafe = enabled; }
+
   // Get special objects
   static const MemoryObject *getUniversalObject() { return &uObj; }
   static const MemoryObject *getNullObject() { return &nObj; }
@@ -142,6 +151,11 @@ public:
   std::vector<const MemoryObject *>
   getReachablePointerObjects(const MemoryObject *,
                              bool includeSelf = true) const;
+  // Zero-allocation cached view of getReachablePointerObjects (lock-free on
+  // cache hit; valid for the lifetime of this MemoryManager).
+  llvm::ArrayRef<const MemoryObject *>
+  getReachablePointerObjectsRef(const MemoryObject *,
+                                bool includeSelf = true) const;
 };
 
 } // namespace tpa

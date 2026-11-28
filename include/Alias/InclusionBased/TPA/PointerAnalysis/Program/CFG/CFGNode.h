@@ -5,6 +5,7 @@
 #include "Alias/InclusionBased/TPA/Util/Iterator/IteratorRange.h"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace llvm {
 class Function;
@@ -13,6 +14,11 @@ class Function;
 namespace tpa {
 
 class CFG;
+class CFGNode;
+
+struct CFGNodeIdLess {
+  bool operator()(const CFGNode *lhs, const CFGNode *rhs) const noexcept;
+};
 
 // Base class for all CFG nodes
 //
@@ -43,8 +49,11 @@ private:
   // Reverse postorder number (for scheduling/priority)
   size_t rpo;
 
-  // Node sets for edges
-  using NodeSet = util::VectorSet<CFGNode *>;
+  // Deterministic creation ID within owning CFG
+  uint32_t id;
+
+  // Node sets for edges (ordered deterministically by CFGNode creation ID)
+  using NodeSet = util::SortedVector<CFGNode *, CFGNodeIdLess>;
   // Control flow edges
   NodeSet pred, succ;
   // Data flow edges (def-use at top level)
@@ -52,14 +61,17 @@ private:
 
 protected:
   // Constructor (called by mixins)
-  CFGNode(CFGNodeTag t) : tag(t), cfg(nullptr), rpo(0) {}
+  CFGNode(CFGNodeTag t) : tag(t), cfg(nullptr), rpo(0), id(0) {}
 
-  // Set the CFG (called by CFG when creating nodes)
+  // Set the CFG and deterministic node ID (called by CFG when creating nodes)
   void setCFG(const CFG &c) { cfg = &c; }
+  void setId(uint32_t nodeId) { id = nodeId; }
 
 public:
   using iterator = NodeSet::iterator;
   using const_iterator = NodeSet::const_iterator;
+
+  uint32_t getId() const noexcept { return id; }
 
   // Non-copyable
   CFGNode(const CFGNode &) = delete;
@@ -136,6 +148,15 @@ public:
 
   friend class CFG;
 };
+
+inline bool CFGNodeIdLess::operator()(const CFGNode *lhs,
+                                      const CFGNode *rhs) const noexcept {
+  const uint32_t lid = lhs->getId();
+  const uint32_t rid = rhs->getId();
+  if (lid != rid)
+    return lid < rid;
+  return lhs < rhs;
+}
 
 // Type aliases for specific node types
 using EntryCFGNode = EntryNodeMixin<CFGNode>;

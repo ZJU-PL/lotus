@@ -93,8 +93,8 @@ private:
   void evalExternalCall(const context::Context *, const CallCFGNode &,
                         const FunctionContext &, EvalResult &);
   void evalInternalCall(const context::Context *, const CallCFGNode &,
-                        const FunctionContext &, EvalResult &, bool,
-                        const Store *&prunedStore);
+                        const FunctionContext &, EvalResult &,
+                        const Store *&prunedStore, bool &addedBypassMemSucc);
   // Return transfer function helpers
   std::pair<bool, bool> evalReturnValue(const context::Context *,
                                         const ReturnCFGNode &,
@@ -105,10 +105,10 @@ private:
   bool evalMallocWithSize(const context::Context *, const llvm::Instruction *,
                           llvm::Type *, const llvm::Value *);
   void evalExternalAlloc(const context::Context *, const CallCFGNode &,
-                         EvalResult &, const annotation::PointerAllocEffect &);
+                         EvalResult &, const annotation::PointerAllocEffect &,
+                         Store *&modifiedStore, bool &envChanged);
   void evalMemcpyPtsSet(const MemoryObject *,
-                        const std::vector<const MemoryObject *> &, size_t,
-                        Store &);
+                        llvm::ArrayRef<const MemoryObject *>, size_t, Store &);
   bool evalMemcpyPointer(const Pointer *, const Pointer *, Store &);
   bool evalMemcpy(const context::Context *, const CallCFGNode &, Store &,
                   const annotation::APosition &, const annotation::APosition &);
@@ -116,12 +116,15 @@ private:
   PtsSet evalExternalCopySource(const context::Context *, const CallCFGNode &,
                                 const annotation::CopySource &);
   void evalExternalCopyDest(const context::Context *, const CallCFGNode &,
-                            EvalResult &, const annotation::CopyDest &, PtsSet);
+                            EvalResult &, const annotation::CopyDest &, PtsSet,
+                            Store *&modifiedStore, bool &envChanged);
   void evalExternalCopy(const context::Context *, const CallCFGNode &,
-                        EvalResult &, const annotation::PointerCopyEffect &);
+                        EvalResult &, const annotation::PointerCopyEffect &,
+                        Store *&modifiedStore, bool &envChanged);
   void evalExternalCallByEffect(const context::Context *, const CallCFGNode &,
-                                const annotation::PointerEffect &,
-                                EvalResult &);
+                                const annotation::PointerEffect &, EvalResult &,
+                                Store *&modifiedStore, bool &envChanged,
+                                bool &hasExit);
 
   // Node-specific evaluation methods
   void evalEntryNode(const ProgramPoint &, EvalResult &);

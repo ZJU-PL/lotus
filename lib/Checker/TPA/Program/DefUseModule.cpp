@@ -1,10 +1,13 @@
 #include "Checker/TPA/Program/DefUseModule.h"
 
+#include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/MemoryObject.h"
 #include "Checker/TPA/Support/ExternalModels.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 
+#include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/DepthFirstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
@@ -12,6 +15,27 @@
 using namespace llvm;
 
 namespace tpa::taint {
+
+void MemoryGroupTable::buildChunkMasks() {
+  groupChunkMasks.clear();
+  groupChunkMasks.resize(groupLocs.size());
+  llvm::SmallDenseMap<uint32_t, uint64_t, 16> chunkMap;
+  for (size_t g = 0; g < groupLocs.size(); ++g) {
+    chunkMap.clear();
+    for (const auto *loc : groupLocs[g]) {
+      const uint32_t id = loc->getId();
+      chunkMap[id >> 5] |= (3ULL << ((id & 31u) << 1));
+    }
+    auto &out = groupChunkMasks[g];
+    out.reserve(chunkMap.size());
+    for (const auto &entry : chunkMap)
+      out.push_back(ChunkMask{entry.first, entry.second});
+    std::sort(out.begin(), out.end(),
+              [](const ChunkMask &a, const ChunkMask &b) {
+                return a.chunkIdx < b.chunkIdx;
+              });
+  }
+}
 
 DefUseInstruction::DefUseInstruction(const Instruction &i) : inst(&i), rpo(0) {}
 

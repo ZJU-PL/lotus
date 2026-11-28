@@ -126,7 +126,7 @@ void StorePruner::findAllReachableObjects(const Store &store,
           (expanded == expandedMin.end() || offset < expanded->second)) {
         expandedMin[block] = offset;
         for (const auto *field :
-             memManager.getReachablePointerObjects(object, false))
+             memManager.getReachablePointerObjectsRef(object, false))
           enqueue(field);
       }
     }
@@ -161,6 +161,44 @@ bool StorePruner::pruneStoreIfNeeded(const Store &store, const ProgramPoint &pp,
   if (totalNonAccessibleBound == 0)
     return false;
 
+  // Collect deduplicated non-accessible argument PtsSets first so we can query
+  // the exact StorePrunerCache keyed by (store.rootVersionId(), argSets).
+  const auto *ctx = pp.getContext();
+  const auto &callNode = static_cast<const CallCFGNode &>(*pp.getCFGNode());
+  llvm::SmallVector<PtsSet, 4> nonAccArgSets;
+  llvm::SmallVector<const void *, 4> keyArgSets;
+  for (const auto *argVal : callNode) {
+    const auto *argPtr = ptrManager.getPointer(ctx, argVal);
+    if (argPtr == nullptr)
+      continue;
+    auto argSet = env.lookup(argPtr);
+    if (!argSet.hasNonAccessible())
+      continue;
+    const void *raw = argSet.rawKey();
+    if (std::find(keyArgSets.begin(), keyArgSets.end(), raw) ==
+        keyArgSets.end()) {
+      keyArgSets.push_back(raw);
+      nonAccArgSets.push_back(argSet);
+    }
+  }
+  if (keyArgSets.size() > 1u)
+    std::sort(keyArgSets.begin(), keyArgSets.end());
+
+  const uint64_t storeVer = store.rootVersionId();
+  uint64_t cacheHash = storeVer * 11400714819323198485ULL;
+  if (cache != nullptr) {
+    for (const void *raw : keyArgSets) {
+      cacheHash ^= (reinterpret_cast<uintptr_t>(raw) >> 4) *
+                   14029467366897019727ULL;
+      cacheHash = (cacheHash << 27) | (cacheHash >> 37);
+    }
+    if (const auto *hit = cache->find(cacheHash, storeVer, keyArgSets)) {
+      if (hit->pruned)
+        out = hit->outStore;
+      return hit->pruned;
+    }
+  }
+
   ObjectSet reachableNonAcc;
   std::vector<const MemoryObject *> work;
 
@@ -192,15 +230,7 @@ bool StorePruner::pruneStoreIfNeeded(const Store &store, const ProgramPoint &pp,
   });
 
   // Seed non-accessible objects pointed to by call arguments.
-  const auto *ctx = pp.getContext();
-  const auto &callNode = static_cast<const CallCFGNode &>(*pp.getCFGNode());
-  for (const auto *argVal : callNode) {
-    const auto *argPtr = ptrManager.getPointer(ctx, argVal);
-    if (argPtr == nullptr)
-      continue;
-    auto argSet = env.lookup(argPtr);
-    if (!argSet.hasNonAccessible())
-      continue;
+  for (const auto &argSet : nonAccArgSets) {
     for (const auto *obj : argSet)
       enqueueNonAcc(obj);
   }
@@ -217,7 +247,7 @@ bool StorePruner::pruneStoreIfNeeded(const Store &store, const ProgramPoint &pp,
           (expanded == expandedMin.end() || offset < expanded->second)) {
         expandedMin[block] = offset;
         for (const auto *field :
-             memManager.getReachablePointerObjects(object, false))
+             memManager.getReachablePointerObjectsRef(object, false))
           enqueueNonAcc(field);
       }
     }
@@ -230,13 +260,21 @@ bool StorePruner::pruneStoreIfNeeded(const Store &store, const ProgramPoint &pp,
     }
   }
 
-  if (keepBoundNonAccIds.size() == totalNonAccessibleBound)
-    return false;
+  const bool didPrune = keepBoundNonAccIds.size() != totalNonAccessibleBound;
+  if (didPrune) {
+    std::sort(keepBoundNonAccIds.begin(), keepBoundNonAccIds.end());
+    // Retain pure-global subtrees and drop pure-unreachable subtrees in O(1).
+    out = store.filterNonAccessibleIds(keepBoundNonAccIds);
+  }
 
-  std::sort(keepBoundNonAccIds.begin(), keepBoundNonAccIds.end());
-  // Retain pure-global subtrees and drop pure-unreachable subtrees in O(1).
-  out = store.filterNonAccessibleIds(keepBoundNonAccIds);
-  return true;
+  if (cache != nullptr) {
+    auto &slot = cache->slot(cacheHash);
+    slot.storeVersion = storeVer;
+    slot.argSets.assign(keyArgSets.begin(), keyArgSets.end());
+    slot.pruned = didPrune;
+    slot.outStore = didPrune ? out : Store();
+  }
+  return didPrune;
 }
 
 // Main entry point for store pruning.

@@ -12,12 +12,14 @@
 #include "Checker/Tooling/CheckerOptions.h"
 #include "Checker/Tooling/CheckerReport.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <map>
 #include <set>
 #include <utility>
+#include <vector>
 
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/Verifier.h>
@@ -345,8 +347,17 @@ int runTPATaintCheckerTool(const char *argv0) try {
 
   if (Track) {
     using namespace util::io;
-    for (const auto &site : analysis.getLossSites())
-      outs() << "Precision loss at " << site << "\n";
+    std::vector<std::string> losses;
+    losses.reserve(analysis.getLossSites().size());
+    for (const auto &site : analysis.getLossSites()) {
+      std::string text;
+      raw_string_ostream os(text);
+      os << "Precision loss at " << site << "\n";
+      losses.push_back(os.str());
+    }
+    std::sort(losses.begin(), losses.end());
+    for (const auto &loss : losses)
+      outs() << loss;
   }
   const char *policyName =
       Unmodeled == tpa::taint::UnmodeledPolicy::Ignore ? "ignore" : "error";

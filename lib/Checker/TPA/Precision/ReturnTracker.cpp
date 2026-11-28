@@ -81,11 +81,57 @@ void ReturnTracker::trackValue(const ProgramPoint &pp,
 
 void ReturnTracker::trackMemory(const ProgramPoint &pp,
                                 const ReturnVector &retVec) {
-  pp.getDefUseInstruction()->forEachMemSucc(
-      [&](const tpa::MemoryObject *obj, const auto &) {
-        auto retTaints = getReturnTaintValues(obj, retVec);
-        processReturns(pp, retVec, retTaints);
-      });
+  const auto &memo = trackerState.getMemo();
+  std::vector<size_t> activeReturns;
+  std::vector<const TaintStore *> activeStores;
+  activeReturns.reserve(retVec.size());
+  activeStores.reserve(retVec.size());
+  for (size_t i = 0, e = retVec.size(); i < e; ++i) {
+    const auto *store = memo.lookup(retVec[i]);
+    if (store && !store->empty()) {
+      activeReturns.push_back(i);
+      activeStores.push_back(store);
+    }
+  }
+  if (activeStores.empty())
+    return;
+
+  llvm::DenseMap<uint32_t, uint64_t> unionChunks;
+  for (const auto *store : activeStores)
+    for (const auto &entry : store->chunks())
+      unionChunks[entry.first] |= entry.second;
+
+  const auto *duInst = pp.getDefUseInstruction();
+  bool markedSource = false;
+  std::vector<uint8_t> enqueued(activeStores.size(), 0);
+  size_t enqueuedCount = 0;
+
+  for (const auto &entry : unionChunks) {
+    const uint32_t baseId = entry.first << 5;
+    const uint64_t w = entry.second;
+    uint64_t eitherLanes = (w & (w >> 1)) & TaintStore::kOddLaneMask;
+    while (eitherLanes) {
+      const unsigned tz = static_cast<unsigned>(__builtin_ctzll(eitherLanes));
+      const uint32_t objId = baseId | (tz >> 1);
+      eitherLanes &= (eitherLanes - 1);
+      const auto *obj = memo.getObjectById(objId);
+      if (!duInst->findMemSuccs(obj))
+        continue;
+      for (size_t k = 0, ke = activeStores.size(); k < ke; ++k) {
+        const auto tVal = activeStores[k]->lookupById(objId);
+        if (tVal == TaintLattice::Tainted && !markedSource) {
+          trackerState.addImprecisionSource(pp);
+          markedSource = true;
+        } else if (tVal == TaintLattice::Either && !enqueued[k]) {
+          enqueued[k] = 1;
+          ++enqueuedCount;
+          workList.enqueue(retVec[activeReturns[k]]);
+        }
+      }
+      if (markedSource && enqueuedCount == activeStores.size())
+        return;
+    }
+  }
 }
 
 void ReturnTracker::trackReturn(const ProgramPoint &pp,

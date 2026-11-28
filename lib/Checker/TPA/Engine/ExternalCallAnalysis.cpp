@@ -63,7 +63,9 @@ void TransferFunction::updateTaintValueByTClass(const TaintValue &tv,
                                                 EvalResult &evalResult) {
   switch (taintClass) {
   case TClass::ValueOnly: {
-    auto envChanged = globalState.getEnv().strongUpdate(tv, taintVal);
+    if (llvm::isa<llvm::Constant>(tv.getValue()))
+      break;
+    auto envChanged = globalState.getEnv().weakUpdate(tv, taintVal);
     if (envChanged)
       addTopLevelSuccessors(pp, evalResult);
     break;
@@ -104,7 +106,10 @@ void TransferFunction::updateTaintCallByTPosition(const ProgramPoint &pp,
       updateTaintValueByTClass(argTVal, taintClass, taintVal, pp, evalResult);
     } else {
       for (size_t i = argPos.getArgIndex(), e = cs->arg_size(); i < e; ++i) {
-        auto argTVal = TaintValue(pp.getContext(), cs->getArgOperand(i));
+        const auto *arg = cs->getArgOperand(i);
+        if (taintClass != TClass::ValueOnly && !arg->getType()->isPointerTy())
+          continue;
+        auto argTVal = TaintValue(pp.getContext(), arg);
         updateTaintValueByTClass(argTVal, taintClass, taintVal, pp, evalResult);
       }
     }
@@ -127,27 +132,19 @@ TaintLattice TransferFunction::getTaintValueByTClass(const TaintValue &tv,
   case TClass::ValueOnly:
     return globalState.getEnv().lookup(tv);
   case TClass::DirectMemory: {
-    if (localState == nullptr)
-      return TaintLattice::Unknown;
-    // assert(localState != nullptr);
-
     auto const &ptrAnalysis = globalState.getPointerAnalysis();
     auto pSet = ptrAnalysis.getPtsSet(tv.getContext(), tv.getValue());
     if (pSet.empty())
       return TaintLattice::Unknown;
-    TaintLattice retVal = loadTaintFromPtsSet(pSet, *localState);
-
-    return retVal;
+    return loadTaintFromPtsSet(pSet, localState);
   }
   case TClass::ReachableMemory: {
-    if (!localState)
-      return TaintLattice::Unknown;
     const auto &pointer = globalState.getPointerAnalysis();
     auto result = TaintLattice::Unknown;
     for (auto *object : pointer.getPtsSet(tv.getContext(), tv.getValue())) {
       if (object->isUniversalObject())
         return TaintLattice::Either;
-      if (object->isNullObject())
+      if (object->isNullObject() || !localState)
         continue;
       for (auto *field :
            pointer.getMemoryManager().getReachableMemoryObjects(object))
@@ -163,10 +160,6 @@ void TransferFunction::evalMemcpy(const TaintValue &srcVal,
                                   const TaintValue &dstVal,
                                   const ProgramPoint &pp,
                                   EvalResult &evalResult) {
-  if (localState == nullptr)
-    return;
-  // assert(localState != nullptr);
-
   auto const &ptrAnalysis = globalState.getPointerAnalysis();
   auto const &memManager = ptrAnalysis.getMemoryManager();
 
@@ -176,7 +169,26 @@ void TransferFunction::evalMemcpy(const TaintValue &srcVal,
     return;
 
   for (const auto *srcObj : srcSet) {
-    if (srcObj->isSpecialObject())
+    if (srcObj->isNullObject())
+      continue;
+    if (srcObj->isUniversalObject()) {
+      for (const auto *updateObj : dstSet) {
+        if (updateObj->isSpecialObject())
+          continue;
+        const size_t baseOffset = updateObj->getOffset();
+        for (const auto *tgtObj :
+             memManager.getReachableMemoryObjects(updateObj)) {
+          if (tgtObj->isSpecialObject() || tgtObj->getOffset() < baseOffset)
+            continue;
+          const bool first = !evalResult.hasOverride(tgtObj);
+          evalResult.weakUpdateOverride(tgtObj, TaintLattice::Either);
+          if (first)
+            evalResult.addDirectMemProp(pp, tgtObj);
+        }
+      }
+      continue;
+    }
+    if (localState == nullptr)
       continue;
 
     auto srcObjs = memManager.getReachableMemoryObjects(srcObj);
@@ -263,14 +275,25 @@ void TransferFunction::evalCallBySummary(const ProgramPoint &pp,
                                          const TaintSummary &summary,
                                          EvalResult &evalResult) {
   bool isSink = false;
+  bool modelsReturnValue = false;
   for (auto const &entry : summary) {
     switch (entry.getEntryEnd()) {
-    case TEnd::Source:
-      evalTaintSource(pp, entry.getAsSourceEntry(), evalResult);
+    case TEnd::Source: {
+      const auto &src = entry.getAsSourceEntry();
+      if (src.getTaintPosition().isReturnPosition() &&
+          src.getTaintClass() == TClass::ValueOnly)
+        modelsReturnValue = true;
+      evalTaintSource(pp, src, evalResult);
       break;
-    case TEnd::Pipe:
-      evalTaintPipe(pp, entry.getAsPipeEntry(), evalResult);
+    }
+    case TEnd::Pipe: {
+      const auto &pipe = entry.getAsPipeEntry();
+      if (pipe.getDstPosition().isReturnPosition() &&
+          pipe.getDstClass() == TClass::ValueOnly)
+        modelsReturnValue = true;
+      evalTaintPipe(pp, pipe, evalResult);
       break;
+    }
     case TEnd::Sink:
       // We only care about taint source, but we need to record all taint sinks
       // for future examination
@@ -278,6 +301,16 @@ void TransferFunction::evalCallBySummary(const ProgramPoint &pp,
       break;
     }
   }
+
+  // Non-void modeled externals without an explicit Ret V rule (e.g., printf,
+  // snprintf, recv, realloc, write) must still produce an Untainted SSA result;
+  // leaving it at Unknown would permanently block downstream internal calls
+  // receiving that return value.
+  const auto *inst = pp.getDefUseInstruction()->getInstruction();
+  if (!modelsReturnValue && !inst->getType()->isVoidTy() &&
+      globalState.getEnv().weakUpdate(TaintValue(pp.getContext(), inst),
+                                      TaintLattice::Untainted))
+    addTopLevelSuccessors(pp, evalResult);
 
   if (isSink)
     globalState.getSinks().insert(SinkSignature(pp, callee));

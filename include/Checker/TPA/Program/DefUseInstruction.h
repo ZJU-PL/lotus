@@ -27,8 +27,16 @@ namespace tpa::taint {
 // Storing memory def-use edges once per groupId avoids duplicating identical
 // successor vectors across thousands of equivalent global/heap objects.
 struct MemoryGroupTable {
+  struct ChunkMask {
+    uint32_t chunkIdx;
+    uint64_t mask;
+  };
+
   llvm::DenseMap<const tpa::MemoryObject *, uint32_t> locToGroup;
   std::vector<std::vector<const tpa::MemoryObject *>> groupLocs;
+  // Per-group 2-bit masks indexed by TaintStore chunkIdx (32 objects per word),
+  // enabling 32-way parallel masked chunk propagation in TaintPropagator.
+  std::vector<std::vector<ChunkMask>> groupChunkMasks;
 
   const uint32_t *findGroup(const tpa::MemoryObject *obj) const {
     auto itr = locToGroup.find(obj);
@@ -38,9 +46,14 @@ struct MemoryGroupTable {
   getGroupObjects(uint32_t groupId) const {
     return groupLocs[groupId];
   }
+  const std::vector<ChunkMask> &getGroupChunkMasks(uint32_t groupId) const {
+    return groupChunkMasks[groupId];
+  }
+  void buildChunkMasks();
   void clear() {
     locToGroup.clear();
     groupLocs.clear();
+    groupChunkMasks.clear();
   }
 };
 
@@ -81,6 +94,9 @@ public:
   bool isReturnInstruction() const;
 
   void setMemoryGroups(const MemoryGroupTable *groups) { memGroups = groups; }
+  const MemoryGroupTable *getMemoryGroups() const { return memGroups; }
+  bool hasUngroupedMemSuccs() const { return !memSucc.empty(); }
+  size_t numMemSuccGroups() const { return groupMemSucc.size(); }
 
   size_t getPriority() const {
     assert(rpo != 0);

@@ -85,16 +85,17 @@ void TransferFunction::evalAllOperands(const ProgramPoint &pp,
 }
 
 TaintLattice TransferFunction::loadTaintFromPtsSet(tpa::PtsSet pSet,
-                                                   const TaintStore &store) {
+                                                   const TaintStore *store) {
   TaintLattice resVal = TaintLattice::Unknown;
   for (const auto *obj : pSet) {
-    if (obj->isUniversalObject()) {
-      resVal = TaintLattice::Either;
-      break;
-    } else if (obj->isNullObject())
+    if (obj->isUniversalObject())
+      return TaintLattice::Either;
+    if (obj->isNullObject())
+      continue;
+    if (store == nullptr)
       continue;
 
-    auto locVal = store.lookup(obj);
+    auto locVal = store->lookup(obj);
     resVal = Lattice<TaintLattice>::merge(resVal, locVal);
   }
 
@@ -103,9 +104,6 @@ TaintLattice TransferFunction::loadTaintFromPtsSet(tpa::PtsSet pSet,
 
 void TransferFunction::evalLoad(const ProgramPoint &pp,
                                 EvalResult &evalResult) {
-  if (localState == nullptr)
-    return;
-
   const auto *ctx = pp.getContext();
   const auto *loadInst =
       cast<LoadInst>(pp.getDefUseInstruction()->getInstruction());
@@ -115,7 +113,7 @@ void TransferFunction::evalLoad(const ProgramPoint &pp,
   if (ptsSet.empty())
     return;
 
-  auto loadVal = loadTaintFromPtsSet(ptsSet, *localState);
+  auto loadVal = loadTaintFromPtsSet(ptsSet, localState);
   if (loadVal != TaintLattice::Unknown) {
     auto envChanged = globalState.getEnv().strongUpdate(
         TaintValue(pp.getContext(),
@@ -195,8 +193,7 @@ bool TransferFunction::updateParamTaintValue(
 
 void TransferFunction::evalInternalCall(const ProgramPoint &pp,
                                         const tpa::FunctionContext &fc,
-                                        EvalResult &evalResult,
-                                        bool callGraphUpdated) {
+                                        EvalResult &evalResult) {
   auto *cs = llvm::dyn_cast<llvm::CallBase>(
       pp.getDefUseInstruction()->getInstruction());
   assert(cs);
@@ -210,19 +207,22 @@ void TransferFunction::evalInternalCall(const ProgramPoint &pp,
   if (argSets.size() < numParam)
     return;
 
+  auto callGraphUpdated = globalState.getCallGraph().insertEdge(pp, fc);
   auto envChanged = updateParamTaintValue(fc.getContext(), callee, argSets) ||
                     callGraphUpdated;
-  const auto *entryInst = globalState.getDefUseModule()
-                              .getDefUseFunction(fc.getFunction())
-                              .getEntryInst();
+  const auto &duCallee = globalState.getDefUseModule().getDefUseFunction(callee);
 
-  evalEntry(pp, ProgramPoint(fc.getContext(), entryInst), evalResult,
-            envChanged);
+  evalEntry(pp, ProgramPoint(fc.getContext(), duCallee.getEntryInst()),
+            evalResult, envChanged);
+
+  // A newly discovered caller must receive an already computed
+  // return even when the callee's inputs did not change.
+  if (callGraphUpdated)
+    for (auto *exit : duCallee.getMemoryExitInsts())
+      evalResult.addTopLevelSuccessor(ProgramPoint(fc.getContext(), exit));
 }
 
 void TransferFunction::evalAtomic(const ProgramPoint &pp, EvalResult &result) {
-  if (!localState)
-    return;
   const auto *inst = pp.getDefUseInstruction()->getInstruction();
   const auto *rmw = dyn_cast<AtomicRMWInst>(inst);
   const auto *cx = dyn_cast<AtomicCmpXchgInst>(inst);
@@ -231,7 +231,7 @@ void TransferFunction::evalAtomic(const ProgramPoint &pp, EvalResult &result) {
       globalState.getPointerAnalysis().getPtsSet(pp.getContext(), ptr);
   if (pointsTo.empty())
     return;
-  const auto oldValue = loadTaintFromPtsSet(pointsTo, *localState);
+  const auto oldValue = loadTaintFromPtsSet(pointsTo, localState);
   auto &env = globalState.getEnv();
   const auto *replacement = rmw ? rmw->getValOperand() : cx->getNewValOperand();
   const auto replacementValue =
@@ -290,17 +290,7 @@ void TransferFunction::evalCall(const ProgramPoint &pp,
       evalExternalCall(pp, callTgt, evalResult);
     else {
       const auto *newCtx = context::pushContextForCall(ctx, inst);
-      auto fc = FunctionContext(newCtx, callTgt);
-      auto callGraphUpdated = globalState.getCallGraph().insertEdge(pp, fc);
-
-      evalInternalCall(pp, fc, evalResult, callGraphUpdated);
-      // A newly discovered caller must receive an already computed
-      // return even when the callee's inputs did not change.
-      if (callGraphUpdated)
-        for (auto *exit : globalState.getDefUseModule()
-                              .getDefUseFunction(callTgt)
-                              .getMemoryExitInsts())
-          evalResult.addTopLevelSuccessor(ProgramPoint(newCtx, exit));
+      evalInternalCall(pp, FunctionContext(newCtx, callTgt), evalResult);
     }
   }
 }

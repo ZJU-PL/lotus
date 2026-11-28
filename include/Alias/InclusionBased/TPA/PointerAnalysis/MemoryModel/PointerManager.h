@@ -54,6 +54,8 @@ private:
   std::unordered_set<const Pointer *> published;
   std::shared_ptr<std::recursive_mutex> registryMutex =
       std::make_shared<std::recursive_mutex>();
+  bool threadSafe = true;
+  bool trackPublished = true;
   PointerManager *base = nullptr;
   std::unordered_set<const Pointer *> staged;
   using ReadKey = std::pair<const context::Context *, const llvm::Value *>;
@@ -75,6 +77,11 @@ public:
   explicit PointerManager(PointerManager &owner);
   bool validateView() const;
   void publishView();
+  void setThreadSafe(bool enabled) noexcept { threadSafe = enabled; }
+  void disablePublishedTracking() noexcept {
+    assert(base == nullptr && ptrSet.empty());
+    trackPublished = false;
+  }
 
   // Set up the universal pointer
   const Pointer *setUniversalPointer(const llvm::UndefValue *);

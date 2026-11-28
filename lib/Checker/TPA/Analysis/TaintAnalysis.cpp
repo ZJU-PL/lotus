@@ -130,6 +130,7 @@ bool TaintAnalysis::runOnDefUseModule(const DefUseModule &module,
   auto work = Initializer(state, memo).runOnInitState(TaintStore());
   std::set<const context::Context *> contexts;
   TaintSyncState syncState;
+  TaintPropagator propagator(memo, work);
   while (!work.empty()) {
     auto point = work.dequeue();
     contexts.insert(point.getContext());
@@ -137,7 +138,7 @@ bool TaintAnalysis::runOnDefUseModule(const DefUseModule &module,
     auto result =
         TransferFunction(state, memo.lookup(point), &syncState).eval(point);
     ++stats.evaluations;
-    TaintPropagator(memo, work).propagate(result, dirtyObjs);
+    propagator.propagate(result, dirtyObjs);
   }
   ignoredUnresolvedCalls = state.getIgnoredUnresolvedCalls();
   violations = SinkViolationChecker(env, memo, extTable, ptrAnalysis)

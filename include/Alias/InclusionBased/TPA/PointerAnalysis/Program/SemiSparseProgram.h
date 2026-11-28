@@ -33,6 +33,7 @@ private:
   // Function -> CFG mapping (lazy construction)
   using MapType = std::unordered_map<const llvm::Function *, CFG>;
   mutable MapType cfgMap;
+  mutable uint32_t nextCfgId = 1;
 
   // List of functions with their address taken
   // These are potential indirect call targets

@@ -15,7 +15,7 @@ struct PtsMergeCacheEntry {
   const void *b = nullptr;
   const void *res = nullptr;
 };
-constexpr size_t kPtsMergeCacheSize = 8192;
+constexpr size_t kPtsMergeCacheSize = 32768;
 thread_local std::array<PtsMergeCacheEntry, kPtsMergeCacheSize> ptsMergeCache{};
 } // namespace
 
@@ -25,8 +25,14 @@ const PtsSet::InternedSet *PtsSet::emptySet = uniquifySet(SetType{});
 const PtsSet::InternedSet *PtsSet::uniquifySet(SetType &&set) {
   if (set.empty() && emptySet != nullptr)
     return emptySet;
-  if (set.count(MemoryManager::getUniversalObject()))
-    set = {MemoryManager::getUniversalObject()};
+  // UniversalObject has ID 0, so in MemoryObjectIdLess order it is always first.
+  const auto *universal = MemoryManager::getUniversalObject();
+  if (!set.empty() && set.front() == universal) {
+    if (set.size() > 1)
+      set = {universal};
+  } else if (set.count(universal)) {
+    set = {universal};
+  }
 
   bool nonAcc = false;
   for (const auto *obj : set) {
@@ -101,14 +107,15 @@ PtsSet PtsSet::merge(const PtsSet &rhs) const {
   // distinct interned sets cannot subsume each other.
   const size_t lhsSize = pSet->objs.size();
   const size_t rhsSize = rhs.pSet->objs.size();
+  const MemoryObjectIdLess comp{};
   if (lhsSize > rhsSize) {
     if (rhsSize == 1u) {
       if (pSet->objs.count(rhs.pSet->objs.front())) {
         cached = {p1, p2, pSet};
         return *this;
       }
-    } else if (pSet->objs.front() <= rhs.pSet->objs.front() &&
-               pSet->objs.back() >= rhs.pSet->objs.back() &&
+    } else if (!comp(rhs.pSet->objs.front(), pSet->objs.front()) &&
+               !comp(pSet->objs.back(), rhs.pSet->objs.back()) &&
                pSet->objs.includes(rhs.pSet->objs)) {
       cached = {p1, p2, pSet};
       return *this;
@@ -119,8 +126,8 @@ PtsSet PtsSet::merge(const PtsSet &rhs) const {
         cached = {p1, p2, rhs.pSet};
         return rhs;
       }
-    } else if (rhs.pSet->objs.front() <= pSet->objs.front() &&
-               rhs.pSet->objs.back() >= pSet->objs.back() &&
+    } else if (!comp(pSet->objs.front(), rhs.pSet->objs.front()) &&
+               !comp(rhs.pSet->objs.back(), pSet->objs.back()) &&
                rhs.pSet->objs.includes(pSet->objs)) {
       cached = {p1, p2, rhs.pSet};
       return rhs;
@@ -130,7 +137,7 @@ PtsSet PtsSet::merge(const PtsSet &rhs) const {
   std::vector<const MemoryObject *> merged;
   merged.reserve(lhsSize + rhsSize);
   std::set_union(pSet->objs.begin(), pSet->objs.end(), rhs.pSet->objs.begin(),
-                 rhs.pSet->objs.end(), std::back_inserter(merged));
+                 rhs.pSet->objs.end(), std::back_inserter(merged), comp);
   const InternedSet *res =
       uniquifySet(SetType::fromSortedUnique(std::move(merged)));
   cached = {p1, p2, res};

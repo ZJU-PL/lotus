@@ -42,16 +42,30 @@ void TransferFunction::evalStore(const Pointer *dst, const Pointer *src,
                                  EvalResult &evalResult) {
   auto &env = globalState.getEnv();
 
-  // Look up what 'src' points to (the value being stored)
-  auto srcSet = env.lookup(src);
-  if (srcSet.empty()) {
+  // Look up what 'dst' points to (the location being written to)
+  auto dstSet = env.lookup(dst);
+  if (dstSet.empty()) {
     addMemLevelSuccessors(pp, *localState, evalResult);
     return;
   }
 
-  // Look up what 'dst' points to (the location being written to)
-  auto dstSet = env.lookup(dst);
-  if (dstSet.empty()) {
+  // Look up what 'src' points to (the value being stored)
+  PtsSet srcSet =
+      src != nullptr ? env.lookup(src) : PtsSet::getEmptySet();
+  if (srcSet.empty()) {
+    // Preserve strong-update monotonicity: if the store definitely overwrites
+    // a single non-summary object, kill its previous value rather than leaking
+    // the pre-store binding to successors before `src` resolves.
+    if (dstSet.size() == 1) {
+      const auto *dstObj = *dstSet.begin();
+      if (!dstObj->isSpecialObject() && !dstObj->isSummaryObject() &&
+          !localState->lookup(dstObj).empty()) {
+        auto &store = evalResult.getNewStore(*localState);
+        strongUpdateStore(dstObj, PtsSet::getEmptySet(), store);
+        addMemLevelSuccessors(pp, store, evalResult);
+        return;
+      }
+    }
     addMemLevelSuccessors(pp, *localState, evalResult);
     return;
   }
@@ -77,15 +91,12 @@ void TransferFunction::evalStoreNode(const ProgramPoint &pp,
   auto const &storeNode = static_cast<const StoreCFGNode &>(*pp.getCFGNode());
 
   auto &ptrManager = globalState.getPointerManager();
-  const auto *srcPtr = ptrManager.getPointer(ctx, storeNode.getSrc());
   const auto *dstPtr = ptrManager.getPointer(ctx, storeNode.getDest());
-
-  // Pointers not registered yet: can't apply the store, but still propagate
-  // the incoming store to mem-level successors.
-  if (srcPtr == nullptr || dstPtr == nullptr) {
+  if (dstPtr == nullptr) {
     addMemLevelSuccessors(pp, *localState, evalResult);
     return;
   }
+  const auto *srcPtr = ptrManager.getPointer(ctx, storeNode.getSrc());
 
   evalStore(dstPtr, srcPtr, pp, evalResult);
 }

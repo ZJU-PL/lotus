@@ -180,8 +180,8 @@ void TransferFunction::evalInternalCall(const context::Context *ctx,
                                         const CallCFGNode &callNode,
                                         const FunctionContext &fc,
                                         EvalResult &evalResult,
-                                        bool callGraphUpdated,
-                                        const Store *&prunedStore) {
+                                        const Store *&prunedStore,
+                                        bool &addedBypassMemSucc) {
   const auto *tgtCFG =
       globalState.getSemiSparseProgram().getCFGForFunction(*fc.getFunction());
   assert(tgtCFG != nullptr);
@@ -191,6 +191,9 @@ void TransferFunction::evalInternalCall(const context::Context *ctx,
   std::tie(isValid, envChanged) = evalCallArguments(ctx, callNode, fc);
   if (!isValid)
     return;
+
+  bool callGraphUpdated = globalState.getCallGraph().insertEdge(
+      ProgramPoint(ctx, &callNode), fc);
 
   // If the environment changed (new args) or it's a new edge, we must
   // re-evaluate the callee's entry point.
@@ -204,8 +207,11 @@ void TransferFunction::evalInternalCall(const context::Context *ctx,
   // resolved callee, so compute it once and reuse across all internal targets.
   if (prunedStore == nullptr) {
     Store filtered;
+    StorePrunerCache *pruneCache = globalState.getEnv().isOverlay()
+                                       ? nullptr
+                                       : &globalState.getStorePrunerCache();
     if (StorePruner(globalState.getEnv(), globalState.getPointerManager(),
-                    globalState.getMemoryManager())
+                    globalState.getMemoryManager(), pruneCache)
             .pruneStoreIfNeeded(*localState, ProgramPoint(ctx, &callNode),
                                 filtered)) {
       prunedStore = &evalResult.getNewStore(std::move(filtered));
@@ -216,12 +222,13 @@ void TransferFunction::evalInternalCall(const context::Context *ctx,
   evalResult.addMemLevelProgramPoint(
       ProgramPoint(fc.getContext(), tgtEntryNode), *prunedStore);
 
-  // Force enqueuing the direct successors of the call in the caller.
-  // This ensures that even if the callee doesn't return immediately,
-  // the caller continues analysis (approximation).
-  if (!tgtCFG->doesNotReturn())
+  // Force enqueuing the direct successors of the call in the caller (at most
+  // once across all returning targets of an indirect call).
+  if (!tgtCFG->doesNotReturn() && !addedBypassMemSucc) {
     addMemLevelSuccessors(ProgramPoint(ctx, &callNode), *localState,
                           evalResult);
+    addedBypassMemSucc = true;
+  }
 }
 
 // Main visitor method for Call nodes.
@@ -260,22 +267,24 @@ void TransferFunction::evalCallNode(const ProgramPoint &pp,
   }
 
   const Store *prunedStore = nullptr;
+  bool addedBypassMemSucc = false;
   for (const auto *f : callees) {
-    // Update call graph first.
     // Create context for callee (policy: k-CFA everywhere or selective 0-CFA
     // for direct calls, k-CFA for indirect).
     const auto *callsite = callNode.getCallSite();
     const auto *newCtx = context::pushContextForCall(ctx, callsite);
     auto callTgt = FunctionContext(newCtx, f);
-    bool callGraphUpdated = globalState.getCallGraph().insertEdge(
-        ProgramPoint(ctx, &callNode), callTgt);
 
     // Check whether f is an external library call or internal function.
-    if (f->isDeclaration())
+    // Internal calls insert into the call graph only after arity validation.
+    if (f->isDeclaration()) {
+      globalState.getCallGraph().insertEdge(ProgramPoint(ctx, &callNode),
+                                            callTgt);
       evalExternalCall(ctx, callNode, callTgt, evalResult);
-    else
-      evalInternalCall(ctx, callNode, callTgt, evalResult, callGraphUpdated,
-                       prunedStore);
+    } else {
+      evalInternalCall(ctx, callNode, callTgt, evalResult, prunedStore,
+                       addedBypassMemSucc);
+    }
   }
 }
 

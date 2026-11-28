@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Alias/InclusionBased/TPA/PointerAnalysis/MemoryModel/MemoryObject.h"
 #include "Alias/InclusionBased/TPA/Util/DataStructure/VectorSet.h"
 #include "Alias/InclusionBased/TPA/Util/Hashing.h"
 
@@ -10,7 +11,16 @@
 
 namespace tpa {
 
-class MemoryObject;
+struct MemoryObjectIdLess {
+  bool operator()(const MemoryObject *lhs,
+                  const MemoryObject *rhs) const noexcept {
+    const uint32_t lid = lhs->getId();
+    const uint32_t rid = rhs->getId();
+    if (lid != rid)
+      return lid < rid;
+    return lhs < rhs;
+  }
+};
 
 // Points-to set representation
 //
@@ -35,8 +45,9 @@ class MemoryObject;
 // - includes(set): Subset test
 class PtsSet {
 private:
-  // Underlying set type - VectorSet provides sorted unique storage
-  using SetType = util::VectorSet<const MemoryObject *>;
+  // Underlying set type - SortedVector ordered deterministically by
+  // MemoryObject::getId() (with pointer tie-breaker across managers)
+  using SetType = util::SortedVector<const MemoryObject *, MemoryObjectIdLess>;
 
   // Interned entry carrying cached summary metadata computed once at intern
   // time (e.g., whether any element is stack/heap memory for StorePruner).
@@ -101,6 +112,9 @@ public:
   bool empty() const { return pSet->objs.empty(); }
   // Get the number of elements
   size_t size() const { return pSet->objs.size(); }
+
+  // Opaque flyweight identity pointer (unique per distinct set contents).
+  const void *rawKey() const noexcept { return pSet; }
 
   // Equality via pointer comparison (flyweight pattern)
   bool operator==(const PtsSet &rhs) const { return pSet == rhs.pSet; }

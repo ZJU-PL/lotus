@@ -12,13 +12,16 @@ struct SubsumedCacheEntry {
   uint64_t aVer = 0;
   uint64_t bVer = 0;
 };
-constexpr size_t kSubsumedCacheSize = 16384;
-thread_local std::array<SubsumedCacheEntry, kSubsumedCacheSize>
-    subsumedCache{};
+struct SubsumedBucket {
+  SubsumedCacheEntry way[2]{};
+  uint8_t victim = 0;
+};
+constexpr size_t kSubsumedBuckets = 32768;
+thread_local std::array<SubsumedBucket, kSubsumedBuckets> subsumedCache{};
 
 inline size_t subsumedSlot(uint64_t aVer, uint64_t bVer) noexcept {
   return ((aVer * 11400714819323198485ULL) ^ (bVer * 14029467366897019727ULL)) &
-         (kSubsumedCacheSize - 1u);
+         (kSubsumedBuckets - 1u);
 }
 } // namespace
 
@@ -295,11 +298,18 @@ const Store::Node *Store::mergeSameLevel(const Node *a, const Node *b,
   assert(a->level == b->level);
   const uint64_t aVer = a->versionId;
   const uint64_t bVer = b->versionId;
-  const size_t cacheIdx = subsumedSlot(aVer, bVer);
-  if (subsumedCache[cacheIdx].aVer == aVer &&
-      subsumedCache[cacheIdx].bVer == bVer) {
-    changed = false;
-    return a;
+  const bool canBeSubsumed =
+      ((a->presentMask & b->presentMask) == b->presentMask) &&
+      (b->totalCount <= a->totalCount) && (b->nonAccCount <= a->nonAccCount);
+  size_t cacheIdx = 0;
+  if (canBeSubsumed) {
+    cacheIdx = subsumedSlot(aVer, bVer);
+    const auto &bucket = subsumedCache[cacheIdx];
+    if ((bucket.way[0].aVer == aVer && bucket.way[0].bVer == bVer) ||
+        (bucket.way[1].aVer == aVer && bucket.way[1].bVer == bVer)) {
+      changed = false;
+      return a;
+    }
   }
 
   const bool selfUnique =
@@ -342,7 +352,9 @@ const Store::Node *Store::mergeSameLevel(const Node *a, const Node *b,
     }
 
     if (!anyChange) {
-      subsumedCache[cacheIdx] = {aVer, bVer};
+      auto &bucket = subsumedCache[cacheIdx];
+      bucket.way[bucket.victim] = {aVer, bVer};
+      bucket.victim ^= 1u;
       changed = false;
       return a;
     }
@@ -366,6 +378,22 @@ const Store::Node *Store::mergeSameLevel(const Node *a, const Node *b,
 
   const auto *ba = static_cast<const BranchNode *>(a);
   const auto *bb = static_cast<const BranchNode *>(b);
+  // Fast path: completely disjoint populated slots need no child recursion.
+  if ((ba->presentMask & bb->presentMask) == 0u) {
+    changed = true;
+    BranchNode *target =
+        selfUnique ? const_cast<BranchNode *>(ba) : new BranchNode(*ba);
+    if (selfUnique)
+      target->versionId = allocVersionId();
+    uint16_t bMask = bb->presentMask;
+    while (bMask) {
+      unsigned s = static_cast<unsigned>(__builtin_ctz(bMask));
+      bMask &= static_cast<uint16_t>(bMask - 1u);
+      refreshBranchSlot(target, s, nullptr, retain(bb->children[s]));
+    }
+    return target;
+  }
+
   bool anyChange = false;
   bool bSubsumesA = (bb->presentMask & ba->presentMask) == ba->presentMask;
   const Node *newChildren[kFanout];
@@ -383,8 +411,17 @@ const Store::Node *Store::mergeSameLevel(const Node *a, const Node *b,
     if (oldChild == bChild)
       continue;
 
-    oldTotals[s] = oldChild ? oldChild->totalCount : 0u;
-    oldNonAccs[s] = oldChild ? oldChild->nonAccCount : 0u;
+    if (oldChild == nullptr) {
+      oldTotals[s] = 0u;
+      oldNonAccs[s] = 0u;
+      anyChange = true;
+      changedMask |= static_cast<uint16_t>(1u << s);
+      newChildren[s] = retain(bChild);
+      continue;
+    }
+
+    oldTotals[s] = oldChild->totalCount;
+    oldNonAccs[s] = oldChild->nonAccCount;
 
     bool childChanged = false;
     const Node *newChild =
@@ -400,7 +437,9 @@ const Store::Node *Store::mergeSameLevel(const Node *a, const Node *b,
   }
 
   if (!anyChange) {
-    subsumedCache[cacheIdx] = {aVer, bVer};
+    auto &bucket = subsumedCache[cacheIdx];
+    bucket.way[bucket.victim] = {aVer, bVer};
+    bucket.victim ^= 1u;
     changed = false;
     return a;
   }

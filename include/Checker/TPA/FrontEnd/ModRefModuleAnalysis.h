@@ -3,6 +3,8 @@
 #include "Checker/TPA/FrontEnd/ModRefModuleSummary.h"
 #include "Checker/TPA/Support/ExternalModels.h"
 
+#include <unordered_set>
+
 namespace llvm {
 class Function;
 class Module;
@@ -33,6 +35,9 @@ public:
       : ptrAnalysis(p), unmodeledPolicy(policy), modRefTable(t) {}
 
   ModRefModuleSummary runOnModule(const llvm::Module &module);
+  ModRefModuleSummary
+  runOnModule(const llvm::Module &module,
+              const std::unordered_set<const llvm::Function *> &reachable);
 };
 
 } // namespace tpa::taint

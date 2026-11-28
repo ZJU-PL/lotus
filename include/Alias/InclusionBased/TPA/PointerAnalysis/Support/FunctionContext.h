@@ -33,14 +33,7 @@ public:
     return ctx == rhs.ctx && func == rhs.func;
   }
   bool operator!=(const FunctionContext &rhs) const { return !(*this == rhs); }
-  bool operator<(const FunctionContext &rhs) const {
-    if (ctx < rhs.ctx)
-      return true;
-    else if (rhs.ctx < ctx)
-      return false;
-    else
-      return func < rhs.func;
-  }
+  bool operator<(const FunctionContext &rhs) const;
   bool operator>(const FunctionContext &rhs) const { return rhs < *this; }
   bool operator<=(const FunctionContext &rhs) const { return !(rhs < *this); }
   bool operator>=(const FunctionContext &rhs) const { return !(*this < rhs); }

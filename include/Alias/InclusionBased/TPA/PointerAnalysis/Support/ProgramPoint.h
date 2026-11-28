@@ -54,15 +54,8 @@ public:
     return ctx == rhs.ctx && node == rhs.node;
   }
   bool operator!=(const ProgramPoint &rhs) const { return !(*this == rhs); }
-  // Ordering for use in ordered containers
-  bool operator<(const ProgramPoint &rhs) const {
-    if (ctx < rhs.ctx)
-      return true;
-    else if (rhs.ctx < ctx)
-      return false;
-    else
-      return node < rhs.node;
-  }
+  // Deterministic ordering for use in ordered containers
+  bool operator<(const ProgramPoint &rhs) const;
   bool operator>(const ProgramPoint &rhs) const { return rhs < *this; }
   bool operator<=(const ProgramPoint &rhs) const { return !(rhs < *this); }
   bool operator>=(const ProgramPoint &rhs) const { return !(*this < rhs); }

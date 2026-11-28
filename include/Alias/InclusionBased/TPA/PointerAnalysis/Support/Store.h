@@ -171,6 +171,7 @@ public:
   bool isOverlay() const { return false; }
   void reserve(size_t) {}
   bool sameRoot(const Store &other) const { return root == other.root; }
+  uint64_t rootVersionId() const noexcept { return root ? root->versionId : 0ULL; }
 
   const PtsSet *findOwnBinding(const MemoryObject *key) const;
   PtsSet lookup(const MemoryObject *key) const {
