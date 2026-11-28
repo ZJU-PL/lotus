@@ -101,7 +101,7 @@ void computeNodePriority(DefUseFunction &duFunc) {
 void DefUseModuleBuilder::buildMemLevelEdges(
     DefUseFunction &duFunc, const ModRefModuleSummary &summaryMap) {
   ReachingDefModuleAnalysis rdAnalysis(ptrAnalysis, summaryMap, modRefTable,
-                                       unmodeledPolicy);
+                                       unmodeledPolicy, enableMemoryGrouping);
   rdAnalysis.buildMemoryDefUseEdges(duFunc);
 }
 

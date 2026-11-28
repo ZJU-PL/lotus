@@ -1464,4 +1464,127 @@ TEST(TPATaint, SuffixKCFASeparatesDeepCallSitesUnderOneCFA) {
   EXPECT_EQ(k1.ambiguous, 0u);
 }
 
+TEST(TPATaint, MemoryGroupingAblationMatchesUngroupedExactly) {
+  const char *ir = R"(
+    @g0 = global i32 0
+    @g1 = global i32 0
+    @g2 = global i32 0
+    @g3 = global i32 0
+    declare i32 @source()
+    declare void @sink(i32)
+
+    define void @touch_all(i32 %v) {
+      store i32 %v, i32* @g0
+      store i32 %v, i32* @g1
+      store i32 %v, i32* @g2
+      store i32 %v, i32* @g3
+      ret void
+    }
+
+    define i32 @read_all() {
+      %a = load i32, i32* @g0
+      %b = load i32, i32* @g1
+      %c = load i32, i32* @g2
+      %d = load i32, i32* @g3
+      %s0 = add i32 %a, %b
+      %s1 = add i32 %c, %d
+      %s2 = add i32 %s0, %s1
+      ret i32 %s2
+    }
+
+    define i32 @main(i1 %cond) {
+      %t = call i32 @source()
+      br i1 %cond, label %dirty, label %clean
+    dirty:
+      call void @touch_all(i32 %t)
+      br label %merge
+    clean:
+      call void @touch_all(i32 0)
+      br label %merge
+    merge:
+      %res = call i32 @read_all()
+      call void @sink(i32 %res)
+      ret i32 0
+    }
+  )";
+
+  auto runMode = [&](bool enableGrouping) {
+    LLVMContext ctx;
+    SMDiagnostic err;
+    auto module = parseAssemblyString(ir, err, ctx);
+    EXPECT_NE(module, nullptr);
+    context::KLimitContext::setLimit(0);
+    context::setContextStrategy(context::ContextStrategy::KLimit);
+    tpa::taint::prepareModule(*module, true);
+
+    tpa::SemiSparseProgramBuilder pb;
+    auto prog = pb.runOnModule(*module);
+    tpa::SemiSparsePointerAnalysis ptr;
+    ptr.loadExternalPointerTable(TPA_TAINT_TEST_INPUTS "/ptr.spec");
+    ptr.runOnProgram(prog);
+
+    tpa::taint::DefUseModuleBuilder builder(ptr);
+    builder.setEnableMemoryGrouping(enableGrouping);
+    builder.loadExternalModRefTable(TPA_TAINT_TEST_INPUTS "/modref.spec");
+    auto graph = builder.buildDefUseModule(*module);
+
+    size_t totalGroups = 0;
+    size_t totalGroupedObjs = 0;
+    size_t mainGroups = 0;
+    size_t mainGroupedObjs = 0;
+    for (const auto &duFunc : graph) {
+      totalGroups += duFunc.getMemoryGroups().groupLocs.size();
+      totalGroupedObjs += duFunc.getMemoryGroups().locToGroup.size();
+      if (duFunc.getFunction().getName() == "main") {
+        mainGroups = duFunc.getMemoryGroups().groupLocs.size();
+        mainGroupedObjs = duFunc.getMemoryGroups().locToGroup.size();
+      }
+    }
+
+    tpa::taint::TaintAnalysis analysis(ptr);
+    analysis.loadExternalTaintTable(TPA_TAINT_TEST_INPUTS "/taint.spec");
+    analysis.runOnDefUseModule(graph, /*trackPrecisionLoss=*/true);
+
+    struct Outcome {
+      size_t memoryEdges;
+      size_t violations;
+      size_t valueFacts;
+      size_t memoryStates;
+      size_t lossSites;
+      size_t totalGroups;
+      size_t totalGroupedObjs;
+      size_t mainGroups;
+      size_t mainGroupedObjs;
+    };
+    const auto &st = analysis.getStatistics();
+    return Outcome{st.memoryEdges,
+                   st.violations,
+                   st.valueFacts,
+                   st.memoryStates,
+                   analysis.getLossSites().size(),
+                   totalGroups,
+                   totalGroupedObjs,
+                   mainGroups,
+                   mainGroupedObjs};
+  };
+
+  auto grouped = runMode(true);
+  auto ungrouped = runMode(false);
+
+  // Exact semantic equivalence across graph edges, taint facts, and tracking.
+  EXPECT_EQ(grouped.memoryEdges, ungrouped.memoryEdges);
+  EXPECT_EQ(grouped.violations, ungrouped.violations);
+  EXPECT_EQ(grouped.violations, 1u);
+  EXPECT_EQ(grouped.valueFacts, ungrouped.valueFacts);
+  EXPECT_EQ(grouped.memoryStates, ungrouped.memoryStates);
+  EXPECT_EQ(grouped.lossSites, ungrouped.lossSites);
+  EXPECT_GT(grouped.lossSites, 0u);
+
+  // Grouping actually compresses equivalent globals in @main, while ungrouped
+  // mode leaves MemoryGroupTable empty.
+  EXPECT_GT(grouped.mainGroupedObjs, grouped.mainGroups);
+  EXPECT_EQ(ungrouped.totalGroups, 0u);
+  EXPECT_EQ(ungrouped.totalGroupedObjs, 0u);
+}
+
 } // namespace

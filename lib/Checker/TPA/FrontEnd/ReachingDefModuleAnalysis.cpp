@@ -612,32 +612,35 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
   // (hasEntryDef, isExitWrite, all WriteSites, all ReadSites). Locations in
   // the same final group have identical def-use edges everywhere in `func`, so
   // Phases C and D run once per group and emit one shared edge set per group.
+  // When `enableMemoryGrouping` is false (ablation mode), every live location
+  // remains an individual ungrouped singleton.
   constexpr uint32_t kDeadGroup = std::numeric_limits<uint32_t>::max();
   std::vector<uint32_t> locGroup(numLocs, kDeadGroup);
-  uint32_t initGroup[4] = {kDeadGroup, kDeadGroup, kDeadGroup, kDeadGroup};
   std::vector<uint32_t> groupSize;
   std::vector<uint8_t> groupEntryDef;
   std::vector<uint8_t> groupExitWrite;
+  std::vector<const MemoryObject *> singleGroupLoc;
 
-  for (uint32_t locId = 0; locId < numLocs; ++locId) {
-    if (!isReadOrExit[locId])
-      continue;
-    uint32_t key =
-        (hasEntryDef[locId] ? 1u : 0u) | (isExitWrite[locId] ? 2u : 0u);
-    if (initGroup[key] == kDeadGroup) {
-      initGroup[key] = static_cast<uint32_t>(groupSize.size());
-      groupSize.push_back(0);
-      groupEntryDef.push_back(hasEntryDef[locId]);
-      groupExitWrite.push_back(isExitWrite[locId]);
+  if (enableMemoryGrouping) {
+    uint32_t initGroup[4] = {kDeadGroup, kDeadGroup, kDeadGroup, kDeadGroup};
+    for (uint32_t locId = 0; locId < numLocs; ++locId) {
+      if (!isReadOrExit[locId])
+        continue;
+      uint32_t key =
+          (hasEntryDef[locId] ? 1u : 0u) | (isExitWrite[locId] ? 2u : 0u);
+      if (initGroup[key] == kDeadGroup) {
+        initGroup[key] = static_cast<uint32_t>(groupSize.size());
+        groupSize.push_back(0);
+        groupEntryDef.push_back(hasEntryDef[locId]);
+        groupExitWrite.push_back(isExitWrite[locId]);
+      }
+      uint32_t g = initGroup[key];
+      locGroup[locId] = g;
+      ++groupSize[g];
     }
-    uint32_t g = initGroup[key];
-    locGroup[locId] = g;
-    ++groupSize[g];
-  }
-  if (groupSize.empty())
-    return;
+    if (groupSize.empty())
+      return;
 
-  {
     std::vector<uint32_t> touchedCount(groupSize.size(), 0);
     std::vector<uint32_t> splitTarget(groupSize.size(), kDeadGroup);
     std::vector<uint32_t> touchedGroups;
@@ -691,22 +694,41 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
         if (refinedReadSlices.insert({rs.begin, rs.end}).second)
           refineBySlice(readLocPool, rs.begin, rs.end);
     }
+  } else {
+    groupSize.reserve(numLocs);
+    groupEntryDef.reserve(numLocs);
+    groupExitWrite.reserve(numLocs);
+    singleGroupLoc.reserve(numLocs);
+    for (uint32_t locId = 0; locId < numLocs; ++locId) {
+      if (!isReadOrExit[locId])
+        continue;
+      uint32_t g = static_cast<uint32_t>(groupSize.size());
+      locGroup[locId] = g;
+      groupSize.push_back(1);
+      groupEntryDef.push_back(hasEntryDef[locId]);
+      groupExitWrite.push_back(isExitWrite[locId]);
+      singleGroupLoc.push_back(idToLoc[locId]);
+    }
+    if (groupSize.empty())
+      return;
   }
 
   const uint32_t numGroups = static_cast<uint32_t>(groupSize.size());
   auto &memGroups = duFunc.getMemoryGroups();
   memGroups.clear();
-  memGroups.groupLocs.resize(numGroups);
-  memGroups.locToGroup.reserve(numLocs);
-  for (uint32_t locId = 0; locId < numLocs; ++locId) {
-    uint32_t g = locGroup[locId];
-    if (g == kDeadGroup)
-      continue;
-    const MemoryObject *loc = idToLoc[locId];
-    memGroups.locToGroup.try_emplace(loc, g);
-    memGroups.groupLocs[g].push_back(loc);
+  if (enableMemoryGrouping) {
+    memGroups.groupLocs.resize(numGroups);
+    memGroups.locToGroup.reserve(numLocs);
+    for (uint32_t locId = 0; locId < numLocs; ++locId) {
+      uint32_t g = locGroup[locId];
+      if (g == kDeadGroup)
+        continue;
+      const MemoryObject *loc = idToLoc[locId];
+      memGroups.locToGroup.try_emplace(loc, g);
+      memGroups.groupLocs[g].push_back(loc);
+    }
+    memGroups.buildChunkMasks();
   }
-  memGroups.buildChunkMasks();
 
   // Collapse every WriteSite and ReadSite from location IDs to group IDs,
   // caching shared pool slices so repeated calls collapse only once.
@@ -866,10 +888,12 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
       continue;
 
     LocSignature sig{groupEntryDef[g] != 0, std::move(groupBBWrites[g])};
-    auto itr = sigToClass.find(sig);
-    if (itr != sigToClass.end()) {
-      groupToWriteClass[g] = itr->second;
-      continue;
+    if (enableMemoryGrouping) {
+      auto itr = sigToClass.find(sig);
+      if (itr != sigToClass.end()) {
+        groupToWriteClass[g] = itr->second;
+        continue;
+      }
     }
 
     const uint32_t classId = static_cast<uint32_t>(classSolutions.size());
@@ -958,7 +982,8 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
       bbWriteIdx[bw.bbId] = -1;
 
     classSolutions.push_back(std::move(sol));
-    sigToClass.emplace(std::move(sig), classId);
+    if (enableMemoryGrouping)
+      sigToClass.emplace(std::move(sig), classId);
   }
 
   // Phase D: Stream each reachable BB once over equivalence groups and emit
@@ -994,10 +1019,18 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
     return vec;
   };
 
+  auto emitEdge = [&](DefUseInstruction *srcDu, uint32_t g,
+                      DefUseInstruction *dstDu) {
+    if (enableMemoryGrouping)
+      srcDu->appendGroupMemSuccEdge(g, dstDu);
+    else
+      srcDu->appendMemSuccEdge(singleGroupLoc[g], dstDu);
+  };
+
   auto emitForGroup = [&](uint32_t g, uint32_t b, DefUseInstruction *dstDu) {
     const uint32_t c = groupToWriteClass[g];
     if (c == kNoWriteClass) {
-      entryDu->appendGroupMemSuccEdge(g, dstDu);
+      emitEdge(entryDu, g, dstDu);
       return;
     }
 
@@ -1005,16 +1038,16 @@ void ReachingDefModuleAnalysis::buildMemoryDefUseEdges(
     if (!localKilled[g]) {
       const auto &inDefs = getDecodedIn(c, b);
       for (DefUseInstruction *srcDu : inDefs) {
-        srcDu->appendGroupMemSuccEdge(g, dstDu);
+        emitEdge(srcDu, g, dstDu);
         emitted = true;
       }
     }
     for (uint32_t d : localDefs[g]) {
-      idToDefDu[d]->appendGroupMemSuccEdge(g, dstDu);
+      emitEdge(idToDefDu[d], g, dstDu);
       emitted = true;
     }
     if (!emitted)
-      entryDu->appendGroupMemSuccEdge(g, dstDu);
+      emitEdge(entryDu, g, dstDu);
   };
 
   for (uint32_t b = 0; b < numBB; ++b) {

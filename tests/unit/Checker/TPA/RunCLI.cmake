@@ -8,8 +8,11 @@ function(check_run expected pattern)
     message(FATAL_ERROR "Unexpected TPA CLI result ${result}, expected ${expected}:\n${output}\n${errors}")
   endif()
 endfunction()
-check_run(1 "raw_sink_violations=2" ${INPUTS}/context.ll ${specs}
+check_run(1 "raw_sink_violations=2.*memory_grouping=1" ${INPUTS}/context.ll ${specs}
   --taint-tpa.k-limit=0 --taint-tpa.track-precision-loss --taint-tpa.def-use-dot-dir=${WORK_DIR}/graphs)
+check_run(1 "raw_sink_violations=2.*memory_grouping=0 memory_groups=0 grouped_memory_objects=0"
+  ${INPUTS}/context.ll ${specs}
+  --taint-tpa.k-limit=0 --taint-tpa.track-precision-loss --taint-tpa.no-memory-grouping)
 check_run(1 "raw_sink_violations=1" ${INPUTS}/context.ll ${specs} --taint-tpa.k-limit=1)
 file(GLOB graphs "${WORK_DIR}/graphs/*.dot")
 if(NOT graphs)

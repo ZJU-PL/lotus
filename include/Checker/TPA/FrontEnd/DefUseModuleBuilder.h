@@ -24,6 +24,7 @@ private:
   const tpa::SemiSparsePointerAnalysis &ptrAnalysis;
   UnmodeledPolicy unmodeledPolicy;
   annotation::ExternalModRefTable modRefTable;
+  bool enableMemoryGrouping = true;
 
   void buildDefUseFunction(DefUseFunction &f, const ModRefModuleSummary &);
   void buildMemLevelEdges(DefUseFunction &f, const ModRefModuleSummary &);
@@ -32,6 +33,9 @@ public:
   DefUseModuleBuilder(const tpa::SemiSparsePointerAnalysis &p,
                       UnmodeledPolicy policy = UnmodeledPolicy::Ignore)
       : ptrAnalysis(p), unmodeledPolicy(policy) {}
+
+  void setEnableMemoryGrouping(bool enable) { enableMemoryGrouping = enable; }
+  bool isMemoryGroupingEnabled() const { return enableMemoryGrouping; }
 
   DefUseModule buildDefUseModule(const llvm::Module &module);
 

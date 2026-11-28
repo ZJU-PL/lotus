@@ -30,14 +30,16 @@ private:
   UnmodeledPolicy unmodeledPolicy;
   const ModRefModuleSummary &summaryMap;
   const annotation::ExternalModRefTable &modRefTable;
+  bool enableMemoryGrouping;
 
 public:
   ReachingDefModuleAnalysis(const tpa::SemiSparsePointerAnalysis &p,
                             const ModRefModuleSummary &s,
                             const annotation::ExternalModRefTable &t,
-                            UnmodeledPolicy policy = UnmodeledPolicy::Ignore)
-      : ptrAnalysis(p), unmodeledPolicy(policy), summaryMap(s), modRefTable(t) {
-  }
+                            UnmodeledPolicy policy = UnmodeledPolicy::Ignore,
+                            bool enableMemoryGrouping = true)
+      : ptrAnalysis(p), unmodeledPolicy(policy), summaryMap(s), modRefTable(t),
+        enableMemoryGrouping(enableMemoryGrouping) {}
 
   ReachingDefModuleMap runOnFunction(const llvm::Function &func);
 

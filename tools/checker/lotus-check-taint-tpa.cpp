@@ -54,6 +54,11 @@ static cl::opt<bool> NoPrepass(
     "taint-tpa.no-prepass", cl::init(false),
     cl::desc("Skip optional TPA normalization (returns still unified)"),
     cl::sub(lotus::checker::tooling::taintTPASubCommand()));
+static cl::opt<bool> NoMemoryGrouping(
+    "taint-tpa.no-memory-grouping", cl::init(false),
+    cl::desc("Disable Paige-Tarjan memory-object equivalence grouping "
+             "(for ablation studies)"),
+    cl::sub(lotus::checker::tooling::taintTPASubCommand()));
 static cl::opt<bool>
     Track("taint-tpa.track-precision-loss", cl::init(false),
           cl::desc("Trace ambiguous sink findings to precision-loss sites"),
@@ -311,6 +316,7 @@ int runTPATaintCheckerTool(const char *argv0) try {
            << coverage.ignoredCalls.size()
            << " call sites; --analysis-stats lists symbol counts\n";
   tpa::taint::DefUseModuleBuilder builder(pointer, Unmodeled);
+  builder.setEnableMemoryGrouping(!NoMemoryGrouping);
   builder.setExternalModRefTable(std::move(modref));
   auto graph = builder.buildDefUseModule(*module);
   auto graphDone = Clock::now();
@@ -383,6 +389,12 @@ int runTPATaintCheckerTool(const char *argv0) try {
            << pointerStats.initializationSeconds
            << " pointer_solve_seconds=" << pointerStats.solveSeconds
            << " debug_stripped=" << (debugStripped ? 1 : 0) << "\n";
+    size_t totalMemoryGroups = 0;
+    size_t totalGroupedObjects = 0;
+    for (const auto &duFunc : graph) {
+      totalMemoryGroups += duFunc.getMemoryGroups().groupLocs.size();
+      totalGroupedObjects += duFunc.getMemoryGroups().locToGroup.size();
+    }
     const auto &s = analysis.getStatistics();
     auto seconds = [](auto a, auto b) {
       return std::chrono::duration<double>(b - a).count();
@@ -392,7 +404,10 @@ int runTPATaintCheckerTool(const char *argv0) try {
            << " evaluations=" << s.evaluations << " contexts=" << s.contexts
            << " value_facts=" << s.valueFacts
            << " memory_states=" << s.memoryStates << " sinks=" << s.sinks
-           << " loss_sites=" << analysis.getLossSites().size() << "\n"
+           << " loss_sites=" << analysis.getLossSites().size()
+           << " memory_grouping=" << (NoMemoryGrouping ? 0 : 1)
+           << " memory_groups=" << totalMemoryGroups
+           << " grouped_memory_objects=" << totalGroupedObjects << "\n"
            << "pointer_pipeline_seconds=" << seconds(started, pointerDone)
            << " graph_seconds=" << seconds(pointerDone, graphDone)
            << " taint_and_tracking_seconds=" << seconds(graphDone, done)
