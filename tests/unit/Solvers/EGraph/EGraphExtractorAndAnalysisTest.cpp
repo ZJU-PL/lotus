@@ -248,3 +248,41 @@ TEST(EGraphFeatureTest, TypedLanguageRunsThroughEGraphAndMatcher) {
   ASSERT_NE(tail, nullptr);
   EXPECT_TRUE(egraph[*tail].nodes.front().isList());
 }
+
+namespace {
+struct CustomAstSize {
+  using Cost = size_t;
+  template <typename ChildCostFn>
+  Cost cost(const SymbolLang &node, ChildCostFn &&child_cost) const {
+    size_t total = 1;
+    for (Id c : node.children()) {
+      total += child_cost(c);
+    }
+    return total;
+  }
+};
+} // namespace
+
+TEST(EGraphFeatureTest, ExtractorBucketDijkstraMatchesGeneralCostOnBinaryDag) {
+  std::vector<Rewrite<SymbolLang>> rules = {
+      makeRewrite<SymbolLang>("comm", "(+ ?a ?b)", "(+ ?b ?a)"),
+      makeRewrite<SymbolLang>("assoc", "(+ ?a (+ ?b ?c))", "(+ (+ ?a ?b) ?c)"),
+      makeRewrite<SymbolLang>("zero-id", "(+ 0 ?x)", "?x"),
+  };
+  auto start = RecExpr<SymbolLang>::parse("(+ (+ x (+ y 0)) (+ 0 z))");
+  Runner<SymbolLang> runner;
+  runner.withExpr(start).withIterLimit(6).run(rules);
+
+  Extractor<SymbolLang> ast_extractor(runner.egraph);
+  Extractor<SymbolLang, NoAnalysis<SymbolLang>, CustomAstSize> gen_extractor(
+      runner.egraph, CustomAstSize{});
+
+  auto [fast_cost, fast_expr] = ast_extractor.findBest(runner.roots[0]);
+  auto [gen_cost, gen_expr] = gen_extractor.findBest(runner.roots[0]);
+  EXPECT_EQ(fast_cost, gen_cost);
+  EXPECT_EQ(fast_cost, 5u);
+  EXPECT_EQ(ast_extractor.findBestNode(runner.roots[0]).op(), "+");
+  EXPECT_EQ(gen_extractor.findBestNode(runner.roots[0]).op(), "+");
+  EXPECT_FALSE(fast_expr.toString().empty());
+  EXPECT_FALSE(gen_expr.toString().empty());
+}

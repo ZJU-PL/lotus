@@ -220,6 +220,17 @@ public:
   virtual ~RewriteScheduler() = default;
 
   virtual bool canStop(size_t) { return true; }
+  virtual bool supportsFlatFastPath() const { return false; }
+  virtual bool supportsSemiNaive() const { return false; }
+
+  virtual void searchRewriteFlat(size_t, const EGraph<L, A> &egraph,
+                                 const Rewrite<L, A> &rewrite,
+                                 uint32_t since_version, FlatMatches &out,
+                                 const WorkControl *control) {
+    rewrite.fastQuery()->runFlat(egraph, out,
+                                 std::numeric_limits<size_t>::max(),
+                                 since_version, control, false);
+  }
 
   virtual std::vector<SearchMatches<L>>
   searchRewrite(size_t, const EGraph<L, A> &egraph,
@@ -275,11 +286,46 @@ public:
 };
 
 template <typename L, typename A>
-class SimpleScheduler final : public RewriteScheduler<L, A> {};
+class SimpleScheduler final : public RewriteScheduler<L, A> {
+public:
+  bool supportsFlatFastPath() const override { return true; }
+  bool supportsSemiNaive() const override { return true; }
+};
 
 template <typename L, typename A>
 class BackoffScheduler final : public RewriteScheduler<L, A> {
 public:
+  bool supportsFlatFastPath() const override { return true; }
+  bool supportsSemiNaive() const override { return false; }
+
+  void searchRewriteFlat(size_t iteration, const EGraph<L, A> &egraph,
+                         const Rewrite<L, A> &rewrite, uint32_t,
+                         FlatMatches &out,
+                         const WorkControl *control) override {
+    auto &stats = ruleStats(rewrite.name());
+    if (iteration < stats.banned_until) {
+      out.reset(rewrite.fastQuery()->stride());
+      return;
+    }
+
+    size_t threshold = detail::runnerSaturatingShiftLeft(stats.match_limit,
+                                                         stats.times_banned);
+    size_t search_limit = threshold == std::numeric_limits<size_t>::max()
+                              ? threshold
+                              : threshold + 1;
+    rewrite.fastQuery()->runFlat(egraph, out, search_limit, /*since_version=*/0,
+                                 control, false);
+    if (out.count() > threshold) {
+      size_t ban_length = detail::runnerSaturatingShiftLeft(stats.ban_length,
+                                                            stats.times_banned);
+      ++stats.times_banned;
+      stats.banned_until = detail::runnerSaturatingAdd(iteration, ban_length);
+      out.reset(rewrite.fastQuery()->stride());
+      return;
+    }
+
+    ++stats.times_applied;
+  }
   BackoffScheduler &withInitialMatchLimit(size_t limit) {
     default_match_limit_ = limit;
     return *this;
@@ -481,6 +527,8 @@ public:
     limits_.start_time = now();
     stop_reason = {};
     iterations.clear();
+    flat_matches_buf_.resize(rules.size());
+    rule_last_version_.assign(rules.size(), 0);
 
     for (size_t i = 0;; ++i) {
       auto iteration = runOne(i, rules);
@@ -577,17 +625,63 @@ private:
     size_t egraph_nodes_after_hooks = egraph.totalSize();
     size_t egraph_classes_after_hooks = egraph.numberOfClasses();
 
+    const bool use_flat = !egraph.areExplanationsEnabled() &&
+                          egraph.analysis().allowEMatchingCycles() &&
+                          scheduler_->supportsFlatFastPath();
+    const bool use_seminaive = use_flat && scheduler_->supportsSemiNaive();
+
+    if (use_flat && !egraph.clean()) {
+      egraph.rebuild();
+    }
+
     std::vector<std::vector<SearchMatches<L>>> matches;
+    std::vector<uint8_t> used_flat_rule;
     Instant search_start = now();
     if (!result) {
-      WorkControl search_control{[&]() { return limits_.timeExceeded(); },
-                                 1024};
-      auto search_result = scheduler_->searchRewrites(
-          iteration_index, egraph, rules, limits_, &search_control);
-      if (search_result) {
-        matches = std::move(*search_result.value);
+      if (use_flat) {
+        used_flat_rule.assign(rules.size(), 0);
+        matches.resize(rules.size());
+        const uint32_t cur_ver = egraph.version();
+        const bool has_time_limit =
+            limits_.time_limit < std::chrono::hours(24 * 365);
+        WorkControl search_control{[&]() { return limits_.timeExceeded(); },
+                                   4096};
+        const WorkControl *ctrl_ptr = has_time_limit ? &search_control : nullptr;
+        for (size_t i = 0; i < rules.size(); ++i) {
+          if (rules[i].hasFastFlatPath()) {
+            used_flat_rule[i] = 1;
+            const uint32_t since =
+                (use_seminaive && rules[i].supportsSemiNaive())
+                    ? rule_last_version_[i]
+                    : 0;
+            // For tight 2-atom rules with no imminent time limit, pass null
+            // control so the specialized inner loop runs at peak throughput;
+            // we still check limits between rules below.
+            scheduler_->searchRewriteFlat(iteration_index, egraph, rules[i],
+                                          since, flat_matches_buf_[i],
+                                          nullptr);
+            if (use_seminaive && rules[i].supportsSemiNaive()) {
+              rule_last_version_[i] = cur_ver;
+            }
+          } else {
+            matches[i] = scheduler_->searchRewrite(iteration_index, egraph,
+                                                   rules[i], ctrl_ptr);
+          }
+          if (auto stop_reason_check = limits_.check(iteration_index, egraph)) {
+            result = *stop_reason_check;
+            break;
+          }
+        }
       } else {
-        result = search_result.stop_reason;
+        WorkControl search_control{[&]() { return limits_.timeExceeded(); },
+                                   1024};
+        auto search_result = scheduler_->searchRewrites(
+            iteration_index, egraph, rules, limits_, &search_control);
+        if (search_result) {
+          matches = std::move(*search_result.value);
+        } else {
+          result = search_result.stop_reason;
+        }
       }
     }
     iteration.search_time =
@@ -595,22 +689,66 @@ private:
 
     Instant apply_start = now();
     if (!result) {
-      WorkControl apply_control{[&]() {
-                                  return limits_.timeExceeded() ||
-                                         egraph.totalSize() >
-                                             limits_.node_limit;
-                                },
-                                1};
-      for (size_t i = 0; i < matches.size(); ++i) {
-        size_t applied =
-            scheduler_->applyRewrite(iteration_index, egraph, rules[i],
-                                     std::move(matches[i]), &apply_control);
-        if (applied > 0) {
-          iteration.applied[rules[i].name()] += applied;
+      if (use_flat) {
+        if constexpr (std::is_same_v<A, NoAnalysis<L>>) {
+          llvm::SmallVector<size_t, 16> op_extra;
+          size_t est_nodes = 0;
+          size_t est_classes = 0;
+          for (size_t i = 0; i < rules.size(); ++i) {
+            if (used_flat_rule[i]) {
+              rules[i].accumulateFlatReserveHint(
+                  egraph, flat_matches_buf_[i], op_extra, est_nodes,
+                  est_classes);
+            }
+          }
+          if (est_nodes >= 2048) {
+            egraph.reserveForIteration(op_extra, est_nodes, est_classes,
+                                       limits_.node_limit);
+          }
         }
-        if (auto stop = limits_.check(iteration_index, egraph)) {
-          result = *stop;
-          break;
+        auto time_check = [&]() { return limits_.timeExceeded(); };
+        WorkControl apply_control{[&]() {
+                                    return limits_.timeExceeded() ||
+                                           egraph.totalSize() >
+                                               limits_.node_limit;
+                                  },
+                                  64};
+        for (size_t i = 0; i < rules.size(); ++i) {
+          size_t applied = 0;
+          if (used_flat_rule[i]) {
+            applied = rules[i].applyFlat(egraph, flat_matches_buf_[i],
+                                         limits_.node_limit, time_check);
+          } else if (!matches[i].empty()) {
+            applied = scheduler_->applyRewrite(iteration_index, egraph,
+                                               rules[i], std::move(matches[i]),
+                                               &apply_control);
+          }
+          if (applied > 0) {
+            iteration.applied[rules[i].name()] += applied;
+          }
+          if (auto stop = limits_.check(iteration_index, egraph)) {
+            result = *stop;
+            break;
+          }
+        }
+      } else {
+        WorkControl apply_control{[&]() {
+                                    return limits_.timeExceeded() ||
+                                           egraph.totalSize() >
+                                               limits_.node_limit;
+                                  },
+                                  1};
+        for (size_t i = 0; i < matches.size(); ++i) {
+          size_t applied =
+              scheduler_->applyRewrite(iteration_index, egraph, rules[i],
+                                       std::move(matches[i]), &apply_control);
+          if (applied > 0) {
+            iteration.applied[rules[i].name()] += applied;
+          }
+          if (auto stop = limits_.check(iteration_index, egraph)) {
+            result = *stop;
+            break;
+          }
         }
       }
     }
@@ -646,6 +784,8 @@ private:
   RunnerLimits limits_;
   std::unique_ptr<RewriteScheduler<L, A>> scheduler_;
   bool validate_explanations_ = false;
+  std::vector<FlatMatches> flat_matches_buf_;
+  std::vector<uint32_t> rule_last_version_;
 };
 
 } // namespace lotus::egraph

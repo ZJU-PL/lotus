@@ -109,3 +109,95 @@ TEST(EGraphCoreTest, SimpleAddFromEggDoesNotBreakRebuild) {
   EXPECT_EQ(egraph.find(plus),
             egraph.find(*egraph.lookup(SymbolLang("+", {x, x2}))));
 }
+
+TEST(EGraphCoreTest, FlatHashMapAndBinaryMemoTablePreserveTombstoneInvariants) {
+  FlatHashMap<uint64_t, uint32_t> map;
+  constexpr uint32_t kCount = 400;
+  for (uint32_t i = 0; i < kCount; ++i) {
+    auto [it, inserted] = map.try_emplace(static_cast<uint64_t>(i) * 17u + 1u, i);
+    EXPECT_TRUE(inserted);
+    EXPECT_EQ(it->second, i);
+  }
+  for (uint32_t i = 0; i < kCount; i += 2) {
+    EXPECT_EQ(map.erase(static_cast<uint64_t>(i) * 17u + 1u), 1u);
+    EXPECT_EQ(map.erase(static_cast<uint64_t>(i) * 17u + 1u), 0u);
+  }
+  EXPECT_EQ(map.size(), kCount / 2);
+  FlatHashMap<uint64_t, uint32_t> copied(map);
+  for (uint32_t i = 0; i < kCount; ++i) {
+    auto it = copied.find(static_cast<uint64_t>(i) * 17u + 1u);
+    if (i % 2 == 0) {
+      EXPECT_EQ(it, copied.end());
+    } else {
+      ASSERT_NE(it, copied.end());
+      EXPECT_EQ(it->second, i);
+    }
+  }
+  for (uint32_t i = kCount; i < kCount * 3; ++i) {
+    EXPECT_TRUE(map.try_emplace(static_cast<uint64_t>(i) * 17u + 1u, i).second);
+  }
+  for (uint32_t i = 0; i < kCount * 3; ++i) {
+    auto it = map.find(static_cast<uint64_t>(i) * 17u + 1u);
+    if (i < kCount && i % 2 == 0) {
+      EXPECT_EQ(it, map.end());
+    } else {
+      ASSERT_NE(it, map.end());
+      EXPECT_EQ(it->second, i);
+    }
+  }
+
+  BinaryMemoTable bmemo;
+  bmemo.ensureSpace(256);
+  for (uint32_t i = 0; i < 200; ++i) {
+    uint64_t k = BinaryMemoTable::packKey(Id(i), Id(i + 1000));
+    uint64_t h = fastMix64(k);
+    auto [slot, inserted] =
+        bmemo.findOrInsertUnchecked(k, h, [&]() { return std::pair<uint32_t, Id>{i, Id(i + 5)}; });
+    EXPECT_TRUE(inserted);
+    EXPECT_EQ(slot->nidx, i);
+  }
+  for (uint32_t i = 0; i < 200; i += 3) {
+    uint64_t k = BinaryMemoTable::packKey(Id(i), Id(i + 1000));
+    uint64_t h = fastMix64(k);
+    EXPECT_FALSE(bmemo.erase(k, h, i + 1)); // wrong nidx must not erase
+    EXPECT_TRUE(bmemo.erase(k, h, i));
+    EXPECT_EQ(bmemo.find(k, h), nullptr);
+  }
+  bmemo.reserve(1024);
+  for (uint32_t i = 0; i < 200; ++i) {
+    uint64_t k = BinaryMemoTable::packKey(Id(i), Id(i + 1000));
+    auto *slot = bmemo.find(k, fastMix64(k));
+    if (i % 3 == 0) {
+      EXPECT_EQ(slot, nullptr);
+    } else {
+      ASSERT_NE(slot, nullptr);
+      EXPECT_EQ(slot->nidx, i);
+      EXPECT_EQ(slot->owner, Id(i + 5));
+    }
+  }
+}
+
+TEST(EGraphCoreTest, DeepBinaryCongruenceCascadeAndLazyNodesMatchEgg) {
+  EGraph<SymbolLang> egraph;
+  Id a = egraph.add(SymbolLang::leaf("a"));
+  Id b = egraph.add(SymbolLang::leaf("b"));
+  Id ca = a;
+  Id cb = b;
+  // Exceeds the initial sequential scan threshold so parent-edge materialization
+  // and lazy original-node materialization are both exercised.
+  for (int i = 0; i < 24; ++i) {
+    ca = egraph.add(SymbolLang("pair", {ca, a}));
+    cb = egraph.add(SymbolLang("pair", {cb, b}));
+  }
+  egraph.rebuild();
+  ASSERT_NE(egraph.find(ca), egraph.find(cb));
+
+  egraph.unite(a, b);
+  size_t unions = egraph.rebuild();
+
+  EXPECT_EQ(unions, 24u);
+  EXPECT_EQ(egraph.find(ca), egraph.find(cb));
+  EXPECT_EQ(egraph.totalSize(), egraph.memoSize());
+  EXPECT_FALSE(egraph.originalExpr(ca).items().empty());
+  EXPECT_FALSE(egraph.nodes().empty());
+}

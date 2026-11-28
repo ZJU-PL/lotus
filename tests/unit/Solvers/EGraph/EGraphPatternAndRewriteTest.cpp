@@ -525,3 +525,71 @@ TEST(EGraphFeatureTest,
   EXPECT_EQ(applied.front(), a);
   EXPECT_NE(applied.front(), b);
 }
+TEST(EGraphFeatureTest, SemiNaiveSiblingJoinMatchesFullSearchAcrossEpochs) {
+  EGraph<SymbolLang> egraph;
+  Id a = egraph.add(SymbolLang::leaf("a"));
+  Id b = egraph.add(SymbolLang::leaf("b"));
+  Id c = egraph.add(SymbolLang::leaf("c"));
+  Id d = egraph.add(SymbolLang::leaf("d"));
+
+  // Epoch 1: outer (+) and right (* a c) present; left (* a b) added later.
+  Id mac = egraph.add(SymbolLang("*", {a, c}));
+  Id mab_holder = egraph.add(SymbolLang::leaf("slot_left"));
+  Id root1 = egraph.add(SymbolLang("+", {mab_holder, mac}));
+  egraph.rebuild();
+
+  auto pat = Pattern<SymbolLang>::parse("(+ (* ?x ?y) (* ?x ?z))");
+  const auto &rq = pat.relationalQuery();
+
+  FlatMatches delta;
+  uint32_t v0 = egraph.version();
+  rq.runFlat(egraph, delta, std::numeric_limits<size_t>::max(), 0, nullptr, false);
+  EXPECT_EQ(delta.count(), 0u);
+
+  // Epoch 2: insert left child (* a b) in Branch 1 order (left NEW, outer & right OLD).
+  Id mab = egraph.add(SymbolLang("*", {a, b}));
+  egraph.unite(mab_holder, mab);
+  egraph.rebuild();
+
+  rq.runFlat(egraph, delta, std::numeric_limits<size_t>::max(), v0, nullptr, false);
+  EXPECT_EQ(delta.count(), 1u);
+  EXPECT_EQ(egraph.find(delta.data[0]), egraph.find(root1));
+
+  // Epoch 3: insert right child (* a d) in Branch 2 order (right NEW, outer & left OLD).
+  uint32_t v1 = egraph.version();
+  Id mad = egraph.add(SymbolLang("*", {a, d}));
+  egraph.unite(mac, mad);
+  egraph.rebuild();
+
+  rq.runFlat(egraph, delta, std::numeric_limits<size_t>::max(), v1, nullptr, false);
+  EXPECT_EQ(delta.count(), 1u);
+  EXPECT_EQ(egraph.find(delta.data[0]), egraph.find(root1));
+}
+TEST(EGraphFeatureTest, SemiNaiveGroundMergeAndBatchedBinarySaturationMatchBackoff) {
+  std::vector<Rewrite<SymbolLang>> rules = {
+      makeRewrite<SymbolLang>("comm", "(+ ?a ?b)", "(+ ?b ?a)"),
+      makeRewrite<SymbolLang>("assoc", "(+ ?a (+ ?b ?c))", "(+ (+ ?a ?b) ?c)"),
+      makeRewrite<SymbolLang>("ground-zero", "(+ zero ?x)", "?x"),
+      makeRewrite<SymbolLang>("mk-zero", "alt_zero", "zero"),
+  };
+  auto expr = RecExpr<SymbolLang>::parse("(+ (+ a alt_zero) (+ b c))");
+
+  Runner<SymbolLang> simple;
+  simple.withExpr(expr)
+      .withIterLimit(5)
+      .withScheduler(SimpleScheduler<SymbolLang, NoAnalysis<SymbolLang>>{})
+      .run(rules);
+
+  Runner<SymbolLang> backoff;
+  backoff.withExpr(expr)
+      .withIterLimit(5)
+      .withScheduler(BackoffScheduler<SymbolLang, NoAnalysis<SymbolLang>>{}
+                         .withInitialMatchLimit(1000000))
+      .run(rules);
+
+  Id s_zero = simple.egraph.addExpr(RecExpr<SymbolLang>::parse("zero"));
+  Id s_alt = simple.egraph.addExpr(RecExpr<SymbolLang>::parse("alt_zero"));
+  EXPECT_EQ(simple.egraph.find(s_zero), simple.egraph.find(s_alt));
+  EXPECT_EQ(simple.egraph.totalSize(), backoff.egraph.totalSize());
+  EXPECT_EQ(simple.egraph.numberOfClasses(), backoff.egraph.numberOfClasses());
+}

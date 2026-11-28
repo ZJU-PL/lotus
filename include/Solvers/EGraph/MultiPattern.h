@@ -16,6 +16,13 @@ public:
     }
     program_ = std::make_shared<PatternProgram<L>>(
         PatternProgram<L>::compileFromMultiPattern(asts));
+    query_ = std::make_shared<detail::RelationalQuery<L>>(
+        detail::RelationalQuery<L>::compileFromMultiPattern(asts));
+  }
+
+  const detail::RelationalQuery<L> &relationalQuery() const { return *query_; }
+  const std::vector<std::pair<Var, Pattern<L>>> &clauses() const {
+    return clauses_;
   }
 
   static MultiPattern parse(std::string_view input) {
@@ -67,12 +74,29 @@ public:
   template <typename A>
   std::vector<Subst> search(const EGraph<L, A> &egraph,
                             const WorkControl *control = nullptr) const {
-    std::vector<Subst> out;
-    for (const auto &match :
-         searchWithLimit(egraph, std::numeric_limits<size_t>::max(), control)) {
-      out.insert(out.end(), match.substs.begin(), match.substs.end());
+    if (clauses_.empty()) {
+      throw std::runtime_error("empty multipattern");
     }
-    return out;
+    if (clauses_.front().second.ast().size() == 1 &&
+        clauses_.front().second.ast().items().front().isVar()) {
+      throw std::runtime_error(
+          "Bare pattern variable cannot be first in multipattern");
+    }
+    if (!egraph.clean()) {
+      throw std::runtime_error("Tried to search a dirty e-graph");
+    }
+    if (!egraph.analysis().allowEMatchingCycles()) {
+      std::vector<Subst> out;
+      for (const auto &match : searchWithLimit(
+               egraph, std::numeric_limits<size_t>::max(), control)) {
+        out.insert(out.end(), match.substs.begin(), match.substs.end());
+      }
+      return out;
+    }
+    FlatMatches flat;
+    query_->runFlat(egraph, flat, std::numeric_limits<size_t>::max(), 0,
+                    control, true);
+    return query_->materializeSubsts(flat);
   }
 
   template <typename A>
@@ -91,8 +115,16 @@ public:
       throw std::runtime_error(
           "Bare pattern variable cannot be first in multipattern");
     }
-    return program_->runEClassesWithLimit(egraph, egraph.classIds(), limit,
-                                          control, nullptr);
+    if (!egraph.clean()) {
+      throw std::runtime_error("Tried to search a dirty e-graph");
+    }
+    if (!egraph.analysis().allowEMatchingCycles()) {
+      return program_->runEClassesWithLimit(egraph, egraph.classIds(), limit,
+                                            control, nullptr);
+    }
+    FlatMatches flat;
+    query_->runFlat(egraph, flat, limit, 0, control, true);
+    return query_->template materializeSearchMatches<A>(flat, nullptr);
   }
 
   template <typename A>
@@ -110,7 +142,17 @@ public:
       throw std::runtime_error(
           "Bare pattern variable cannot be first in multipattern");
     }
-    auto results = program_->runWithLimit(egraph, eclass, limit, control);
+    if (!egraph.clean()) {
+      throw std::runtime_error("Tried to search a dirty e-graph");
+    }
+    std::vector<Subst> results;
+    if (!egraph.analysis().allowEMatchingCycles()) {
+      results = program_->runWithLimit(egraph, eclass, limit, control);
+    } else {
+      FlatMatches flat;
+      query_->runSingleEClassFlat(egraph, eclass, flat, limit, control);
+      results = query_->materializeSubsts(flat);
+    }
     if (results.empty()) {
       return std::nullopt;
     }
@@ -215,6 +257,7 @@ public:
 private:
   std::vector<std::pair<Var, Pattern<L>>> clauses_;
   std::shared_ptr<PatternProgram<L>> program_;
+  std::shared_ptr<detail::RelationalQuery<L>> query_;
 };
 
 } // namespace lotus::egraph

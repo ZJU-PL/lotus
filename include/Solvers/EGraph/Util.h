@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Solvers/EGraph/FlatHashMap.h"
 #include "Solvers/EGraph/Id.h"
 
 #include <algorithm>

@@ -6,6 +6,7 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <queue>
 #include <type_traits>
 #include <unordered_set>
 
@@ -118,7 +119,15 @@ public:
 
   const L &findBestNode(Id eclass) const {
     Id canonical = egraph_.find(eclass);
-    return egraph_[canonical].nodes[bestEntry(canonical).node_index];
+    uint32_t s = slot(canonical);
+    if (best_node_cache_.size() < best_.size()) {
+      best_node_cache_.resize(best_.size());
+    }
+    if (!best_node_cache_[s].has_value()) {
+      best_node_cache_[s].emplace(
+          egraph_.materializeEnode(bestEntry(canonical).enode_idx));
+    }
+    return *best_node_cache_[s];
   }
 
   Cost findBestCost(Id eclass) const {
@@ -128,91 +137,233 @@ public:
 private:
   struct Entry {
     Cost cost{};
-    size_t node_index = 0;
+    uint32_t enode_idx = 0;
   };
 
-  size_t slot(Id id) const { return slots_.at(egraph_.find(id)); }
+  static constexpr uint32_t kNoSlot = UINT32_MAX;
 
-  const Entry &bestEntry(Id id) const { return best_.at(slot(id)).value(); }
+  uint32_t slot(Id id) const noexcept {
+    return id_to_slot_[egraph_.find(id).index()];
+  }
+
+  const Entry &bestEntry(Id id) const {
+    return best_[slot(id)].value();
+  }
 
   void compute() {
-    slots_.reserve(egraph_.classIds().size());
-    for (Id id : egraph_.classIds()) {
-      slots_.emplace(id, slots_.size());
+    const auto &active_ids = egraph_.activeClassIds();
+    const size_t id_space = egraph_.idSpaceSize();
+    id_to_slot_.assign(id_space, kNoSlot);
+    const size_t nclasses = active_ids.size();
+    for (uint32_t s = 0; s < nclasses; ++s) {
+      id_to_slot_[active_ids[s].index()] = s;
     }
-    best_.resize(slots_.size());
-    reach_marks_.assign(slots_.size(), 0);
-    std::deque<Id> worklist(egraph_.classIds().begin(),
-                            egraph_.classIds().end());
-    std::vector<bool> in_queue(slots_.size(), false);
-    for (Id id : egraph_.classIds()) {
-      in_queue[slot(id)] = true;
+
+    best_.resize(nclasses);
+    const bool is_clean = egraph_.clean();
+    auto canon = [&](Id id) noexcept -> Id {
+      return is_clean ? id : egraph_.find(id);
+    };
+
+    // Fast-path exact bucket-Dijkstra extraction for AstSize<L>:
+    // - Zero L materialization on binary nodes!
+    // - Zero O(d^2) class re-scanning (visits individual parent enodes)!
+    // - Every class finalized at most ONCE in strictly increasing cost order!
+    if constexpr (std::is_same_v<CostFn, AstSize<L>>) {
+      constexpr size_t kInf = std::numeric_limits<size_t>::max();
+      constexpr size_t kBuckets = 1024;
+      std::vector<size_t> best_cost(nclasses, kInf);
+      std::vector<uint32_t> best_nidx(nclasses, 0);
+      std::vector<std::vector<uint32_t>> buckets(kBuckets);
+      using HeapItem = std::pair<size_t, uint32_t>;
+      std::priority_queue<HeapItem, std::vector<HeapItem>, std::greater<HeapItem>>
+          overflow_heap;
+      size_t min_bucket = kBuckets;
+      size_t queued = 0;
+
+      auto pushSlot = [&](size_t c, uint32_t s) {
+        if (c < kBuckets) {
+          buckets[c].push_back(s);
+          if (c < min_bucket) {
+            min_bucket = c;
+          }
+        } else {
+          overflow_heap.emplace(c, s);
+        }
+        ++queued;
+      };
+
+      // 1. Seed ONLY arity-0 leaf nodes (cost == 1) in O(leaves)!
+      egraph_.forEachLeafEnode([&](uint32_t nidx, Id owner, const L &) {
+        uint32_t s = id_to_slot_[owner.index()];
+        if (s != kNoSlot && 1 < best_cost[s]) {
+          best_cost[s] = 1;
+          best_nidx[s] = nidx;
+          pushSlot(1, s);
+        }
+      });
+
+      if (queued > 0) {
+        egraph_.prepareParentEdgesForExtraction();
+      }
+
+      while (queued > 0) {
+        size_t cur_cost = 0;
+        uint32_t cur_slot = 0;
+        while (min_bucket < kBuckets && buckets[min_bucket].empty()) {
+          ++min_bucket;
+        }
+        if (min_bucket < kBuckets) {
+          cur_cost = min_bucket;
+          cur_slot = buckets[min_bucket].back();
+          buckets[min_bucket].pop_back();
+          --queued;
+        } else {
+          auto top = overflow_heap.top();
+          overflow_heap.pop();
+          --queued;
+          cur_cost = top.first;
+          cur_slot = top.second;
+        }
+
+        if (cur_cost != best_cost[cur_slot]) {
+          continue; // Already finalized at a strictly smaller cost!
+        }
+
+        const Id cur_id = active_ids[cur_slot];
+        egraph_.forEachParentEnode(cur_id, [&](uint32_t p_nidx, Id p_owner) {
+          const uint32_t ps = id_to_slot_[p_owner.index()];
+          if (ps == kNoSlot) {
+            return;
+          }
+          size_t total = 1;
+          if (egraph_.enodeIsBinary(p_nidx)) {
+            auto [c0, c1] = egraph_.binaryEnodeChildren(p_nidx);
+            const uint32_t s0 = id_to_slot_[canon(c0).index()];
+            const uint32_t s1 = id_to_slot_[canon(c1).index()];
+            if (s0 == kNoSlot || s1 == kNoSlot) {
+              return;
+            }
+            const size_t k0 = best_cost[s0];
+            const size_t k1 = best_cost[s1];
+            if (k0 == kInf || k1 == kInf) {
+              return;
+            }
+            total = (k0 > kInf - 1 - k1) ? kInf : (1 + k0 + k1);
+          } else {
+            bool ok = true;
+            egraph_.forEachEnodeChild(p_nidx, [&](Id child) {
+              if (!ok) {
+                return;
+              }
+              const uint32_t cs = id_to_slot_[canon(child).index()];
+              if (cs == kNoSlot || best_cost[cs] == kInf) {
+                ok = false;
+                return;
+              }
+              const size_t cc = best_cost[cs];
+              total = (cc > kInf - total) ? kInf : (total + cc);
+            });
+            if (!ok) {
+              return;
+            }
+          }
+          if (total < best_cost[ps]) {
+            best_cost[ps] = total;
+            best_nidx[ps] = p_nidx;
+            pushSlot(total, ps);
+          }
+        });
+      }
+
+      for (uint32_t s = 0; s < nclasses; ++s) {
+        if (best_cost[s] != kInf) {
+          best_[s] = Entry{best_cost[s], best_nidx[s]};
+        }
+      }
+      return;
+    }
+
+    // General CostFn path: O(edges) per-parent-enode propagation (zero O(d^2)
+    // class re-scanning!) with full soundness for non-monotone/cyclic costs!
+    reach_marks_.assign(nclasses, 0);
+    std::vector<uint8_t> in_queue(nclasses, 0);
+    std::deque<Id> worklist;
+    bool all_strictly_increasing = true;
+
+    auto tryRelaxEnode = [&](Id owner, uint32_t owner_slot, uint32_t nidx,
+                             const L &node) {
+      const auto &children = node.children();
+      for (Id child : children) {
+        Id fc = canon(child);
+        uint32_t cs = id_to_slot_[fc.index()];
+        if (fc == owner || cs == kNoSlot || !best_[cs].has_value()) {
+          return;
+        }
+      }
+
+      Cost total_cost = detail::invokeCost(cost_fn_, node, [&](Id child) -> Cost {
+        return best_[id_to_slot_[canon(child).index()]]->cost;
+      });
+
+      auto &old = best_[owner_slot];
+      if (old && !(total_cost < old->cost)) {
+        return;
+      }
+
+      bool strictly_inc = true;
+      for (Id child : children) {
+        const Cost &cc = best_[id_to_slot_[canon(child).index()]]->cost;
+        if (!(cc < total_cost)) {
+          strictly_inc = false;
+          break;
+        }
+      }
+
+      if (!(all_strictly_increasing && strictly_inc)) {
+        if (wouldCreateCycle(owner, node)) {
+          return;
+        }
+      }
+
+      old = Entry{std::move(total_cost), nidx};
+      if (!strictly_inc) {
+        all_strictly_increasing = false;
+      }
+      if (!in_queue[owner_slot]) {
+        in_queue[owner_slot] = 1;
+        worklist.push_back(owner);
+      }
+    };
+
+    // Seed with all leaf enodes (arity 0) in O(leaves)!
+    egraph_.forEachLeafEnode([&](uint32_t nidx, Id owner, const L &node) {
+      uint32_t s = id_to_slot_[owner.index()];
+      if (s != kNoSlot) {
+        tryRelaxEnode(owner, s, nidx, node);
+      }
+    });
+
+    if (!worklist.empty()) {
+      egraph_.prepareParentEdgesForExtraction();
     }
 
     while (!worklist.empty()) {
-      Id id = egraph_.find(worklist.front());
+      Id id = worklist.front();
       worklist.pop_front();
-      in_queue[slot(id)] = false;
+      const uint32_t id_slot = id_to_slot_[id.index()];
+      in_queue[id_slot] = 0;
 
-      const auto &klass = egraph_[id];
-      std::optional<Entry> best_entry;
-      for (size_t index = 0; index < klass.nodes.size(); ++index) {
-        const auto &node = klass.nodes[index];
-        auto child_cost = [&](Id child) -> std::optional<Cost> {
-          const auto &entry = best_[slot(child)];
-          if (!entry) {
-            return std::nullopt;
-          }
-          return entry->cost;
-        };
-
-        auto total_cost = nodeTotalCost(node, child_cost);
-        if (!total_cost || (best_entry && !(*total_cost < best_entry->cost))) {
-          continue;
+      egraph_.forEachParentEnode(id, [&](uint32_t p_nidx, Id p_owner) {
+        uint32_t ps = id_to_slot_[p_owner.index()];
+        if (ps == kNoSlot) {
+          return;
         }
-        if (wouldCreateCycle(id, node)) {
-          continue;
-        }
-        best_entry = Entry{*total_cost, index};
-      }
-
-      auto &old = best_[slot(id)];
-      if (!best_entry || (old && !(best_entry->cost < old->cost))) {
-        continue;
-      }
-      old = *best_entry;
-      for (Id parent : klass.parents) {
-        Id canonical_parent = egraph_.find(parent);
-        size_t parent_slot = slot(canonical_parent);
-        if (!in_queue[parent_slot]) {
-          in_queue[parent_slot] = true;
-          worklist.push_back(canonical_parent);
-        }
-      }
+        egraph_.visitEnode(p_nidx, [&](const L &node) {
+          tryRelaxEnode(p_owner, ps, p_nidx, node);
+        });
+      });
     }
-  }
-
-  template <typename ChildCostFn>
-  std::optional<Cost> nodeTotalCost(const L &node, ChildCostFn &&child_cost) {
-    llvm::SmallVector<std::pair<Id, Cost>, 4> child_costs;
-    child_costs.reserve(node.children().size());
-    for (Id child : node.children()) {
-      auto cost = child_cost(child);
-      if (!cost) {
-        return std::nullopt;
-      }
-      child_costs.emplace_back(child, *cost);
-    }
-
-    return detail::invokeCost(cost_fn_, node, [&](Id child) -> Cost {
-      auto it =
-          std::find_if(child_costs.begin(), child_costs.end(),
-                       [&](const auto &entry) { return entry.first == child; });
-      if (it == child_costs.end()) {
-        throw std::runtime_error("Cost function requested a non-child e-class");
-      }
-      return it->second;
-    });
   }
 
   bool wouldCreateCycle(Id owner, const L &node) const {
@@ -230,11 +381,10 @@ private:
   }
 
   bool reaches(Id current, Id target) const {
-    current = egraph_.find(current);
     if (current == target) {
       return true;
     }
-    size_t current_slot = slot(current);
+    uint32_t current_slot = id_to_slot_[current.index()];
     if (reach_marks_[current_slot] == reach_generation_) {
       return false;
     }
@@ -243,21 +393,21 @@ private:
     if (!best) {
       return false;
     }
-    const auto &node = egraph_[current].nodes[best->node_index];
-    for (Id child : node.children()) {
-      if (reaches(egraph_.find(child), target)) {
-        return true;
+    bool found = false;
+    egraph_.forEachEnodeChild(best->enode_idx, [&](Id child) {
+      if (!found && reaches(egraph_.find(child), target)) {
+        found = true;
       }
-    }
-    return false;
+    });
+    return found;
   }
 
   RecExpr<L> buildExpr(Id eclass) const {
     RecExpr<L> expr;
-    std::unordered_map<Id, Id> materialized;
-    materialized.reserve(slots_.size());
-    std::unordered_map<L, Id, LanguageHash<L>> enodes;
-    enodes.reserve(slots_.size());
+    FlatHashMap<Id, Id> materialized;
+    materialized.reserve(std::min<size_t>(best_.size(), 1024));
+    FlatHashMap<L, Id, LanguageHash<L>> enodes;
+    enodes.reserve(std::min<size_t>(best_.size(), 1024));
     std::vector<Id> stack{egraph_.find(eclass)};
 
     while (!stack.empty()) {
@@ -267,7 +417,7 @@ private:
         continue;
       }
 
-      const auto &node = egraph_[current].nodes[bestEntry(current).node_index];
+      L node = egraph_.materializeEnode(bestEntry(current).enode_idx);
       bool ready = true;
       for (Id child : node.children()) {
         Id canonical_child = egraph_.find(child);
@@ -282,16 +432,16 @@ private:
       }
 
       L rebuilt = node.mapChildren(
-          [&](Id child) { return materialized.at(egraph_.find(child)); });
+          [&](Id child) { return materialized.find(egraph_.find(child))->second; });
       auto found = enodes.find(rebuilt);
       Id output;
       if (found != enodes.end()) {
         output = found->second;
       } else {
         output = expr.add(rebuilt);
-        enodes.emplace(std::move(rebuilt), output);
+        enodes.try_emplace(std::move(rebuilt), output);
       }
-      materialized.emplace(current, output);
+      materialized.try_emplace(current, output);
       stack.pop_back();
     }
     return expr;
@@ -299,8 +449,9 @@ private:
 
   const EGraph<L, A> &egraph_;
   mutable CostFn cost_fn_;
-  std::unordered_map<Id, size_t> slots_;
+  std::vector<uint32_t> id_to_slot_;
   std::vector<std::optional<Entry>> best_;
+  mutable std::vector<std::optional<L>> best_node_cache_;
   mutable std::vector<size_t> reach_marks_;
   mutable size_t reach_generation_ = 0;
 };

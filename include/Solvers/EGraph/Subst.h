@@ -71,6 +71,10 @@ public:
     return subst;
   }
 
+  void emplaceUnique(const Var &var, Id id) {
+    bindings_.emplace_back(var, id);
+  }
+
   std::optional<Id> insert(const Var &var, Id id) {
     for (auto &[bound_var, bound_id] : bindings_) {
       if (bound_var == var) {
@@ -79,13 +83,14 @@ public:
         return old;
       }
     }
-    bindings_.push_back({var, id});
+    bindings_.emplace_back(var, id);
     return std::nullopt;
   }
 
-  const Id *get(const Var &var) const {
+  const Id *get(const Var &var) const noexcept {
+    const uint32_t target = var.name().id();
     for (const auto &[bound_var, id] : bindings_) {
-      if (bound_var == var) {
+      if (bound_var.name().id() == target) {
         return &id;
       }
     }
@@ -106,7 +111,7 @@ public:
     throw std::runtime_error("Substitution variable not found");
   }
 
-  const llvm::SmallVector<std::pair<Var, Id>, 3> &bindings() const {
+  const llvm::SmallVector<std::pair<Var, Id>, 4> &bindings() const {
     return bindings_;
   }
 
@@ -119,7 +124,7 @@ public:
   }
 
 private:
-  llvm::SmallVector<std::pair<Var, Id>, 3> bindings_;
+  llvm::SmallVector<std::pair<Var, Id>, 4> bindings_;
 };
 
 } // namespace lotus::egraph

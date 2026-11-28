@@ -603,6 +603,28 @@ template <> struct TypedValueCodec<std::string> {
 #define LOTUS_EGRAPH_TYPED_DETAIL_DISPLAY_DATA_VARIADIC(NAME, OP, TYPE)        \
   LOTUS_EGRAPH_TYPED_DETAIL_DISPLAY_DATA(NAME, OP, TYPE)
 
+#define LOTUS_EGRAPH_TYPED_DETAIL_EXACT_MATCH(KIND, NAME, OP, ARG)             \
+  LOTUS_EGRAPH_TYPED_DETAIL_DISPATCH(LOTUS_EGRAPH_TYPED_DETAIL_EXACT_MATCH,    \
+                                     KIND, NAME, OP, ARG)
+#define LOTUS_EGRAPH_TYPED_DETAIL_EXACT_MATCH_CONSTANT(NAME, OP, ARG)          \
+  case Kind::NAME:                                                             \
+    return true;
+#define LOTUS_EGRAPH_TYPED_DETAIL_EXACT_MATCH_FIXED(NAME, OP, ARITY)           \
+  case Kind::NAME:                                                             \
+    return true;
+#define LOTUS_EGRAPH_TYPED_DETAIL_EXACT_MATCH_VARIADIC(NAME, OP, ARG)          \
+  case Kind::NAME:                                                             \
+    return false;
+#define LOTUS_EGRAPH_TYPED_DETAIL_EXACT_MATCH_DATA(NAME, OP, TYPE)             \
+  case Kind::NAME:                                                             \
+    return false;
+#define LOTUS_EGRAPH_TYPED_DETAIL_EXACT_MATCH_DATA_FIXED(NAME, OP, DATA)       \
+  case Kind::NAME:                                                             \
+    return false;
+#define LOTUS_EGRAPH_TYPED_DETAIL_EXACT_MATCH_DATA_VARIADIC(NAME, OP, TYPE)    \
+  case Kind::NAME:                                                             \
+    return false;
+
 #define LOTUS_EGRAPH_TYPED_DETAIL_HASH(KIND, NAME, OP, ARG)                    \
   LOTUS_EGRAPH_TYPED_DETAIL_DISPATCH(LOTUS_EGRAPH_TYPED_DETAIL_HASH, KIND,     \
                                      NAME, OP, ARG)
@@ -612,23 +634,30 @@ template <> struct TypedValueCodec<std::string> {
 #define LOTUS_EGRAPH_TYPED_DETAIL_HASH_FIXED(NAME, OP, ARITY)                  \
   case Kind::NAME:                                                             \
     for (Id child : get##NAME().ids) {                                         \
-      ::lotus::egraph::hashCombine(seed, child);                               \
+      seed = ::lotus::egraph::fxHashWord(seed, child.value());                 \
     }                                                                          \
     break;
 #define LOTUS_EGRAPH_TYPED_DETAIL_HASH_VARIADIC(NAME, OP, ARG)                 \
-  LOTUS_EGRAPH_TYPED_DETAIL_HASH_FIXED(NAME, OP, ARG)
+  case Kind::NAME:                                                             \
+    seed = ::lotus::egraph::fxHashWord(seed, get##NAME().ids.size());          \
+    for (Id child : get##NAME().ids) {                                         \
+      seed = ::lotus::egraph::fxHashWord(seed, child.value());                 \
+    }                                                                          \
+    break;
 #define LOTUS_EGRAPH_TYPED_DETAIL_HASH_DATA(NAME, OP, TYPE)                    \
   case Kind::NAME:                                                             \
-    ::lotus::egraph::hashCombine(seed, get##NAME().value);                     \
+    seed = ::lotus::egraph::fxHashWord(                                        \
+        seed, static_cast<uint64_t>(std::hash<TYPE>{}(get##NAME().value)));    \
     break;
 #define LOTUS_EGRAPH_TYPED_DETAIL_HASH_DATA_FIXED(NAME, OP, DATA)              \
   LOTUS_EGRAPH_TYPED_DETAIL_APPLY_DATA(                                        \
       LOTUS_EGRAPH_TYPED_DETAIL_HASH_DATA_FIXED_I, NAME, DATA)
 #define LOTUS_EGRAPH_TYPED_DETAIL_HASH_DATA_FIXED_I(NAME, TYPE, ARITY)         \
   case Kind::NAME:                                                             \
-    ::lotus::egraph::hashCombine(seed, get##NAME().value);                     \
+    seed = ::lotus::egraph::fxHashWord(                                        \
+        seed, static_cast<uint64_t>(std::hash<TYPE>{}(get##NAME().value)));    \
     for (Id child : get##NAME().ids) {                                         \
-      ::lotus::egraph::hashCombine(seed, child);                               \
+      seed = ::lotus::egraph::fxHashWord(seed, child.value());                 \
     }                                                                          \
     break;
 #define LOTUS_EGRAPH_TYPED_DETAIL_HASH_DATA_VARIADIC(NAME, OP, TYPE)           \
@@ -649,25 +678,30 @@ template <> struct TypedValueCodec<std::string> {
     VARIANTS(LOTUS_EGRAPH_TYPED_DETAIL_VALIDATE)                               \
     NAME() = delete;                                                           \
     VARIANTS(LOTUS_EGRAPH_TYPED_DETAIL_FACTORY)                                \
-    Kind kind() const {                                                        \
-      const size_t index = storage_.index();                                   \
-      if (index == 0 || index == std::variant_npos) {                           \
-        throw std::logic_error("Typed language has no active variant");        \
-      }                                                                        \
-      return static_cast<Kind>(index - 1);                                     \
+    Kind kind() const noexcept {                                               \
+      return static_cast<Kind>(storage_.index() - 1);                          \
     }                                                                          \
-    Discriminant discriminant() const { return kind(); }                       \
+    Discriminant discriminant() const noexcept { return kind(); }              \
+    static constexpr bool discriminantImpliesMatchFor(Kind k) noexcept {       \
+      switch (k) {                                                             \
+        VARIANTS(LOTUS_EGRAPH_TYPED_DETAIL_EXACT_MATCH)                        \
+      }                                                                        \
+      return false;                                                            \
+    }                                                                          \
+    bool discriminantImpliesMatch() const noexcept {                           \
+      return discriminantImpliesMatchFor(kind());                              \
+    }                                                                          \
     llvm::ArrayRef<Id> children() const {                                      \
       switch (kind()) {                                                        \
         VARIANTS(LOTUS_EGRAPH_TYPED_DETAIL_CHILDREN)                           \
       }                                                                        \
-      throw std::logic_error("Unknown typed language variant");                \
+      return {};                                                               \
     }                                                                          \
     llvm::MutableArrayRef<Id> childrenMut() {                                  \
       switch (kind()) {                                                        \
         VARIANTS(LOTUS_EGRAPH_TYPED_DETAIL_CHILDREN_MUT)                       \
       }                                                                        \
-      throw std::logic_error("Unknown typed language variant");                \
+      return {};                                                               \
     }                                                                          \
     template <typename F> Self mapChildren(F &&fn) const {                     \
       Self copy = *this;                                                       \
@@ -728,12 +762,12 @@ template <> struct TypedValueCodec<std::string> {
       }                                                                        \
       throw std::logic_error("Unknown typed language variant");                \
     }                                                                          \
-    size_t hash() const {                                                      \
-      size_t seed = std::hash<uint32_t>{}(static_cast<uint32_t>(kind()));      \
+    size_t hash() const noexcept {                                             \
+      uint64_t seed = static_cast<uint32_t>(kind());                           \
       switch (kind()) {                                                        \
         VARIANTS(LOTUS_EGRAPH_TYPED_DETAIL_HASH)                               \
       }                                                                        \
-      return seed;                                                             \
+      return static_cast<size_t>(::lotus::egraph::fastMix64(seed));            \
     }                                                                          \
                                                                                \
   private:                                                                     \
@@ -755,21 +789,28 @@ template <> struct TypedValueCodec<std::string> {
   LOTUS_EGRAPH_TYPED_DETAIL_DEFINE_CLASS(NAME, VARIANTS)                       \
   }
 
+template <>
+struct lotus::egraph::DiscriminantImpliesMatch<lotus::egraph::DynamicLang>
+    : std::true_type {};
+
 template <> struct std::hash<lotus::egraph::DynamicLangDiscriminant> {
   size_t operator()(
       const lotus::egraph::DynamicLangDiscriminant &value) const noexcept {
-    size_t seed = std::hash<lotus::egraph::Symbol>{}(value.op);
-    lotus::egraph::hashCombine(seed, value.arity);
-    return seed;
+    uint64_t seed = lotus::egraph::fxHashWord(
+        static_cast<uint64_t>(value.op.id()),
+        static_cast<uint64_t>(value.arity));
+    return static_cast<size_t>(lotus::egraph::fastMix64(seed));
   }
 };
 
 template <> struct std::hash<lotus::egraph::DynamicLang> {
   size_t operator()(const lotus::egraph::DynamicLang &value) const noexcept {
-    size_t seed = std::hash<lotus::egraph::Symbol>{}(value.op());
-    for (lotus::egraph::Id child : value.children()) {
-      lotus::egraph::hashCombine(seed, child);
+    uint64_t seed = static_cast<uint64_t>(value.op().id());
+    const auto &children = value.children();
+    seed = lotus::egraph::fxHashWord(seed, children.size());
+    for (lotus::egraph::Id child : children) {
+      seed = lotus::egraph::fxHashWord(seed, child.value());
     }
-    return seed;
+    return static_cast<size_t>(lotus::egraph::fastMix64(seed));
   }
 };

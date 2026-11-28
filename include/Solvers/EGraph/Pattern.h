@@ -8,6 +8,9 @@
 namespace lotus::egraph {
 
 template <typename L> class PatternProgram;
+namespace detail {
+template <typename L> class RelationalQuery;
+}
 
 template <typename L> struct ENodeOrVarDiscriminant {
   std::variant<typename L::Discriminant, Var> value;
@@ -183,28 +186,7 @@ public:
   template <typename A>
   std::vector<SearchMatches<L>>
   searchWithLimit(const EGraph<L, A> &egraph, size_t limit,
-                  const WorkControl *control = nullptr) const {
-    if (limit == 0) {
-      return {};
-    }
-
-    if (ast_->empty()) {
-      return {};
-    }
-    const auto &root = ast_->items().back();
-    const std::vector<Id> *candidates = nullptr;
-    if (root.isVar()) {
-      candidates = &egraph.classIds();
-    } else {
-      candidates = &egraph.classesForOp(root.node().discriminant());
-    }
-
-    auto match_ast = egraph.areExplanationsEnabled()
-                         ? std::static_pointer_cast<const PatternAst<L>>(ast_)
-                         : nullptr;
-    return program_->runEClassesWithLimit(egraph, *candidates, limit, control,
-                                          std::move(match_ast));
-  }
+                  const WorkControl *control = nullptr) const;
 
   template <typename A>
   std::optional<SearchMatches<L>>
@@ -219,6 +201,8 @@ public:
   searchEClassWithLimit(const EGraph<L, A> &egraph, Id eclass, size_t limit,
                         const WorkControl *control = nullptr) const;
 
+  const detail::RelationalQuery<L> &relationalQuery() const { return *query_; }
+
   template <typename A> size_t nMatches(const EGraph<L, A> &egraph) const {
     size_t total = 0;
     for (const auto &match : search(egraph)) {
@@ -229,7 +213,18 @@ public:
 
   template <typename A>
   Id apply(EGraph<L, A> &egraph, const Subst &subst) const {
-    return applyNode(egraph, ast_->root(), subst);
+    llvm::SmallVector<Id, 16> ids;
+    ids.reserve(ast_->size());
+    for (const auto &item : ast_->items()) {
+      if (item.isVar()) {
+        ids.push_back(subst.at(item.var()));
+      } else {
+        auto materialized = item.node().mapChildren(
+            [&](Id child) { return ids[child.index()]; });
+        ids.push_back(egraph.add(materialized));
+      }
+    }
+    return ids.back();
   }
 
   template <typename A>
@@ -291,6 +286,7 @@ private:
 
   std::shared_ptr<PatternAst<L>> ast_ = std::make_shared<PatternAst<L>>();
   std::shared_ptr<PatternProgram<L>> program_;
+  std::shared_ptr<detail::RelationalQuery<L>> query_;
 };
 
 template <typename L> inline Pattern<L> pattern(std::string_view text) {
@@ -300,6 +296,7 @@ template <typename L> inline Pattern<L> pattern(std::string_view text) {
 } // namespace lotus::egraph
 
 #include "Solvers/EGraph/PatternMachine.h"
+#include "Solvers/EGraph/RelationalQuery.h"
 
 namespace lotus::egraph {
 
@@ -309,6 +306,8 @@ inline Pattern<L>::Pattern(PatternAst<L> ast)
   compact();
   program_ = std::make_shared<PatternProgram<L>>(
       PatternProgram<L>::compileFromPattern(*this));
+  query_ = std::make_shared<detail::RelationalQuery<L>>(
+      detail::RelationalQuery<L>::compileFromPattern(*ast_));
 }
 
 template <typename L> inline Pattern<L>::Pattern(const RecExpr<L> &expr) {
@@ -320,6 +319,40 @@ template <typename L> inline Pattern<L>::Pattern(const RecExpr<L> &expr) {
   compact();
   program_ = std::make_shared<PatternProgram<L>>(
       PatternProgram<L>::compileFromPattern(*this));
+  query_ = std::make_shared<detail::RelationalQuery<L>>(
+      detail::RelationalQuery<L>::compileFromPattern(*ast_));
+}
+
+template <typename L>
+template <typename A>
+inline std::vector<SearchMatches<L>>
+Pattern<L>::searchWithLimit(const EGraph<L, A> &egraph, size_t limit,
+                            const WorkControl *control) const {
+  if (limit == 0 || ast_->empty()) {
+    return {};
+  }
+  if (!egraph.clean()) {
+    throw std::runtime_error("Tried to search a dirty e-graph");
+  }
+
+  auto match_ast = egraph.areExplanationsEnabled()
+                       ? std::static_pointer_cast<const PatternAst<L>>(ast_)
+                       : nullptr;
+
+  if (!egraph.analysis().allowEMatchingCycles()) {
+    const auto &root = ast_->items().back();
+    const std::vector<Id> *candidates =
+        root.isVar() ? &egraph.classIds()
+                     : &egraph.classesForOp(root.node().discriminant());
+    return program_->runEClassesWithLimit(egraph, *candidates, limit, control,
+                                          std::move(match_ast));
+  }
+
+  FlatMatches flat;
+  query_->runFlat(egraph, flat, limit, /*since_version=*/0, control,
+                  /*sorted_classes=*/true);
+  return query_->template materializeSearchMatches<A>(flat,
+                                                      std::move(match_ast));
 }
 
 template <typename L>
@@ -328,10 +361,21 @@ inline std::optional<SearchMatches<L>>
 Pattern<L>::searchEClassWithLimit(const EGraph<L, A> &egraph, Id eclass,
                                   size_t limit,
                                   const WorkControl *control) const {
-  if (limit == 0) {
+  if (limit == 0 || ast_->empty()) {
     return std::nullopt;
   }
-  auto substs = program_->runWithLimit(egraph, eclass, limit, control);
+  if (!egraph.clean()) {
+    throw std::runtime_error("Tried to search a dirty e-graph");
+  }
+
+  std::vector<Subst> substs;
+  if (!egraph.analysis().allowEMatchingCycles()) {
+    substs = program_->runWithLimit(egraph, eclass, limit, control);
+  } else {
+    FlatMatches flat;
+    query_->runSingleEClassFlat(egraph, eclass, flat, limit, control);
+    substs = query_->materializeSubsts(flat);
+  }
   if (substs.empty()) {
     return std::nullopt;
   }

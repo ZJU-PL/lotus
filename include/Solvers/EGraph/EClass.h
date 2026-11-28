@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Solvers/EGraph/FlatHashMap.h"
 #include "Solvers/EGraph/Id.h"
 #include "Solvers/EGraph/Language.h"
 
@@ -7,13 +8,13 @@ namespace lotus::egraph {
 
 template <typename L, typename D> struct EClass {
   using MatchingNodes =
-      std::unordered_map<typename L::Discriminant, std::vector<size_t>>;
+      FlatHashMap<typename L::Discriminant, llvm::SmallVector<uint32_t, 4>>;
   static constexpr size_t MATCHING_INDEX_THRESHOLD = 16;
 
   Id id;
-  std::vector<L> nodes;
+  llvm::SmallVector<L, 1> nodes;
   D data;
-  std::vector<Id> parents;
+  llvm::SmallVector<Id, 2> parents;
   std::shared_ptr<MatchingNodes> matching_nodes;
   bool nodes_dirty = true;
 
@@ -25,7 +26,7 @@ template <typename L, typename D> struct EClass {
 
   auto iter() const { return nodes.begin(); }
 
-  const std::vector<Id> &parentIds() const { return parents; }
+  const llvm::SmallVector<Id, 2> &parentIds() const { return parents; }
   bool isEmpty() const { return empty(); }
   size_t len() const { return size(); }
 
@@ -42,7 +43,7 @@ template <typename L, typename D> struct EClass {
                      : std::make_shared<MatchingNodes>();
     index->clear();
     index->reserve(nodes.size());
-    for (size_t i = 0; i < nodes.size(); ++i) {
+    for (uint32_t i = 0; i < static_cast<uint32_t>(nodes.size()); ++i) {
       (*index)[nodes[i].discriminant()].push_back(i);
     }
     matching_nodes = std::move(index);
@@ -83,7 +84,15 @@ inline bool forEachMatchingNode(const EClass<L, D> &klass, const L &node,
     if (indexed == klass.matching_nodes->end()) {
       return true;
     }
-    for (size_t index : indexed->second) {
+    if (discriminantImpliesMatch(node)) {
+      for (uint32_t index : indexed->second) {
+        if (!fn(klass.nodes[index])) {
+          return false;
+        }
+      }
+      return true;
+    }
+    for (uint32_t index : indexed->second) {
       const auto &candidate = klass.nodes[index];
       if (node.matches(candidate) && !fn(candidate)) {
         return false;

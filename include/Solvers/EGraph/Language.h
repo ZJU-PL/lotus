@@ -172,23 +172,51 @@ template <typename L> inline bool nodeMatches(const L &lhs, const L &rhs) {
   return lhs.matches(rhs);
 }
 
+template <typename L, typename = void>
+struct DiscriminantImpliesMatch : std::false_type {};
+
+template <>
+struct DiscriminantImpliesMatch<SymbolLang> : std::true_type {};
+
+template <typename L, typename = void>
+struct HasDiscriminantImpliesMatchMethod : std::false_type {};
+
+template <typename L>
+struct HasDiscriminantImpliesMatchMethod<
+    L, std::void_t<decltype(std::declval<const L &>().discriminantImpliesMatch())>>
+    : std::true_type {};
+
+template <typename L>
+inline bool discriminantImpliesMatch(const L &node) noexcept {
+  if constexpr (DiscriminantImpliesMatch<L>::value) {
+    return true;
+  } else if constexpr (HasDiscriminantImpliesMatchMethod<L>::value) {
+    return node.discriminantImpliesMatch();
+  } else {
+    return false;
+  }
+}
+
 } // namespace lotus::egraph
 
 template <> struct std::hash<lotus::egraph::SymbolLangDiscriminant> {
   size_t operator()(
       const lotus::egraph::SymbolLangDiscriminant &value) const noexcept {
-    size_t seed = std::hash<lotus::egraph::Symbol>{}(value.op);
-    lotus::egraph::hashCombine(seed, value.arity);
-    return seed;
+    uint64_t seed = lotus::egraph::fxHashWord(
+        static_cast<uint64_t>(value.op.id()),
+        static_cast<uint64_t>(value.arity));
+    return static_cast<size_t>(lotus::egraph::fastMix64(seed));
   }
 };
 
 template <> struct std::hash<lotus::egraph::SymbolLang> {
   size_t operator()(const lotus::egraph::SymbolLang &value) const noexcept {
-    size_t seed = std::hash<lotus::egraph::Symbol>{}(value.op());
-    for (lotus::egraph::Id child : value.children()) {
-      lotus::egraph::hashCombine(seed, child);
+    uint64_t seed = static_cast<uint64_t>(value.op().id());
+    const auto &children = value.children();
+    seed = lotus::egraph::fxHashWord(seed, children.size());
+    for (lotus::egraph::Id child : children) {
+      seed = lotus::egraph::fxHashWord(seed, child.value());
     }
-    return seed;
+    return static_cast<size_t>(lotus::egraph::fastMix64(seed));
   }
 };
